@@ -2868,3 +2868,110 @@ def test_start_allows_matching_feature_space(tmp_path) -> None:
     ):
         record = reg.start(cfg, JobTarget(runner="local"))
     assert record.state == "running"
+
+
+# ---------------------------------------------------------------------------
+# Fine-tune policy-type guard: --policy.type must match the source checkpoint's
+# architecture, because lerobot loads pretrained weights non-strictly and would
+# otherwise train a fresh policy that only looks like a fine-tune.
+# ---------------------------------------------------------------------------
+
+
+def _finetune_source(policy_type: str, runner: str = "imported"):
+    from makerlab.jobs import JobRecord
+    from makerlab.train import TrainingRequest
+
+    return JobRecord(
+        id="src-1",
+        name="Imported · lerobot/smolvla_base",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type=policy_type),
+        output_dir="",
+        started_at=0.0,
+        runner=runner,
+    )
+
+
+def test_check_finetune_policy_type_rejects_mismatch() -> None:
+    from makerlab.jobs import _check_finetune_policy_type
+
+    with pytest.raises(ValueError, match="smolvla") as exc:
+        _check_finetune_policy_type(_finetune_source("smolvla"), "act")
+    # Both sides named, so the toast tells the user what to switch.
+    assert "'act'" in str(exc.value)
+
+
+def test_check_finetune_policy_type_accepts_match() -> None:
+    from makerlab.jobs import _check_finetune_policy_type
+
+    _check_finetune_policy_type(_finetune_source("smolvla"), "smolvla")
+
+
+def test_check_finetune_policy_type_ignores_unknown_source_type() -> None:
+    """register_imported records the "model" placeholder when a checkpoint's
+    config.json can't be read — that says nothing about the weights, so it must
+    not block a fine-tune."""
+    from makerlab.jobs import _check_finetune_policy_type
+
+    _check_finetune_policy_type(_finetune_source("model"), "act")
+
+
+def test_finetune_start_rejects_contradicting_policy_type(tmp_path) -> None:
+    """End to end through JobRegistry.start: a smolvla base + an "act" request
+    (the old silent default) fails with a 400-shaped ValueError instead of
+    launching an ACT run from smolvla weights. No record is created."""
+    from unittest.mock import MagicMock, patch
+
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
+
+    # A flat imported checkpoint dir whose config.json names the architecture.
+    src = tmp_path / "smolvla_ckpt"
+    src.mkdir()
+    (src / "config.json").write_text(_json.dumps({"type": "smolvla"}))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = reg.register_imported(str(src))
+    assert source.config.policy_type == "smolvla"
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",  # what the form sends when the type never propagates
+        finetune_from_job_id=source.id,
+    )
+    with (
+        patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="smolvla"),
+    ):
+        reg.start(cfg, JobTarget(runner="local"))
+
+    assert [r.id for r in reg.list(limit=10)] == [source.id]
+
+
+def test_finetune_start_accepts_matching_policy_type(tmp_path) -> None:
+    """The same fine-tune with the propagated type launches, and resolves the
+    source checkpoint into --policy.pretrained_path."""
+    from unittest.mock import MagicMock, patch
+
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
+
+    src = tmp_path / "smolvla_ckpt"
+    src.mkdir()
+    (src / "config.json").write_text(_json.dumps({"type": "smolvla"}))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = reg.register_imported(str(src))
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="smolvla",
+        finetune_from_job_id=source.id,
+    )
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(cfg, JobTarget(runner="local"))
+
+    assert record.config.policy_type == "smolvla"
+    assert record.config.policy_pretrained_path == str(src.resolve())

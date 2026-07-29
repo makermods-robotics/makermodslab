@@ -942,6 +942,45 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
     return chosen.ref
 
 
+# register_imported's fallback when a checkpoint's config.json can't be read.
+# It's a display label, not an architecture, so it can never be compared
+# against a requested policy type.
+_UNKNOWN_POLICY_TYPE = "model"
+
+
+def _check_finetune_policy_type(source: JobRecord, requested: str) -> None:
+    """Reject a fine-tune whose requested policy type contradicts its source.
+
+    A fine-tune is launched as ``--policy.type <requested>`` plus
+    ``--policy.pretrained_path <source checkpoint>`` (see
+    train.build_training_command). lerobot builds the policy class from
+    ``--policy.type`` and then loads the checkpoint's safetensors NON-strictly
+    (``PreTrainedPolicy.from_pretrained`` defaults ``strict=False``, and
+    ``make_policy`` doesn't override it), so a mismatched pair does not fail
+    loudly — it trains an essentially randomly-initialized `requested` policy
+    while the run claims to be a fine-tune of `source`. Fail up front instead.
+
+    Only compared when the source record carries a real architecture: imported
+    models fall back to the `_UNKNOWN_POLICY_TYPE` placeholder when their
+    config.json couldn't be read, and that says nothing about the weights.
+
+    Raises ValueError (→ HTTP 400) naming both types.
+    """
+    source_type = (source.config.policy_type or "").strip()
+    requested_type = (requested or "").strip()
+    if not source_type or source_type == _UNKNOWN_POLICY_TYPE:
+        return
+    if not requested_type or requested_type == source_type:
+        return
+    raise ValueError(
+        f"This run is set to train {requested_type!r}, but the fine-tune source "
+        f"{source.id!r} is a {source_type!r} checkpoint. Fine-tuning loads the "
+        f"source's weights into the policy you pick, so the two must match — "
+        f"set the policy to {source_type!r}, or pick a {requested_type!r} base "
+        "model."
+    )
+
+
 _CLOUD_CKPT_TTL_SECONDS = 30.0
 _CKPT_PATH_RE = re.compile(r"^checkpoints/(\d+)/pretrained_model/config\.json$")
 
@@ -2096,6 +2135,12 @@ class JobRegistry:
                 source = self._records.get(config.finetune_from_job_id)
             if source is None:
                 raise ValueError(f"Fine-tune source {config.finetune_from_job_id!r} not found.")
+            # The requested policy type must be the source checkpoint's own
+            # architecture — lerobot loads the weights non-strictly, so a
+            # mismatch trains a fresh `policy_type` policy that only *looks*
+            # like a fine-tune. Checked before the pretrained path resolves
+            # (cheap, no Hub call) so a contradicting request never starts.
+            _check_finetune_policy_type(source, config.policy_type)
             config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                 source, config.finetune_from_step
             )
