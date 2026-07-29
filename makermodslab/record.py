@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import collections
-import contextlib
 import json
 import logging
 import shutil
@@ -42,7 +41,12 @@ from .datasets import (
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
-from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
+from .teleoperate import (
+    _device_buses,
+    _return_followers_to_rest,
+    force_disable_torque,
+    force_disconnect_partial,
+)
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
@@ -1663,12 +1667,18 @@ def record_with_web_events(
                 logger.error(
                     "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
                 )
+            # Drop any half-open handles from this failed attempt so the retry
+            # starts from a clean device — and so a *terminal* failure doesn't
+            # leak the opened bus and camera read threads into the rest of the
+            # process. Must be the component-wise teardown, not
+            # robot.disconnect(): connect() dies with the later cameras still
+            # unopened, and lerobot's all-or-nothing is_connected guard makes
+            # disconnect() a no-op raise in exactly that state (see
+            # force_disconnect_partial).
+            force_disconnect_partial(robot, "robot")
             if attempt < connect_attempts and transient_camera:
-                # Drop any half-open handles from this failed attempt so the retry
-                # starts from a clean device, then let the OS release settle past
-                # the turbulence window before re-rolling the connect.
-                with contextlib.suppress(Exception):
-                    robot.disconnect()
+                # Let the OS release settle past the turbulence window before
+                # re-rolling the connect.
                 time.sleep(2.0)
                 continue
             raise
@@ -1690,6 +1700,12 @@ def record_with_web_events(
             logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
         except Exception as e:
             logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
+            # The robot connected fine a moment ago; release both so a leader
+            # failure can't strand the follower's bus and camera threads for
+            # the rest of the process (partial teardown for the same reason as
+            # the robot-connect path above).
+            force_disconnect_partial(robot, "robot")
+            force_disconnect_partial(teleop, "teleop")
             raise
 
     # Arm-identity guard: read-only check that each connected arm matches its

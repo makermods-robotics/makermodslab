@@ -571,6 +571,153 @@ def test_force_disable_torque_handles_bimanual_and_none() -> None:
     assert force_disable_torque(None, "nothing") == []
 
 
+class _FakeCamera:
+    """Camera double with lerobot's OpenCVCamera disconnect semantics: raises
+    DeviceNotConnectedError when it was never opened, releases otherwise."""
+
+    def __init__(self, name: str, connected: bool = True, failing: bool = False) -> None:
+        self.name = name
+        self.is_connected = connected
+        self.failing = failing
+        self.released = False
+
+    def disconnect(self) -> None:
+        from lerobot.utils.errors import DeviceNotConnectedError
+
+        if self.failing:
+            raise RuntimeError(f"{self.name} wedged")
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self.name} not connected.")
+        self.is_connected = False
+        self.released = True
+
+
+class _FakeConnectableBus(_FakeBus):
+    """Motor bus double that tracks open/closed state for teardown tests."""
+
+    def __init__(self, port: str = "COM_FAKE", connected: bool = True) -> None:
+        super().__init__(port=port)
+        self.is_connected = connected
+        self.disconnect_calls = 0
+
+    def disconnect(self, disable_torque: bool = True) -> None:
+        self.disconnect_calls += 1
+        self.is_connected = False
+
+
+class _FakePartialRobot:
+    def __init__(self, bus: _FakeConnectableBus, cameras: dict[str, _FakeCamera]) -> None:
+        self.bus = bus
+        self.cameras = cameras
+
+
+def test_force_disconnect_partial_releases_bus_when_a_later_camera_never_opened() -> None:
+    """The regression this helper exists for: connect() opened the bus and the
+    first camera, then died on it, leaving the *second* camera never opened.
+    lerobot's all-or-nothing is_connected makes robot.disconnect() a no-op
+    raise in that state, leaking the bus (next attempt: "FeetechMotorsBus is
+    already connected") and the opened camera's read thread.
+    """
+    from makerlab.teleoperate import force_disconnect_partial
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER")
+    front = _FakeCamera("front", connected=True)
+    wrist = _FakeCamera("wrist", connected=False)  # never reached by connect()
+    robot = _FakePartialRobot(bus, {"front": front, "wrist": wrist})
+
+    force_disconnect_partial(robot, "robot")
+
+    assert front.released is True  # read thread released, device freed
+    assert bus.is_connected is False and bus.disconnect_calls == 1
+
+
+def test_lerobot_disconnect_cannot_release_a_partially_connected_robot() -> None:
+    """Pins *why* force_disconnect_partial exists, against lerobot's own guard.
+
+    Uses the real ``check_if_not_connected`` decorator and the real all-or-
+    nothing ``is_connected`` shape from SOFollower. If upstream ever makes
+    disconnect() tolerant of partial state, this test fails and the helper can
+    collapse back to robot.disconnect().
+    """
+    from lerobot.utils.decorators import check_if_not_connected
+    from lerobot.utils.errors import DeviceNotConnectedError
+    from makerlab.teleoperate import force_disconnect_partial
+
+    class _LeRobotShapedRobot:
+        def __init__(self) -> None:
+            self.bus = _FakeConnectableBus(port="COM_FOLLOWER")
+            self.cameras = {
+                "front": _FakeCamera("front", connected=True),
+                "wrist": _FakeCamera("wrist", connected=False),
+            }
+
+        @property
+        def is_connected(self) -> bool:
+            return self.bus.is_connected and all(c.is_connected for c in self.cameras.values())
+
+        @check_if_not_connected
+        def disconnect(self) -> None:
+            self.bus.disconnect()
+            for cam in self.cameras.values():
+                cam.disconnect()
+
+    robot = _LeRobotShapedRobot()
+    with pytest.raises(DeviceNotConnectedError):
+        robot.disconnect()
+    # ...and nothing was released — this is the leak that made every later
+    # recording attempt fail with "FeetechMotorsBus is already connected".
+    assert robot.bus.is_connected is True
+    assert robot.cameras["front"].is_connected is True
+
+    force_disconnect_partial(robot, "robot")
+    assert robot.bus.is_connected is False
+    assert robot.cameras["front"].is_connected is False
+
+
+def test_force_disconnect_partial_releases_bus_despite_a_wedged_camera() -> None:
+    """A camera that fails to release must not strand the serial port."""
+    from makerlab.teleoperate import force_disconnect_partial
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER")
+    wedged = _FakeCamera("front", connected=True, failing=True)
+    wrist = _FakeCamera("wrist", connected=True)
+    robot = _FakePartialRobot(bus, {"front": wedged, "wrist": wrist})
+
+    force_disconnect_partial(robot, "robot")
+
+    assert wedged.released is False
+    assert wrist.released is True  # a bad camera doesn't abort the rest
+    assert bus.is_connected is False
+
+
+def test_force_disconnect_partial_is_idempotent_and_handles_bimanual_and_none() -> None:
+    from makerlab.teleoperate import force_disconnect_partial
+
+    # Already fully disconnected: no raise, no bus disconnect call.
+    bus = _FakeConnectableBus(connected=False)
+    robot = _FakePartialRobot(bus, {"front": _FakeCamera("front", connected=False)})
+    force_disconnect_partial(robot, "robot")
+    force_disconnect_partial(robot, "robot")
+    assert bus.disconnect_calls == 0
+
+    # Bimanual: buses live on the sub-arms, cameras are merged at the top level.
+    class _BiRobot:
+        def __init__(self) -> None:
+            self.left_arm = _FakeArm(_FakeConnectableBus(port="COM_LEFT"))
+            self.right_arm = _FakeArm(_FakeConnectableBus(port="COM_RIGHT"))
+            self.cameras = {"left_front": _FakeCamera("left_front")}
+
+    bi = _BiRobot()
+    force_disconnect_partial(bi, "robot")
+    assert bi.left_arm.bus.is_connected is False
+    assert bi.right_arm.bus.is_connected is False
+    assert bi.cameras["left_front"].released is True
+
+    # A device with no cameras attribute at all, and None.
+    force_disconnect_partial(_FakeArm(_FakeConnectableBus()), "teleop")
+    force_disconnect_partial(None, "nothing")
+
+
 def test_stop_teleoperation_surfaces_cleanup_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

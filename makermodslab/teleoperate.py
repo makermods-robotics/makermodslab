@@ -25,6 +25,7 @@ from lerobot.robots.bi_so_follower import BiSOFollower
 from lerobot.robots.so_follower import SO101Follower
 from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
+from lerobot.utils.errors import DeviceNotConnectedError
 
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
@@ -508,6 +509,51 @@ def _safe_disconnect(device, label: str = "device") -> str | None:
             if target is not None:
                 _force_close_device_resources(target, logger)
         return message
+
+
+def force_disconnect_partial(device, label: str = "device") -> None:
+    """Release a device that may be only *partially* connected.
+
+    ``device.disconnect()`` is unusable after a failed ``connect()``. lerobot
+    guards it with ``@check_if_not_connected``, and a robot's ``is_connected``
+    is all-or-nothing (``bus.is_connected and all(cam.is_connected ...)``), so
+    when ``connect()`` opens the bus and then dies on a camera, the cameras
+    *after* the failing one in iteration order were never opened — the guard
+    sees ``is_connected == False`` and ``disconnect()`` raises
+    ``DeviceNotConnectedError`` immediately, releasing **nothing**. The bus
+    stays open and every already-opened camera keeps its background read thread
+    running, holding the OS device busy for the rest of the process. The next
+    connect attempt then dies on the leaked bus with the misleading
+    "FeetechMotorsBus is already connected", and its cameras time out against
+    the leaked read threads — the failure is self-perpetuating until restart
+    (diagnosed 2026-07-29 on the front/wrist rig).
+
+    Go component by component instead, each independently guarded, so a broken
+    camera can't strand the bus and vice versa. Safe on a fully connected,
+    partially connected, or already disconnected device.
+    """
+    if device is None:
+        return
+    # Cameras first: they're the usual point of failure, and their read threads
+    # are what keep the device busy for the next attempt. ``.cameras`` covers
+    # both sides on a bimanual BiSO device (it merges the sub-arms' dicts).
+    for name, cam in (getattr(device, "cameras", None) or {}).items():
+        try:
+            cam.disconnect()
+        except DeviceNotConnectedError:
+            pass  # never opened (or already released) — nothing to do
+        except Exception as e:
+            logger.warning(f"Could not release {label} camera {name}: {e}")
+    for bus in _device_buses(device):
+        try:
+            if bus.is_connected:
+                # Default disable_torque=True: on a camera failure torque was
+                # never enabled (configure() runs after the cameras), but a
+                # failure later in connect() can leave it on.
+                bus.disconnect()
+        except Exception as e:
+            port = getattr(bus, "port", None) or "unknown port"
+            logger.warning(f"Could not release {label} bus on {port}: {e}")
 
 
 def _cleanup_after_setup_failure(
