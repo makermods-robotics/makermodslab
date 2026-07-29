@@ -2975,3 +2975,156 @@ def test_finetune_start_accepts_matching_policy_type(tmp_path) -> None:
 
     assert record.config.policy_type == "smolvla"
     assert record.config.policy_pretrained_path == str(src.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint-level policy-type guard. _check_finetune_policy_type compares the
+# source JobRecord's *recorded* type, so it is blind to a request that supplies
+# policy_pretrained_path directly (a public TrainingRequest field, no
+# finetune_from_job_id needed) and it opts out entirely when the record carries
+# register_imported's "model" placeholder. These cover the checkpoint's own
+# config.json being consulted instead.
+# ---------------------------------------------------------------------------
+
+
+def _flat_ckpt(tmp_path: Path, name: str, policy_type: str) -> Path:
+    """A flat pretrained_model-shaped dir whose config.json names an architecture."""
+    d = tmp_path / name
+    d.mkdir()
+    (d / "config.json").write_text(_json.dumps({"type": policy_type}))
+    return d
+
+
+def test_read_pretrained_policy_type_reads_local_config(tmp_path) -> None:
+    from makerlab.jobs import read_pretrained_policy_type
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    assert read_pretrained_policy_type(str(ckpt)) == "smolvla"
+
+
+def test_read_pretrained_policy_type_none_when_unreadable(tmp_path) -> None:
+    """Missing config.json, blank type, and a bad Hub ref all yield None —
+    "not established", which callers must not treat as a clean result."""
+    from unittest.mock import patch
+
+    from makerlab.jobs import read_pretrained_policy_type
+
+    bare = tmp_path / "no_config"
+    bare.mkdir()
+    assert read_pretrained_policy_type(str(bare)) is None
+
+    blank = tmp_path / "blank"
+    blank.mkdir()
+    (blank / "config.json").write_text(_json.dumps({"type": "   "}))
+    assert read_pretrained_policy_type(str(blank)) is None
+
+    # Not a directory ⇒ treated as a Hub repo id; a failed download is silent.
+    with patch("makerlab.jobs.hf_hub_download", side_effect=OSError("offline")):
+        assert read_pretrained_policy_type("someone/nope") is None
+
+
+def test_check_pretrained_policy_type_rejects_mismatch(tmp_path) -> None:
+    from makerlab.jobs import _check_pretrained_policy_type
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    with pytest.raises(ValueError, match="smolvla") as exc:
+        _check_pretrained_policy_type(str(ckpt), "act")
+    assert "'act'" in str(exc.value)
+
+
+def test_check_pretrained_policy_type_silent_when_matching_or_unknown(tmp_path) -> None:
+    """A match passes, and so does an unverifiable checkpoint — an unreadable
+    source must not block a launch, only an actual contradiction may."""
+    from makerlab.jobs import _check_pretrained_policy_type
+
+    ckpt = _flat_ckpt(tmp_path, "act_ckpt", "act")
+    _check_pretrained_policy_type(str(ckpt), "act")
+
+    bare = tmp_path / "unknown"
+    bare.mkdir()
+    _check_pretrained_policy_type(str(bare), "act")
+
+
+def test_start_rejects_direct_pretrained_path_mismatch(tmp_path) -> None:
+    """The hole _check_finetune_policy_type leaves open: policy_pretrained_path
+    set directly, with no finetune_from_job_id, so the record-based guard never
+    runs. The checkpoint's own config.json must still stop it, and no record may
+    be created."""
+    from unittest.mock import MagicMock, patch
+
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    reg = JobRegistry(tmp_path / "root")
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        policy_pretrained_path=str(ckpt),
+    )
+    with (
+        patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="smolvla"),
+    ):
+        reg.start(cfg, JobTarget(runner="local"))
+
+    assert reg.list(limit=10) == []
+
+
+def test_start_rejects_finetune_when_record_type_is_placeholder(tmp_path) -> None:
+    """register_imported stores the "model" placeholder when it can't read a
+    checkpoint's config.json, and _check_finetune_policy_type deliberately skips
+    that case. If the config becomes readable by launch time, the checkpoint
+    check must still catch the mismatch."""
+    from unittest.mock import MagicMock, patch
+
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
+
+    src = tmp_path / "mystery_ckpt"
+    src.mkdir()
+    (src / "config.json").write_text(_json.dumps({"type": "smolvla"}))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = reg.register_imported(str(src))
+    # Simulate the import having failed to read the architecture.
+    source.config.policy_type = "model"
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        finetune_from_job_id=source.id,
+    )
+    with (
+        patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="smolvla"),
+    ):
+        reg.start(cfg, JobTarget(runner="local"))
+
+
+def test_start_allows_resume_without_checkpoint_type_check(tmp_path) -> None:
+    """Resume passes --config_path and never emits --policy.pretrained_path, so
+    the pair can't contradict and the guard must not fire on it (a resumed
+    smolvla run whose request still carries the "act" default would otherwise be
+    refused)."""
+    from unittest.mock import MagicMock, patch
+
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    reg = JobRegistry(tmp_path / "root")
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        policy_pretrained_path=str(ckpt),
+        resume=True,
+        config_path=str(tmp_path / "train_config.json"),
+    )
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 99
+    with patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(cfg, JobTarget(runner="local"))
+    assert record.state == "running"

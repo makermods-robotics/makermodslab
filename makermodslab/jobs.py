@@ -981,6 +981,84 @@ def _check_finetune_policy_type(source: JobRecord, requested: str) -> None:
     )
 
 
+def read_pretrained_policy_type(pretrained_path: str) -> str | None:
+    """Read the architecture of the checkpoint at ``--policy.pretrained_path``.
+
+    `pretrained_path` is whatever lerobot would be handed: an absolute local
+    ``pretrained_model`` directory, or a Hub repo id whose ROOT holds the model
+    (``_resolve_finetune_pretrained_path`` never returns a Hub sub-path, because
+    lerobot's ``pretrained_path`` can't address one).
+
+    Returns the ``type`` field of the checkpoint's own ``config.json``, or None
+    when it can't be read — missing file, malformed JSON, private/absent repo,
+    or no network. None means "not established", never "fine": callers must
+    treat it as a reason to stay silent rather than a clean bill of health.
+    """
+    path = Path(pretrained_path)
+    if path.is_dir():
+        with contextlib.suppress(Exception), open(path / "config.json") as f:
+            return _clean_policy_type(json.load(f).get("type"))
+        return None
+
+    with contextlib.suppress(Exception):
+        local = hf_hub_download(
+            repo_id=pretrained_path, filename="config.json", repo_type="model"
+        )
+        with open(local) as f:
+            return _clean_policy_type(json.load(f).get("type"))
+    return None
+
+
+def _clean_policy_type(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _check_pretrained_policy_type(pretrained_path: str, requested: str) -> None:
+    """Reject a run whose ``--policy.type`` contradicts the checkpoint it loads.
+
+    The last line of defence before the trainer is spawned, and the only one
+    that consults the WEIGHTS' OWN config rather than MakerLab's bookkeeping
+    about them. That matters twice over:
+
+    * ``_check_finetune_policy_type`` compares the source JobRecord's recorded
+      ``policy_type``, which is absent for a hand-built request and is the
+      `_UNKNOWN_POLICY_TYPE` placeholder whenever an import couldn't read its
+      config — precisely the cases it therefore skips.
+    * ``policy_pretrained_path`` is a plain field of the public
+      ``TrainingRequest``, so a caller can POST it directly with no
+      ``finetune_from_job_id`` at all and bypass that guard entirely.
+
+    MakerLab cannot make the load itself strict — it shells out to
+    ``lerobot_train``, and ``make_policy`` hardcodes the non-strict default with
+    no CLI surface to override — so validating the pair up front is the only
+    available equivalent. See makerlab/finetune_audit.py for why a mismatch is
+    unrecoverable after the fact: the architectures share no parameter names, so
+    nothing is loaded and the written checkpoint is indistinguishable from a
+    from-scratch run.
+
+    Silent when the checkpoint's architecture can't be read: an unverifiable
+    source must not block a launch. Raises ValueError (→ HTTP 400) only on a
+    contradiction we can actually prove.
+    """
+    requested_type = _clean_policy_type(requested)
+    if not requested_type:
+        return
+    actual = read_pretrained_policy_type(pretrained_path)
+    if actual is None or actual == requested_type:
+        return
+    raise ValueError(
+        f"This run is set to train {requested_type!r}, but the checkpoint it "
+        f"starts from ({pretrained_path}) is a {actual!r} model. lerobot loads "
+        f"those weights into a {requested_type!r} policy without checking, and "
+        f"the two share no parameters — the run would silently train a brand-new "
+        f"{requested_type!r} while reporting itself as a fine-tune. Set the "
+        f"policy to {actual!r}, or pick a {requested_type!r} base model."
+    )
+
+
 _CLOUD_CKPT_TTL_SECONDS = 30.0
 _CKPT_PATH_RE = re.compile(r"^checkpoints/(\d+)/pretrained_model/config\.json$")
 
@@ -2180,6 +2258,19 @@ class JobRegistry:
             # that also inserts the record, so two concurrent starts can't both
             # pass. (The pre-flight copy above is only a fail-fast.)
             self._assert_no_running_local(target)
+
+            # Whatever put a pretrained_path on this request — the fine-tune
+            # resolution above, or a caller setting the public field directly —
+            # its architecture must match --policy.type before we spend a GPU on
+            # it. Checked against the CHECKPOINT'S OWN config.json, so it holds
+            # even when the registry's record of that checkpoint is missing or
+            # carries the "model" placeholder. Skipped on resume: that path
+            # passes --config_path instead and never emits pretrained_path (see
+            # train.build_training_command), so there is no pair to contradict.
+            if config.policy_pretrained_path and not config.resume:
+                _check_pretrained_policy_type(
+                    config.policy_pretrained_path, config.policy_type
+                )
 
             # Resume: turn the selected source run + step into the config_path
             # lerobot needs. Do this under the lock (source lookup) and before
