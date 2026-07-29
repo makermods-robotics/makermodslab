@@ -151,8 +151,18 @@ def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
     assert "--policy.tags" not in off
 
 
-def test_resume_push_to_hub_emits_public_and_tags() -> None:
-    """The resume branch must also make a pushed policy public + tagged."""
+def test_resume_push_to_hub_emits_public_but_never_tags() -> None:
+    """The resume branch makes a pushed policy public but must NOT re-pass tags.
+
+    Regression test for MT24. With --config_path present, lerobot parses through
+    draccus.parse(cls, config_file, args=cli_args), which merges each CLI
+    override into the config dict as a RAW STRING before decoding it against the
+    field type — so `--policy.tags '[a,b,c]'` reaches list[str] decoding as the
+    literal string and raises DecodingError, killing the run at startup. The
+    checkpoint's own train_config.json already carries policy.tags, so dropping
+    the flag loses nothing. The fresh-run branch still emits it (argparse splits
+    the bracket form there) — covered by the test above.
+    """
     from makermodslab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(
@@ -166,7 +176,7 @@ def test_resume_push_to_hub_emits_public_and_tags() -> None:
 
     assert _arg_value(cmd, "--policy.push_to_hub") == "true"
     assert _arg_value(cmd, "--policy.private") == "false"
-    assert _arg_value(cmd, "--policy.tags") == "[makermods,openbooth,MakerModsLab]"
+    assert "--policy.tags" not in cmd
 
 
 def test_seed_omitted_when_none() -> None:
