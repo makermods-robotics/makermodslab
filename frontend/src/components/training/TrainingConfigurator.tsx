@@ -209,11 +209,15 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // config (via ResumeSeed) rather than left at fresh-run defaults — see the
     // ResumeSeed comments for which of them lerobot actually honours. Prefill,
     // don't lock: every one stays editable, since extending steps or raising the
-    // timeout on a continuation is exactly what the form is for. `steps` is the
-    // one deliberate exception to inheritance — it's seeded ABOVE the source's
-    // total so the continuation actually trains further. Fine-tune is a fresh
-    // run, so it uses the normal fresh defaults throughout.
-    steps: resumeSeed ? resumeSeed.sourceSteps * 2 : 10000,
+    // timeout on a continuation is exactly what the form is for. `steps` is
+    // inherited as-is like the rest, so resuming an interrupted run defaults to
+    // FINISHING its original target (one that died at step 4,814 of 15,000
+    // resumes toward 15,000); raise it by hand to train past that. Resuming a
+    // run that already reached its target therefore prefills steps equal to the
+    // checkpoint's step — `resumeStepError` below blocks Start until the user
+    // raises it, as does the backend. Fine-tune is a fresh run, so it uses the
+    // normal fresh defaults throughout.
+    steps: resumeSeed ? resumeSeed.sourceSteps : 10000,
     batch_size: resumeSeed?.batchSize ?? 8,
     seed: resumeSeed?.seed ?? 1000,
     num_workers: resumeSeed?.numWorkers ?? 4,
