@@ -305,6 +305,15 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
       * 'INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...' for loss/lr/grdn
         (only at log_freq cadence, default every 250 steps).
 
+    One `line` can carry MANY tqdm frames. tqdm separates its redraws with \\r,
+    and a log transport that doesn't split on \\r hands us the whole burst as one
+    line with the trailing 'INFO ... step:N ...' appended (HF Jobs' SSE log
+    stream batches ~log_freq frames per message this way; a local subprocess
+    read with universal_newlines gets one frame per line). The LAST frame is the
+    one the appended INFO line belongs to, so we must take the last match, not
+    the first — taking the first understated every step by ~log_freq−1, which
+    the abbreviated 'step:4K' token below cannot correct.
+
     `resume_total` is the run's full step target for a *resumed* run (None for a
     fresh run). On resume lerobot's tqdm bar counts only the remaining window
     (0 → steps−checkpoint), so the raw bar understates the true global step; we
@@ -313,11 +322,12 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
     carries the true global step, so it needs no rebasing.
     """
     try:
-        tqdm_match = _TQDM_RE.search(line)
-        if tqdm_match:
+        tqdm_frames = _TQDM_RE.findall(line)
+        if tqdm_frames:
             try:
-                tqdm_step = int(tqdm_match.group(1))
-                total = int(tqdm_match.group(2))
+                raw_step, raw_total, raw_eta = tqdm_frames[-1]
+                tqdm_step = int(raw_step)
+                total = int(raw_total)
                 if resume_total is not None and total > 0:
                     metrics.current_step = resume_total - total + tqdm_step
                     metrics.total_steps = resume_total
@@ -325,13 +335,17 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
                     metrics.current_step = tqdm_step
                     if total > 0:
                         metrics.total_steps = total
-                eta = _parse_duration(tqdm_match.group(3))
+                eta = _parse_duration(raw_eta)
                 if eta is not None:
                     metrics.eta_seconds = eta
             except (ValueError, IndexError):
                 pass
 
         if "step:" in line and "loss:" in line:
+            # Only useful below 1000 steps: lerobot renders this through
+            # format_big_number, so the token becomes "4K" and int() raises —
+            # suppressed, leaving the (now correct) tqdm step in place. Don't
+            # try to expand the K suffix; it's rounded, hence lossy.
             with contextlib.suppress(ValueError):
                 metrics.current_step = int(line.split("step:")[1].split()[0].replace(",", ""))
             with contextlib.suppress(ValueError):
@@ -2601,7 +2615,12 @@ class JobRegistry:
                 if target.runner == "local":
                     runner = LocalJobRunner(record.metrics, log_file_path=log_path)
                 else:
-                    runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
+                    runner = HfCloudJobRunner(
+                        record.metrics,
+                        log_path,
+                        target.flavor,
+                        _resume_total_steps(config),
+                    )
 
                 try:
                     runner.start(job_id, config, lerobot_output_dir)
@@ -2859,7 +2878,12 @@ class JobRegistry:
                 if target.runner == "local":
                     runner = LocalJobRunner(record.metrics, log_file_path=log_path)
                 else:
-                    runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
+                    runner = HfCloudJobRunner(
+                        record.metrics,
+                        log_path,
+                        target.flavor,
+                        _resume_total_steps(record.config),
+                    )
                 try:
                     runner.start(job_id, record.config, output_dir)
                 except Exception as exc:
@@ -3375,6 +3399,7 @@ class JobRegistry:
                         record.metrics,
                         _job_log_path(self._output_root, record.id),
                         record.hf_flavor,
+                        _resume_total_steps(record.config),
                     )
                     runner.reattach(record.hf_job_id)
                     self._runners[record.id] = runner

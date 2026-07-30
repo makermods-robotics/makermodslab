@@ -247,6 +247,102 @@ def test_parse_metrics_into_keeps_tqdm_step_when_log_line_step_is_abbreviated() 
     assert m.current_lr == pytest.approx(0.0001)
 
 
+def _tqdm_burst(first: int, last: int, total: int, eta: str = "6:26:18") -> str:
+    """One log line carrying every tqdm redraw from `first` to `last`.
+
+    tqdm separates redraws with \\r; a transport that doesn't split on \\r (HF
+    Jobs' SSE log stream) delivers the whole burst as a single line with the
+    trailing 'INFO ... step:N ...' appended to the LAST frame.
+    """
+    return "\r".join(
+        f"Training:  39%|███▊      | {s}/{total} [2:31:07<{eta},  2.12s/step]" for s in range(first, last + 1)
+    )
+
+
+@pytest.mark.parametrize(
+    ("burst", "info", "resume_total", "expect_step", "expect_total"),
+    [
+        # The real shape of a resumed cloud run: 50 frames of the remaining-window
+        # bar + an abbreviated 'step:4K' that int() can't use. Last frame 50 of
+        # 11000 remaining, on a 15000-step target → global step 4050.
+        (
+            _tqdm_burst(1, 50, 11000),
+            "INFO 2026-07-29 02:11:59 train.py:606 step:4K smpl:259K ep:878 "
+            "epch:43.90 loss:0.040 grdn:0.919 lr:8.4e-05",
+            15000,
+            4050,
+            15000,
+        ),
+        # Same batching on a fresh run: the bar is already global, and the
+        # 'step:1K' token is still unusable, so the last frame must stand.
+        (
+            _tqdm_burst(951, 1000, 10000),
+            "INFO ... step:1K smpl:8K loss:0.0077 grdn:0.9 lr:0.0001",
+            None,
+            1000,
+            10000,
+        ),
+        # Below 1000 the log line's step is a plain int and wins outright —
+        # which is also the only reason the first-frame bug stayed invisible
+        # under step 1000.
+        (
+            _tqdm_burst(901, 950, 10000),
+            "INFO ... step:950 smpl:7K loss:0.0077 grdn:0.9 lr:0.0001",
+            None,
+            950,
+            10000,
+        ),
+    ],
+    ids=["resumed-cloud-burst", "fresh-burst-abbreviated", "fresh-burst-exact"],
+)
+def test_parse_metrics_into_uses_the_last_tqdm_frame_of_a_batched_line(
+    burst: str, info: str, resume_total: int | None, expect_step: int, expect_total: int
+) -> None:
+    """A batched line's LAST tqdm frame is the one the appended INFO line belongs
+    to. Taking the first understated every step above 1000 by log_freq−1 (a real
+    run charted 8201 where the true step was 8250)."""
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into(f"{burst}{info}", m, resume_total)
+
+    assert m.current_step == expect_step
+    assert m.total_steps == expect_total
+    assert m.current_loss is not None
+    # ETA comes from the same (last) frame.
+    assert m.eta_seconds == 6 * 3600 + 26 * 60 + 18
+
+
+def test_read_metrics_history_of_a_batched_resumed_log(tmp_path) -> None:
+    """End-to-end on the shape a resumed cloud run actually writes: batched tqdm
+    bursts + abbreviated step tokens land on the true global steps (multiples of
+    log_freq), not log_freq−1 below them."""
+    from makerlab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
+    from makerlab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path)
+    root = reg._output_root
+    msgs = [
+        _tqdm_burst(first, first + 49, 11000) + f"INFO ... step:4K loss:0.04{i} grdn:0.9 lr:8.4e-05"
+        for i, first in enumerate((1, 51, 101))
+    ]
+    p = _job_log_path(root, "R")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w") as f:
+        for msg in msgs:
+            f.write(LogLine(timestamp=0.0, message=msg).model_dump_json() + "\n")
+    reg._records["R"] = JobRecord(
+        id="R",
+        name="r",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="d", resume=True, steps=15000),
+        output_dir=str(root / "R" / "run"),
+        started_at=0.0,
+    )
+
+    assert [pt.step for pt in reg.read_metrics_history("R")] == [4050, 4100, 4150]
+
+
 def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     from makermodslab.jobs import TrainingMetrics, parse_metrics_into
 
@@ -1066,6 +1162,96 @@ def test_cloud_start_allows_unknown_status_dataset(tmp_path) -> None:
         record = reg.start(cfg, target)
 
     assert record.runner == "hf_cloud"
+
+
+def test_cloud_start_passes_resume_total_to_the_runner(tmp_path) -> None:
+    """A resumed cloud run must hand the runner its full step target, or the log
+    parser can't rebase the remaining-window tqdm bar and the UI reports
+    resume-relative progress (observed: 4,251/11,000 instead of 8,251/15,000)."""
+    from unittest.mock import MagicMock, patch
+
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(
+        dataset_repo_id="user/on_hub",
+        policy_type="act",
+        resume=True,
+        # Stands in for a resume selection; the runner (which is what turns this
+        # into a Hub download for a cloud job) is stubbed out below.
+        config_path="/somewhere/checkpoints/004000/pretrained_model/train_config.json",
+        steps=15000,
+    )
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    seen: list[tuple] = []
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+    fake_runner.wandb_run_url.return_value = None  # keep the watchdog's persist clean
+
+    def _factory(*args, **kwargs):
+        seen.append(args)
+        return fake_runner
+
+    with (
+        patch(
+            "makerlab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch("makerlab.runners.hf_cloud.HfCloudJobRunner", _factory),
+    ):
+        reg.start(cfg, target)
+
+    assert seen and seen[0][-1] == 15000
+
+
+def test_cloud_reattach_passes_resume_total_to_the_runner(monkeypatch, tmp_path) -> None:
+    """Re-attaching to a running cloud job after a restart must carry the resume
+    target too — otherwise the progress readout silently rebases itself on the
+    remaining window mid-run."""
+    from unittest.mock import MagicMock, patch
+
+    from makerlab.jobs import JobRegistry
+
+    root = tmp_path / "root"
+    job_dir = root / "cloud-job"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        _json.dumps(
+            {
+                "id": "cloud-job",
+                "name": "SMOLVLA · user/ds",
+                "state": "running",
+                "config": {
+                    "dataset_repo_id": "user/ds",
+                    "policy_type": "smolvla",
+                    "resume": True,
+                    "steps": 15000,
+                },
+                "output_dir": str(job_dir / "run"),
+                "started_at": 1.0,
+                "runner": "hf_cloud",
+                "hf_job_id": "hf-job-1",
+                "hf_flavor": "a10g-small",
+            }
+        )
+    )
+
+    seen: list[tuple] = []
+
+    def _factory(*args, **kwargs):
+        seen.append(args)
+        return MagicMock()
+
+    # No watchdog: this test is about what _load_from_disk hands the runner, and
+    # the tick would poll the (stubbed) runner and the Hub for checkpoints.
+    monkeypatch.setattr(JobRegistry, "_start_watchdog", lambda self: None)
+    with patch("makerlab.runners.hf_cloud.HfCloudJobRunner", _factory):
+        JobRegistry(root)
+
+    assert seen and seen[0][-1] == 15000
 
 
 def test_local_start_skips_hub_preflight(tmp_path) -> None:

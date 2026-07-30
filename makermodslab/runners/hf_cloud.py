@@ -604,10 +604,18 @@ class HfCloudJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         flavor: str,
+        resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._flavor = flavor
+        # Full step target for a resumed run, so the log parser can rebase the
+        # remaining-window tqdm bar onto the global step (see
+        # jobs.parse_metrics_into / jobs._resume_total_steps). Passed in rather
+        # than derived from `config` because reattach() has no config; both
+        # construction sites in jobs.py must supply it or a resumed cloud run
+        # reports resume-relative steps (e.g. 4251/11000 instead of 8251/15000).
+        self._resume_total = resume_total
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -851,7 +859,7 @@ class HfCloudJobRunner:
                         stripped = raw.rstrip()
                         if not stripped:
                             continue
-                        parse_metrics_into(stripped, self._metrics)
+                        parse_metrics_into(stripped, self._metrics, self._resume_total)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(stripped)
                             if url is not None:
