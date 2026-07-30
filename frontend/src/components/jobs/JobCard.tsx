@@ -361,19 +361,41 @@ const JobCard: React.FC<Props> = ({
   // really change.
   const goToResume = (runner: "local" | "hf_cloud") => {
     if (selectedStep == null) return;
+    // Carry the parent run's whole configured shape forward. The registry
+    // already holds it as `selectedJob.config` (the persisted TrainingRequest),
+    // so this needs no extra fetch and no reading of the checkpoint's
+    // train_config.json. The configurator PREFILLS from these — nothing is
+    // locked, so the user can still extend steps, raise the timeout, or change
+    // hardware on the continuation.
+    const parent = selectedJob.config;
     navigate("/training", {
       state: {
         resume: {
           jobId: selectedJob.id,
           step: selectedStep,
           name: jobDisplayName(selectedJob),
-          datasetRepoId: selectedJob.config.dataset_repo_id,
-          policyType: selectedJob.config.policy_type,
-          sourceSteps: selectedJob.config.steps,
-          logFreq: selectedJob.config.log_freq,
-          saveFreq: selectedJob.config.save_freq,
+          datasetRepoId: parent.dataset_repo_id,
+          policyType: parent.policy_type,
+          sourceSteps: parent.steps,
+          logFreq: parent.log_freq,
+          saveFreq: parent.save_freq,
+          saveCheckpoint: parent.save_checkpoint,
           runner,
           flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
+          // Cloud-only: without this a Continue fell back to the runner's 2h
+          // default, capping the tail of a run already known to need longer.
+          hfJobTimeout:
+            runner === "hf_cloud" ? (parent.hf_job_timeout ?? undefined) : undefined,
+          batchSize: parent.batch_size,
+          seed: parent.seed,
+          numWorkers: parent.num_workers,
+          policyDevice: parent.policy_device,
+          policyUseAmp: parent.policy_use_amp,
+          optimizerType: parent.optimizer_type,
+          optimizerLr: parent.optimizer_lr,
+          optimizerWeightDecay: parent.optimizer_weight_decay,
+          optimizerGradClipNorm: parent.optimizer_grad_clip_norm,
+          usePolicyTrainingPreset: parent.use_policy_training_preset,
         },
       },
     });

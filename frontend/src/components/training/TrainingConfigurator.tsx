@@ -44,6 +44,7 @@ export type ResumeSeed = {
   sourceSteps: number; // the source run's configured total, for a sane prefill
   logFreq?: number; // the source run's log cadence, to preserve on resume
   saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
+  saveCheckpoint?: boolean; // the source run's checkpointing switch, to preserve
   // The parent run's runner + flavor. A resume DEFAULTS to the parent's runner
   // but may cross to the other one (F7), so `runner` is the form's starting
   // point AND its record of where the parent actually ran — which is what tells
@@ -54,6 +55,26 @@ export type ResumeSeed = {
   // per-launch choice.
   runner?: "local" | "hf_cloud";
   flavor?: string;
+  // Cloud resume: the parent run's HF Jobs timeout. Omitting it let the form
+  // render blank, which `configToRequest` sends as undefined and the runner
+  // resolves to HF_JOB_TIMEOUT ("2h") — silently capping the continuation of a
+  // run that had already proved it needs a longer budget. See NEW-12.
+  hfJobTimeout?: string;
+  // The remaining hyperparameters. lerobot rebuilds these from the checkpoint's
+  // train_config.json on resume (build_training_command's resume branch emits
+  // none of them), so carrying them forward does NOT change what trains — it
+  // stops the form from *displaying* fresh-run defaults for a continuation, and
+  // keeps the new JobRecord's persisted config truthful about the run's shape.
+  batchSize?: number;
+  seed?: number;
+  numWorkers?: number;
+  policyDevice?: string;
+  policyUseAmp?: boolean;
+  optimizerType?: string;
+  optimizerLr?: number;
+  optimizerWeightDecay?: number;
+  optimizerGradClipNorm?: number;
+  usePolicyTrainingPreset?: boolean;
 };
 
 // Passed by the "Fine-tune" button on an imported model. A fine-tune is a
@@ -184,17 +205,21 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     dataset_repo_id: "",
     policy_type: "act",
     job_name: "",
-    // On resume, everything but steps is inherited from the checkpoint's
-    // train_config.json; prefill steps above the source's total so the
-    // continuation actually trains further. Fine-tune is a fresh run, so it
-    // uses the normal fresh default.
+    // On resume the fields below are PREFILLED from the parent run's persisted
+    // config (via ResumeSeed) rather than left at fresh-run defaults — see the
+    // ResumeSeed comments for which of them lerobot actually honours. Prefill,
+    // don't lock: every one stays editable, since extending steps or raising the
+    // timeout on a continuation is exactly what the form is for. `steps` is the
+    // one deliberate exception to inheritance — it's seeded ABOVE the source's
+    // total so the continuation actually trains further. Fine-tune is a fresh
+    // run, so it uses the normal fresh defaults throughout.
     steps: resumeSeed ? resumeSeed.sourceSteps * 2 : 10000,
-    batch_size: 8,
-    seed: 1000,
-    num_workers: 4,
+    batch_size: resumeSeed?.batchSize ?? 8,
+    seed: resumeSeed?.seed ?? 1000,
+    num_workers: resumeSeed?.numWorkers ?? 4,
     log_freq: resumeSeed?.logFreq ?? 50,
     save_freq: resumeSeed?.saveFreq ?? 1000,
-    save_checkpoint: true,
+    save_checkpoint: resumeSeed?.saveCheckpoint ?? true,
     // Fine-tune is NOT a resume — it's a fresh run whose weights are seeded from
     // the source checkpoint. resume stays false; the backend resolves
     // finetune_from_* into --policy.pretrained_path.
@@ -206,10 +231,17 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     wandb_enable: false,
     wandb_mode: "online",
     wandb_disable_artifact: false,
-    policy_device: "auto",
-    policy_use_amp: false,
-    optimizer_type: "adam",
-    use_policy_training_preset: true,
+    policy_device: resumeSeed?.policyDevice ?? "auto",
+    policy_use_amp: resumeSeed?.policyUseAmp ?? false,
+    optimizer_type: resumeSeed?.optimizerType ?? "adam",
+    optimizer_lr: resumeSeed?.optimizerLr,
+    optimizer_weight_decay: resumeSeed?.optimizerWeightDecay,
+    optimizer_grad_clip_norm: resumeSeed?.optimizerGradClipNorm,
+    use_policy_training_preset: resumeSeed?.usePolicyTrainingPreset ?? true,
+    // Cloud-only. Prefilled from the parent so a Continue keeps its budget
+    // instead of silently falling back to the runner's 2h default; the field
+    // stays editable so the user can raise it for a longer tail.
+    hf_job_timeout: resumeSeed?.hfJobTimeout,
   });
 
   // The config the form actually reads: internal state overlaid with the
@@ -540,11 +572,25 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               : " from its latest checkpoint"}
           </div>
           <p className="mt-1 text-muted-foreground">
-            The dataset, policy, batch size, and optimizer are inherited from the
-            checkpoint — only <span className="font-medium">Steps</span> applies
-            here. Set it above the resumed step to train further (prefilled to{" "}
+            Settings are prefilled from that run and stay editable. The dataset,
+            policy, batch size, and optimizer are rebuilt from the checkpoint
+            itself, so changing them here won't affect the continuation — but{" "}
+            <span className="font-medium">Steps</span>, the checkpoint cadence
+            {isCloud ? ", and the job timeout" : ""} all apply. Set Steps above
+            the resumed step to train further (prefilled to{" "}
             {config.steps.toLocaleString()}).
           </p>
+          {isCloud ? (
+            <p className="mt-1 text-muted-foreground">
+              Job timeout:{" "}
+              <span className="font-medium">
+                {config.hf_job_timeout?.trim()
+                  ? config.hf_job_timeout
+                  : "2h (default)"}
+              </span>{" "}
+              — a continuation needs at least as long as the tail it has left.
+            </p>
+          ) : null}
         </div>
       ) : null}
       {finetuneSeed ? (
