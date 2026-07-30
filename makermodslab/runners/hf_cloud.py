@@ -909,12 +909,52 @@ class HfCloudJobRunner:
             return
         # Pre-set CANCELED so the watchdog finalises as canceled regardless
         # of whether the status poller observed a terminal stage first.
+        # (_set_terminal is idempotent, so a stage the poller already saw — a
+        # run that beat us to COMPLETED or ERROR — survives this and is what
+        # the registry classifies on.)
         self._set_terminal("CANCELED")
         try:
             self._api.cancel_job(job_id=self._hf_job_id)
         except Exception as exc:
             # Already-completed jobs may 404; that's fine.
             logger.info("cancel_job(%s) ignored: %s", self._hf_job_id, exc)
+            self._reconcile_stage_after_failed_cancel()
+
+    def _reconcile_stage_after_failed_cancel(self) -> None:
+        """Re-read the real stage when cancel_job refused.
+
+        The usual reason it refuses is that the job had ALREADY ended (404),
+        which means the CANCELED we pre-set above is a lie about a run that
+        finished on its own — and the whole point of tracking cancellation is
+        not to relabel those. The status poller can't fix it: pre-setting a
+        terminal stage stopped it.
+
+        So ask once, and adopt a terminal answer. Writes the fields directly
+        rather than going through the idempotent _set_terminal, since the value
+        being corrected is precisely the one it would refuse to overwrite.
+        Silent on any failure: an unreachable Hub leaves CANCELED standing,
+        which is the best available guess once our cancel is already out.
+        """
+        try:
+            info = self._api.inspect_job(job_id=self._hf_job_id)
+            status_obj = getattr(info, "status", None)
+            stage = getattr(status_obj, "stage", None) if status_obj is not None else None
+            if stage is None:
+                return
+            stage_str = str(stage).upper()
+            if stage_str not in _TERMINAL_STAGES or stage_str == self._terminal_status:
+                return
+            logger.info(
+                "Job %s had already reached %s before the cancel; recording that instead of CANCELED",
+                self._hf_job_id,
+                stage_str,
+            )
+            self._terminal_status = stage_str
+            msg = getattr(status_obj, "message", None)
+            if msg:
+                self._terminal_message = str(msg)
+        except Exception as exc:
+            logger.info("Could not reconcile stage for %s: %s", self._hf_job_id, exc)
 
     def is_running(self) -> bool:
         # Liveness is driven by _status_poll_loop's inspect_job calls.
@@ -944,6 +984,16 @@ class HfCloudJobRunner:
 
     def wandb_run_url(self) -> str | None:
         return self._wandb_run_url
+
+    def terminal_stage(self) -> str | None:
+        """The platform's terminal stage, or None while the job is live.
+
+        Read by the registry watchdog in preference to returncode(), which
+        collapses every non-COMPLETED stage to 1 and so cannot tell a cancel
+        from a crash — the defect that filed every stopped cloud run as
+        `failed`. One of COMPLETED / CANCELED / ERROR / DELETED.
+        """
+        return self._terminal_status
 
     def terminal_message(self) -> str | None:
         """Status.message captured when the job reached a terminal stage.

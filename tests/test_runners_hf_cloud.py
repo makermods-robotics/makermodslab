@@ -13,9 +13,10 @@
 # limitations under the License.
 """Tests for makermodslab.runners.hf_cloud — covers the host-side wandb credential
 resolution, the pinned-lerobot spec derivation, and the cloud-boundary config
-localization. HfCloudJobRunner itself talks to HF Jobs and is not unit-
-testable without a heavy mock of HfApi; we intentionally leave it for
-integration tests."""
+localization, plus the terminal-stage bookkeeping in HfCloudJobRunner.stop()
+(which decides whether a stopped run reads as `interrupted` or as a failure,
+and needs only a two-method fake). Submission, log tailing and status polling
+talk to HF Jobs and are intentionally left for integration tests."""
 
 from __future__ import annotations
 
@@ -640,3 +641,137 @@ def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="2h")) == 7200
+
+
+# --- stop(): distinguishing a cancel from a crash ---------------------------
+#
+# returncode() collapses every non-COMPLETED stage to 1, so the registry
+# classifies cloud runs on terminal_stage() instead. These cover stop()'s own
+# decisions only — no submission, no threads, no network — because the stage
+# stop() leaves behind is what decides whether a stopped run reads as
+# `interrupted` or as a failed model.
+
+
+class _FakeStatus:
+    def __init__(self, stage, message=None):
+        self.stage = stage
+        self.message = message
+
+
+class _FakeJobInfo:
+    def __init__(self, stage, message=None):
+        self.status = _FakeStatus(stage, message)
+
+
+class _FakeJobsApi:
+    """Just the two calls stop() makes."""
+
+    def __init__(self, *, cancel_raises=False, inspect=None, inspect_raises=False):
+        self._cancel_raises = cancel_raises
+        self._inspect = inspect
+        self._inspect_raises = inspect_raises
+        self.cancelled = []
+        self.inspected = []
+
+    def cancel_job(self, job_id):
+        self.cancelled.append(job_id)
+        if self._cancel_raises:
+            raise RuntimeError("404 job already ended")
+
+    def inspect_job(self, job_id):
+        self.inspected.append(job_id)
+        if self._inspect_raises:
+            raise RuntimeError("network down")
+        return self._inspect
+
+
+def _runner_with(api, tmp_path, *, stage=None):
+    from makerlab.jobs import TrainingMetrics
+    from makerlab.runners.hf_cloud import HfCloudJobRunner
+
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "a10g-small")
+    runner._api = api
+    runner._hf_job_id = "job-1"
+    runner._terminal_status = stage
+    return runner
+
+
+def test_stop_records_canceled_stage(tmp_path) -> None:
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert api.cancelled == ["job-1"]
+    assert runner.terminal_stage() == "CANCELED"
+    assert runner.is_running() is False
+    # No corrective lookup needed when the cancel was accepted.
+    assert api.inspected == []
+
+
+def test_stop_does_not_overwrite_a_stage_the_poller_already_saw(tmp_path) -> None:
+    """_set_terminal is idempotent, and that is what keeps a run which
+    finished before the stop landed reported as COMPLETED."""
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path, stage="COMPLETED")
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "COMPLETED"
+    assert runner.returncode() == 0
+
+
+def test_stop_adopts_the_real_stage_when_cancel_is_refused(tmp_path) -> None:
+    """cancel_job refusing usually means the job had ALREADY ended, so the
+    pre-set CANCELED describes a run that finished on its own. Re-read it."""
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("COMPLETED"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert api.inspected == ["job-1"]
+    assert runner.terminal_stage() == "COMPLETED"
+    assert runner.returncode() == 0
+
+
+def test_stop_adopts_an_error_stage_and_its_message(tmp_path) -> None:
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("ERROR", "Job timeout"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "ERROR"
+    assert runner.terminal_message() == "Job timeout"
+
+
+def test_stop_keeps_canceled_when_the_stage_cannot_be_re_read(tmp_path) -> None:
+    """An unreachable Hub leaves CANCELED standing: our cancel is already out,
+    so it's the best available account of the run."""
+    api = _FakeJobsApi(cancel_raises=True, inspect_raises=True)
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "CANCELED"
+
+
+def test_stop_keeps_canceled_when_the_job_is_still_running(tmp_path) -> None:
+    """cancel_job can also fail transiently. A non-terminal stage is no
+    evidence that the run ended on its own, so don't adopt it."""
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("RUNNING"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "CANCELED"
+
+
+def test_stop_is_a_noop_before_submission(tmp_path) -> None:
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path)
+    runner._hf_job_id = None
+
+    runner.stop()
+
+    assert api.cancelled == []
+    assert runner.terminal_stage() is None

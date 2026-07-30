@@ -3128,3 +3128,429 @@ def test_start_allows_resume_without_checkpoint_type_check(tmp_path) -> None:
     with patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
         record = reg.start(cfg, JobTarget(runner="local"))
     assert record.state == "running"
+
+
+# --- Deliberate stop vs genuine failure -------------------------------------
+#
+# Regression cover for the defect where every press of Stop landed in run
+# history as `failed` + "Subprocess exited with code 1", indistinguishable
+# from a crash: JobRegistry.stop() recorded no intent and the watchdog had
+# only the exit code to go on. The state machine already had `interrupted`,
+# reachable only by startup reconciliation of a stranded record.
+
+
+class _FakeRunner:
+    """Minimal JobRunner. Deliberately does NOT expose the optional hooks —
+    subclasses add them, mirroring runners that can and can't answer."""
+
+    def __init__(self, *, code=None, on_stop_code=None, stage=None, on_stop_stage=None):
+        self._code = code  # None + no stage => still running
+        self._on_stop_code = on_stop_code
+        self._stage = stage
+        self._on_stop_stage = on_stop_stage
+        self.stopped = False
+
+    def start(self, job_id, config, output_dir) -> None:
+        # No subprocess: liveness is driven by the fields above so the
+        # watchdog's exit-detection can be stepped deterministically.
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+        if self._on_stop_code is not None:
+            self._code = self._on_stop_code
+        # Idempotent like HfCloudJobRunner._set_terminal: a stage the platform
+        # already reported survives our cancel.
+        if self._on_stop_stage is not None and self._stage is None:
+            self._stage = self._on_stop_stage
+
+    def is_running(self) -> bool:
+        return self._code is None and self._stage is None
+
+    def returncode(self):
+        if self._stage is not None:
+            return 0 if self._stage == "COMPLETED" else 1
+        return self._code
+
+    def stream_log_lines(self):
+        return []
+
+    def wandb_run_url(self):
+        return None
+
+    def pid(self):
+        return 4242
+
+
+class _FakeSignallingRunner(_FakeRunner):
+    """A local-shaped runner: reports whether it actually signalled."""
+
+    def __init__(self, *, signals=True, **kw):
+        super().__init__(**kw)
+        self._signals = signals
+
+    def stop(self) -> None:
+        if self._signals:
+            super().stop()
+        else:
+            # Process was already gone; stop() short-circuits and claims
+            # nothing, exactly like LocalJobRunner's poll() guard.
+            self.stopped = True
+
+    def stop_signalled(self) -> bool:
+        return self._signals and self.stopped
+
+
+class _FakeStagedRunner(_FakeRunner):
+    """A cloud-shaped runner: reports a platform terminal stage + message."""
+
+    def __init__(self, *, message=None, **kw):
+        super().__init__(**kw)
+        self._message = message
+
+    def terminal_stage(self):
+        return self._stage
+
+    def terminal_message(self):
+        return self._message
+
+
+def _start_with(reg, runner, **cfg_kw):
+    """Start a job whose runner is `runner`, via the real JobRegistry.start."""
+    from unittest.mock import patch
+
+    from makerlab.jobs import JobTarget
+    from makerlab.train import TrainingRequest
+
+    cfg = TrainingRequest(dataset_repo_id="user/ds", **cfg_kw)
+    with patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: runner):
+        return reg.start(cfg, JobTarget(runner="local"))
+
+
+def _stop_and_finalise(reg, job_id):
+    """Stop, then force a watchdog tick so the assertion doesn't race the
+    1Hz background thread. _tick is a no-op if that thread got there first."""
+    reg.stop(job_id)
+    reg._tick()
+    return reg.get(job_id)
+
+
+# -- the pure classifier ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rc", "stop_requested", "stage", "expected"),
+    [
+        # Local: a clean exit is `done` no matter what else is true.
+        (0, False, None, "done"),
+        (0, True, None, "done"),
+        # Local: nonzero without a stop is a real failure (unchanged).
+        (1, False, None, "failed"),
+        (-15, False, None, "failed"),
+        # Local: nonzero after a stop we signalled is deliberate.
+        (1, True, None, "interrupted"),
+        (-15, True, None, "interrupted"),
+        # No code at all: no evidence, stays a failure (unchanged).
+        (None, False, None, "failed"),
+        (None, True, None, "failed"),
+        # Cloud: the platform stage wins over the collapsed exit code.
+        (0, False, "COMPLETED", "done"),
+        (0, True, "COMPLETED", "done"),
+        (1, True, "CANCELED", "interrupted"),
+        (1, False, "CANCELED", "failed"),
+        (1, True, "ERROR", "failed"),
+        (1, False, "ERROR", "failed"),
+        (1, True, "DELETED", "failed"),
+        # Stage matching is case-insensitive (HF returns an enum we str()).
+        (1, True, "canceled", "interrupted"),
+    ],
+)
+def test_classify_terminal_state_table(rc, stop_requested, stage, expected) -> None:
+    from makerlab.jobs import classify_terminal_state
+
+    assert (
+        classify_terminal_state(returncode=rc, stop_requested=stop_requested, terminal_stage=stage)
+        == expected
+    )
+
+
+# -- registry: local runner -------------------------------------------------
+
+
+def test_stop_records_intent_before_signalling(tmp_path) -> None:
+    """The intent must be on the registry before the signal leaves, or the
+    watchdog can finalise a stop it never heard about."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    seen: list[bool] = []
+
+    class _Probe(_FakeSignallingRunner):
+        def stop(self):
+            # Observed from inside stop(), i.e. before any signal lands.
+            seen.append(record.id in reg._stop_requested)
+            super().stop()
+
+    runner = _Probe(on_stop_code=-15)
+    record = _start_with(reg, runner)
+    reg.stop(record.id)
+
+    assert seen == [True]
+
+
+def test_local_stop_is_interrupted_not_failed(tmp_path) -> None:
+    from makerlab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+
+    final = _stop_and_finalise(reg, record.id)
+    assert final.state == "interrupted"
+    assert final.error_message == STOPPED_BY_REQUEST_MESSAGE
+    assert "exited with code" not in (final.error_message or "")
+    # The real code is still recorded for anyone debugging.
+    assert final.exit_code == -15
+    assert final.ended_at is not None
+
+
+def test_local_stop_of_trainer_that_catches_sigterm_is_still_interrupted(tmp_path) -> None:
+    """A trainer with its own SIGTERM handler exits 1, not -15. Narrowing
+    `interrupted` to signal-shaped codes would leave the bug unfixed here."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=1))
+
+    assert _stop_and_finalise(reg, record.id).state == "interrupted"
+
+
+def test_crash_without_a_stop_stays_failed(tmp_path) -> None:
+    """The unchanged path: nothing asked this to stop, so it failed."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner()
+    record = _start_with(reg, runner)
+
+    runner._code = 1  # crashed on its own
+    reg._tick()
+
+    final = reg.get(record.id)
+    assert final.state == "failed"
+    assert final.error_message == "Subprocess exited with code 1"
+
+
+def test_clean_finish_racing_a_stop_stays_done(tmp_path) -> None:
+    """rc == 0 means the trainer ran its own shutdown to completion; a stop
+    that arrived too late must not relabel it."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner(on_stop_code=0)
+    record = _start_with(reg, runner)
+
+    final = _stop_and_finalise(reg, record.id)
+    assert final.state == "done"
+    assert final.error_message is None
+
+
+def test_crash_before_the_signal_landed_is_not_laundered(tmp_path) -> None:
+    """The process died on its own between the intent and the signal, so
+    LocalJobRunner.stop() short-circuits and reports it signalled nothing.
+    The nonzero code is the process's own: still a failure."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner(signals=False)
+    record = _start_with(reg, runner)
+
+    runner._code = 1  # crashed in the window
+    final = _stop_and_finalise(reg, record.id)
+
+    assert runner.stopped is True  # we did ask
+    assert final.state == "failed"
+    assert final.error_message == "Subprocess exited with code 1"
+
+
+def test_runner_without_the_hook_still_gets_interrupted(tmp_path) -> None:
+    """A runner that can't say whether it signalled abstains rather than
+    vetoing — recorded intent alone is enough."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeRunner(on_stop_code=1)
+    assert not hasattr(runner, "stop_signalled")
+    record = _start_with(reg, runner)
+
+    assert _stop_and_finalise(reg, record.id).state == "interrupted"
+
+
+def test_stop_intent_is_dropped_after_finalisation(tmp_path) -> None:
+    """No stale intent may linger to mislabel anything later."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+    _stop_and_finalise(reg, record.id)
+
+    assert record.id not in reg._stop_requested
+
+
+def test_interrupted_state_survives_a_restart(tmp_path) -> None:
+    """The classification is persisted, not just in-memory — the user's
+    history has to still read `interrupted` on the next launch."""
+    from makerlab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+
+    root = tmp_path / "root"
+    reg = JobRegistry(root)
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+    _stop_and_finalise(reg, record.id)
+    reg.shutdown()
+
+    reloaded = JobRegistry(root).get(record.id)
+    assert reloaded.state == "interrupted"
+    assert reloaded.error_message == STOPPED_BY_REQUEST_MESSAGE
+
+
+def test_stop_rejects_an_already_finished_job_without_recording_intent(tmp_path) -> None:
+    from makerlab.jobs import JobNotRunningError, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner()
+    record = _start_with(reg, runner)
+
+    runner._code = 0
+    reg._tick()
+    assert reg.get(record.id).state == "done"
+
+    with pytest.raises(JobNotRunningError):
+        reg.stop(record.id)
+    assert record.id not in reg._stop_requested
+
+
+# -- registry: cloud-shaped runner (classified on terminal_stage) -----------
+
+
+def test_cloud_cancel_is_interrupted(tmp_path) -> None:
+    """The reported case: a stopped HF Jobs run. returncode() collapses every
+    non-COMPLETED stage to 1, so before this it read `failed` + "Subprocess
+    exited with code 1" and looked like a broken model."""
+    from makerlab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeStagedRunner(on_stop_stage="CANCELED"))
+
+    final = _stop_and_finalise(reg, record.id)
+    assert final.state == "interrupted"
+    assert final.error_message == STOPPED_BY_REQUEST_MESSAGE
+
+
+def test_cloud_job_that_completed_before_the_cancel_stays_done(tmp_path) -> None:
+    """The poller saw COMPLETED first; _set_terminal is idempotent so our
+    cancel doesn't overwrite it, and the run keeps its success."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner(on_stop_stage="CANCELED")
+    record = _start_with(reg, runner)
+
+    runner._stage = "COMPLETED"  # observed by the status poller
+    final = _stop_and_finalise(reg, record.id)
+
+    assert final.state == "done"
+    assert final.error_message is None
+
+
+def test_cloud_job_that_errored_before_the_cancel_stays_failed(tmp_path) -> None:
+    """A real crash that merely coincided with the stop must not be laundered
+    into `interrupted` — that would hide a genuine failure."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner(on_stop_stage="CANCELED", message="boom")
+    record = _start_with(reg, runner)
+
+    runner._stage = "ERROR"
+    final = _stop_and_finalise(reg, record.id)
+
+    assert final.state == "failed"
+    assert final.error_message == "boom"
+
+
+def test_cloud_timeout_stays_failed_and_keeps_its_platform_message(tmp_path) -> None:
+    """HF Jobs' 'Job timeout' arrives as an ERROR stage with a message. It is
+    a failure, not a user stop, and the message must still reach the UI."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner(message="Job timeout")
+    record = _start_with(reg, runner)
+
+    runner._stage = "ERROR"
+    reg._tick()
+
+    final = reg.get(record.id)
+    assert final.state == "failed"
+    assert final.error_message == "Job timeout"
+
+
+def test_cloud_cancel_from_outside_makerlab_stays_failed(tmp_path) -> None:
+    """A CANCELED we never asked for (HF web UI, platform-side kill). HF's
+    stage doesn't say who asked, so this is left alone rather than guessed
+    into `interrupted`. Documented limitation, asserted so it's a choice."""
+    from makerlab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner()
+    record = _start_with(reg, runner)
+
+    runner._stage = "CANCELED"
+    reg._tick()
+
+    assert reg.get(record.id).state == "failed"
+
+
+# -- TailingJobRunner: no Popen to reap, so the code is synthesised ---------
+
+
+def _tailing_runner(pid, monkeypatch, *, alive=True):
+    """A TailingJobRunner over a fake pid; os.kill is stubbed so no real
+    process is signalled."""
+    from makerlab import jobs as jobs_mod
+
+    state = {"alive": alive}
+
+    def fake_kill(target_pid, sig):
+        assert target_pid == pid
+        if not state["alive"]:
+            raise ProcessLookupError(pid)
+        if sig != 0:
+            state["alive"] = False  # SIGTERM landed
+
+    monkeypatch.setattr(jobs_mod.os, "kill", fake_kill)
+    runner = jobs_mod.TailingJobRunner(jobs_mod.TrainingMetrics(), Path("/nonexistent"), pid)
+    return runner, state
+
+
+def test_tailing_runner_reports_sigterm_after_a_delivered_stop(monkeypatch) -> None:
+    """Its returncode() synthesises 0 when the pid is gone, which would file a
+    deliberate stop as `done`. Once we know we signalled a live pid, naming
+    the signal is the more honest synthetic answer."""
+    import signal as signal_mod
+
+    runner, _ = _tailing_runner(31337, monkeypatch)
+    assert runner.returncode() is None  # still alive
+
+    runner.stop()
+    assert runner.stop_signalled() is True
+    assert runner.returncode() == -signal_mod.SIGTERM
+
+
+def test_tailing_runner_keeps_optimistic_zero_when_pid_was_already_gone(monkeypatch) -> None:
+    """Nothing was signalled, so the pid's absence isn't ours to claim: the
+    detached run that finished normally still finalises as `done`."""
+    runner, _ = _tailing_runner(31338, monkeypatch, alive=False)
+
+    runner.stop()
+    assert runner.stop_signalled() is False
+    assert runner.returncode() == 0

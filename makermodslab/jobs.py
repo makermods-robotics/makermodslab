@@ -159,7 +159,23 @@ def _pid_alive(pid: int) -> bool:
 class JobRunner(Protocol):
     """Backend interface for running one job. LocalJobRunner is the only impl
     today; remote runners (SSH, Slurm) drop in here later. @runtime_checkable
-    lets `isinstance(r, JobRunner)` work in tests / sanity checks."""
+    lets `isinstance(r, JobRunner)` work in tests / sanity checks.
+
+    Three OPTIONAL hooks are read defensively by the registry watchdog via
+    `_runner_hook` rather than declared here, so a runner that can't answer
+    them still satisfies this Protocol (HfCloudJobRunner has no
+    `stop_signalled`; the local runners have no `terminal_stage`):
+
+      * `stop_signalled() -> bool` — did this runner actually deliver the
+        stop signal to a live process? False means the process was already
+        gone, so a nonzero exit code belongs to the process, not to us.
+      * `terminal_stage() -> str | None` — a platform-reported terminal stage
+        (HF Jobs' COMPLETED / CANCELED / ERROR / DELETED), which is richer
+        than an exit code and is preferred over it when present.
+      * `terminal_message() -> str | None` — the platform's own reason string
+        (e.g. HF Jobs' "Job timeout"), surfaced instead of a synthetic
+        "exited with code N".
+    """
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None: ...
     def stop(self) -> None: ...
@@ -167,6 +183,92 @@ class JobRunner(Protocol):
     def returncode(self) -> int | None: ...
     def stream_log_lines(self) -> list[LogLine]: ...
     def wandb_run_url(self) -> str | None: ...
+
+
+# Written to `error_message` when a run ends because we asked it to. The field
+# is named for its usual content but is rendered as neutral subtext, and
+# leaving it None would show the user nothing at all where a misleading
+# "Subprocess exited with code 1" used to be. The real code stays in
+# `exit_code` for anyone debugging.
+STOPPED_BY_REQUEST_MESSAGE = "Stopped at your request, not by a training error."
+
+
+def classify_terminal_state(
+    *,
+    returncode: int | None,
+    stop_requested: bool,
+    terminal_stage: str | None = None,
+) -> JobState:
+    """Decide the final state of a run that has just stopped running.
+
+    Exists because an exit code alone cannot tell a deliberate stop from a
+    crash: SIGTERM'ing the trainer yields a nonzero code, so before this every
+    press of the Stop button landed in history as `failed` with a synthetic
+    "Subprocess exited with code N" — indistinguishable from a real failure,
+    and read by at least one user as "the model is broken" when nothing was.
+
+    `stop_requested` is the registry's recorded intent, ANDed with the runner's
+    own account of whether it actually signalled anything (see
+    `JobRunner`'s optional `stop_signalled` hook).
+
+    Precedence, and the reasoning for the ambiguous cases:
+
+    1. `terminal_stage` wins when the platform reports one (hf_cloud). It is
+       set once and never overwritten, so a stage observed BEFORE our cancel
+       landed is the truth about a run that beat us to the finish:
+         * COMPLETED → `done`, even with a stop pending. A run that finished
+           on its own is never relabelled.
+         * ERROR     → `failed`, even with a stop pending. The poller can only
+           have seen ERROR before our cancel took effect, so this is a genuine
+           crash that merely coincided with the stop; laundering it into
+           `interrupted` would hide a real failure.
+         * CANCELED  → `interrupted`, but only if we asked. An unsolicited
+           CANCELED (cancelled in the HF web UI, or however the platform
+           chooses to report an enforced timeout) is left as `failed` rather
+           than guessed at — see the module note in `JobRegistry.stop`.
+         * DELETED   → `failed`, unchanged from before.
+    2. `returncode == 0` → `done`, whatever else is true. A clean exit means
+       the trainer ran its own shutdown path to completion, which SIGTERM does
+       not produce; intent never overrides it.
+    3. A nonzero code with a stop we actually signalled → `interrupted`.
+       Deliberately not narrowed to signal-shaped codes (-15/-9): a trainer
+       that installs its own SIGTERM handler and exits 1 is still a run we
+       ended, and requiring -15 would leave the bug unfixed for exactly that
+       case. The cost is that a crash landing inside the microseconds between
+       the runner's "is it still alive?" check and its `terminate()` call is
+       misread as a stop. That window is unobservably narrow and carries no
+       evidence that could separate the two; every wider window (process
+       already dead before the signal, platform stage already terminal) is
+       caught above.
+    4. Anything else → `failed`, including a missing code.
+    """
+    if terminal_stage is not None:
+        stage = terminal_stage.upper()
+        if stage == "COMPLETED":
+            return "done"
+        if stage == "CANCELED" and stop_requested:
+            return "interrupted"
+        return "failed"
+    if returncode == 0:
+        return "done"
+    if stop_requested and returncode is not None:
+        return "interrupted"
+    return "failed"
+
+
+def _runner_hook(runner: object, name: str):
+    """Call an optional zero-arg runner hook, or return None.
+
+    None means "this runner can't answer", never a substantive answer — a
+    runner that doesn't implement the hook and one whose hook raised are
+    deliberately indistinguishable, because neither is evidence."""
+    fn = getattr(runner, name, None)
+    if not callable(fn):
+        return None
+    try:
+        return fn()
+    except Exception:  # pragma: no cover — a hook must never break finalisation
+        return None
 
 
 # tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
@@ -377,6 +479,10 @@ class LocalJobRunner:
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
+        # True only once we have actually signalled a LIVE process. Lets the
+        # registry tell "we killed this" from "it had already died", which the
+        # exit code alone cannot express.
+        self._stop_signalled = False
 
     def start(
         self,
@@ -430,9 +536,13 @@ class LocalJobRunner:
         return self._process.pid if self._process is not None else None
 
     def stop(self) -> None:
+        # Early return on an already-exited process is what makes
+        # stop_signalled() meaningful: the exit code we are about to hand the
+        # watchdog is then the process's own, and must stay a failure.
         if self._process is None or self._process.poll() is not None:
             return
         self._stop_event.set()
+        self._stop_signalled = True
         try:
             self._process.terminate()
             try:
@@ -446,6 +556,10 @@ class LocalJobRunner:
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
+
+    def stop_signalled(self) -> bool:
+        """Whether stop() actually delivered a signal to a live process."""
+        return self._stop_signalled
 
     def returncode(self) -> int | None:
         if self._process is None:
@@ -528,6 +642,9 @@ class TailingJobRunner:
         # on metrics, then tail from the current EOF.
         self._tail_offset = 0
         self._wandb_run_url: str | None = None
+        # See stop() / returncode(): we have no Popen to reap, so this flag is
+        # the only record that the pid's disappearance was our doing.
+        self._stop_signalled = False
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # Required by JobRunner Protocol but irrelevant here; the subprocess
@@ -543,21 +660,38 @@ class TailingJobRunner:
         self._tail_thread.start()
 
     def stop(self) -> None:
-        with contextlib.suppress(ProcessLookupError):
+        try:
             os.kill(self._pid, signal.SIGTERM)
+        except ProcessLookupError:
+            # Already gone — we signalled nothing, so its disappearance is not
+            # ours to claim and returncode() keeps its optimistic default.
+            pass
+        else:
+            self._stop_signalled = True
         self._stop_event.set()
 
     def is_running(self) -> bool:
         return _pid_alive(self._pid)
 
+    def stop_signalled(self) -> bool:
+        """Whether stop() actually delivered SIGTERM to a live pid."""
+        return self._stop_signalled
+
     def returncode(self) -> int | None:
-        # We can't reap a process from another session, so we don't know the
-        # actual exit code. Return 0 once the pid is gone — the watchdog
-        # finalises as "done" rather than "failed", which is the better
-        # default for a detached training that completed normally.
+        # We can't reap a process from another session, so we never learn the
+        # real exit code and have to synthesise one.
+        #
+        # Default is 0 once the pid is gone — the watchdog finalises as "done"
+        # rather than "failed", the better default for a detached training that
+        # completed normally.
+        #
+        # After a stop we actually delivered, report SIGTERM instead. A plain 0
+        # there would classify a run the user deliberately ended as "done",
+        # which is a worse lie than naming the signal we know we sent to a pid
+        # that was alive at the time and is now gone.
         if _pid_alive(self._pid):
             return None
-        return 0
+        return -signal.SIGTERM if self._stop_signalled else 0
 
     def stream_log_lines(self) -> list[LogLine]:
         out: list[LogLine] = []
@@ -1990,6 +2124,13 @@ class JobRegistry:
         self._records: dict[str, JobRecord] = {}
         self._runners: dict[str, JobRunner] = {}
         self._last_persist_at: dict[str, float] = {}
+        # Ids we have asked to stop, recorded BEFORE the signal goes out so the
+        # watchdog can tell a deliberate stop from a crash (see
+        # classify_terminal_state). Guarded by _lock; entries are dropped when
+        # the record is finalised or deleted. Deliberately in-memory only: a
+        # stop cannot outlive the process that issued it, and a record found
+        # 'running' after a restart is reconciled by _load_from_disk instead.
+        self._stop_requested: set[str] = set()
 
         # job_id -> the thread materializing that job's base checkpoint before
         # its trainer can start (see _materialize_then_start). Entries are left
@@ -2969,22 +3110,41 @@ class JobRegistry:
         return record
 
     def stop(self, job_id: str) -> JobRecord:
-        """Ask a running job to stop, and wait briefly for the new state.
+        """Ask a running job to stop, and record that we asked.
+
+        The intent is registered under the lock BEFORE any signal or cancel
+        leaves this process, so the watchdog can never finalise a stop it
+        doesn't know about — the reason every Stop press used to land in
+        history as `failed`.
+
+        Intent alone does not decide the outcome: the runner still gets to
+        report that it finished on its own, or that it was already dead when we
+        went to signal it. See classify_terminal_state for the full precedence.
 
         Works during a local fine-tune's base-checkpoint download too: that
         window has a PreparingJobRunner registered in place of the trainer, so
-        the cancel is recorded on it as usual and the materialize thread
+        the intent is recorded here as usual and the materialize thread
         finalises the run as `interrupted` when the download returns (it can't
         be aborted mid-flight — see _materialize_then_start). The 2s wait below
         will usually time out on that path, so the caller sees `running` and
-        learns the outcome from the next poll."""
+        learns the outcome from the next poll.
+
+        NOT covered: a cloud job cancelled outside MakerMods Lab (the HF web UI, or
+        a platform-side kill that HF reports as CANCELED rather than ERROR).
+        There is no intent recorded here for those, and HF's stage does not say
+        who asked, so they stay `failed` rather than being guessed into
+        `interrupted`.
+        """
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
                 raise JobNotFoundError(job_id)
             runner = self._runners.get(job_id)
-        if record.state != "running" or runner is None:
-            raise JobNotRunningError(job_id)
+            # Raised under the lock (it used to be checked outside it) so the
+            # intent below can't be recorded for a job that just finalised.
+            if record.state != "running" or runner is None:
+                raise JobNotRunningError(job_id)
+            self._stop_requested.add(job_id)
         runner.stop()
         # The watchdog will finalise the record (state, ended_at, exit_code).
         # Wait briefly so the caller sees the new state in the response.
@@ -3153,6 +3313,7 @@ class JobRegistry:
             self._records.pop(job_id, None)
             self._runners.pop(job_id, None)
             self._last_persist_at.pop(job_id, None)
+            self._stop_requested.discard(job_id)
             self._prepare_threads.pop(job_id, None)
         with contextlib.suppress(FileNotFoundError):
             shutil.rmtree(_job_dir(self._output_root, job_id))
@@ -3392,24 +3553,37 @@ class JobRegistry:
 
             # Subprocess exited since the last tick. Finalise.
             rc = runner.returncode()
+            # A stop counts only if we asked for it AND the runner didn't tell
+            # us it never got to signal anything (already-dead process). A
+            # runner that can't answer abstains rather than vetoing.
+            with self._lock:
+                asked_to_stop = jid in self._stop_requested
+            signalled = _runner_hook(runner, "stop_signalled")
+            stop_requested = asked_to_stop and signalled is not False
+            state = classify_terminal_state(
+                returncode=rc,
+                stop_requested=stop_requested,
+                terminal_stage=_runner_hook(runner, "terminal_stage"),
+            )
             with self._lock:
                 if record.wandb_run_url is None:
                     record.wandb_run_url = runner.wandb_run_url()
-                record.state = "done" if rc == 0 else "failed"
+                record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc
-                if rc != 0 and record.error_message is None:
-                    # Prefer a runner-supplied reason (e.g. HF Jobs'
-                    # 'Job timeout') over the synthetic exit-code message.
-                    reason = None
-                    get_message = getattr(runner, "terminal_message", None)
-                    if callable(get_message):
-                        try:
-                            reason = get_message()
-                        except Exception:
-                            reason = None
-                    record.error_message = reason or f"Subprocess exited with code {rc}"
+                if record.error_message is None:
+                    if state == "interrupted":
+                        # Never the synthetic exit-code text here: that message
+                        # on a run the user stopped themselves is what made a
+                        # deliberate pause look like a broken model.
+                        record.error_message = STOPPED_BY_REQUEST_MESSAGE
+                    elif state == "failed":
+                        # Prefer a runner-supplied reason (e.g. HF Jobs'
+                        # 'Job timeout') over the synthetic exit-code message.
+                        reason = _runner_hook(runner, "terminal_message")
+                        record.error_message = reason or f"Subprocess exited with code {rc}"
                 self._runners.pop(jid, None)
+                self._stop_requested.discard(jid)
             self._persist(record, force=True)
             self._notify_change()
 
@@ -3460,4 +3634,6 @@ __all__ = [
     "JobNotRunningError",
     "job_registry",
     "parse_metrics_into",
+    "classify_terminal_state",
+    "STOPPED_BY_REQUEST_MESSAGE",
 ]
