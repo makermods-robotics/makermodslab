@@ -40,6 +40,17 @@ export const CheckpointDropdown: React.FC<Props> = ({
   // never saves at step 0), so it has no meaningful step number — show
   // "latest" instead. Real training checkpoints keep their step label.
   const labelFor = (step: number) => (step === 0 ? "latest" : `step ${step}`);
+  // Render newest-first regardless of the caller's order (the backend lists
+  // ascending; JobCard pre-sorts descending — this is the one authoritative
+  // display order). The step-0 "latest" sentinel sorts to the top, not the
+  // bottom. Sorting a copy keeps the callers' own arrays in backend order,
+  // which their `cks[cks.length - 1]` "latest" defaults rely on; the sort is
+  // stable, so same-step entries keep the caller's relative order.
+  // (Finite sentinel key: Infinity - Infinity would be NaN if a list ever
+  // held two "latest" entries, making the comparator inconsistent.)
+  const sortKey = (c: JobCheckpoint) =>
+    c.step === 0 ? Number.MAX_SAFE_INTEGER : c.step;
+  const ordered = [...checkpoints].sort((a, b) => sortKey(b) - sortKey(a));
   return (
     <Select
       value={selectedRef ?? undefined}
@@ -60,7 +71,7 @@ export const CheckpointDropdown: React.FC<Props> = ({
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent className="bg-popover border-border">
-        {checkpoints.map((c) => (
+        {ordered.map((c) => (
           <SelectItem
             key={c.ref}
             value={c.ref}
