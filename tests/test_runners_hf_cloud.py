@@ -628,7 +628,23 @@ def test_resolve_job_timeout_falls_back_to_constant_when_unset() -> None:
 
     config = TrainingRequest(dataset_repo_id="x")
     assert config.hf_job_timeout is None
-    assert resolve_job_timeout(config) == HF_JOB_TIMEOUT  # "2h" string passthrough
+    assert resolve_job_timeout(config) == HF_JOB_TIMEOUT  # string passthrough, not seconds
+
+
+def test_hf_job_timeout_constant_is_single_unit_and_covers_measured_runs() -> None:
+    """The fallback is handed to run_job as a raw string, and run_job's parser is
+    only `float(timeout[:-1]) * factor[timeout[-1]]` — a single unit suffix. A
+    compound "improvement" like "1d12h" would not survive that, so pin the shape
+    as well as the budget: it must clear the longest run we have measured
+    (SmolVLA 15k steps at 2.24 s/step on a10g-small ≈ 8.8h)."""
+    from makerlab.runners.hf_cloud import HF_JOB_TIMEOUT
+
+    assert isinstance(HF_JOB_TIMEOUT, str)
+    factors = {"s": 1, "m": 60, "h": 3600, "d": 3600 * 24}  # run_job's own table
+    assert HF_JOB_TIMEOUT[-1] in factors
+    seconds = float(HF_JOB_TIMEOUT[:-1]) * factors[HF_JOB_TIMEOUT[-1]]  # no ValueError
+    assert seconds == 24 * 3600
+    assert seconds > 8.8 * 3600
 
 
 def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:

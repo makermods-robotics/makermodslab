@@ -530,11 +530,25 @@ WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
     "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
 ).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
 
-# HF Jobs' platform default timeout has killed legitimate runs that pushed
-# the model successfully but were still uploading auxiliary files. 2h covers
-# our typical ACT/SmolVLA runs on t4-small with comfortable headroom. This is
-# the FALLBACK: used only when the request carries no explicit hf_job_timeout.
-HF_JOB_TIMEOUT = "2h"
+# HF Jobs' platform default timeout has killed legitimate runs that pushed the
+# model successfully but were still uploading auxiliary files — that is why a
+# generous fallback exists at all. 24h is calibrated on measured a10g-small
+# throughput from real completed runs: SmolVLA at batch 64 is 2.24 s/step
+# (n=12,890), so 15k steps ≈ 8.8h; ACT at batch 8 is 0.162 s/step (n=2,873),
+# so 100k steps ≈ 4.5h (per-step cost is near-linear in batch size — batch 16
+# measured 0.299 s/step). That leaves ~2.7x headroom on the longest run we have
+# actually observed. The previous 2h sat below *every* real run and silently
+# truncated paid GPU time mid-training.
+#
+# This is the FALLBACK: used only when the request carries no explicit
+# hf_job_timeout (that path goes through parse_hf_duration instead). The axis
+# you trade when changing this is coverage vs runaway-billing exposure — a
+# larger value protects longer legitimate runs but also raises the ceiling on
+# what a HUNG job can bill before the platform reaps it, which is why this is
+# 24h (one day) rather than 2d. Keep it a SINGLE-unit string: run_job parses it
+# as float(timeout[:-1]) * factor[timeout[-1]], so a compound form like "1d12h"
+# does not survive the trip.
+HF_JOB_TIMEOUT = "24h"
 
 
 def resolve_job_timeout(config: TrainingRequest) -> int | str:
