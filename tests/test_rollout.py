@@ -1873,6 +1873,39 @@ def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_p
     assert rollout._inference_proc is not None
 
 
+def test_format_cameras_arg_reanchors_index_by_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The rollout subprocess starts fresh, so its cv2 sees fresh-enumeration
+    # order; a stored index predating a replug/port swap must be re-anchored
+    # by uniqueID before it's baked into the CLI args. `unique_id` itself is
+    # consumed here — lerobot's OpenCVCameraConfig doesn't know the key.
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        rollout,
+        "list_cameras_fresh",
+        lambda: [
+            {"index": 0, "name": "USB Camera", "unique_id": "0xb"},
+            {"index": 1, "name": "USB Camera", "unique_id": "0xa"},
+        ],
+    )
+    result = rollout._format_cameras_arg(
+        {"front": {"type": "opencv", "camera_index": 0, "unique_id": "0xa", "fps": 30}}
+    )
+    assert "index_or_path: 1" in result
+    assert "unique_id" not in result
+
+
+def test_format_cameras_arg_raises_when_camera_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(rollout, "list_cameras_fresh", lambda: [{"index": 0, "unique_id": "0xb"}])
+
+    with pytest.raises(ValueError, match="front"):
+        rollout._format_cameras_arg({"front": {"type": "opencv", "camera_index": 0, "unique_id": "0xa"}})
+
+
 # ---------------------------------------------------------------------------
 # Multi-episode EVALUATION mode
 #

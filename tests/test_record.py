@@ -2323,6 +2323,32 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
     assert status["saved_episodes"] == 2
 
 
+def test_build_camera_configs_reanchors_index_by_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stored camera_index goes stale when the device set changes (replug,
+    # twin-camera port swap); with a unique_id present the in-process
+    # resolution wins over the stored index.
+    from lerobot.cameras.configs import Cv2Backends
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "resolve_cv2_index", lambda uid, fallback: 1 if uid == "0xa" else fallback)
+    cameras = {"cam": {"type": "opencv", "camera_index": 0, "unique_id": "0xa"}}
+    configs = record._build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
+
+    assert configs["cam"].index_or_path == 1
+
+
+def test_build_camera_configs_raises_when_camera_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # None from resolution = the device is verifiably absent from this
+    # process's AVFoundation snapshot (plugged in after startup): opening the
+    # stale index would silently record a DIFFERENT camera, so refuse.
+    from lerobot.cameras.configs import Cv2Backends
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "resolve_cv2_index", lambda uid, fallback: None)
+    cameras = {"wrist": {"type": "opencv", "camera_index": 0, "unique_id": "0xa"}}
+
+    with pytest.raises(ValueError, match="wrist"):
+        record._build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
 # ---------------------------------------------------------------------------
 # I8: shutdown_event() has no UI to poll and no "press Stop again" gesture
 # available, but handle_stop_recording()'s first call is deliberately

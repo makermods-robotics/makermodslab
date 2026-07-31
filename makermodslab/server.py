@@ -17,13 +17,10 @@ import concurrent.futures
 import contextlib
 import ctypes
 import io
-import json
 import logging
 import os
 import queue
 import re
-import subprocess
-import sys
 import threading
 import time
 import zipfile
@@ -49,6 +46,7 @@ from lerobot.policies.factory import make_policy_config
 # lookup at call time, not a bound name frozen at import).
 from . import (
     datasets as dataset_browser,
+    focus_tune as focus_tune_state,
     models as model_browser,
     record as record_state,
     rollout as rollout_state,
@@ -62,7 +60,7 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_identity import resolve_cv2_index
+from .camera_identity import list_cameras_fresh, resolve_cv2_index
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
@@ -2253,70 +2251,10 @@ async def supply_voltage(port: str = ""):
     return await read_supply_voltage(port)
 
 
-# Runs in a fresh Python — see _avfoundation_cameras_in_cv2_order for why.
-# Mirrors OpenCV's macOS enumeration: video + muxed devices sorted by
-# uniqueID (cap_avfoundation_mac.mm), so the returned index matches what
-# cv2.VideoCapture will open.
-_AVF_ENUM_SCRIPT = """
-import json, objc
-from Foundation import NSBundle
-bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework")
-bundle.load()
-types = []
-for name in (
-    "AVCaptureDeviceTypeBuiltInWideAngleCamera",
-    "AVCaptureDeviceTypeExternalUnknown",   # macOS < 14
-    "AVCaptureDeviceTypeExternal",          # macOS >= 14
-    "AVCaptureDeviceTypeContinuityCamera",  # macOS >= 14
-    "AVCaptureDeviceTypeDeskViewCamera",    # macOS >= 13
-):
-    loaded = {}
-    try:
-        objc.loadBundleVariables(bundle, loaded, [(name, b"@")])
-    except objc.error:
-        continue
-    if loaded.get(name) is not None:
-        types.append(loaded[name])
-cls = objc.lookUpClass("AVCaptureDeviceDiscoverySession")
-devs = []
-for mt in ("vide", "muxx"):
-    devs.extend(cls.discoverySessionWithDeviceTypes_mediaType_position_(types, mt, 0).devices() or [])
-devs.sort(key=lambda d: d.uniqueID())
-print(json.dumps([
-    {"index": i, "name": str(d.localizedName()), "unique_id": str(d.uniqueID())}
-    for i, d in enumerate(devs)
-]))
-"""
-
-
-def _avfoundation_cameras_in_cv2_order() -> list[dict[str, Any]]:
-    """Enumerate macOS cameras in a fresh Python subprocess.
-
-    AVFoundation's in-process device cache doesn't refresh on USB
-    hotplug. Both the deprecated ``+devicesWithMediaType:`` and a
-    long-lived ``AVCaptureDeviceDiscoverySession`` go stale, because
-    device-connection notifications are delivered via
-    ``NSNotificationCenter`` on a thread that needs an active
-    ``NSRunLoop`` — uvicorn workers don't run one. A fresh subprocess
-    re-initializes AVFoundation, which reads IOKit's live device state
-    at startup.
-    """
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", _AVF_ENUM_SCRIPT],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-        )
-    except (subprocess.SubprocessError, OSError) as e:
-        logger.warning("AVFoundation enumeration subprocess failed: %s", e)
-        return []
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        logger.warning("AVFoundation enumeration returned invalid JSON: %s", e)
-        return []
+# Fresh-subprocess AVFoundation enumeration (in cv2 open order) — moved to
+# makerlab/camera_identity.py, which also re-anchors stored camera indices to
+# their AVFoundation uniqueIDs at record/inference start.
+_avfoundation_cameras_in_cv2_order = list_cameras_fresh
 
 
 def _generic_cv2_cameras(backend) -> list[dict[str, Any]]:
@@ -2474,10 +2412,10 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
     fresh-subprocess enumeration after a replug — without the re-anchor the
     stream can silently show a different camera (see makermodslab/camera_identity.py).
 
-    Returns 409 while recording or inference is active (they own the cv2
-    devices) and 503 when the camera can't be opened. Teleoperation drives the
-    serial bus and opens no cv2 cameras, so a preview during teleop does not
-    contend — it is allowed.
+    Returns 409 while recording, inference or a focus tune is active (they own
+    the cv2 devices) and 503 when the camera can't be opened. Teleoperation
+    drives the serial bus and opens no cv2 cameras, so a preview during teleop
+    does not contend — it is allowed.
     """
     if record_state.recording_active:
         raise HTTPException(
@@ -2488,6 +2426,12 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
         raise HTTPException(
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
+        )
+    if focus_tune_state.focus_tune_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Focus tuning is running — it needs exclusive access to the cameras. "
+            "The preview resumes when it finishes.",
         )
     resolved = resolve_cv2_index(unique_id, index)
     if resolved is None:

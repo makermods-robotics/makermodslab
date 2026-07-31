@@ -32,6 +32,7 @@ from lerobot.motors.motors_bus import MotorsBus
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
+from .camera_identity import resolve_cv2_index
 from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
@@ -417,7 +418,15 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     camera; when omitted `backend` falls back to `default_backend` and `fourcc`
     to MJPG (`_DEFAULT_FOURCC`) so multi-camera USB rigs don't exhaust isochronous
     bandwidth on Linux (see `_DEFAULT_FOURCC`). An explicit per-camera fourcc wins.
-    Cameras are addressed by their cv2 integer `camera_index`.
+
+    Cameras are addressed by their cv2 integer `camera_index`, but when a camera
+    carries a `unique_id` the index is re-anchored to the physical device via
+    the in-process AVFoundation list first (see makerlab/camera_identity.py):
+    recording runs in this process, whose cv2 resolves indices against a startup
+    device snapshot that diverges from the fresh /available-cameras enumeration
+    after a replug. Without the re-anchor a stale index silently records a
+    different camera (the built-in webcam, or two identical robot cameras
+    swapped). A verifiably unreachable camera raises instead.
     """
     from lerobot.cameras.configs import Cv2Backends
     from lerobot.cameras.opencv import OpenCVCameraConfig
@@ -434,8 +443,16 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
         backend = Cv2Backends[backend_name] if backend_name else default_backend
         fourcc = camera_data.get("fourcc") or _DEFAULT_FOURCC
 
+        camera_index = resolve_cv2_index(camera_data.get("unique_id"), camera_data.get("camera_index", 0))
+        if camera_index is None:
+            raise ValueError(
+                f"Camera '{camera_name}' is not visible to the server — it was plugged in "
+                "after makerlab started (or moved to another port). Restart makerlab, "
+                "re-check the camera setup, then start recording again."
+            )
+
         camera_configs[camera_name] = OpenCVCameraConfig(
-            index_or_path=camera_data.get("camera_index", 0),
+            index_or_path=camera_index,
             backend=backend,
             fps=camera_data.get("fps"),
             width=camera_data.get("width"),
@@ -444,7 +461,7 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
         )
         logger.info(
             f"✅ CAMERA CONFIG: {camera_name} -> OpenCVCameraConfig("
-            f"index={camera_data.get('camera_index')}, backend={backend.name}, "
+            f"index={camera_index}, backend={backend.name}, "
             f"{camera_data.get('width')}x{camera_data.get('height')}@{camera_data.get('fps')}fps, "
             f"fourcc={fourcc})"
         )

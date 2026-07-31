@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -57,6 +58,7 @@ from pydantic import BaseModel
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .camera_identity import list_cameras_fresh, resolve_in_enumeration
 from .camera_preview import camera_preview_manager
 from .eval_protocol import (
     CMD_EPISODE,
@@ -990,23 +992,42 @@ def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     lerobot's CLI dict syntax. `cameras` is the record-resolved session dict
     (see _session_cameras), keyed by the POLICY-expected camera names. The
     stored key `camera_index` is remapped to lerobot's `index_or_path`; the
-    identity key `unique_id` is dropped — it is the robot record's own handle
-    on the physical device (see makermodslab/camera_identity.py), and lerobot's
-    OpenCVCameraConfig would reject it as an unknown field.
+    identity key `unique_id` is consumed here (re-anchoring, below) and never
+    forwarded — lerobot's OpenCVCameraConfig doesn't know it.
+
+    When a camera carries a `unique_id`, its index is re-anchored against a
+    FRESH AVFoundation enumeration (see makermodslab/camera_identity.py): the
+    rollout subprocess starts fresh, so its cv2 resolves indices in fresh
+    device order — which diverges from any index stored before a replug.
+    A verifiably absent camera raises (surfaced by _fail_startup) instead of
+    letting the subprocess open a different physical device.
 
     Like recording (`record._build_camera_configs`), opencv cameras default to
-    MJPG when the record doesn't pin a fourcc: without it, Linux/V4L2
+    MJPG when the request doesn't pin a fourcc: without it, Linux/V4L2
     negotiates raw YUYV and a 3-camera rig exhausts the USB bus at STREAMON —
     the third camera fails during inference only, since recording already
-    defaults to MJPG. An explicit fourcc from the record still wins.
+    defaults to MJPG. An explicit fourcc from the UI still wins.
     """
+    # One fresh enumeration for all cameras (each subprocess run costs ~0.5s).
+    needs_identity = platform.system() == "Darwin" and any(cfg.get("unique_id") for cfg in cameras.values())
+    fresh = list_cameras_fresh() if needs_identity else None
+
     parts = []
     for name, cfg in cameras.items():
+        camera_index = resolve_in_enumeration(
+            fresh, cfg.get("unique_id") if needs_identity else None, cfg.get("camera_index", 0)
+        )
+        if camera_index is None:
+            raise ValueError(
+                f"Camera '{name}' is not attached (or moved to another port) — "
+                "re-check the camera setup in the robot configuration, then start again."
+            )
         remapped = {
             ("index_or_path" if k == "camera_index" else k): v
             for k, v in cfg.items()
             if v is not None and k != "unique_id"
         }
+        remapped["index_or_path"] = camera_index
         if cfg.get("type") == "opencv" and not cfg.get("fourcc"):
             remapped["fourcc"] = _DEFAULT_FOURCC
         body = ", ".join(f"{k}: {v}" for k, v in remapped.items())
