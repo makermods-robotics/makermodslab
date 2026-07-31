@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.focus_tune — the uvc-util table parser, the
+"""Tests for makermodslab.focus_tune — the uvc-util table parser, the
 AVFoundation-uniqueID→uvc-index mapping, binary discovery, and the
 refusal branches of handle_start_focus_tune. The sweep itself (cv2 capture
 + live UVC writes) is hardware and deliberately untested, like the other
@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import pytest
 
-import makerlab
-from makerlab import focus_tune, record, rollout, teleoperate  # noqa: F401
+import makermodslab
+from makermodslab import focus_tune, record, rollout, teleoperate  # noqa: F401
 
 # Verbatim `uvc-util -d` output from the SO-101 rig's two cameras.
 UVC_DEVICE_TABLE = """\
@@ -127,7 +127,7 @@ class TestHandleStartRefusals:
         ],
     )
     def test_refuses_while_robot_flow_active(self, darwin_with_uvc_util, monkeypatch, module, flag, label):
-        monkeypatch.setattr(getattr(makerlab, module), flag, True)
+        monkeypatch.setattr(getattr(makermodslab, module), flag, True)
         result = focus_tune.handle_start_focus_tune(CAMERAS, AVF_CAMERAS)
         assert result["success"] is False
         assert label in result["message"]

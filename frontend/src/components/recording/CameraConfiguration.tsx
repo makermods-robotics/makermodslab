@@ -66,7 +66,7 @@ interface CameraConfigurationProps {
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>; // Ref to expose stream release function
 }
 
-// Mirrors makerlab/focus_tune.py's per-camera status dict.
+// Mirrors makermodslab/focus_tune.py's per-camera status dict.
 interface FocusTuneCameraStatus {
   camera_index: number;
   name: string;
@@ -278,8 +278,13 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   const [tuneStatus, setTuneStatus] = useState<FocusTuneStatus | null>(null);
 
   // Sweep UVC focus-abs on the backend while scoring frame sharpness, then
-  // lock each camera at its best value. The browser previews must be released
-  // first for the same reason recording releases them: cv2 needs the devices.
+  // lock each camera at its best value. Previews must be released first for
+  // the same reason recording releases them: cv2 needs the devices. Pausing
+  // unmounts the BackendCameraStream tiles, which drops their MJPEG requests
+  // so the server releases the shared captures; /focus-tune/start also calls
+  // camera_preview_manager.stop_all(), which is what actually guarantees the
+  // handover (tiles elsewhere in the app — Deploy, Teleop — aren't paused by
+  // this state, and 409 while the tune runs).
   const tuneFocus = async () => {
     const tunable = cameras.filter((cam) => cam.camera_index !== undefined);
     if (tunable.length === 0) return;

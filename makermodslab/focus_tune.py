@@ -32,6 +32,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from .camera_preview import camera_preview_manager
+
 logger = logging.getLogger(__name__)
 
 UVC_UTIL_ENV = "MAKERMODSLAB_UVC_UTIL"
@@ -218,8 +220,8 @@ def _tune_one_camera(uvc_util: str, cam_status: dict[str, Any]) -> None:
     if not cap.isOpened():
         cam_status["phase"] = "error"
         cam_status["error"] = (
-            "Could not open the camera. Another app may be holding it (a browser "
-            "preview that didn't release, or an active robot session)."
+            "Could not open the camera. Another app may be holding it (a preview "
+            "stream that didn't release, or an active robot session)."
         )
         return
     try:
@@ -379,8 +381,17 @@ def handle_start_focus_tune(
         _status["active"] = True
         _status["error"] = None
         _status["cameras"] = cam_statuses
-        _tune_thread = threading.Thread(target=_tune_worker, args=(uvc_util,), daemon=True)
-        _tune_thread.start()
+
+    # Backend camera previews hold the cv2 devices this sweep is about to open,
+    # and a preview still holding an index makes _tune_one_camera's
+    # cv2.VideoCapture fail outright. Same handover as recording and inference
+    # (record.handle_start_recording): released only after `focus_tune_active`
+    # is True, so /camera-preview 409s and no client can re-acquire a device in
+    # the gap between this release and the sweep's first open.
+    camera_preview_manager.stop_all()
+
+    _tune_thread = threading.Thread(target=_tune_worker, args=(uvc_util,), daemon=True)
+    _tune_thread.start()
 
     return {"success": True, "message": f"Focus tune started for {len(cam_statuses)} camera(s)."}
 

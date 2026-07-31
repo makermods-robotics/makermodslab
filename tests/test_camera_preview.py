@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import makermodslab.camera_preview as camera_preview
+import makermodslab.focus_tune as focus_tune
 import makermodslab.record as record
 import makermodslab.rollout as rollout
 import makermodslab.server as server_mod
@@ -197,6 +198,15 @@ def test_camera_preview_409_while_recording(client: TestClient, monkeypatch: pyt
     assert "Recording" in response.json()["detail"]
 
 
+def test_camera_preview_409_while_focus_tuning(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A focus tune opens the same cv2 indices (and drives their UVC controls),
+    so a preview must not re-acquire a device mid-sweep."""
+    monkeypatch.setattr(focus_tune, "focus_tune_active", True)
+    response = client.get("/camera-preview/0")
+    assert response.status_code == 409
+    assert "Focus tuning" in response.json()["detail"]
+
+
 def test_camera_preview_allowed_while_teleoperating(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -241,6 +251,17 @@ def test_camera_preview_streams_multipart_mjpeg(client: TestClient, monkeypatch:
 # ---------------------------------------------------------------------------
 # Exclusivity wiring — recording/teleop start paths stop the previews
 # ---------------------------------------------------------------------------
+
+# Verbatim `uvc-util -d` output from the SO-101 rig's two cameras (kept in sync
+# with tests/test_focus_tune.py, which parses it in anger).
+UVC_DEVICE_TABLE = """\
+------------ -------------- ------------ ------------ ------------------------------------------------
+Index        Vend:Prod      LocationID   UVC Version  Device name
+------------ -------------- ------------ ------------ ------------------------------------------------
+0            0x1e45:0x0209  0x01113000   1.00         USB Camera
+1            0x1e45:0x0209  0x01114000   1.00         USB Camera
+------------ -------------- ------------ ------------ ------------------------------------------------
+"""
 
 
 def test_start_recording_stops_camera_previews(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,6 +321,52 @@ def test_start_inference_stops_camera_previews(monkeypatch: pytest.MonkeyPatch) 
     assert result["success"] is True
     assert calls == ["stop_all"]
     rollout.inference_active = False
+
+
+def test_start_focus_tune_stops_camera_previews(monkeypatch: pytest.MonkeyPatch) -> None:
+    """handle_start_focus_tune force-releases the previews before the sweep
+    thread opens the same cv2 indices. Everything below the release is stubbed:
+    no uvc-util is executed and the real worker never runs, so no camera or USB
+    control is touched."""
+    calls: list[str] = []
+    active_when_released: list[bool] = []
+
+    def _stop_all() -> None:
+        calls.append("stop_all")
+        active_when_released.append(focus_tune.focus_tune_active)
+
+    monkeypatch.setattr(focus_tune.camera_preview_manager, "stop_all", _stop_all)
+    monkeypatch.setattr(focus_tune.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(focus_tune, "find_uvc_util", lambda: "/fake/uvc-util")
+    monkeypatch.setattr(focus_tune, "focus_tune_active", False)
+    # Rebind (not mutate) the module's session state: handle_start_focus_tune
+    # writes into `_status` in place, and an in-place mutation is something
+    # monkeypatch cannot undo — it would leak a populated, active status into
+    # tests/test_focus_tune.py's idle-shape assertions. The module resolves both
+    # globals at call time, so a rebind is picked up and then reverted for free.
+    monkeypatch.setattr(focus_tune, "_status", {"active": False, "cameras": [], "error": None})
+    monkeypatch.setattr(focus_tune, "_tune_thread", None)
+    monkeypatch.setattr(
+        focus_tune,
+        "_uvc_run",
+        lambda *a: UVC_DEVICE_TABLE if a[1] == ["-d"] else "auto-focus\nfocus-abs\n",
+    )
+    worker_args: list[str] = []
+    monkeypatch.setattr(focus_tune, "_tune_worker", worker_args.append)
+
+    result = focus_tune.handle_start_focus_tune(
+        [{"camera_index": 0, "name": "front"}],
+        [{"index": 0, "name": "USB Camera", "unique_id": "0x11130001e450209"}],
+    )
+
+    assert result["success"] is True
+    assert calls == ["stop_all"]
+    # Released only AFTER the active flag is set, so /camera-preview 409s and no
+    # client can re-acquire a device in the gap before the sweep's first open.
+    assert active_when_released == [True]
+    if focus_tune._tune_thread is not None:
+        focus_tune._tune_thread.join(timeout=2)
+    assert worker_args == ["/fake/uvc-util"]
 
 
 def test_teleoperation_does_not_touch_camera_previews(monkeypatch: pytest.MonkeyPatch) -> None:
