@@ -10,13 +10,14 @@ import {
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
-import { Camera, Plus, Trash2, VideoOff, RefreshCw, ChevronRight } from "lucide-react";
+import { Camera, Focus, Loader2, Plus, Trash2, VideoOff, RefreshCw, ChevronRight } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
+import { useApi } from "@/contexts/ApiContext";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
 import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
@@ -64,6 +65,26 @@ interface CameraConfigurationProps {
   onCamerasChange: (cameras: CameraConfig[]) => void;
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>; // Ref to expose stream release function
 }
+
+// Mirrors makerlab/focus_tune.py's per-camera status dict.
+interface FocusTuneCameraStatus {
+  camera_index: number;
+  name: string;
+  phase: "pending" | "coarse" | "fine" | "verify" | "done" | "error";
+  current_value: number | null;
+  best_value: number | null;
+  best_sharpness: number | null;
+  locked_value: number | null;
+  error: string | null;
+}
+
+interface FocusTuneStatus {
+  active: boolean;
+  error: string | null;
+  cameras: FocusTuneCameraStatus[];
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   cameras,
@@ -252,6 +273,63 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     setStreamsPaused(true);
   }, []);
 
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const [isTuningFocus, setIsTuningFocus] = useState(false);
+  const [tuneStatus, setTuneStatus] = useState<FocusTuneStatus | null>(null);
+
+  // Sweep UVC focus-abs on the backend while scoring frame sharpness, then
+  // lock each camera at its best value. The browser previews must be released
+  // first for the same reason recording releases them: cv2 needs the devices.
+  const tuneFocus = async () => {
+    const tunable = cameras.filter((cam) => cam.camera_index !== undefined);
+    if (tunable.length === 0) return;
+    setIsTuningFocus(true);
+    setTuneStatus(null);
+    setStreamsPaused(true);
+    try {
+      const response = await fetchWithHeaders(`${baseUrl}/focus-tune/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cameras: tunable.map((cam) => ({
+            camera_index: cam.camera_index,
+            name: cam.name,
+          })),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message ?? "Failed to start focus tune.");
+      }
+      let status: FocusTuneStatus;
+      do {
+        await sleep(1000);
+        const statusResponse = await fetchWithHeaders(`${baseUrl}/focus-tune/status`);
+        status = await statusResponse.json();
+        setTuneStatus(status);
+      } while (status.active);
+      const locked = status.cameras.filter((c) => c.phase === "done");
+      const failed = status.cameras.filter((c) => c.phase === "error");
+      toast({
+        title: failed.length === 0 ? "Focus locked" : "Focus tune finished with errors",
+        description: [
+          ...locked.map((c) => `${c.name}: focus-abs ${c.locked_value}`),
+          ...failed.map((c) => `${c.name}: ${c.error}`),
+        ].join(" · "),
+        variant: failed.length === status.cameras.length ? "destructive" : "default",
+      });
+    } catch (error) {
+      toast({
+        title: "Focus Tune Failed",
+        description: error instanceof Error ? error.message : String(error),
+        variant: "destructive",
+      });
+    } finally {
+      setIsTuningFocus(false);
+      setStreamsPaused(false); // resume previews — they now show the locked focus
+    }
+  };
+
   useEffect(() => {
     if (releaseStreamsRef) {
       releaseStreamsRef.current = releaseAllCameraStreams;
@@ -411,9 +489,51 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       {/* Configured Cameras */}
       {cameras.length > 0 && (
         <div className="space-y-4">
-          <h4 className="text-sm font-medium text-foreground">
-            Configured cameras ({cameras.length})
-          </h4>
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-medium text-foreground">
+              Configured cameras ({cameras.length})
+            </h4>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={tuneFocus}
+              disabled={isTuningFocus}
+              title="Disable autofocus and lock each camera at its sharpest focus. Point the cameras at the workspace (with the target object in view) first."
+            >
+              {isTuningFocus ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <Focus className="w-4 h-4 mr-2" />
+              )}
+              {isTuningFocus ? "Tuning focus..." : "Tune focus"}
+            </Button>
+          </div>
+
+          {/* Live progress while the backend sweeps; last result stays visible. */}
+          {tuneStatus && (
+            <div className="bg-muted/50 rounded-lg p-3 space-y-1">
+              {tuneStatus.cameras.map((cam) => (
+                <p key={cam.camera_index} className="text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">{cam.name}</span>
+                  {": "}
+                  {cam.phase === "pending" && "waiting..."}
+                  {(cam.phase === "coarse" || cam.phase === "fine") &&
+                    `${cam.phase} sweep at ${cam.current_value ?? "..."} — best so far ${
+                      cam.best_value ?? "..."
+                    } (sharpness ${cam.best_sharpness ?? "..."})`}
+                  {cam.phase === "verify" &&
+                    `verifying top candidates (at ${cam.current_value ?? "..."})`}
+                  {cam.phase === "done" &&
+                    `locked at focus-abs ${cam.locked_value} (sharpness ${cam.best_sharpness})`}
+                  {cam.phase === "error" && (cam.error ?? "failed")}
+                </p>
+              ))}
+              {tuneStatus.error && (
+                <p className="text-xs text-destructive">{tuneStatus.error}</p>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
             {cameras.map((camera) => (

@@ -62,6 +62,7 @@ from .auto_calibrate import (
 from .calibrate import CalibrationRequest, calibration_manager
 from .camera_identity import list_cameras_fresh, resolve_cv2_index
 from .camera_preview import CameraOpenError, camera_preview_manager
+from .focus_tune import get_focus_tune_status, handle_start_focus_tune
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -2392,6 +2393,35 @@ def get_available_cameras():
     except Exception as e:
         logger.error(f"Error detecting cameras: {e}")
         return {"status": "error", "message": str(e), "cameras": []}
+
+
+class FocusTuneCamera(BaseModel):
+    camera_index: int
+    name: str | None = None
+
+
+class FocusTuneRequest(BaseModel):
+    cameras: list[FocusTuneCamera]
+
+
+@app.post("/focus-tune/start")
+def start_focus_tune(request: FocusTuneRequest):
+    """Auto-tune and lock UVC focus for the given cv2 camera indices (macOS).
+
+    The AVFoundation enumeration runs here, at click time, so the
+    uniqueID→uvc-util mapping inside focus_tune reflects the current USB
+    topology even if a camera was replugged since the page enumerated.
+    """
+    avf_cameras = _avfoundation_cameras_in_cv2_order()
+    return handle_start_focus_tune(
+        [{"camera_index": c.camera_index, "name": c.name} for c in request.cameras],
+        avf_cameras,
+    )
+
+
+@app.get("/focus-tune/status")
+def focus_tune_status():
+    return get_focus_tune_status()
 
 
 @app.get("/camera-preview/{index}")
