@@ -24,15 +24,33 @@ from pathlib import Path
 import pytest
 
 
-def _make_checkpoint(output_dir: Path, step: int, *, with_state: bool = True) -> None:
-    """Lay out a lerobot-style checkpoint under <output_dir>/checkpoints/<step>."""
+def _make_checkpoint(
+    output_dir: Path,
+    step: int,
+    *,
+    with_state: bool = True,
+    with_optimizer: bool = True,
+) -> None:
+    """Lay out a lerobot-style checkpoint under <output_dir>/checkpoints/<step>.
+
+    `with_state=False` is the weights-only shape (an imported model);
+    `with_optimizer=False` is the interrupted-save shape the cloud uploader
+    used to publish — training_state/ exists but the big optimizer file that
+    lerobot writes last never landed.
+    """
     ck = output_dir / "checkpoints" / str(step)
     pm = ck / "pretrained_model"
     pm.mkdir(parents=True)
     (pm / "config.json").write_text("{}")  # required by _list_local_checkpoints
     (pm / "train_config.json").write_text("{}")
+    (pm / "model.safetensors").write_bytes(b"weights")
     if with_state:
-        (ck / "training_state").mkdir()
+        ts = ck / "training_state"
+        ts.mkdir()
+        (ts / "training_step.json").write_text("{}")
+        (ts / "rng_state.safetensors").write_bytes(b"rng")
+        if with_optimizer:
+            (ts / "optimizer_state.safetensors").write_bytes(b"optim")
 
 
 def _record(output_dir: Path, runner: str = "local"):
@@ -76,6 +94,21 @@ def test_resolve_resume_config_path_rejects_missing_training_state(tmp_path) -> 
     _make_checkpoint(out, 2000, with_state=False)  # weights-only (e.g. imported)
     with pytest.raises(ValueError, match="training_state"):
         _resolve_resume_config_path(_record(out), 2000)
+
+
+def test_resolve_resume_config_path_rejects_interrupted_save(tmp_path) -> None:
+    """training_state/ exists but the optimizer file lerobot writes last never
+    landed — the shape the cloud uploader used to publish. It must be refused
+    at the API with the remedy named, not accepted and crashed on inside the
+    trainer."""
+    from makermodslab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000, with_optimizer=False)
+    with pytest.raises(ValueError, match="incomplete") as excinfo:
+        _resolve_resume_config_path(_record(out), 2000)
+    assert "optimizer_state.safetensors" in str(excinfo.value)
+    assert "fine-tune from its weights" in str(excinfo.value)
 
 
 def test_resolve_resume_config_path_rejects_non_local(tmp_path) -> None:
@@ -122,14 +155,25 @@ class _FakeHubApi:
         return self._files
 
 
+def _hub_checkpoint_files(step_dir: str, *, with_optimizer: bool = True) -> list[str]:
+    """The repo paths a COMPLETE cloud checkpoint publishes (or, without the
+    optimizer file, the partial tree a mid-save upload used to seal)."""
+    files = [
+        f"checkpoints/{step_dir}/pretrained_model/config.json",
+        f"checkpoints/{step_dir}/pretrained_model/model.safetensors",
+        f"checkpoints/{step_dir}/pretrained_model/train_config.json",
+        f"checkpoints/{step_dir}/training_state/training_step.json",
+        f"checkpoints/{step_dir}/training_state/rng_state.safetensors",
+    ]
+    if with_optimizer:
+        files.append(f"checkpoints/{step_dir}/training_state/optimizer_state.safetensors")
+    return files
+
+
 def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
     from makermodslab.jobs import _resolve_cloud_resume
 
-    files = [
-        "checkpoints/005000/pretrained_model/config.json",
-        "checkpoints/005000/training_state/training_step.json",
-    ]
-    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("005000")))
     repo_id, step_dir = _resolve_cloud_resume(_cloud_record(), 5000)
     assert repo_id == "user/act_ds_2026"
     assert step_dir == "005000"  # zero-padded dir name preserved
@@ -138,15 +182,40 @@ def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
 def test_resolve_cloud_resume_defaults_to_latest(monkeypatch) -> None:
     from makermodslab.jobs import _resolve_cloud_resume
 
-    files = [
-        "checkpoints/001000/pretrained_model/config.json",
-        "checkpoints/001000/training_state/training_step.json",
-        "checkpoints/003000/pretrained_model/config.json",
-        "checkpoints/003000/training_state/training_step.json",
-    ]
+    files = _hub_checkpoint_files("001000") + _hub_checkpoint_files("003000")
     monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
     _repo, step_dir = _resolve_cloud_resume(_cloud_record(), None)  # None ⇒ latest
     assert step_dir == "003000"
+
+
+def test_resolve_cloud_resume_rejects_partial_hub_checkpoint(monkeypatch) -> None:
+    """The NEW-17 shape: everything on the Hub except the optimizer file the
+    uploader raced. `training_state/training_step.json` alone used to pass this
+    guard, so the run died inside the trainer on a FileNotFoundError instead of
+    at the API with something the user can act on."""
+    from makermodslab.jobs import _resolve_cloud_resume
+
+    files = _hub_checkpoint_files("005000", with_optimizer=False)
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="incomplete on the Hub") as excinfo:
+        _resolve_cloud_resume(_cloud_record(), 5000)
+    message = str(excinfo.value)
+    assert "uploader race" in message
+    assert "training_state/optimizer_state.safetensors" in message
+    assert "fine-tune from its weights" in message  # the named remedy
+
+
+def test_resolve_cloud_resume_ignores_other_steps_when_checking_completeness(
+    monkeypatch,
+) -> None:
+    """Completeness is judged per step: a complete 001000 must not vouch for a
+    partial 003000 (the file listing is repo-wide and flat)."""
+    from makermodslab.jobs import _resolve_cloud_resume
+
+    files = _hub_checkpoint_files("001000") + _hub_checkpoint_files("003000", with_optimizer=False)
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="incomplete on the Hub"):
+        _resolve_cloud_resume(_cloud_record(), 3000)
 
 
 def test_resolve_cloud_resume_rejects_no_checkpoints(monkeypatch) -> None:
@@ -170,11 +239,7 @@ def test_resolve_cloud_resume_rejects_missing_training_state(monkeypatch) -> Non
 def test_resolve_cloud_resume_rejects_unknown_step(monkeypatch) -> None:
     from makermodslab.jobs import _resolve_cloud_resume
 
-    files = [
-        "checkpoints/005000/pretrained_model/config.json",
-        "checkpoints/005000/training_state/training_step.json",
-    ]
-    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("005000")))
     with pytest.raises(ValueError, match="no checkpoint at step 9999"):
         _resolve_cloud_resume(_cloud_record(), 9999)
 
@@ -191,6 +256,95 @@ def test_resolve_cloud_resume_rejects_missing_repo() -> None:
 
     with pytest.raises(ValueError, match="no output repo"):
         _resolve_cloud_resume(_cloud_record(repo_id=None), None)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint completeness — the single readiness rule shared by both resume
+# guards above and (inlined verbatim) by the in-container cloud uploader.
+# ---------------------------------------------------------------------------
+
+
+def _complete_names() -> set[str]:
+    return {
+        "pretrained_model/config.json",
+        "pretrained_model/model.safetensors",
+        "pretrained_model/train_config.json",
+        "training_state/training_step.json",
+        "training_state/rng_state.safetensors",
+        "training_state/optimizer_state.safetensors",
+    }
+
+
+def test_missing_checkpoint_files_accepts_a_complete_tree() -> None:
+    from makermodslab.jobs import missing_checkpoint_files
+
+    assert missing_checkpoint_files(_complete_names()) == []
+
+
+def test_missing_checkpoint_files_does_not_require_a_scheduler() -> None:
+    """save_training_state writes scheduler_state.json only `if scheduler is not
+    None`, so requiring it would permanently block scheduler-less presets."""
+    from makermodslab.jobs import missing_checkpoint_files
+
+    assert "training_state/scheduler_state.json" not in _complete_names()
+    assert missing_checkpoint_files(_complete_names()) == []
+
+
+def test_missing_checkpoint_files_flags_a_mid_save_snapshot() -> None:
+    """config.json is the FIRST artifact lerobot writes — on its own it means a
+    save just started, not a checkpoint."""
+    from makermodslab.jobs import missing_checkpoint_files
+
+    missing = missing_checkpoint_files({"pretrained_model/config.json"})
+    assert "pretrained_model/*.safetensors" in missing
+    assert "training_state/training_step.json" in missing
+    assert "training_state/optimizer_state.safetensors" in missing
+
+
+def test_missing_checkpoint_files_flags_the_optimizer_file_alone() -> None:
+    from makermodslab.jobs import missing_checkpoint_files
+
+    names = _complete_names() - {"training_state/optimizer_state.safetensors"}
+    assert missing_checkpoint_files(names) == ["training_state/optimizer_state.safetensors"]
+
+
+def test_missing_checkpoint_files_accepts_nested_multi_optimizer_state() -> None:
+    """A MultiAdam policy writes training_state/<name>/optimizer_state.safetensors,
+    so the optimizer probe must match at any depth or such runs would never be
+    considered ready."""
+    from makermodslab.jobs import missing_checkpoint_files
+
+    names = (_complete_names() - {"training_state/optimizer_state.safetensors"}) | {
+        "training_state/actor/optimizer_state.safetensors",
+        "training_state/critic/optimizer_state.safetensors",
+    }
+    assert missing_checkpoint_files(names) == []
+
+
+def test_missing_checkpoint_files_accepts_a_peft_adapter_as_weights() -> None:
+    from makermodslab.jobs import missing_checkpoint_files
+
+    names = (_complete_names() - {"pretrained_model/model.safetensors"}) | {
+        "pretrained_model/adapter_model.safetensors"
+    }
+    assert missing_checkpoint_files(names) == []
+
+
+def test_scan_checkpoint_dir_reports_relative_names_and_a_change_sensitive_fingerprint(
+    tmp_path,
+) -> None:
+    from makermodslab.jobs import missing_checkpoint_files, scan_checkpoint_dir
+
+    _make_checkpoint(tmp_path, 1000)
+    ck = tmp_path / "checkpoints" / "1000"
+
+    names, fingerprint = scan_checkpoint_dir(ck)
+    assert "training_state/optimizer_state.safetensors" in names  # posix, relative
+    assert missing_checkpoint_files(names) == []
+    assert scan_checkpoint_dir(ck)[1] == fingerprint  # stable while nothing writes
+
+    (ck / "training_state" / "optimizer_state.safetensors").write_bytes(b"grown-larger")
+    assert scan_checkpoint_dir(ck)[1] != fingerprint  # a byte written moves it
 
 
 def test_extract_wandb_run_url_finds_canonical_url() -> None:
@@ -1538,25 +1692,6 @@ def test_start_leaves_a_fresh_records_progress_at_zero(tmp_path) -> None:
 # decision — no per-policy exceptions.
 
 
-def _hub_checkpoint_files(step_dir: str, *, with_state: bool = True) -> list[str]:
-    """The repo paths a complete cloud checkpoint publishes.
-
-    `with_state=False` is the weights-only shape — an interrupted upload, or a
-    staging repo that lost its training_state/ — which is exactly what every
-    resume path has to refuse."""
-    files = [
-        f"checkpoints/{step_dir}/pretrained_model/config.json",
-        f"checkpoints/{step_dir}/pretrained_model/model.safetensors",
-        f"checkpoints/{step_dir}/pretrained_model/train_config.json",
-    ]
-    if with_state:
-        files += [
-            f"checkpoints/{step_dir}/training_state/training_step.json",
-            f"checkpoints/{step_dir}/training_state/optimizer_state.safetensors",
-        ]
-    return files
-
-
 def _resumable_source(tmp_path, state: str, *, job_id: str = "src", steps: int = 200):
     """A local run record with one real, fully-saved checkpoint at step 100."""
     from makermodslab.jobs import JobRecord, JobRegistry
@@ -1815,7 +1950,7 @@ def test_cloud_parent_resumed_locally_refuses_an_incomplete_hub_checkpoint(tmp_p
     reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
     monkeypatch.setattr(
         "makermodslab.jobs.shared_hf_api",
-        lambda: _FakeHubApi(_hub_checkpoint_files("000100", with_state=False)),
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100", with_optimizer=False)),
     )
 
     def _no_downloads(**kwargs):
@@ -1972,7 +2107,7 @@ def test_local_parent_resumed_on_the_cloud_re_uploads_when_the_hub_lost_it(
     reg = _resumable_source(tmp_path, "interrupted")
     reg._records["src"].checkpoints_hub_repo_id = "alice/src_checkpoints"
     reg._records["src"].checkpoints_hub_steps = ["100"]
-    api = _FakeUploadApi(_hub_checkpoint_files("100", with_state=False))
+    api = _FakeUploadApi(_hub_checkpoint_files("100", with_optimizer=False))
     monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
     monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
     with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()):
@@ -2096,7 +2231,7 @@ def test_local_parent_resumed_on_the_cloud_fails_when_the_upload_cannot_be_confi
     class _SilentlyPartialApi(_FakeUploadApi):
         def upload_folder(self, **kwargs):
             self.uploaded.append(kwargs)
-            self._files.extend(_hub_checkpoint_files("100", with_state=False))
+            self._files.extend(_hub_checkpoint_files("100", with_optimizer=False))
 
     api = _SilentlyPartialApi()
     monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)

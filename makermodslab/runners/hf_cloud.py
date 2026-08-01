@@ -484,12 +484,18 @@ def _scan_and_upload():
                 repo_id=repo_id,
                 path_in_repo=f"checkpoints/{entry.name}",
                 commit_message=f"checkpoint {entry.name}",
+                # safetensors writes through a .tmpXXXX file and renames; one
+                # caught mid-rename has landed on the Hub before.
+                ignore_patterns=[".tmp*", "**/.tmp*"],
             )
             seen.add(entry.name)
             waits.pop(entry.name, None)
             print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
         except Exception as exc:
+            # NOT added to `seen`: sealing a step whose upload failed (or only
+            # partly landed) is what made incomplete Hub checkpoints permanent.
             print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
+            continue
 
 
 def _watch():
