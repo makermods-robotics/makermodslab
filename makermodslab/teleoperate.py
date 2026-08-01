@@ -541,7 +541,24 @@ def force_disconnect_partial(device, label: str = "device") -> None:
         try:
             cam.disconnect()
         except DeviceNotConnectedError:
-            pass  # never opened (or already released) — nothing to do
+            # Never opened (or already released) — usually nothing to do. But a
+            # camera whose DEVICE VANISHED mid-connect (unplugged between open
+            # and the read thread starting) lands here too: ``is_connected``
+            # goes False on the dead device and ``thread is None``, yet
+            # ``videocapture`` still holds the OS capture session. Left in
+            # place, that stale in-process session poisons every later open of
+            # the replugged camera (degraded fps profile / no frames) until
+            # makerlab restarts — so release the raw handle directly.
+            videocapture = getattr(cam, "videocapture", None)
+            if videocapture is not None:
+                try:
+                    videocapture.release()
+                    cam.videocapture = None
+                    logger.info(
+                        f"Released {label} camera {name}'s stale capture handle (device vanished mid-connect)"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not release {label} camera {name}'s capture handle: {e}")
         except Exception as e:
             logger.warning(f"Could not release {label} camera {name}: {e}")
     for bus in _device_buses(device):
