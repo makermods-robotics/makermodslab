@@ -59,6 +59,10 @@ export type ResumeSeed = {
   // resolves to HF_JOB_TIMEOUT ("2h") — silently capping the continuation of a
   // run that had already proved it needs a longer budget. See NEW-12.
   hfJobTimeout?: string;
+  // The parent's dataloader worker count — a starting point, not a lock: the
+  // resume branch DOES pass --num_workers, so an edit here really takes effect
+  // (a continuation can run on a host with different capacity than the parent).
+  numWorkers?: number;
   // The remaining hyperparameters. lerobot rebuilds these from the checkpoint's
   // train_config.json on resume (build_training_command's resume branch emits
   // none of them), so carrying them forward does NOT change what trains — it
@@ -66,7 +70,6 @@ export type ResumeSeed = {
   // keeps the new JobRecord's persisted config truthful about the run's shape.
   batchSize?: number;
   seed?: number;
-  numWorkers?: number;
   policyDevice?: string;
   policyUseAmp?: boolean;
   optimizerType?: string;
@@ -205,16 +208,20 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     job_name: "",
     // On resume the fields below are PREFILLED from the parent run's persisted
     // config (via ResumeSeed) rather than left at fresh-run defaults — see the
-    // ResumeSeed comments for which of them lerobot actually honours. Prefill,
-    // don't lock: every one stays editable, since extending steps or raising the
-    // timeout on a continuation is exactly what the form is for. `steps` is
-    // inherited as-is like the rest, so resuming an interrupted run defaults to
-    // FINISHING its original target (one that died at step 4,814 of 15,000
-    // resumes toward 15,000); raise it by hand to train past that. Resuming a
-    // run that already reached its target therefore prefills steps equal to the
-    // checkpoint's step — `resumeStepError` below blocks Start until the user
-    // raises it, as does the backend. Fine-tune is a fresh run, so it uses the
-    // normal fresh defaults throughout.
+    // ResumeSeed comments for which of them lerobot actually honours. The ones
+    // it does NOT honour render read-only on a resume (`resumeLocked` below);
+    // the values are still prefilled and still sent, so JobRecord.config keeps
+    // describing the run's real shape — the lock is a display-honesty change,
+    // not a payload change. What stays editable is what a continuation can
+    // genuinely change: steps, the log/save cadence, the dataloader worker
+    // count, and the cloud budget.
+    // `steps` is inherited as-is like the rest, so resuming an interrupted run
+    // defaults to FINISHING its original target (one that died at step 4,814
+    // of 15,000 resumes toward 15,000); raise it by hand to train past that.
+    // Resuming a run that already reached its target therefore prefills steps
+    // equal to the checkpoint's step — `resumeStepError` below blocks Start
+    // until the user raises it, as does the backend. Fine-tune is a fresh run,
+    // so it uses the normal fresh defaults throughout.
     steps: resumeSeed ? resumeSeed.sourceSteps : 10000,
     batch_size: resumeSeed?.batchSize ?? 8,
     seed: resumeSeed?.seed ?? 1000,
@@ -588,13 +595,24 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               : " from its latest checkpoint"}
           </div>
           <p className="mt-1 text-muted-foreground">
-            Settings are prefilled from that run and stay editable. The dataset,
-            policy, batch size, and optimizer are rebuilt from the checkpoint
-            itself, so changing them here won't affect the continuation — but{" "}
-            <span className="font-medium">Steps</span>, the checkpoint cadence
-            {isCloud ? ", and the job timeout" : ""} all apply. Set Steps above
-            the resumed step to train further (prefilled to{" "}
-            {config.steps.toLocaleString()}).
+            {datasetRepoId ? (
+              <>
+                Training continues on{" "}
+                <span className="font-mono text-xs">{datasetRepoId}</span> with
+                the parent run's
+              </>
+            ) : (
+              <>The parent run's dataset,</>
+            )}{" "}
+            policy, batch size, seed, device, optimizer and W&amp;B logging —
+            lerobot rebuilds all of them from the checkpoint, so they're shown
+            read-only below. A resume continues the same experiment; to train with
+            different settings, fine-tune from this checkpoint instead.{" "}
+            <span className="font-medium">Steps</span>, the log and checkpoint
+            cadence, the dataloader worker count
+            {isCloud ? ", the hardware, and the job timeout" : ""} do still
+            apply: set Steps above the resumed step to train further (prefilled
+            to {config.steps.toLocaleString()}).
           </p>
           {isCloud ? (
             <p className="mt-1 text-muted-foreground">

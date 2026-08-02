@@ -380,9 +380,11 @@ const JobCard: React.FC<Props> = ({
     // Carry the parent run's whole configured shape forward. The registry
     // already holds it as `selectedJob.config` (the persisted TrainingRequest),
     // so this needs no extra fetch and no reading of the checkpoint's
-    // train_config.json. The configurator PREFILLS from these — nothing is
-    // locked, so the user can still extend steps, raise the timeout, or change
-    // hardware on the continuation.
+    // train_config.json. The configurator PREFILLS from these, then renders
+    // read-only the ones lerobot rebuilds from the checkpoint anyway (batch
+    // size, seed, device, optimizer). Steps, the log/save cadence, the worker
+    // count, hardware and the timeout stay editable — those a continuation can
+    // really change.
     const parent = selectedJob.config;
     navigate("/training", {
       state: {
