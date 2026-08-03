@@ -697,11 +697,11 @@ def test_force_disconnect_partial_releases_vanished_cameras_capture_handle() -> 
     lerobot's disconnect() raises without releasing it (its guard is
     ``if not self.is_connected and self.thread is None: raise``), and left in
     place the stale in-process session poisons every later open of the
-    replugged camera until makerlab restarts. The helper must release the raw
+    replugged camera until MakerMods Lab restarts. The helper must release the raw
     handle on exactly this path.
     """
     from lerobot.utils.errors import DeviceNotConnectedError
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     class _FakeVideoCapture:
         def __init__(self) -> None:

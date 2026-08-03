@@ -421,7 +421,7 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
 
     Cameras are addressed by their cv2 integer `camera_index`, but when a camera
     carries a `unique_id` the index is re-anchored to the physical device via
-    the in-process AVFoundation list first (see makerlab/camera_identity.py):
+    the in-process AVFoundation list first (see makermodslab/camera_identity.py):
     recording runs in this process, whose cv2 resolves indices against a startup
     device snapshot that diverges from the fresh /available-cameras enumeration
     after a replug. Without the re-anchor a stale index silently records a
@@ -447,7 +447,7 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
         if camera_index is None:
             raise ValueError(
                 f"Camera '{camera_name}' is not visible to the server — it was plugged in "
-                "after makerlab started (or moved to another port). Restart makerlab, "
+                "after MakerMods Lab started (or moved to another port). Restart MakerMods Lab, "
                 "re-check the camera setup, then start recording again."
             )
 

@@ -548,7 +548,7 @@ def force_disconnect_partial(device, label: str = "device") -> None:
             # ``videocapture`` still holds the OS capture session. Left in
             # place, that stale in-process session poisons every later open of
             # the replugged camera (degraded fps profile / no frames) until
-            # makerlab restarts — so release the raw handle directly.
+            # MakerMods Lab restarts — so release the raw handle directly.
             videocapture = getattr(cam, "videocapture", None)
             if videocapture is not None:
                 try:

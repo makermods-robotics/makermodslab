@@ -2253,7 +2253,7 @@ async def supply_voltage(port: str = ""):
 
 
 # Fresh-subprocess AVFoundation enumeration (in cv2 open order) — moved to
-# makerlab/camera_identity.py, which also re-anchors stored camera indices to
+# makermodslab/camera_identity.py, which also re-anchors stored camera indices to
 # their AVFoundation uniqueIDs at record/inference start.
 _avfoundation_cameras_in_cv2_order = list_cameras_fresh
 

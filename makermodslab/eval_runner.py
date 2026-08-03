@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Persistent multi-episode rollout runner for MakerLab's evaluation mode.
+"""Persistent multi-episode rollout runner for MakerMods Lab's evaluation mode.
 
     python -m makermodslab.eval_runner <exactly the lerobot-rollout argv>
 
