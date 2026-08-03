@@ -121,9 +121,9 @@ def friendly_hint(error_text: str | None) -> str | None:
         )
     # A camera that won't open at all is unplugged (or the index is stale
     # after a port change) — distinct from the turbulence family below, where
-    # the device opens but comes up degraded. Must precede the network branch:
-    # lerobot raises this as a ConnectionError, whose type name would match
-    # the generic "connectionerror" download hint.
+    # the device opens but comes up degraded. Kept ahead of the Hub branches:
+    # lerobot raises this as a ConnectionError too, so the arm/camera families
+    # are all resolved before anything can be read as a download problem.
     if "failed to open" in low and "camera" in low:
         return "A camera couldn't be opened — it looks unplugged. Check its cable, then try again."
     # Hub model-download failures (snapshot_download, before the arm is ever
