@@ -95,3 +95,13 @@ jetson/
 # API. Contains personal data (emails, IPs) and an API key — local only, never
 # committed.
 waitlist/
+
+# Local working material, never shipped: bug/feature tracking lists
+# (internal_docs), hardware-probe scratch scripts (debug), local agent
+# skills (.agents), and hardware repro tests with their own sandboxing
+# conftest (tests/repro — accidentally committed once during a rebase
+# cleanup; keep it ignored so `git add -A` can't sweep it in again).
+internal_docs/
+debug/
+.agents/
+tests/repro/
