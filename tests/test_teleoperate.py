@@ -690,6 +690,50 @@ def test_force_disconnect_partial_releases_bus_despite_a_wedged_camera() -> None
     assert bus.is_connected is False
 
 
+def test_force_disconnect_partial_disables_remaining_motors_despite_one_failing() -> None:
+    """force_disconnect_partial must disable torque motor-by-motor, not rely on
+    bus.disconnect()'s own internal torque-disable: lerobot's real disconnect()
+    disables torque motor-by-motor too, but a single motor's failed write
+    aborts that loop and leaves every motor after it energized/rigid — this is
+    exactly why force_disable_torque exists as a standalone belt-and-braces
+    step elsewhere in this module (see its docstring) and why
+    _cleanup_after_setup_failure calls it before disconnecting. This helper
+    handles the same "torque may already be enabled after an incomplete
+    connect" situation and needs the same protection.
+    """
+    from makermodslab.teleoperate import force_disconnect_partial
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER")
+    bus.failing = {"elbow_flex"}
+    robot = _FakePartialRobot(bus, {})
+
+    force_disconnect_partial(robot, "robot")
+
+    # shoulder_pan (before elbow_flex) and gripper (after it) must still get
+    # an explicit disable_torque call despite elbow_flex's failure.
+    assert [motor for motor, _ in bus.disabled] == ["shoulder_pan", "gripper"]
+    assert bus.is_connected is False
+
+
+def test_force_disconnect_partial_skips_torque_disable_when_no_bus_ever_opened() -> None:
+    """When connect() died on the port itself (wrong port, arm unplugged) no
+    bus is open: torque can't be on, and the motor writes can't succeed. The
+    torque pass must be skipped entirely — running it would emit
+    force_disable_torque's "TORQUE MAY STILL BE ENABLED … unplug its power"
+    ERROR on every failed connect attempt for an arm that was never energized.
+    """
+    from makermodslab.teleoperate import force_disconnect_partial
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER", connected=False)
+    bus.failing = {"shoulder_pan", "elbow_flex", "gripper"}  # writes would fail loudly
+    robot = _FakePartialRobot(bus, {})
+
+    force_disconnect_partial(robot, "robot")
+
+    assert bus.disabled == []  # no torque writes attempted
+    assert bus.disconnect_calls == 0  # nothing to disconnect either
+
+
 def test_force_disconnect_partial_releases_vanished_cameras_capture_handle() -> None:
     """A camera whose DEVICE disappeared mid-connect (unplugged between the
     cv2 open and the read thread starting) reports not-connected with no

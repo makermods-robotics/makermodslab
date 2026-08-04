@@ -531,10 +531,26 @@ def force_disconnect_partial(device, label: str = "device") -> None:
     Go component by component instead, each independently guarded, so a broken
     camera can't strand the bus and vice versa. Safe on a fully connected,
     partially connected, or already disconnected device.
+
+    Torque, motor-by-motor, before any of that: on a camera failure torque was
+    never enabled (configure() runs after the cameras), but a failure later in
+    connect() can leave it on. bus.disconnect() below does disable torque
+    itself, but — same reasoning as force_disable_torque's docstring — one
+    motor's failed write there aborts the disable for every motor after it on
+    that bus, leaving them energized. force_disable_torque disables each motor
+    independently first so a bad motor can't strand its bus-mates rigid; the
+    disconnect() call after it is then belt-and-braces, same ordering as
+    _cleanup_after_setup_failure uses for the same "torque may already be
+    enabled after an incomplete setup" situation. Skipped when no bus ever
+    opened (e.g. connect() died on the port itself): torque can't be on and the
+    writes can't succeed, and force_disable_torque would log a misleading
+    "TORQUE MAY STILL BE ENABLED" error on every failed connect attempt.
     """
     if device is None:
         return
-    # Cameras first: they're the usual point of failure, and their read threads
+    if any(bus.is_connected for bus in _device_buses(device)):
+        force_disable_torque(device, label)
+    # Cameras next: they're the usual point of failure, and their read threads
     # are what keep the device busy for the next attempt. ``.cameras`` covers
     # both sides on a bimanual BiSO device (it merges the sub-arms' dicts).
     for name, cam in (getattr(device, "cameras", None) or {}).items():
@@ -564,9 +580,6 @@ def force_disconnect_partial(device, label: str = "device") -> None:
     for bus in _device_buses(device):
         try:
             if bus.is_connected:
-                # Default disable_torque=True: on a camera failure torque was
-                # never enabled (configure() runs after the cameras), but a
-                # failure later in connect() can leave it on.
                 bus.disconnect()
         except Exception as e:
             port = getattr(bus, "port", None) or "unknown port"
