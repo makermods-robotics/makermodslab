@@ -31,14 +31,6 @@ export interface TrainingConfig {
   finetune_from_job_id?: string;
   finetune_from_step?: number;
 
-  // Weights & Biases
-  wandb_enable: boolean;
-  wandb_project?: string;
-  wandb_entity?: string;
-  wandb_notes?: string;
-  wandb_mode?: string;
-  wandb_disable_artifact: boolean;
-
   // Policy-specific parameters
   policy_device?: string;
   policy_use_amp: boolean;

@@ -104,27 +104,14 @@ def test_optional_dataset_fields_only_present_when_set() -> None:
     assert cmd2[idx + 1 : idx + 4] == ["0", "1", "2"]
 
 
-def test_wandb_block_only_serialized_when_enabled() -> None:
+def test_wandb_always_forced_off() -> None:
+    """W&B support is removed; the command must pin it off so a preset or a
+    resumed train_config.json that had wandb enabled can't turn it back on."""
     from makermodslab.train import TrainingRequest, build_training_command
 
-    off = build_training_command(TrainingRequest(dataset_repo_id="x", wandb_enable=False), "/tmp/out")
-    assert _arg_value(off, "--wandb.enable") == "false"
-    assert "--wandb.project" not in off
-
-    on = build_training_command(
-        TrainingRequest(
-            dataset_repo_id="x",
-            wandb_enable=True,
-            wandb_project="proj",
-            wandb_entity="me",
-            wandb_run_id="abc",
-        ),
-        "/tmp/out",
-    )
-    assert _arg_value(on, "--wandb.enable") == "true"
-    assert _arg_value(on, "--wandb.project") == "proj"
-    assert _arg_value(on, "--wandb.entity") == "me"
-    assert _arg_value(on, "--wandb.run_id") == "abc"
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x"), "/tmp/out")
+    assert _arg_value(cmd, "--wandb.enable") == "false"
+    assert "--wandb.project" not in cmd
 
 
 def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:

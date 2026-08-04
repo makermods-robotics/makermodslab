@@ -366,16 +366,6 @@ const TrainingJobDialog: React.FC<{
                           View on Hub ↗
                         </a>
                       )}
-                    {job.wandb_run_url && (
-                      <a
-                        href={job.wandb_run_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs text-primary hover:underline"
-                      >
-                        View on W&B ↗
-                      </a>
-                    )}
                   </div>
                   {/* When aliased, keep the immutable run id visible as subtext. */}
                   {job.display_name ? (

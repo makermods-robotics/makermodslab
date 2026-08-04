@@ -103,8 +103,6 @@ class JobRecord(BaseModel):
     hf_flavor: str | None = None
     hf_repo_id: str | None = None
     hf_job_url: str | None = None
-    # Captured from training stdout the first time wandb prints the run URL.
-    wandb_run_url: str | None = None
     # Number of checkpoints currently visible (local: filesystem; cloud:
     # Hub repo). Filled in by JobRegistry.list/get; persisted as zero.
     checkpoint_count: int = 0
@@ -182,7 +180,6 @@ class JobRunner(Protocol):
     def is_running(self) -> bool: ...
     def returncode(self) -> int | None: ...
     def stream_log_lines(self) -> list[LogLine]: ...
-    def wandb_run_url(self) -> str | None: ...
 
 
 # Written to `error_message` when a run ends because we asked it to. The field
@@ -273,16 +270,6 @@ def _runner_hook(runner: object, name: str):
 
 # tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
 _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:]+)<([\d:]+)")
-
-# Wandb prints something like "wandb: 🚀 View run at https://wandb.ai/<entity>/<project>/runs/<id>"
-# when it boots. We capture the first URL of that shape we see.
-_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+")
-
-
-def extract_wandb_run_url(line: str) -> str | None:
-    match = _WANDB_URL_RE.search(line)
-    return match.group(0) if match else None
-
 
 def _parse_duration(s: str) -> float | None:
     """Parse tqdm's HH:MM:SS or MM:SS into seconds. Returns None on '?'."""
@@ -491,7 +478,6 @@ class LocalJobRunner:
         self._stop_event = threading.Event()
         self._log_file_path = log_file_path
         self._log_file = None  # type: ignore[assignment]
-        self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
         # True only once we have actually signalled a LIVE process. Lets the
         # registry tell "we killed this" from "it had already died", which the
@@ -590,9 +576,6 @@ class LocalJobRunner:
             pass
         return out
 
-    def wandb_run_url(self) -> str | None:
-        return self._wandb_run_url
-
     # -- internals --
 
     def _pump_stdout(self) -> None:
@@ -605,10 +588,6 @@ class LocalJobRunner:
                 if not stripped:
                     continue
                 parse_metrics_into(stripped, self._metrics, self._resume_total)
-                if self._wandb_run_url is None:
-                    url = extract_wandb_run_url(stripped)
-                    if url is not None:
-                        self._wandb_run_url = url
                 log_line = LogLine(timestamp=time.time(), message=stripped)
                 if self._log_file is not None:
                     try:
@@ -655,7 +634,6 @@ class TailingJobRunner:
         # Replay everything that's already on disk so the parser catches up
         # on metrics, then tail from the current EOF.
         self._tail_offset = 0
-        self._wandb_run_url: str | None = None
         # See stop() / returncode(): we have no Popen to reap, so this flag is
         # the only record that the pid's disappearance was our doing.
         self._stop_signalled = False
@@ -719,9 +697,6 @@ class TailingJobRunner:
     def pid(self) -> int | None:
         return self._pid
 
-    def wandb_run_url(self) -> str | None:
-        return self._wandb_run_url
-
     # -- internals --
 
     def _tail_loop(self) -> None:
@@ -748,11 +723,9 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(log_line.message, self._metrics, self._resume_total)
-                        if self._wandb_run_url is None:
-                            url = extract_wandb_run_url(log_line.message)
-                            if url is not None:
-                                self._wandb_run_url = url
+                        parse_metrics_into(
+                            log_line.message, self._metrics, self._resume_total
+                        )
                         if self._log_queue.qsize() >= 1000:
                             with contextlib.suppress(Empty):
                                 self._log_queue.get_nowait()
@@ -841,11 +814,6 @@ class PreparingJobRunner:
         except Empty:
             pass
         return out
-
-    def wandb_run_url(self) -> str | None:
-        # No trainer has run yet, so there is no run URL to capture. Present
-        # only because the watchdog asks every runner for one.
-        return None
 
 
 _PERSIST_THROTTLE_SECONDS = 1.0
@@ -2258,7 +2226,7 @@ class JobRegistry:
         self._on_change: Callable[[], None] | None = None
 
         # Fired from the watchdog at ~1Hz with a compact snapshot of every
-        # running job (id, state, metrics, wandb url, checkpoint count) so
+        # running job (id, state, metrics, checkpoint count) so
         # the dashboard keeps the progress bar live without refetching /jobs.
         self._on_progress: Callable[[builtins.list[dict]], None] | None = None
 
@@ -3650,13 +3618,6 @@ class JobRegistry:
             if runner is None or record is None:
                 continue
             if runner.is_running():
-                # Pull the wandb run URL once it appears in stdout.
-                if record.wandb_run_url is None:
-                    url = runner.wandb_run_url()
-                    if url is not None:
-                        with self._lock:
-                            record.wandb_run_url = url
-                        self._persist(record, force=True)
                 # Persist metric snapshot at most once per second.
                 self._persist(record, force=False)
                 progress_snapshots.append(
@@ -3664,7 +3625,6 @@ class JobRegistry:
                         "id": record.id,
                         "state": record.state,
                         "metrics": record.metrics.model_dump(),
-                        "wandb_run_url": record.wandb_run_url,
                         "checkpoint_count": self._count_checkpoints(record),
                     }
                 )
@@ -3685,8 +3645,6 @@ class JobRegistry:
                 terminal_stage=_runner_hook(runner, "terminal_stage"),
             )
             with self._lock:
-                if record.wandb_run_url is None:
-                    record.wandb_run_url = runner.wandb_run_url()
                 record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc

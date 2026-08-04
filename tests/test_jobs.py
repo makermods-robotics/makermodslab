@@ -347,20 +347,6 @@ def test_scan_checkpoint_dir_reports_relative_names_and_a_change_sensitive_finge
     assert scan_checkpoint_dir(ck)[1] != fingerprint  # a byte written moves it
 
 
-def test_extract_wandb_run_url_finds_canonical_url() -> None:
-    from makermodslab.jobs import extract_wandb_run_url
-
-    line = "wandb: \U0001f680 View run at https://wandb.ai/me/myproj/runs/abc123 trailing text"
-    assert extract_wandb_run_url(line) == "https://wandb.ai/me/myproj/runs/abc123"
-
-
-def test_extract_wandb_run_url_returns_none_when_absent() -> None:
-    from makermodslab.jobs import extract_wandb_run_url
-
-    assert extract_wandb_run_url("nothing here") is None
-    assert extract_wandb_run_url("https://example.com/runs/abc") is None
-
-
 def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
     from makermodslab.jobs import _parse_duration
 
@@ -1343,7 +1329,6 @@ def test_cloud_start_passes_resume_total_to_the_runner(tmp_path) -> None:
     fake_runner = MagicMock()
     fake_runner.hf_job_id.return_value = "job-xyz"
     fake_runner.hf_job_url.return_value = None
-    fake_runner.wandb_run_url.return_value = None  # keep the watchdog's persist clean
 
     def _factory(*args, **kwargs):
         seen.append(args)
@@ -3495,9 +3480,6 @@ class _FakeRunner:
 
     def stream_log_lines(self):
         return []
-
-    def wandb_run_url(self):
-        return None
 
     def pid(self):
         return 4242

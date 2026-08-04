@@ -81,8 +81,6 @@ const cfg = (
   save_freq: 2000,
   save_checkpoint: true,
   resume: false,
-  wandb_enable: false,
-  wandb_disable_artifact: true,
   policy_use_amp: false,
   use_policy_training_preset: true,
   ...extra,
@@ -112,7 +110,6 @@ const job = (j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">): JobRecord 
   hf_flavor: null,
   hf_repo_id: null,
   hf_job_url: null,
-  wandb_run_url: null,
   checkpoint_count: 0,
   ...j,
 });

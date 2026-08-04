@@ -52,16 +52,13 @@ def open_folder_in_file_browser(path: str) -> None:
         raise OSError(f"Opening a folder is not supported on this platform: {system!r}")
 
 
-# accelerate and wandb are only ever consumed by training SUBPROCESSES (fresh
-# processes that see new installs immediately) — nothing needs them imported
+# accelerate is only ever consumed by training SUBPROCESSES (fresh
+# processes that see new installs immediately) — nothing needs it imported
 # into this server process. So availability is probed live per request via
 # ``_extra_available`` (mirroring ``handle_get_policy_extra``), never cached at
 # import. A just-installed package becomes available without a server restart.
 TRAINING_PROBE_MODULE: str = "accelerate"
 TRAINING_INSTALL_HINT: str = "pip install accelerate"
-
-WANDB_PROBE_MODULE: str = "wandb"
-WANDB_INSTALL_HINT: str = "pip install wandb"
 
 
 def _extra_available(module: str) -> bool:
@@ -201,7 +198,6 @@ class InstallManager:
 
 
 training_install_manager = InstallManager("accelerate")
-wandb_install_manager = InstallManager("wandb")
 
 
 def handle_get_training_extra() -> dict[str, Any]:
@@ -217,21 +213,6 @@ def handle_install_training_extra() -> dict[str, Any]:
 
 def handle_install_training_extra_status() -> dict[str, Any]:
     return training_install_manager.get_status()
-
-
-def handle_get_wandb_extra() -> dict[str, Any]:
-    return {
-        "available": _extra_available(WANDB_PROBE_MODULE),
-        "install_hint": WANDB_INSTALL_HINT,
-    }
-
-
-def handle_install_wandb_extra() -> dict[str, Any]:
-    return wandb_install_manager.start()
-
-
-def handle_install_wandb_extra_status() -> dict[str, Any]:
-    return wandb_install_manager.get_status()
 
 
 # --------------------------------------------------------------------------- #

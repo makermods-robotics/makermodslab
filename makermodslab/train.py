@@ -217,15 +217,6 @@ class TrainingRequest(BaseModel):
     # configs persisted before F7 — all of them cloud→cloud — keep their meaning.
     resume_from_uploaded_checkpoint: bool = False
 
-    # Weights & Biases
-    wandb_enable: bool = False
-    wandb_project: str | None = None
-    wandb_entity: str | None = None
-    wandb_notes: str | None = None
-    wandb_run_id: str | None = None
-    wandb_mode: str | None = "online"
-    wandb_disable_artifact: bool = False
-
     # Environment / evaluation
     env_type: str | None = None
     env_task: str | None = None
@@ -416,20 +407,9 @@ def build_training_command(
     if request.job_name:
         cmd.extend(["--job_name", request.job_name])
 
-    # W&B
-    cmd.extend(["--wandb.enable", "true" if request.wandb_enable else "false"])
-    if request.wandb_enable:
-        if request.wandb_project:
-            cmd.extend(["--wandb.project", request.wandb_project])
-        if request.wandb_entity:
-            cmd.extend(["--wandb.entity", request.wandb_entity])
-        if request.wandb_notes:
-            cmd.extend(["--wandb.notes", request.wandb_notes])
-        if request.wandb_run_id:
-            cmd.extend(["--wandb.run_id", request.wandb_run_id])
-        if request.wandb_mode:
-            cmd.extend(["--wandb.mode", request.wandb_mode])
-        cmd.extend(["--wandb.disable_artifact", "true" if request.wandb_disable_artifact else "false"])
+    # W&B support is removed for now. Force it off explicitly so a preset or a
+    # resumed train_config.json that had wandb enabled can't turn it back on.
+    cmd.extend(["--wandb.enable", "false"])
 
     # Env
     if request.env_type:

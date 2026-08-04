@@ -27,7 +27,6 @@ from __future__ import annotations
 import contextlib
 import inspect
 import logging
-import netrc
 import os
 import re
 import shlex
@@ -42,7 +41,7 @@ from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
-from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
+from ..jobs import LogLine, TrainingMetrics, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makermodslab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
@@ -595,27 +594,6 @@ _TAIL_CLEAN_END_WAIT_S = 15.0
 _TAIL_RECONNECT_BACKOFF_S = 5.0
 
 
-def resolve_wandb_api_key() -> str | None:
-    """Look up the host's wandb API key for forwarding to a cloud job.
-
-    Checks WANDB_API_KEY first, then falls back to ~/.netrc (where
-    `wandb login` writes the key under machine api.wandb.ai). Returns None
-    if neither source has it; the caller decides how to surface that.
-    """
-    key = os.environ.get("WANDB_API_KEY")
-    if key:
-        return key
-    try:
-        rc = netrc.netrc()
-    except (FileNotFoundError, netrc.NetrcParseError, OSError):
-        return None
-    auth = rc.authenticators("api.wandb.ai")
-    if auth is None:
-        return None
-    _login, _account, password = auth
-    return password or None
-
-
 class HfCloudJobRunner:
     """Run a training as an HF Jobs job. Single-shot — instantiate per job."""
 
@@ -656,7 +634,6 @@ class HfCloudJobRunner:
         # Status.message at the terminal tick (e.g. "Job timeout"), so the
         # registry can surface it to the UI instead of a synthetic exit code.
         self._terminal_message: str | None = None
-        self._wandb_run_url: str | None = None
         # Count of log lines processed across (possibly multiple) SSE
         # connections, so reconnects skip the replayed prefix.
         self._lines_processed: int = 0
@@ -753,16 +730,6 @@ class HfCloudJobRunner:
         # HF_TOKEN goes via `secrets` (not `env`) so it doesn't show up in
         # the job's environment variable inspection / logs.
         secrets = {"HF_TOKEN": token}
-        if config.wandb_enable:
-            wandb_key = resolve_wandb_api_key()
-            if not wandb_key:
-                # ValueError so main.py maps it to a 400 + detail the UI shows.
-                raise ValueError(
-                    "WANDB_API_KEY not found on this machine. "
-                    "Run `wandb login` or export WANDB_API_KEY before launching "
-                    "cloud jobs with W&B enabled."
-                )
-            secrets["WANDB_API_KEY"] = wandb_key
 
         job = self._api.run_job(
             image=LEROBOT_IMAGE,
@@ -880,10 +847,6 @@ class HfCloudJobRunner:
                         if not stripped:
                             continue
                         parse_metrics_into(stripped, self._metrics, self._resume_total)
-                        if self._wandb_run_url is None:
-                            url = extract_wandb_run_url(stripped)
-                            if url is not None:
-                                self._wandb_run_url = url
                         log_line = LogLine(timestamp=time.time(), message=stripped)
                         if self._log_file is not None:
                             try:
@@ -1009,9 +972,6 @@ class HfCloudJobRunner:
 
     def hf_job_url(self) -> str | None:
         return self._hf_job_url
-
-    def wandb_run_url(self) -> str | None:
-        return self._wandb_run_url
 
     def terminal_stage(self) -> str | None:
         """The platform's terminal stage, or None while the job is live.
