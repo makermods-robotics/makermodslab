@@ -28,10 +28,8 @@ import {
   XCircle,
   ExternalLink,
   Pencil,
-  Play,
   FastForward,
   Download,
-  Sparkles,
   Upload,
 } from "lucide-react";
 import MetaRows from "@/components/library/MetaRows";
@@ -51,7 +49,6 @@ interface Props {
   job: JobRecord;
   onStop: (id: string) => void;
   onDelete: (id: string) => void;
-  onPlay: (job: JobRecord, step: number) => void;
   // Called after a successful rename so the parent can refetch the list.
   onRenamed?: () => void;
   // Runs this job was resumed from, nearest-parent first. Rendered nested and
@@ -93,18 +90,28 @@ const statePresentation: Record<
   },
 };
 
+/**
+ * Run-centric card for the jobs history: what a training is doing (state,
+ * progress, logs) and the run-shaped actions — stop, Continue / Resume,
+ * rename, delete.
+ *
+ * The model-shaped actions (Run, Fine-tune, Download) are NOT here: they
+ * operate on the weights a run produced, so they live on ModelCard in the
+ * model library. Continue / Resume stay because they are the opposite case —
+ * they need a run that stopped SHORT of its target, which by construction
+ * never gets a model card.
+ */
 const JobCard: React.FC<Props> = ({
   job,
   onStop,
   onDelete,
-  onPlay,
   onRenamed,
   ancestors = [],
 }) => {
   const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
-  const { openStudio, openJobMonitor } = useStudio();
+  const { openJobMonitor } = useStudio();
   const present = statePresentation[job.state];
   const Icon = present.Icon;
   const isRunning = job.state === "running";
@@ -327,12 +334,6 @@ const JobCard: React.FC<Props> = ({
   // Flat list for the dropdown (already newest-first).
   const checkpoints = lineageCheckpoints.map((c) => c.ckpt);
 
-  const handlePlay = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (selectedStep == null) return;
-    onPlay(selectedJob, selectedStep);
-  };
-
   // Resume — local Continue and cloud Resume alike — is for a run that stopped
   // SHORT of what it was configured to do: failed, interrupted or cancelled,
   // with a saved checkpoint below the step target.
@@ -427,76 +428,20 @@ const JobCard: React.FC<Props> = ({
     goToResume("hf_cloud");
   };
 
-  // Fine-tune: start a FRESH run whose weights are initialized from this
-  // model's checkpoint. Unlike Continue (which needs optimizer/step state and
-  // is local-only), fine-tuning is weights-only, so it works from ANY source
-  // that has a checkpoint — the user's own local and cloud runs included.
-  //
-  // The old gate also required runner === "imported". That was a workaround for
-  // MT2, where a hub step-ref was truncated to the bare repo id and a fine-tune
-  // of a cloud run silently trained from ROOT weights instead of the step the
-  // user picked; excluding cloud runs (and, collaterally, local ones) hid the
-  // bug rather than fixing it. jobs._resolve_finetune_pretrained_path now
-  // branches on all three runners and keeps a step-suffixed hub ref verbatim
-  // for the trainer's host to materialize, so there is nothing left to guard:
-  // gate on state and checkpoints only.
-  const canFinetune =
-    !isRunning && lineageCheckpoints.length > 0 && selectedStep != null;
-
-  // No dialog and no route jump: fine-tuning opens the Train panel's
-  // "Start a new training" form with the base skill (and the dropdown's
-  // checkpoint step) prefilled.
-  const handleFinetune = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (selectedStep == null) return;
-    openStudio("train", {
-      train: {
-        baseJobId: selectedJob.id,
-        baseStep: selectedStep,
-        baseName: jobDisplayName(selectedJob),
-      },
-    });
-  };
-
-  // A local checkpoint can be exported as a zip while training continues, so
-  // (unlike Continue) this doesn't gate on !isRunning.
-  const canDownload =
-    selectedJob.runner === "local" &&
-    lineageCheckpoints.length > 0 &&
-    selectedStep != null;
-
-  const handleDownload = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (selectedStep == null) return;
-    try {
-      const res = await fetchWithHeaders(
-        `${baseUrl}/jobs/${selectedJob.id}/checkpoints/${selectedStep}/download`,
-      );
-      if (!res.ok) {
-        toast({ title: "Download failed", variant: "destructive" });
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${jobDisplayName(selectedJob)}_step_${selectedStep}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      toast({
-        title: "Download failed",
-        description: String(err),
-        variant: "destructive",
-      });
-    }
-  };
+  // Fine-tune, Run and Download used to live here too. They act on the WEIGHTS
+  // a run produced, not on the run, so they moved to ModelCard in the model
+  // library — where a finished run is surfaced as the model it is. Continue /
+  // Resume stayed: they need a run that ended short of its target, and such a
+  // run never gets a model card.
 
   const showProgressBar = isRunning;
-  const showInferenceRow =
-    lineageCheckpoints.length > 0 && selectedStep != null;
+  // The checkpoint row exists to serve Continue / Resume: it says which
+  // checkpoint they will start from. Rendered whenever there is a resume action
+  // OR a real choice to make — never as a lone dropdown wired to nothing.
+  const showResumeRow =
+    lineageCheckpoints.length > 0 &&
+    selectedStep != null &&
+    (canContinue || canResumeCloud || lineageCheckpoints.length > 1);
 
   // Unified metadata rows (same format as the dataset/model cards). Imported
   // models keep their source path in the subtitle; trainings surface what they
@@ -655,14 +600,13 @@ const JobCard: React.FC<Props> = ({
             </div>
           </div>
         ) : null}
-        {showInferenceRow ? (
+        {showResumeRow ? (
           // Single-line action row: the checkpoint dropdown flexes and the
-          // buttons never wrap. Secondary actions (Continue / Resume /
-          // Download) are icon-only so the row fits a narrow grid card.
+          // buttons never wrap. Continue / Resume are icon-only so the row fits
+          // a narrow grid card.
           <div className="mt-auto flex items-center gap-1.5 pt-1">
             {/* A single checkpoint offers no choice — skip the dropdown and
-                free the row for the buttons (imported models are the common
-                case: one "latest" entry). */}
+                free the row for the buttons. */}
             {checkpoints.length > 1 ? (
               <div className="min-w-0 flex-1">
                 <CheckpointDropdown
@@ -673,14 +617,6 @@ const JobCard: React.FC<Props> = ({
                 />
               </div>
             ) : null}
-            <Button
-              size="sm"
-              onClick={handlePlay}
-              className="h-8 shrink-0 gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
-              aria-label="Run inference with this checkpoint"
-            >
-              <Play className="w-3.5 h-3.5" /> Run
-            </Button>
             {canContinue ? (
               <Button
                 size="sm"
@@ -705,40 +641,13 @@ const JobCard: React.FC<Props> = ({
                 <FastForward className="w-3.5 h-3.5" />
               </Button>
             ) : null}
-            {canFinetune ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleFinetune}
-                className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
-                aria-label="Fine-tune a new run from this model's weights"
-                title="Fine-tune a new run from this model's weights"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                {/* Label only when the card is wide enough for the whole row
-                    to stay on one line; the tooltip covers the narrow case. */}
-                <span className="hidden @[13rem]:inline">Fine-tune</span>
-              </Button>
-            ) : null}
-            {canDownload ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleDownload}
-                className="h-8 w-8 shrink-0 p-0 border-border text-muted-foreground hover:bg-muted"
-                aria-label="Download this checkpoint"
-                title="Download this checkpoint"
-              >
-                <Download className="w-3.5 h-3.5" />
-              </Button>
-            ) : null}
           </div>
         ) : null}
         {missingExtra ? (
-          // When there's no inference row this is the card's only CTA — pin it
+          // When there's no resume row this is the card's only CTA — pin it
           // to the footer like every other card's action row.
           <div
-            className={`flex items-center ${showInferenceRow ? "" : "mt-auto pt-1"}`}
+            className={`flex items-center ${showResumeRow ? "" : "mt-auto pt-1"}`}
           >
             <Button
               size="sm"

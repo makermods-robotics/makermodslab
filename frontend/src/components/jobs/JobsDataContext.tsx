@@ -23,7 +23,13 @@ import {
   stopJob,
 } from "@/lib/jobsApi";
 
-const LIMIT = 10;
+// How many registry records one page pulls. Raised from 10 because the model
+// library now surfaces finished runs as models too: at 10 a handful of recent
+// trainings could push older-but-still-deployable models off the page, and a
+// model missing from the list is a model the user can't search for or launch.
+// This is still a CAP, not "everything" — proper paging (or a server-side
+// filtered query for the deployable set) is future work.
+const LIMIT = 50;
 
 export const isJobActive = (j: JobRecord) =>
   j.state === "running" || j.checkpoint_count > 0;
@@ -34,6 +40,9 @@ interface JobsDataValue {
   localJobs: JobRecord[];
   trackedCloudJobs: JobRecord[];
   importedJobs: JobRecord[];
+  /** Successful trainings (local or cloud) with a checkpoint and no resumer —
+   * surfaced in the Models library so a finished run is deployable in place. */
+  deployableModels: JobRecord[];
   /** Hub jobs with no mirroring local record. */
   untrackedHubJobs: HubJob[];
   /** Uploaded hub model repos no job (cloud run or import) tracks. */
@@ -363,12 +372,32 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     [byId],
   );
 
+  // Finished trainings that are also deployable models: a successful run
+  // (local or cloud) that produced a checkpoint and hasn't been superseded by
+  // a resumer. The run *is* the model, so its real JobRecord is surfaced in
+  // the Models library; ModelCard gates its affordances off the record's own
+  // runner, so no separate record is minted. Failed/interrupted runs are
+  // excluded on purpose — those are runs to resume (JobCard's job), not models
+  // to deploy.
+  const deployableModels = useMemo(
+    () =>
+      jobs.filter(
+        (j) =>
+          (j.runner === "local" || j.runner === "hf_cloud") &&
+          j.state === "done" &&
+          j.checkpoint_count > 0 &&
+          !supersededIds.has(j.id),
+      ),
+    [jobs, supersededIds],
+  );
+
   const value = useMemo(
     () => ({
       jobs,
       localJobs,
       trackedCloudJobs,
       importedJobs,
+      deployableModels,
       untrackedHubJobs,
       untrackedHubModels,
       supersededIds,
@@ -387,6 +416,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       localJobs,
       trackedCloudJobs,
       importedJobs,
+      deployableModels,
       untrackedHubJobs,
       untrackedHubModels,
       supersededIds,

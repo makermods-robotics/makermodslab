@@ -10,7 +10,6 @@ import LibraryToolbar from "@/components/library/LibraryToolbar";
 import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
 import LibraryHeader from "@/components/library/LibraryHeader";
 import { SLIDE } from "@/components/studio/panel/primitives";
-import { useStudio } from "@/contexts/StudioContext";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import { isJobActive, useJobsData } from "./JobsDataContext";
@@ -62,15 +61,9 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     dismissHub,
   } = useJobsData();
 
-  // Run on a job card doesn't open a dialog: it prefills the Deploy panel's
-  // skill/checkpoint picker and focuses that panel.
-  const { openStudio } = useStudio();
-  const handlePlay = useCallback(
-    (job: JobRecord, step: number) =>
-      openStudio("deploy", { deploy: { source: "job", id: job.id, step } }),
-    [openStudio],
-  );
-
+  // Launching a run's weights is not a run action: Run lives on the model
+  // card in the Deploy panel's library, where a finished run appears as the
+  // model it produced. These rows are the run history.
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<JobsFilter>("all");
   // Lifted so the main grid can stop reserving its blank second row while
@@ -255,7 +248,6 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
                       job={job}
                       onStop={stop}
                       onDelete={remove}
-                      onPlay={handlePlay}
                       onRenamed={refresh}
                       ancestors={ancestorsOf(job)}
                     />
@@ -295,7 +287,6 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
                           job={job}
                           onStop={stop}
                           onDelete={remove}
-                          onPlay={handlePlay}
                           onRenamed={refresh}
                           ancestors={ancestorsOf(job)}
                         />
