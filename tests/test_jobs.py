@@ -3535,6 +3535,340 @@ def test_start_allows_resume_without_checkpoint_type_check(tmp_path) -> None:
     assert record.state == "running"
 
 
+# ---------------------------------------------------------------------------
+# Feature-space guard (MT44). Matching architectures are not enough: this
+# launch path is `--policy.type` + `--policy.pretrained_path`, so lerobot sizes
+# the policy from the DATASET and loads the checkpoint's weights strict=False.
+# A dof mismatch is loud-but-late for ACT and SILENT for SmolVLA/pi0 (they pad
+# to 32 dims), and renamed cameras are silent for every policy. Phase 1 refuses
+# those two; a changed camera COUNT or resolution is legitimate and only warns.
+#
+# Every Hub read is patched out: the checkpoint side through
+# jobs.hf_hub_download, the dataset side through jobs.read_dataset_features.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_CAMERAS = ("front", "wrist")
+
+
+def _feature_ckpt(
+    tmp_path: Path,
+    name: str,
+    *,
+    policy_type: str = "act",
+    state_dim: int = 6,
+    action_dim: int = 6,
+    cameras: tuple[str, ...] = _DEFAULT_CAMERAS,
+    height: int = 480,
+    width: int = 640,
+) -> Path:
+    """A pretrained_model dir whose config.json carries a real feature space.
+    Image shapes are CHW, as a policy checkpoint writes them."""
+    d = tmp_path / name
+    d.mkdir()
+    inputs: dict = {"observation.state": {"type": "STATE", "shape": [state_dim]}}
+    for cam in cameras:
+        inputs[f"observation.images.{cam}"] = {"type": "VISUAL", "shape": [3, height, width]}
+    (d / "config.json").write_text(
+        _json.dumps(
+            {
+                "type": policy_type,
+                "input_features": inputs,
+                "output_features": {"action": {"type": "ACTION", "shape": [action_dim]}},
+            }
+        )
+    )
+    return d
+
+
+def _dataset_features(
+    *,
+    state_dim: int = 6,
+    action_dim: int = 6,
+    cameras: tuple[str, ...] = _DEFAULT_CAMERAS,
+    height: int = 480,
+    width: int = 640,
+) -> dict:
+    """A dataset meta/info.json `features` map. Image shapes are HWC with named
+    axes — the opposite convention from the checkpoint above, which is exactly
+    what the guard has to normalise."""
+    features: dict = {
+        "action": {"dtype": "float32", "shape": [action_dim]},
+        "observation.state": {"dtype": "float32", "shape": [state_dim]},
+    }
+    for cam in cameras:
+        features[f"observation.images.{cam}"] = {
+            "dtype": "video",
+            "shape": [height, width, 3],
+            "names": ["height", "width", "channels"],
+        }
+    return features
+
+
+def _patch_dataset_features(features):
+    """Pin what the guard sees for the selected dataset (no Hub, no cache)."""
+    from unittest.mock import patch
+
+    return patch("makermodslab.jobs.read_dataset_features", lambda repo_id: features)
+
+
+def test_check_feature_space_rejects_single_arm_checkpoint_on_bimanual_dataset(tmp_path) -> None:
+    """The SILENT case MT44 is really about: SmolVLA pads dofs to 32, so a
+    6-dof checkpoint loads cleanly into a 12-dof run and trains garbage that is
+    recorded as a fine-tune. Both widths and both sources must be named."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "single_arm", policy_type="smolvla")
+    with (
+        _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)),
+        pytest.raises(ValueError) as exc,
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/bimanual_ds")
+    message = str(exc.value)
+    assert "6-dim robot state" in message
+    assert "12-dim robot state" in message
+    assert "user/bimanual_ds" in message
+    assert str(ckpt) in message
+
+
+def test_check_feature_space_rejects_bimanual_checkpoint_on_single_arm_dataset(tmp_path) -> None:
+    """The same refusal in the other direction — neither side is privileged."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "bimanual", state_dim=12, action_dim=12)
+    with (
+        _patch_dataset_features(_dataset_features(state_dim=6, action_dim=6)),
+        pytest.raises(ValueError) as exc,
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/single_ds")
+    message = str(exc.value)
+    assert "12-dim robot state" in message
+    assert "6-dim robot state" in message
+
+
+def test_check_feature_space_rejects_action_width_mismatch(tmp_path) -> None:
+    """State can agree while the action head doesn't (a checkpoint whose output
+    space was changed); the action side is checked on its own terms."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "wide_action", action_dim=12)
+    with (
+        _patch_dataset_features(_dataset_features()),
+        pytest.raises(ValueError, match="action"),
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/ds")
+
+
+def test_check_feature_space_rejects_renamed_cameras(tmp_path) -> None:
+    """Equal camera COUNT, different keys — the bimanual `left_` prefix case.
+    This is the refusal the whole rule exists for, and the generic-base
+    exemption below must never swallow it: `front`/`wrist` are real mounts."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "named_ckpt", cameras=("front", "wrist"))
+    with (
+        _patch_dataset_features(_dataset_features(cameras=("left_front", "left_wrist"))),
+        pytest.raises(ValueError) as exc,
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/renamed_ds")
+    message = str(exc.value)
+    assert "front, wrist" in message
+    assert "left_front, left_wrist" in message
+    # The two ways out the message must offer.
+    assert "base model" in message
+    assert "from scratch" in message
+
+
+def test_check_feature_space_exempts_a_generic_base_from_the_rename_rule(tmp_path, caplog) -> None:
+    """lerobot/smolvla_base ships camera1/camera2/camera3 — placeholders, not a
+    rig. Binding those to a named 3-camera dataset is THE canonical SmolVLA
+    fine-tune, so it warns instead of refusing."""
+    import logging
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(
+        tmp_path, "smolvla_base", policy_type="smolvla", cameras=("camera1", "camera2", "camera3")
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
+        _patch_dataset_features(_dataset_features(cameras=("front", "wrist", "top"))),
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/named_rig_ds")
+    assert "placeholder camera names" in caplog.text
+    assert "front, top, wrist" in caplog.text
+
+
+def test_check_feature_space_exemption_is_all_or_nothing(tmp_path) -> None:
+    """A checkpoint mixing a placeholder with a real mount (camera1 + wrist) is
+    not a generic base — it came off some rig — so the rename refusal stands."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "half_generic", cameras=("camera1", "wrist"))
+    with (
+        _patch_dataset_features(_dataset_features(cameras=("front", "top"))),
+        pytest.raises(ValueError, match="different names"),
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/other_rig_ds")
+
+
+def test_check_feature_space_accepts_matching_features(tmp_path) -> None:
+    """The ordinary fine-tune: same robot, same cameras, same resolution."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "matched")
+    with _patch_dataset_features(_dataset_features()):
+        _check_pretrained_feature_space(str(ckpt), "user/ds")
+
+
+def test_check_feature_space_allows_camera_count_change_with_a_warning(tmp_path, caplog) -> None:
+    """A dropped camera is a real sensor-suite change but a legitimate one
+    (ACT's backbone is shared), so phase 1 records it instead of refusing. The
+    warn-and-confirm UI is phase 2."""
+    import logging
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "two_cams", cameras=("front", "wrist"))
+    with (
+        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
+        _patch_dataset_features(_dataset_features(cameras=("front",))),
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/one_cam_ds")
+    assert "wrist" in caplog.text
+
+    # ...and the same for a camera the checkpoint never saw.
+    caplog.clear()
+    with (
+        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
+        _patch_dataset_features(_dataset_features(cameras=("front", "wrist", "top"))),
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/three_cam_ds")
+    assert "top" in caplog.text
+
+
+def test_check_feature_space_allows_resolution_change_with_a_warning(tmp_path, caplog) -> None:
+    """Resolution only moves ACT's token count and VRAM — allowed, but noted.
+    Also the one case that proves CHW (checkpoint) and HWC (dataset) shapes are
+    normalised before comparison rather than compared axis-for-axis."""
+    import logging
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "hi_res", height=480, width=640)
+    with (
+        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
+        _patch_dataset_features(_dataset_features(height=240, width=320)),
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/small_ds")
+    assert "480x640 -> 240x320" in caplog.text
+
+
+def test_check_feature_space_silent_when_either_side_is_unreadable(tmp_path) -> None:
+    """The discipline the neighbouring guards keep: an unverifiable pair must
+    not block a launch. None means "not established", never "fine"."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    bare = tmp_path / "no_config"
+    bare.mkdir()
+    with _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)):
+        _check_pretrained_feature_space(str(bare), "user/bimanual_ds")
+
+    # A config.json with no feature maps at all says nothing either.
+    typed_only = _flat_ckpt(tmp_path, "type_only", "act")
+    with _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)):
+        _check_pretrained_feature_space(str(typed_only), "user/bimanual_ds")
+
+    # Unreadable dataset meta (offline, or a repo we can't see).
+    ckpt = _feature_ckpt(tmp_path, "readable", state_dim=6)
+    with _patch_dataset_features(None):
+        _check_pretrained_feature_space(str(ckpt), "user/unknown_ds")
+
+
+def test_read_pretrained_feature_space_reads_a_step_ref(monkeypatch, tmp_path) -> None:
+    """Like the policy-type read, this must look inside the step it names —
+    and it must come out of the SAME config.json fetch, not a second one."""
+    from makermodslab.jobs import read_pretrained_feature_space
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(
+        _json.dumps(
+            {
+                "type": "smolvla",
+                "input_features": {"observation.state": {"type": "STATE", "shape": [6]}},
+                "output_features": {"action": {"type": "ACTION", "shape": [6]}},
+            }
+        )
+    )
+    seen: dict = {}
+
+    def fake_download(**kwargs):
+        seen.update(kwargs)
+        return str(cfg_file)
+
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", fake_download)
+
+    inputs, outputs = read_pretrained_feature_space("user/repo@checkpoints/000500")
+    assert inputs["observation.state"]["shape"] == [6]
+    assert outputs["action"]["shape"] == [6]
+    assert seen["filename"] == "checkpoints/000500/pretrained_model/config.json"
+
+
+def test_start_rejects_feature_space_mismatch_and_leaves_no_record(tmp_path) -> None:
+    """End to end: the refusal is synchronous, is a 400-shaped ValueError, and
+    happens before anything is materialized — no record, no output dir, no
+    prepare thread."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    ckpt = _feature_ckpt(tmp_path, "single_arm", policy_type="smolvla")
+    reg = JobRegistry(tmp_path / "root")
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/bimanual_ds",
+        policy_type="smolvla",
+        policy_pretrained_path=str(ckpt),
+    )
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)),
+        pytest.raises(ValueError, match="12-dim robot state"),
+    ):
+        reg.start(cfg, JobTarget(runner="local"))
+
+    assert reg.list(limit=10) == []
+    assert list(reg._output_root.iterdir()) == []
+    assert reg._prepare_threads == {}
+
+
+def test_start_allows_matching_feature_space(tmp_path) -> None:
+    """The guard must not become a new way for an ordinary fine-tune to fail:
+    a matching checkpoint/dataset pair still reaches the normal start path."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    ckpt = _feature_ckpt(tmp_path, "matched")
+    reg = JobRegistry(tmp_path / "root")
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        policy_pretrained_path=str(ckpt),
+    )
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner),
+        _patch_dataset_features(_dataset_features()),
+    ):
+        record = reg.start(cfg, JobTarget(runner="local"))
+    assert record.state == "running"
+
+
 # --- Deliberate stop vs genuine failure -------------------------------------
 #
 # Regression cover for the defect where every press of Stop landed in run
