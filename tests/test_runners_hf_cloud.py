@@ -548,7 +548,7 @@ def test_hf_job_timeout_constant_is_single_unit_and_covers_measured_runs() -> No
     compound "improvement" like "1d12h" would not survive that, so pin the shape
     as well as the budget: it must clear the longest run we have measured
     (SmolVLA 15k steps at 2.24 s/step on a10g-small ≈ 8.8h)."""
-    from makerlab.runners.hf_cloud import HF_JOB_TIMEOUT
+    from makermodslab.runners.hf_cloud import HF_JOB_TIMEOUT
 
     assert isinstance(HF_JOB_TIMEOUT, str)
     factors = {"s": 1, "m": 60, "h": 3600, "d": 3600 * 24}  # run_job's own table
@@ -613,8 +613,8 @@ class _FakeJobsApi:
 
 
 def _runner_with(api, tmp_path, *, stage=None):
-    from makerlab.jobs import TrainingMetrics
-    from makerlab.runners.hf_cloud import HfCloudJobRunner
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
 
     runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "a10g-small")
     runner._api = api

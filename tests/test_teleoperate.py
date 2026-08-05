@@ -618,7 +618,7 @@ def test_force_disconnect_partial_releases_bus_when_a_later_camera_never_opened(
     raise in that state, leaking the bus (next attempt: "FeetechMotorsBus is
     already connected") and the opened camera's read thread.
     """
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     bus = _FakeConnectableBus(port="COM_FOLLOWER")
     front = _FakeCamera("front", connected=True)
@@ -641,7 +641,7 @@ def test_lerobot_disconnect_cannot_release_a_partially_connected_robot() -> None
     """
     from lerobot.utils.decorators import check_if_not_connected
     from lerobot.utils.errors import DeviceNotConnectedError
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     class _LeRobotShapedRobot:
         def __init__(self) -> None:
@@ -676,7 +676,7 @@ def test_lerobot_disconnect_cannot_release_a_partially_connected_robot() -> None
 
 def test_force_disconnect_partial_releases_bus_despite_a_wedged_camera() -> None:
     """A camera that fails to release must not strand the serial port."""
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     bus = _FakeConnectableBus(port="COM_FOLLOWER")
     wedged = _FakeCamera("front", connected=True, failing=True)
@@ -780,7 +780,7 @@ def test_force_disconnect_partial_releases_vanished_cameras_capture_handle() -> 
 
 
 def test_force_disconnect_partial_is_idempotent_and_handles_bimanual_and_none() -> None:
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     # Already fully disconnected: no raise, no bus disconnect call.
     bus = _FakeConnectableBus(connected=False)

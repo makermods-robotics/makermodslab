@@ -441,7 +441,7 @@ def test_parse_metrics_into_uses_the_last_tqdm_frame_of_a_batched_line(
     """A batched line's LAST tqdm frame is the one the appended INFO line belongs
     to. Taking the first understated every step above 1000 by log_freq−1 (a real
     run charted 8201 where the true step was 8250)."""
-    from makerlab.jobs import TrainingMetrics, parse_metrics_into
+    from makermodslab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     parse_metrics_into(f"{burst}{info}", m, resume_total)
@@ -457,8 +457,8 @@ def test_read_metrics_history_of_a_batched_resumed_log(tmp_path) -> None:
     """End-to-end on the shape a resumed cloud run actually writes: batched tqdm
     bursts + abbreviated step tokens land on the true global steps (multiples of
     log_freq), not log_freq−1 below them."""
-    from makerlab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
+    from makermodslab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path)
     root = reg._output_root
@@ -1359,8 +1359,8 @@ def test_cloud_start_passes_resume_total_to_the_runner(tmp_path) -> None:
     resume-relative progress (observed: 4,251/11,000 instead of 8,251/15,000)."""
     from unittest.mock import MagicMock, patch
 
-    from makerlab.jobs import JobRegistry, JobTarget
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path / "root")
     cfg = TrainingRequest(
@@ -1385,10 +1385,10 @@ def test_cloud_start_passes_resume_total_to_the_runner(tmp_path) -> None:
 
     with (
         patch(
-            "makerlab.datasets.get_hub_status",
+            "makermodslab.datasets.get_hub_status",
             return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
         ),
-        patch("makerlab.runners.hf_cloud.HfCloudJobRunner", _factory),
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", _factory),
     ):
         reg.start(cfg, target)
 
@@ -1401,7 +1401,7 @@ def test_cloud_reattach_passes_resume_total_to_the_runner(monkeypatch, tmp_path)
     remaining window mid-run."""
     from unittest.mock import MagicMock, patch
 
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     root = tmp_path / "root"
     job_dir = root / "cloud-job"
@@ -1436,7 +1436,7 @@ def test_cloud_reattach_passes_resume_total_to_the_runner(monkeypatch, tmp_path)
     # No watchdog: this test is about what _load_from_disk hands the runner, and
     # the tick would poll the (stubbed) runner and the Hub for checkpoints.
     monkeypatch.setattr(JobRegistry, "_start_watchdog", lambda self: None)
-    with patch("makerlab.runners.hf_cloud.HfCloudJobRunner", _factory):
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", _factory):
         JobRegistry(root)
 
     assert seen and seen[0][-1] == 15000
@@ -3236,8 +3236,8 @@ def test_start_allows_matching_feature_space(tmp_path) -> None:
 
 
 def _finetune_source(policy_type: str, runner: str = "imported"):
-    from makerlab.jobs import JobRecord
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
 
     return JobRecord(
         id="src-1",
@@ -3251,7 +3251,7 @@ def _finetune_source(policy_type: str, runner: str = "imported"):
 
 
 def test_check_finetune_policy_type_rejects_mismatch() -> None:
-    from makerlab.jobs import _check_finetune_policy_type
+    from makermodslab.jobs import _check_finetune_policy_type
 
     with pytest.raises(ValueError, match="smolvla") as exc:
         _check_finetune_policy_type(_finetune_source("smolvla"), "act")
@@ -3260,7 +3260,7 @@ def test_check_finetune_policy_type_rejects_mismatch() -> None:
 
 
 def test_check_finetune_policy_type_accepts_match() -> None:
-    from makerlab.jobs import _check_finetune_policy_type
+    from makermodslab.jobs import _check_finetune_policy_type
 
     _check_finetune_policy_type(_finetune_source("smolvla"), "smolvla")
 
@@ -3269,7 +3269,7 @@ def test_check_finetune_policy_type_ignores_unknown_source_type() -> None:
     """register_imported records the "model" placeholder when a checkpoint's
     config.json can't be read — that says nothing about the weights, so it must
     not block a fine-tune."""
-    from makerlab.jobs import _check_finetune_policy_type
+    from makermodslab.jobs import _check_finetune_policy_type
 
     _check_finetune_policy_type(_finetune_source("model"), "act")
 
@@ -3280,8 +3280,8 @@ def test_finetune_start_rejects_contradicting_policy_type(tmp_path) -> None:
     launching an ACT run from smolvla weights. No record is created."""
     from unittest.mock import MagicMock, patch
 
-    from makerlab.jobs import JobRegistry, JobTarget
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
 
     # A flat imported checkpoint dir whose config.json names the architecture.
     src = tmp_path / "smolvla_ckpt"
@@ -3298,7 +3298,7 @@ def test_finetune_start_rejects_contradicting_policy_type(tmp_path) -> None:
         finetune_from_job_id=source.id,
     )
     with (
-        patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
         pytest.raises(ValueError, match="smolvla"),
     ):
         reg.start(cfg, JobTarget(runner="local"))
@@ -3311,8 +3311,8 @@ def test_finetune_start_accepts_matching_policy_type(tmp_path) -> None:
     source checkpoint into --policy.pretrained_path."""
     from unittest.mock import MagicMock, patch
 
-    from makerlab.jobs import JobRegistry, JobTarget
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
 
     src = tmp_path / "smolvla_ckpt"
     src.mkdir()
@@ -3328,7 +3328,7 @@ def test_finetune_start_accepts_matching_policy_type(tmp_path) -> None:
     )
     fake_runner = MagicMock()
     fake_runner.pid.return_value = 4242
-    with patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
         record = reg.start(cfg, JobTarget(runner="local"))
 
     assert record.config.policy_type == "smolvla"
@@ -3401,7 +3401,7 @@ def _flat_ckpt(tmp_path: Path, name: str, policy_type: str) -> Path:
 
 
 def test_read_pretrained_policy_type_reads_local_config(tmp_path) -> None:
-    from makerlab.jobs import read_pretrained_policy_type
+    from makermodslab.jobs import read_pretrained_policy_type
 
     ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
     assert read_pretrained_policy_type(str(ckpt)) == "smolvla"
@@ -3412,7 +3412,7 @@ def test_read_pretrained_policy_type_none_when_unreadable(tmp_path) -> None:
     "not established", which callers must not treat as a clean result."""
     from unittest.mock import patch
 
-    from makerlab.jobs import read_pretrained_policy_type
+    from makermodslab.jobs import read_pretrained_policy_type
 
     bare = tmp_path / "no_config"
     bare.mkdir()
@@ -3424,12 +3424,12 @@ def test_read_pretrained_policy_type_none_when_unreadable(tmp_path) -> None:
     assert read_pretrained_policy_type(str(blank)) is None
 
     # Not a directory ⇒ treated as a Hub repo id; a failed download is silent.
-    with patch("makerlab.jobs.hf_hub_download", side_effect=OSError("offline")):
+    with patch("makermodslab.jobs.hf_hub_download", side_effect=OSError("offline")):
         assert read_pretrained_policy_type("someone/nope") is None
 
 
 def test_check_pretrained_policy_type_rejects_mismatch(tmp_path) -> None:
-    from makerlab.jobs import _check_pretrained_policy_type
+    from makermodslab.jobs import _check_pretrained_policy_type
 
     ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
     with pytest.raises(ValueError, match="smolvla") as exc:
@@ -3440,7 +3440,7 @@ def test_check_pretrained_policy_type_rejects_mismatch(tmp_path) -> None:
 def test_check_pretrained_policy_type_silent_when_matching_or_unknown(tmp_path) -> None:
     """A match passes, and so does an unverifiable checkpoint — an unreadable
     source must not block a launch, only an actual contradiction may."""
-    from makerlab.jobs import _check_pretrained_policy_type
+    from makermodslab.jobs import _check_pretrained_policy_type
 
     ckpt = _flat_ckpt(tmp_path, "act_ckpt", "act")
     _check_pretrained_policy_type(str(ckpt), "act")
@@ -3457,8 +3457,8 @@ def test_start_rejects_direct_pretrained_path_mismatch(tmp_path) -> None:
     be created."""
     from unittest.mock import MagicMock, patch
 
-    from makerlab.jobs import JobRegistry, JobTarget
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
 
     ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
     reg = JobRegistry(tmp_path / "root")
@@ -3469,7 +3469,7 @@ def test_start_rejects_direct_pretrained_path_mismatch(tmp_path) -> None:
         policy_pretrained_path=str(ckpt),
     )
     with (
-        patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
         pytest.raises(ValueError, match="smolvla"),
     ):
         reg.start(cfg, JobTarget(runner="local"))
@@ -3484,8 +3484,8 @@ def test_start_rejects_finetune_when_record_type_is_placeholder(tmp_path) -> Non
     check must still catch the mismatch."""
     from unittest.mock import MagicMock, patch
 
-    from makerlab.jobs import JobRegistry, JobTarget
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
 
     src = tmp_path / "mystery_ckpt"
     src.mkdir()
@@ -3502,7 +3502,7 @@ def test_start_rejects_finetune_when_record_type_is_placeholder(tmp_path) -> Non
         finetune_from_job_id=source.id,
     )
     with (
-        patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
         pytest.raises(ValueError, match="smolvla"),
     ):
         reg.start(cfg, JobTarget(runner="local"))
@@ -3515,8 +3515,8 @@ def test_start_allows_resume_without_checkpoint_type_check(tmp_path) -> None:
     refused)."""
     from unittest.mock import MagicMock, patch
 
-    from makerlab.jobs import JobRegistry, JobTarget
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
 
     ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
     reg = JobRegistry(tmp_path / "root")
@@ -3530,7 +3530,7 @@ def test_start_allows_resume_without_checkpoint_type_check(tmp_path) -> None:
     )
     fake_runner = MagicMock()
     fake_runner.pid.return_value = 99
-    with patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
         record = reg.start(cfg, JobTarget(runner="local"))
     assert record.state == "running"
 
@@ -3955,11 +3955,11 @@ def _start_with(reg, runner, **cfg_kw):
     """Start a job whose runner is `runner`, via the real JobRegistry.start."""
     from unittest.mock import patch
 
-    from makerlab.jobs import JobTarget
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
 
     cfg = TrainingRequest(dataset_repo_id="user/ds", **cfg_kw)
-    with patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: runner):
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: runner):
         return reg.start(cfg, JobTarget(runner="local"))
 
 
@@ -4002,7 +4002,7 @@ def _stop_and_finalise(reg, job_id):
     ],
 )
 def test_classify_terminal_state_table(rc, stop_requested, stage, expected) -> None:
-    from makerlab.jobs import classify_terminal_state
+    from makermodslab.jobs import classify_terminal_state
 
     assert (
         classify_terminal_state(returncode=rc, stop_requested=stop_requested, terminal_stage=stage)
@@ -4016,7 +4016,7 @@ def test_classify_terminal_state_table(rc, stop_requested, stage, expected) -> N
 def test_stop_records_intent_before_signalling(tmp_path) -> None:
     """The intent must be on the registry before the signal leaves, or the
     watchdog can finalise a stop it never heard about."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     seen: list[bool] = []
@@ -4035,7 +4035,7 @@ def test_stop_records_intent_before_signalling(tmp_path) -> None:
 
 
 def test_local_stop_is_interrupted_not_failed(tmp_path) -> None:
-    from makerlab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+    from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
@@ -4052,7 +4052,7 @@ def test_local_stop_is_interrupted_not_failed(tmp_path) -> None:
 def test_local_stop_of_trainer_that_catches_sigterm_is_still_interrupted(tmp_path) -> None:
     """A trainer with its own SIGTERM handler exits 1, not -15. Narrowing
     `interrupted` to signal-shaped codes would leave the bug unfixed here."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     record = _start_with(reg, _FakeSignallingRunner(on_stop_code=1))
@@ -4062,7 +4062,7 @@ def test_local_stop_of_trainer_that_catches_sigterm_is_still_interrupted(tmp_pat
 
 def test_crash_without_a_stop_stays_failed(tmp_path) -> None:
     """The unchanged path: nothing asked this to stop, so it failed."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeSignallingRunner()
@@ -4079,7 +4079,7 @@ def test_crash_without_a_stop_stays_failed(tmp_path) -> None:
 def test_clean_finish_racing_a_stop_stays_done(tmp_path) -> None:
     """rc == 0 means the trainer ran its own shutdown to completion; a stop
     that arrived too late must not relabel it."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeSignallingRunner(on_stop_code=0)
@@ -4094,7 +4094,7 @@ def test_crash_before_the_signal_landed_is_not_laundered(tmp_path) -> None:
     """The process died on its own between the intent and the signal, so
     LocalJobRunner.stop() short-circuits and reports it signalled nothing.
     The nonzero code is the process's own: still a failure."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeSignallingRunner(signals=False)
@@ -4111,7 +4111,7 @@ def test_crash_before_the_signal_landed_is_not_laundered(tmp_path) -> None:
 def test_runner_without_the_hook_still_gets_interrupted(tmp_path) -> None:
     """A runner that can't say whether it signalled abstains rather than
     vetoing — recorded intent alone is enough."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeRunner(on_stop_code=1)
@@ -4123,7 +4123,7 @@ def test_runner_without_the_hook_still_gets_interrupted(tmp_path) -> None:
 
 def test_stop_intent_is_dropped_after_finalisation(tmp_path) -> None:
     """No stale intent may linger to mislabel anything later."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
@@ -4135,7 +4135,7 @@ def test_stop_intent_is_dropped_after_finalisation(tmp_path) -> None:
 def test_interrupted_state_survives_a_restart(tmp_path) -> None:
     """The classification is persisted, not just in-memory — the user's
     history has to still read `interrupted` on the next launch."""
-    from makerlab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+    from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
 
     root = tmp_path / "root"
     reg = JobRegistry(root)
@@ -4149,7 +4149,7 @@ def test_interrupted_state_survives_a_restart(tmp_path) -> None:
 
 
 def test_stop_rejects_an_already_finished_job_without_recording_intent(tmp_path) -> None:
-    from makerlab.jobs import JobNotRunningError, JobRegistry
+    from makermodslab.jobs import JobNotRunningError, JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeSignallingRunner()
@@ -4171,7 +4171,7 @@ def test_cloud_cancel_is_interrupted(tmp_path) -> None:
     """The reported case: a stopped HF Jobs run. returncode() collapses every
     non-COMPLETED stage to 1, so before this it read `failed` + "Subprocess
     exited with code 1" and looked like a broken model."""
-    from makerlab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+    from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     record = _start_with(reg, _FakeStagedRunner(on_stop_stage="CANCELED"))
@@ -4184,7 +4184,7 @@ def test_cloud_cancel_is_interrupted(tmp_path) -> None:
 def test_cloud_job_that_completed_before_the_cancel_stays_done(tmp_path) -> None:
     """The poller saw COMPLETED first; _set_terminal is idempotent so our
     cancel doesn't overwrite it, and the run keeps its success."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeStagedRunner(on_stop_stage="CANCELED")
@@ -4200,7 +4200,7 @@ def test_cloud_job_that_completed_before_the_cancel_stays_done(tmp_path) -> None
 def test_cloud_job_that_errored_before_the_cancel_stays_failed(tmp_path) -> None:
     """A real crash that merely coincided with the stop must not be laundered
     into `interrupted` — that would hide a genuine failure."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeStagedRunner(on_stop_stage="CANCELED", message="boom")
@@ -4216,7 +4216,7 @@ def test_cloud_job_that_errored_before_the_cancel_stays_failed(tmp_path) -> None
 def test_cloud_timeout_stays_failed_and_keeps_its_platform_message(tmp_path) -> None:
     """HF Jobs' 'Job timeout' arrives as an ERROR stage with a message. It is
     a failure, not a user stop, and the message must still reach the UI."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeStagedRunner(message="Job timeout")
@@ -4230,11 +4230,11 @@ def test_cloud_timeout_stays_failed_and_keeps_its_platform_message(tmp_path) -> 
     assert final.error_message == "Job timeout"
 
 
-def test_cloud_cancel_from_outside_makerlab_stays_failed(tmp_path) -> None:
+def test_cloud_cancel_from_outside_makermodslab_stays_failed(tmp_path) -> None:
     """A CANCELED we never asked for (HF web UI, platform-side kill). HF's
     stage doesn't say who asked, so this is left alone rather than guessed
     into `interrupted`. Documented limitation, asserted so it's a choice."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     runner = _FakeStagedRunner()
@@ -4252,7 +4252,7 @@ def test_cloud_cancel_from_outside_makerlab_stays_failed(tmp_path) -> None:
 def _tailing_runner(pid, monkeypatch, *, alive=True):
     """A TailingJobRunner over a fake pid; os.kill is stubbed so no real
     process is signalled."""
-    from makerlab import jobs as jobs_mod
+    from makermodslab import jobs as jobs_mod
 
     state = {"alive": alive}
 

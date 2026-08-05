@@ -1878,7 +1878,7 @@ def test_format_cameras_arg_reanchors_index_by_unique_id(monkeypatch: pytest.Mon
     # order; a stored index predating a replug/port swap must be re-anchored
     # by uniqueID before it's baked into the CLI args. `unique_id` itself is
     # consumed here — lerobot's OpenCVCameraConfig doesn't know the key.
-    from makerlab import rollout
+    from makermodslab import rollout
 
     monkeypatch.setattr(rollout.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(
@@ -1897,7 +1897,7 @@ def test_format_cameras_arg_reanchors_index_by_unique_id(monkeypatch: pytest.Mon
 
 
 def test_format_cameras_arg_raises_when_camera_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from makerlab import rollout
+    from makermodslab import rollout
 
     monkeypatch.setattr(rollout.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(rollout, "list_cameras_fresh", lambda: [{"index": 0, "unique_id": "0xb"}])

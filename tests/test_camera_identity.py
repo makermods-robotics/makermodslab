@@ -1,4 +1,4 @@
-"""Unit tests for makerlab/camera_identity.py — uniqueID → cv2 index re-anchoring.
+"""Unit tests for makermodslab/camera_identity.py — uniqueID → cv2 index re-anchoring.
 
 Pure-logic tests only: the AVFoundation enumerations (in-process and fresh
 subprocess) are monkeypatched, never touched. What matters is the resolution
@@ -19,21 +19,21 @@ def _enum(*pairs: tuple[int, str]) -> list[dict]:
 
 
 def test_resolve_in_enumeration_no_unique_id_trusts_fallback() -> None:
-    from makerlab.camera_identity import resolve_in_enumeration
+    from makermodslab.camera_identity import resolve_in_enumeration
 
     assert resolve_in_enumeration(_enum((0, "0xa"), (1, "0xb")), None, 1) == 1
     assert resolve_in_enumeration(_enum((0, "0xa")), "", 0) == 0
 
 
 def test_resolve_in_enumeration_unavailable_list_trusts_fallback() -> None:
-    from makerlab.camera_identity import resolve_in_enumeration
+    from makermodslab.camera_identity import resolve_in_enumeration
 
     assert resolve_in_enumeration(None, "0xa", 3) == 3
     assert resolve_in_enumeration([], "0xa", 3) == 3
 
 
 def test_resolve_in_enumeration_reanchors_to_enumerated_index() -> None:
-    from makerlab.camera_identity import resolve_in_enumeration
+    from makermodslab.camera_identity import resolve_in_enumeration
 
     # The stored index says 0, but the device now enumerates at 1 (a twin
     # camera swap — the exact failure that recorded crossed front/wrist
@@ -42,20 +42,20 @@ def test_resolve_in_enumeration_reanchors_to_enumerated_index() -> None:
 
 
 def test_resolve_in_enumeration_absent_device_returns_none() -> None:
-    from makerlab.camera_identity import resolve_in_enumeration
+    from makermodslab.camera_identity import resolve_in_enumeration
 
     assert resolve_in_enumeration(_enum((0, "0xa")), "0xdead", 0) is None
 
 
 def test_resolve_cv2_index_identity_unavailable_trusts_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    from makerlab import camera_identity
+    from makermodslab import camera_identity
 
     monkeypatch.setattr(camera_identity, "list_cameras_in_process", lambda: None)
     assert camera_identity.resolve_cv2_index("0xa", 2) == 2
 
 
 def test_resolve_cv2_index_reanchors_and_flags_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from makerlab import camera_identity
+    from makermodslab import camera_identity
 
     monkeypatch.setattr(camera_identity, "list_cameras_in_process", lambda: _enum((0, "0xb"), (1, "0xa")))
     assert camera_identity.resolve_cv2_index("0xa", 0) == 1
@@ -65,7 +65,7 @@ def test_resolve_cv2_index_reanchors_and_flags_absent(monkeypatch: pytest.Monkey
 
 
 def test_resolve_fresh_index_non_macos_never_enumerates(monkeypatch: pytest.MonkeyPatch) -> None:
-    from makerlab import camera_identity
+    from makermodslab import camera_identity
 
     def boom() -> list[dict]:
         raise AssertionError("fresh enumeration must not run off-macOS")
@@ -76,7 +76,7 @@ def test_resolve_fresh_index_non_macos_never_enumerates(monkeypatch: pytest.Monk
 
 
 def test_resolve_fresh_index_reanchors_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
-    from makerlab import camera_identity
+    from makermodslab import camera_identity
 
     monkeypatch.setattr(camera_identity.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(camera_identity, "list_cameras_fresh", lambda: _enum((0, "0xb"), (1, "0xa")))
