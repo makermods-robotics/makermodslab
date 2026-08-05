@@ -9,6 +9,8 @@
  * whose distinguishing text sits at the end.
  */
 
+import { validateModelName } from "@/lib/datasetName";
+
 /**
  * Shorten `text` from the MIDDLE, keeping both ends readable.
  *
@@ -84,4 +86,36 @@ const DEDUPE_DATE_SUFFIX_RE = /^\d{4}-(\d{2}-\d{2}(?: \d{2}:\d{2})?)$/;
 export function displayDedupeSuffix(suffix: string): string {
   const match = DEDUPE_DATE_SUFFIX_RE.exec(suffix);
   return match ? match[1] : suffix;
+}
+
+// The session stamp a recording appends to the dataset name the user typed
+// ("eraser_stack" -> "eraser_stack_20260718_175437"). Peeling it recovers the
+// TASK the dataset captured, which is the name the model trained on it wants.
+const DATASET_SESSION_STAMP_RE = /_\d{8}_\d{6}$/;
+
+// The run stamp a training run appends (jobs._named_job_id /
+// _generate_job_id — mirrors utils/naming.py's RUN_REPO_TIMESTAMP_RE). Peeled
+// for the same reason when the proposal comes from an existing model.
+const RUN_TIMESTAMP_RE = /_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/;
+
+/**
+ * Propose a model name from what the run is ABOUT — its dataset's repo id, or
+ * the model it fine-tunes from — so accepting the default costs no keystrokes.
+ *
+ * Peels the namespace and whichever machine stamp the source carries, leaving
+ * the task stem: `makermods/eraser_stack_20260718_175437` -> `eraser_stack`,
+ * `makermods/eraser_stack_2026-08-04_11-02-19` -> `eraser_stack`.
+ *
+ * Returns "" when the result wouldn't be a legal model name — a display title
+ * like "SMOLVLA · user/ds" or a hand-typed "smolvla 5k" is a label, not an
+ * identifier. A prefill that the form would immediately mark invalid is worse
+ * than an empty field, so the caller falls back (or leaves it to the user).
+ */
+export function proposeModelName(source: string): string {
+  const path = source.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  const basename = path.split("/").pop() ?? "";
+  const stem = basename
+    .replace(DATASET_SESSION_STAMP_RE, "")
+    .replace(RUN_TIMESTAMP_RE, "");
+  return validateModelName(stem) === null ? stem : "";
 }

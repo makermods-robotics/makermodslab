@@ -32,6 +32,8 @@ import {
 import { useDatasets } from "@/hooks/useDatasets";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import { getDatasetInfo } from "@/lib/replayApi";
+import { validateModelName } from "@/lib/datasetName";
+import { proposeModelName } from "@/lib/modelNames";
 
 // Passed by the "Continue" button on a completed local job, or the "Resume"
 // button on a cloud run that ended before its step target.
@@ -330,10 +332,16 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       .finally(() => setHardwareLoading(false));
   }, [baseUrl, fetchWithHeaders, auth.status]);
 
+  // Whether the user has touched the Model name. Once they have, the prefill
+  // below stops writing — swapping the dataset must never overwrite a name
+  // someone typed. A ref, not state: nothing renders from it.
+  const nameEdited = useRef(false);
+
   const updateConfig = <T extends keyof TrainingConfig>(
     key: T,
     value: TrainingConfig[T],
   ) => {
+    if (key === "job_name") nameEdited.current = true;
     // policy_type is controlled by the caller; route edits (EssentialsCard's
     // dropdown) back up. dataset_repo_id is controlled + display-only, but
     // guard it too so a stray write can't desync.
@@ -345,12 +353,40 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     setTrainingConfig((prev) => ({ ...prev, [key]: value }));
   };
 
+  // Prefill the Model name from what the run is ABOUT, so the required field
+  // costs zero keystrokes when the obvious name is the right one: the dataset's
+  // task stem for a fresh run ("makermods/eraser_stack_20260718_175437" →
+  // "eraser_stack"), the source model's stem for a fine-tune (a continuation of
+  // that skill on new data, so its name is the better starting point). Re-runs
+  // whenever the selection changes — a name proposed for the dataset the user
+  // has since swapped away from is worse than no proposal — but only while the
+  // field is untouched. A resume never proposes: it keeps the parent run's
+  // identity and the field is locked (see EssentialsCard).
+  const finetuneSourceName = finetuneSeed?.name;
+  useEffect(() => {
+    if (resumeSeed || nameEdited.current) return;
+    const proposed =
+      (finetuneSourceName ? proposeModelName(finetuneSourceName) : "") ||
+      proposeModelName(controlledDatasetRepoId);
+    setTrainingConfig((prev) =>
+      prev.job_name === proposed ? prev : { ...prev, job_name: proposed },
+    );
+  }, [controlledDatasetRepoId, finetuneSourceName, resumeSeed]);
+
   // Cloud training runs from the Hub, so a dataset that only exists in this
   // machine's local cache must be uploaded first. We read the chosen dataset's
   // `source` from the /datasets listing (already carries it) and, for a
   // local-only + cloud combo, chain an upload before the job launches.
   const { datasets } = useDatasets();
   const datasetRepoId = config.dataset_repo_id.trim();
+  // null when the model name is usable; a message otherwise (incl. empty).
+  // Mirrors the backend's validate_model_name — a name that fails here is a 400
+  // there, so gating Start on it turns a server refusal into a visible field.
+  // A resume has no name to choose (it keeps the parent's identity), so the
+  // requirement doesn't apply.
+  const modelNameError = resumeSeed
+    ? null
+    : validateModelName(config.job_name || "");
   const isCloud = config.target.runner === "hf_cloud";
   const selectedDatasetItem = datasets.find((d) => d.repo_id === datasetRepoId);
   // Only "local" needs uploading; "both"/"hub" already exist on the Hub, and an
@@ -467,6 +503,19 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
 
+    // The name is the run's identity, so it is required and must be a legal
+    // repo-id segment — the same gate CollectPanel puts in front of a
+    // recording. The Start button is already disabled on this condition; this
+    // catches the keyboard/enter path and states the reason.
+    if (modelNameError) {
+      toast({
+        title: "Invalid model name",
+        description: modelNameError,
+        variant: "destructive",
+      });
+      return;
+    }
+
     // Pre-flight: smolvla/pi0/diffusion need an optional package installed
     // locally. Catch it here with a one-click installer instead of a buried
     // ImportError after the job has already started. Cloud jobs run in their
@@ -556,13 +605,14 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     isStarting ||
     uploading ||
     !datasetRepoId ||
+    modelNameError != null ||
     localBlocked ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
     uploadBlockedOffline ||
     checkpointUploadBlockedOffline ||
     resumeStepError != null;
-  const startTooltip = localBlocked
+  const blockedTooltip = localBlocked
     ? "Another local training is already running"
     : targetRequiresAuth && !authenticated
       ? "Log in to Hugging Face to use cloud compute"
@@ -573,6 +623,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           : checkpointUploadBlockedOffline
             ? "Offline mode is on — the checkpoint can't be uploaded to the Hub"
             : undefined;
+  // The name field can sit far above a portaled Start button (the studio panel
+  // pins it at the panel's foot), so its reason travels with the button — and
+  // it takes precedence: an unnamed run can't start whatever else is true.
+  const startTooltip = modelNameError ?? blockedTooltip;
 
   return (
     <div className="w-full">

@@ -20,6 +20,18 @@ export function validateDatasetName(name: string): string | null {
 }
 
 /**
+ * Validate a user-chosen MODEL name, mirroring backend `validate_model_name`
+ * (makermodslab/utils/config.py). Same segment rules as a dataset name, because
+ * the name lands in the same kind of place: one path segment of the repo the
+ * run publishes to (`<name>_<timestamp>`). Only the wording differs, so the
+ * message names the thing the user typed. Returns null when `name` is valid.
+ */
+export function validateModelName(name: string): string | null {
+  const error = validateDatasetName(name);
+  return error === null ? null : error.replace("Dataset name", "Model name");
+}
+
+/**
  * Validate a full dataset id: a bare name, or "namespace/name" (one slash).
  * Mirrors backend `validate_dataset_repo_id`. Use for fields that may carry a
  * namespace (e.g. the merge output). Returns an error message, or null if valid.

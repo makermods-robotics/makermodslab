@@ -42,7 +42,7 @@ from tqdm.auto import tqdm as _base_tqdm
 
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
 from .train import TrainingRequest
-from .utils.config import is_valid_robot_name
+from .utils.config import is_valid_robot_name, validate_model_name
 from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
 from .utils.naming import (
     dedupe_display_names,
@@ -1207,52 +1207,6 @@ def _check_finetune_policy_type(source: JobRecord, requested: str) -> None:
     )
 
 
-def read_pretrained_config(pretrained_path: str) -> dict[str, Any] | None:
-    """Read the whole ``config.json`` of the checkpoint at
-    ``--policy.pretrained_path``.
-
-    `pretrained_path` is whatever the run will be started from: an absolute
-    local ``pretrained_model`` directory, a Hub repo id whose ROOT holds the
-    model, or a step-suffixed hub ref ('repo@checkpoints/<step_dir>') that has
-    not been materialized yet — the checks that use this run BEFORE the
-    download, so that a contradicting pair is refused without first pulling
-    gigabytes.
-
-    Only the checkpoint's ``config.json`` is fetched in every case (a few KB).
-    Every field the preflight needs — the architecture ``type`` and the
-    ``input_features``/``output_features`` maps — comes out of this ONE read,
-    so adding a feature-space guard beside the policy-type one costs no extra
-    fetch beyond huggingface_hub's own cache lookup.
-
-    Returns the parsed object, or None when it can't be read — missing file,
-    malformed JSON, private/absent repo, or no network. None means "not
-    established", never "fine": callers must treat it as a reason to stay
-    silent rather than a clean bill of health.
-    """
-    path = Path(pretrained_path)
-    if path.is_dir():
-        with contextlib.suppress(Exception), open(path / "config.json") as f:
-            loaded = json.load(f)
-            return loaded if isinstance(loaded, dict) else None
-        return None
-
-    # A step-suffixed ref addresses one checkpoint inside the repo; anything
-    # else is a repo id whose root holds the config.
-    m = _HUB_CKPT_REF_RE.match(pretrained_path)
-    if m:
-        repo_id = m.group("repo")
-        filename = f"checkpoints/{m.group('step_dir')}/{_HUB_CKPT_SUBDIR}/config.json"
-    else:
-        repo_id, filename = pretrained_path, "config.json"
-
-    with contextlib.suppress(Exception):
-        local = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
-        with open(local) as f:
-            loaded = json.load(f)
-            return loaded if isinstance(loaded, dict) else None
-    return None
-
-
 def read_pretrained_policy_type(pretrained_path: str) -> str | None:
     """The ``type`` field (architecture) of the checkpoint's own config.json,
     or None when the config can't be read or names no usable type. See
@@ -1262,37 +1216,6 @@ def read_pretrained_policy_type(pretrained_path: str) -> str | None:
     if cfg is None:
         return None
     return _clean_policy_type(cfg.get("type"))
-
-
-def read_pretrained_feature_space(
-    pretrained_path: str,
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """The checkpoint's ``(input_features, output_features)`` maps.
-
-    Companion to read_pretrained_policy_type over the same single
-    read_pretrained_config fetch. These are the feature specs lerobot WOULD
-    have built the policy from had the run used ``--policy.path``; on
-    MakerMods Lab's launch path (``--policy.type`` + ``--policy.pretrained_path``)
-    they are never consulted, which is exactly why the preflight has to read
-    them itself (MT44).
-
-    Each map is ``{feature key: {"type": "STATE"|"VISUAL"|"ACTION", "shape":
-    [...]}}``; image shapes are CHW. None when the config can't be read or
-    carries neither map — "not established", not "fine". A config with only
-    one of the two yields the other as ``{}``, so a state-dim check can still
-    run when output_features is missing.
-    """
-    cfg = read_pretrained_config(pretrained_path)
-    if cfg is None:
-        return None
-    inputs = cfg.get("input_features")
-    outputs = cfg.get("output_features")
-    if not isinstance(inputs, dict) and not isinstance(outputs, dict):
-        return None
-    return (
-        inputs if isinstance(inputs, dict) else {},
-        outputs if isinstance(outputs, dict) else {},
-    )
 
 
 def _clean_policy_type(value: object) -> str | None:
@@ -1343,233 +1266,6 @@ def _check_pretrained_policy_type(pretrained_path: str, requested: str) -> None:
         f"{requested_type!r} while reporting itself as a fine-tune. Set the "
         f"policy to {actual!r}, or pick a {requested_type!r} base model."
     )
-
-
-def _camera_features(features: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The camera entries of a feature map, keyed by BARE camera name.
-
-    Both sides of the preflight name cameras the same way — the dataset's
-    ``meta/info.json`` and the checkpoint's ``config.json`` both use
-    ``observation.images.<name>`` — so stripping the prefix gives directly
-    comparable key sets. Every ``observation.images.*`` key counts here, video
-    and raw-image alike (unlike datasets._video_camera_names, which filters to
-    what the episode viewer can play): the trainer consumes both as camera
-    inputs, so both belong in the comparison.
-    """
-    return {
-        key[len(CAMERA_FEATURE_PREFIX) :]: spec
-        for key, spec in features.items()
-        if key.startswith(CAMERA_FEATURE_PREFIX) and isinstance(spec, dict)
-    }
-
-
-# A camera key a pretrained BASE ships as a placeholder rather than as the name
-# of a real mount: lerobot/smolvla_base's camera1/camera2/camera3. Matched
-# against the BARE tail (the observation.images. prefix already stripped).
-_PLACEHOLDER_CAMERA_RE = re.compile(r"^camera\d+$")
-
-
-def _is_placeholder_camera_set(names: set[str]) -> bool:
-    """True when EVERY camera key is a generic placeholder — the signature of a
-    pretrained base that was never tied to one rig. All-or-nothing on purpose: a
-    checkpoint mixing placeholders with real mounts (camera1 + wrist) is not a
-    generic base, so it does not qualify."""
-    return bool(names) and all(_PLACEHOLDER_CAMERA_RE.match(name) for name in names)
-
-
-def _image_height_width(spec: dict[str, Any]) -> tuple[int, int] | None:
-    """(height, width) of a camera feature, normalising the two shape
-    conventions this file has to compare.
-
-    A dataset's ``meta/info.json`` stores image shapes HWC — ``[480, 640, 3]``
-    with ``names: ["height", "width", "channels"]`` — while a policy
-    checkpoint's ``config.json`` stores them CHW — ``[3, 480, 640]``, no names
-    at all. Locate the channel axis by name when the spec carries names, else
-    by the only axis narrow enough to be channels (1 or 3), and return the
-    remaining two dims in order.
-
-    None when the shape isn't a 3-axis image or the channel axis is
-    ambiguous — the caller then simply doesn't compare resolutions, which in
-    phase 1 only costs a log line.
-    """
-    shape = spec.get("shape")
-    if not isinstance(shape, (list, tuple)) or len(shape) != 3:
-        return None
-
-    axis: int | None = None
-    names = spec.get("names")
-    if isinstance(names, (list, tuple)) and len(names) == 3:
-        for i, name in enumerate(names):
-            if isinstance(name, str) and name.strip().lower().rstrip("s") == "channel":
-                axis = i
-                break
-    if axis is None:
-        narrow = [i for i, dim in enumerate(shape) if dim in (1, 3)]
-        if len(narrow) != 1:
-            return None
-        axis = narrow[0]
-
-    try:
-        height, width = (int(dim) for i, dim in enumerate(shape) if i != axis)
-    except (TypeError, ValueError):
-        return None
-    return height, width
-
-
-def _describe_cameras(names: set[str]) -> str:
-    return ", ".join(sorted(names)) if names else "none"
-
-
-def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) -> None:
-    """Reject a fine-tune whose checkpoint and dataset describe different robots.
-
-    Sibling of ``_check_pretrained_policy_type``, and necessary for the same
-    reason: on MakerMods Lab's launch path (``--policy.type`` +
-    ``--policy.pretrained_path``) lerobot builds the policy FROM THE DATASET's
-    features and then loads the checkpoint's weights with ``strict=False``, so
-    it never compares the two. lerobot's own
-    ``validate_visual_features_consistency`` is a tautology here — it compares
-    the dataset against itself. Nothing downstream will notice the mismatch
-    (MT44).
-
-    What that costs, by class:
-
-    * STATE/ACTION WIDTH — ACT fails loudly but late, with a raw size-mismatch
-      traceback after the dataset download. SmolVLA/pi0/pi05 pad the
-      proprioceptive dims to 32, so a 6-dof checkpoint loads CLEANLY into a
-      12-dof (bimanual) run and trains garbage that is recorded as a
-      fine-tune. Refused.
-    * RENAMED CAMERAS — the same number of cameras under different keys (the
-      bimanual ``left_``-prefix case). Refused as a SELECTION mistake, not an
-      architectural one: ACT drives every camera through one shared backbone
-      (``ACT.backbone`` + a spatial-only position embedding, no per-camera
-      parameters) and SmolVLA through one shared vision tower, so the weights
-      would in fact carry over fine. What the rename actually signals is that
-      the dataset and the base model came from DIFFERENT RIGS — which in this
-      UI is never deliberate. Catching the bimanual ``left_``-prefix case is
-      the whole point of the rule.
-
-      ONE EXEMPTION — a GENERIC BASE. When every one of the CHECKPOINT's camera
-      keys is a placeholder (``camera1``/``camera2``/… — see
-      _is_placeholder_camera_set), the checkpoint was never tied to a rig at
-      all: ``lerobot/smolvla_base`` ships exactly that, and adapting it to a
-      named 3-camera rig is the CANONICAL SmolVLA fine-tune, not a mixup.
-      That case demotes to the warn path. The gate is checkpoint-side only —
-      a user's dataset always carries real mount names, so the dataset side
-      tells us nothing — and it is all-or-nothing, so a checkpoint mixing a
-      placeholder with a real mount stays refused. Phase 2 may replace this
-      exemption with an explicit confirm once there is a UI to confirm in.
-    * MISSING / EXTRA CAMERA, DIFFERENT RESOLUTION — legitimate choices
-      (ACT's shared backbone handles a changed sensor count; resolution only
-      moves the token count and VRAM). Phase 1 logs a warning; the
-      warn-and-confirm UI is phase 2.
-
-    Silent when either side can't be read, matching the neighbouring guards:
-    an unverifiable pair must not block a launch. Raises ValueError (→ HTTP
-    400) only on a contradiction we can actually prove.
-    """
-    # Checkpoint first: it is the side most often unreadable (a hub ref with no
-    # network, a hand-built path), and bailing here spares the dataset read.
-    feature_space = read_pretrained_feature_space(pretrained_path)
-    if feature_space is None:
-        return
-    ckpt_inputs, ckpt_outputs = feature_space
-
-    dataset_features = read_dataset_features(dataset_repo_id)
-    if not dataset_features:
-        return
-
-    # -- state / action width ------------------------------------------------
-    # The dataset's own dims are what lerobot will build the policy from, so a
-    # difference here is exactly the width the loaded weights won't fit.
-    for label, ckpt_feature, dataset_key in (
-        ("robot state", ckpt_inputs.get("observation.state"), "observation.state"),
-        ("action", ckpt_outputs.get("action"), "action"),
-    ):
-        ckpt_dim = _flat_feature_dim(ckpt_feature)
-        dataset_dim = _flat_feature_dim(dataset_features.get(dataset_key))
-        if ckpt_dim is None or dataset_dim is None or ckpt_dim == dataset_dim:
-            continue
-        raise ValueError(
-            f"The checkpoint this run starts from ({pretrained_path}) was trained "
-            f"with {ckpt_dim}-dim {label}, but the dataset {dataset_repo_id!r} "
-            f"records {dataset_dim}-dim {label} — a different robot (an SO-101 arm "
-            f"is 6 dims, a bimanual pair 12). Fine-tuning builds the policy from "
-            f"the DATASET and loads the checkpoint's weights into it without "
-            f"checking the widths, so the run would train from largely random "
-            f"weights while reporting itself as a fine-tune. Pick a dataset "
-            f"recorded on the same robot as this checkpoint, pick a base model "
-            f"trained on this robot, or train from scratch."
-        )
-
-    # -- cameras -------------------------------------------------------------
-    ckpt_cameras = _camera_features(ckpt_inputs)
-    dataset_cameras = _camera_features(dataset_features)
-    ckpt_names, dataset_names = set(ckpt_cameras), set(dataset_cameras)
-
-    renamed = ckpt_names != dataset_names and len(ckpt_names) == len(dataset_names)
-    if renamed and _is_placeholder_camera_set(ckpt_names):
-        # A generic base being bound to a named rig for the first time — the
-        # canonical smolvla_base fine-tune. Recorded, not refused.
-        logger.warning(
-            "Fine-tune feature space: checkpoint %s carries placeholder camera "
-            "names (%s); binding them to dataset %s's cameras (%s).",
-            pretrained_path,
-            _describe_cameras(ckpt_names),
-            dataset_repo_id,
-            _describe_cameras(dataset_names),
-        )
-    elif renamed:
-        raise ValueError(
-            f"The checkpoint this run starts from ({pretrained_path}) expects "
-            f"cameras {_describe_cameras(ckpt_names)}, but the dataset "
-            f"{dataset_repo_id!r} provides {_describe_cameras(dataset_names)} — "
-            f"the same number of cameras under different names. Cameras are "
-            f"matched by name, so the two were almost certainly recorded on "
-            f"different robots, and the fine-tune would be building on a base "
-            f"that never saw this rig. Pick a base model whose camera names "
-            f"match this dataset, or train from scratch."
-        )
-    elif ckpt_names != dataset_names:
-        # Unequal counts: a real sensor-suite change, but a legitimate one.
-        # Phase 1 only records it (phase 2 asks the user to confirm).
-        missing = ckpt_names - dataset_names
-        extra = dataset_names - ckpt_names
-        if missing:
-            logger.warning(
-                "Fine-tune feature space: checkpoint %s expects camera(s) %s that "
-                "dataset %s does not provide; those inputs will be dropped.",
-                pretrained_path,
-                _describe_cameras(missing),
-                dataset_repo_id,
-            )
-        if extra:
-            logger.warning(
-                "Fine-tune feature space: dataset %s adds camera(s) %s the "
-                "checkpoint %s was not trained on; those inputs start from scratch.",
-                dataset_repo_id,
-                _describe_cameras(extra),
-                pretrained_path,
-            )
-
-    # Resolution differences on the cameras both sides DO share. Allowed —
-    # lerobot resizes/re-tokenizes — but it moves ACT's token count and VRAM,
-    # so it should not pass unrecorded.
-    resized = []
-    for name in sorted(ckpt_names & dataset_names):
-        ckpt_hw = _image_height_width(ckpt_cameras[name])
-        dataset_hw = _image_height_width(dataset_cameras[name])
-        if ckpt_hw is None or dataset_hw is None or ckpt_hw == dataset_hw:
-            continue
-        resized.append(f"{name} {ckpt_hw[0]}x{ckpt_hw[1]} -> {dataset_hw[0]}x{dataset_hw[1]}")
-    if resized:
-        logger.warning(
-            "Fine-tune feature space: checkpoint %s and dataset %s disagree on "
-            "camera resolution (%s); training proceeds at the dataset's size.",
-            pretrained_path,
-            dataset_repo_id,
-            "; ".join(resized),
-        )
 
 
 _CLOUD_CKPT_TTL_SECONDS = 30.0
@@ -2375,13 +2071,63 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
         )
 
 
+# The one timestamp shape every job id (and therefore every repo a run
+# publishes to) ends in. utils.naming.RUN_REPO_TIMESTAMP_RE peels EXACTLY this
+# shape back off to derive display titles, so both id builders below must use
+# it — a human-named run is still a MakerMods Lab run, and must still read as
+# one. Factored out (rather than inlined twice) so a test can pin it.
+_JOB_ID_TIMESTAMP_FMT = "%Y-%m-%d_%H-%M-%S"
+
+
+def _job_id_timestamp() -> str:
+    return datetime.now().strftime(_JOB_ID_TIMESTAMP_FMT)
+
+
 def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
-    """Build a sortable, collision-free job id from policy type and dataset slug."""
+    """Build a sortable, collision-free job id from policy type and dataset slug.
+
+    The machine fallback, used when the caller named no model — a bare API
+    call, or an imported record (which has no form behind it). The UI requires
+    a name, so a run started from the browser takes _named_job_id instead.
+    """
     from .train import _SLUG_RE
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     dataset_slug = _SLUG_RE.sub("_", dataset_repo_id).strip("_") or "dataset"
-    return f"{policy_type}_{dataset_slug}_{timestamp}"
+    return f"{policy_type}_{dataset_slug}_{_job_id_timestamp()}"
+
+
+def _named_job_id(job_name: str) -> str:
+    """Build a job id from the HUMAN-chosen model name: `{name}_{timestamp}`.
+
+    The mirror of how a recording names a dataset (a human stem plus a machine
+    session stamp): the stem the user typed replaces the machine prefix, and the
+    timestamp stays so two runs of the same name stay distinguishable and every
+    id keeps sorting by time. `job_name` must already have passed
+    `_validated_job_stem` — it becomes one path segment of the Hub repo the run
+    publishes to.
+    """
+    return f"{job_name}_{_job_id_timestamp()}"
+
+
+def _validated_job_stem(job_name: str | None) -> str | None:
+    """The human stem a run's id is built from, or None for machine naming.
+
+    None (or blank) is not an error: `job_name` is optional on the API, and a
+    caller that omits it gets the legacy `_generate_job_id` shape. What IS an
+    error is a name that can't be a repo-id segment — it would otherwise reach
+    the Hub as a broken repo id, or get silently slugified into something the
+    user never typed. Raises ValueError, which the route turns into a 400.
+    """
+    stem = (job_name or "").strip()
+    if not stem:
+        return None
+    ok, reason = validate_model_name(stem)
+    if not ok:
+        raise ValueError(
+            f"{reason} The model name becomes this run's identity — its job id and "
+            'the Hub repo it publishes to ("<name>_<timestamp>").'
+        )
+    return stem
 
 
 # Accepted in place of a bare repo id when importing from the Hub — users
@@ -2688,6 +2434,13 @@ class JobRegistry:
         if target.runner == "hf_cloud" and not target.flavor:
             raise ValueError("flavor is required when runner is hf_cloud")
 
+        # The model name the user typed, checked here — the cheapest refusal in
+        # the method, and long before any record, directory or Hub call exists.
+        # None ⇒ nothing was typed and the run falls back to machine naming; the
+        # requirement lives in the form (the same division of labour recording
+        # uses: record.py takes any name, CollectPanel demands one).
+        job_stem = _validated_job_stem(config.job_name)
+
         # Cloud preflight (belt-and-braces): the HF Jobs pod resolves the
         # dataset by repo_id from the Hub and can't see this machine's local
         # cache, so a local-only dataset would fail the remote job. Reject up
@@ -2928,7 +2681,7 @@ class JobRegistry:
                         "target rather than toggling resume manually."
                     )
 
-            job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)
+            job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id, job_name=job_stem)
             job_dir = _job_dir(self._output_root, job_id)
             lerobot_output_dir = str(job_dir / "run")
             name = (
@@ -3395,12 +3148,18 @@ class JobRegistry:
         self._runners.pop(job_id, None)
         self._persist(record, force=True)
 
-    def _unique_job_id(self, policy_type: str, dataset_repo_id: str) -> str:
-        """_generate_job_id with a collision guard. The generated id embeds a
-        second-granularity timestamp, so two jobs created within the same
-        second would otherwise share an id and silently overwrite each other
-        in the registry (and on disk). Suffix -2, -3, … until unused."""
-        base = _generate_job_id(policy_type, dataset_repo_id)
+    def _unique_job_id(self, policy_type: str, dataset_repo_id: str, job_name: str | None = None) -> str:
+        """The run's id, with a collision guard.
+
+        `job_name` (already validated — see _validated_job_stem) picks the human
+        shape `{name}_{timestamp}`; without one the id falls back to the machine
+        shape `{policy}_{dataset}_{timestamp}`. BOTH go through the guard here,
+        because both embed a second-granularity timestamp: two jobs created
+        within the same second would otherwise share an id and silently
+        overwrite each other in the registry (and on disk) — and two runs
+        sharing a NAME is the ordinary case for the human shape, not the rare
+        one. Suffix -2, -3, … until unused."""
+        base = _named_job_id(job_name) if job_name else _generate_job_id(policy_type, dataset_repo_id)
         job_id = base
         n = 2
         while job_id in self._records or _job_dir(self._output_root, job_id).exists():

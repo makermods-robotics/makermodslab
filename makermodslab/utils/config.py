@@ -1155,6 +1155,23 @@ def validate_dataset_name(name: object) -> tuple[bool, str]:
     return True, ""
 
 
+def validate_model_name(name: object) -> tuple[bool, str]:
+    """Validate a user-chosen MODEL name — the human stem of a training run's id.
+
+    Same rules as a dataset name, because the name ends up in the same kind of
+    place: one path segment of a repo id. A run built from the name publishes to
+    ``{namespace}/{name}_{timestamp}`` (jobs._named_job_id → the Hub repo the
+    runner derives), so a name that isn't a legal segment can't be smuggled
+    through — it is rejected at the source rather than slugified behind the
+    user's back, exactly as a dataset name is.
+
+    Returns (ok, human_readable_reason); only the wording differs from
+    validate_dataset_name, so the message names the thing the user typed.
+    """
+    ok, reason = validate_dataset_name(name)
+    return ok, reason.replace("Dataset name", "Model name")
+
+
 def validate_dataset_repo_id(repo_id: object) -> tuple[bool, str]:
     """Validate a full dataset id: a bare name, or 'namespace/name' (one slash).
 

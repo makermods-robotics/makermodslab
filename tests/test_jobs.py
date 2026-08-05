@@ -2865,134 +2865,6 @@ def test_an_unknown_finetune_source_still_refuses_before_any_record(monkeypatch,
 _DEFAULT_CAMERAS = ("front", "wrist")
 
 
-def _feature_ckpt(
-    tmp_path: Path,
-    name: str,
-    *,
-    policy_type: str = "act",
-    state_dim: int = 6,
-    action_dim: int = 6,
-    cameras: tuple[str, ...] = _DEFAULT_CAMERAS,
-    height: int = 480,
-    width: int = 640,
-) -> Path:
-    """A pretrained_model dir whose config.json carries a real feature space.
-    Image shapes are CHW, as a policy checkpoint writes them."""
-    d = tmp_path / name
-    d.mkdir()
-    inputs: dict = {"observation.state": {"type": "STATE", "shape": [state_dim]}}
-    for cam in cameras:
-        inputs[f"observation.images.{cam}"] = {"type": "VISUAL", "shape": [3, height, width]}
-    (d / "config.json").write_text(
-        _json.dumps(
-            {
-                "type": policy_type,
-                "input_features": inputs,
-                "output_features": {"action": {"type": "ACTION", "shape": [action_dim]}},
-            }
-        )
-    )
-    return d
-
-
-def _dataset_features(
-    *,
-    state_dim: int = 6,
-    action_dim: int = 6,
-    cameras: tuple[str, ...] = _DEFAULT_CAMERAS,
-    height: int = 480,
-    width: int = 640,
-) -> dict:
-    """A dataset meta/info.json `features` map. Image shapes are HWC with named
-    axes — the opposite convention from the checkpoint above, which is exactly
-    what the guard has to normalise."""
-    features: dict = {
-        "action": {"dtype": "float32", "shape": [action_dim]},
-        "observation.state": {"dtype": "float32", "shape": [state_dim]},
-    }
-    for cam in cameras:
-        features[f"observation.images.{cam}"] = {
-            "dtype": "video",
-            "shape": [height, width, 3],
-            "names": ["height", "width", "channels"],
-        }
-    return features
-
-
-def _patch_dataset_features(features):
-    """Pin what the guard sees for the selected dataset (no Hub, no cache)."""
-    from unittest.mock import patch
-
-    return patch("makermodslab.jobs.read_dataset_features", lambda repo_id: features)
-
-
-def test_check_feature_space_rejects_single_arm_checkpoint_on_bimanual_dataset(tmp_path) -> None:
-    """The SILENT case MT44 is really about: SmolVLA pads dofs to 32, so a
-    6-dof checkpoint loads cleanly into a 12-dof run and trains garbage that is
-    recorded as a fine-tune. Both widths and both sources must be named."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "single_arm", policy_type="smolvla")
-    with (
-        _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)),
-        pytest.raises(ValueError) as exc,
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/bimanual_ds")
-    message = str(exc.value)
-    assert "6-dim robot state" in message
-    assert "12-dim robot state" in message
-    assert "user/bimanual_ds" in message
-    assert str(ckpt) in message
-
-
-def test_check_feature_space_rejects_bimanual_checkpoint_on_single_arm_dataset(tmp_path) -> None:
-    """The same refusal in the other direction — neither side is privileged."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "bimanual", state_dim=12, action_dim=12)
-    with (
-        _patch_dataset_features(_dataset_features(state_dim=6, action_dim=6)),
-        pytest.raises(ValueError) as exc,
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/single_ds")
-    message = str(exc.value)
-    assert "12-dim robot state" in message
-    assert "6-dim robot state" in message
-
-
-def test_check_feature_space_rejects_action_width_mismatch(tmp_path) -> None:
-    """State can agree while the action head doesn't (a checkpoint whose output
-    space was changed); the action side is checked on its own terms."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "wide_action", action_dim=12)
-    with (
-        _patch_dataset_features(_dataset_features()),
-        pytest.raises(ValueError, match="action"),
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/ds")
-
-
-def test_check_feature_space_rejects_renamed_cameras(tmp_path) -> None:
-    """Equal camera COUNT, different keys — the bimanual `left_` prefix case.
-    This is the refusal the whole rule exists for, and the generic-base
-    exemption below must never swallow it: `front`/`wrist` are real mounts."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "named_ckpt", cameras=("front", "wrist"))
-    with (
-        _patch_dataset_features(_dataset_features(cameras=("left_front", "left_wrist"))),
-        pytest.raises(ValueError) as exc,
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/renamed_ds")
-    message = str(exc.value)
-    assert "front, wrist" in message
-    assert "left_front, left_wrist" in message
-    # The two ways out the message must offer.
-    assert "base model" in message
-    assert "from scratch" in message
-
-
 def test_check_feature_space_rejects_disjoint_cameras_at_different_counts(tmp_path) -> None:
     """Zero overlap is the rename mistake at an unequal count: a 1-camera `left`
     dataset against a wrist/front checkpoint would otherwise fall past the
@@ -3015,26 +2887,6 @@ def test_check_feature_space_rejects_disjoint_cameras_at_different_counts(tmp_pa
     assert "from scratch" in message
 
 
-def test_check_feature_space_exempts_a_generic_base_from_the_rename_rule(tmp_path, caplog) -> None:
-    """lerobot/smolvla_base ships camera1/camera2/camera3 — placeholders, not a
-    rig. Binding those to a named 3-camera dataset is THE canonical SmolVLA
-    fine-tune, so it warns instead of refusing."""
-    import logging
-
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(
-        tmp_path, "smolvla_base", policy_type="smolvla", cameras=("camera1", "camera2", "camera3")
-    )
-    with (
-        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
-        _patch_dataset_features(_dataset_features(cameras=("front", "wrist", "top"))),
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/named_rig_ds")
-    assert "placeholder camera names" in caplog.text
-    assert "front, top, wrist" in caplog.text
-
-
 def test_check_feature_space_exempts_a_generic_base_from_the_disjoint_rule(tmp_path, caplog) -> None:
     """The canonical smolvla_base fine-tune is disjoint AND unequal in count
     (camera1/2/3 vs a real 2-camera rig), so the generic-base exemption has to
@@ -3053,179 +2905,6 @@ def test_check_feature_space_exempts_a_generic_base_from_the_disjoint_rule(tmp_p
     ):
         _check_pretrained_feature_space(str(ckpt), "user/two_cam_ds")
     assert "placeholder camera names" in caplog.text
-
-
-def test_check_feature_space_exemption_is_all_or_nothing(tmp_path) -> None:
-    """A checkpoint mixing a placeholder with a real mount (camera1 + wrist) is
-    not a generic base — it came off some rig — so the rename refusal stands."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "half_generic", cameras=("camera1", "wrist"))
-    with (
-        _patch_dataset_features(_dataset_features(cameras=("front", "top"))),
-        pytest.raises(ValueError, match="different names"),
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/other_rig_ds")
-
-
-def test_check_feature_space_accepts_matching_features(tmp_path) -> None:
-    """The ordinary fine-tune: same robot, same cameras, same resolution."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "matched")
-    with _patch_dataset_features(_dataset_features()):
-        _check_pretrained_feature_space(str(ckpt), "user/ds")
-
-
-def test_check_feature_space_allows_camera_count_change_with_a_warning(tmp_path, caplog) -> None:
-    """A dropped camera, with the rest still shared, is a real sensor-suite
-    change but a legitimate one (ACT's backbone is shared), so phase 1 records
-    it instead of refusing. The warn-and-confirm UI is phase 2."""
-    import logging
-
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "two_cams", cameras=("front", "wrist"))
-    with (
-        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
-        _patch_dataset_features(_dataset_features(cameras=("front",))),
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/one_cam_ds")
-    assert "wrist" in caplog.text
-
-    # ...and the same for a camera the checkpoint never saw.
-    caplog.clear()
-    with (
-        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
-        _patch_dataset_features(_dataset_features(cameras=("front", "wrist", "top"))),
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/three_cam_ds")
-    assert "top" in caplog.text
-
-
-def test_check_feature_space_allows_resolution_change_with_a_warning(tmp_path, caplog) -> None:
-    """Resolution only moves ACT's token count and VRAM — allowed, but noted.
-    Also the one case that proves CHW (checkpoint) and HWC (dataset) shapes are
-    normalised before comparison rather than compared axis-for-axis."""
-    import logging
-
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "hi_res", height=480, width=640)
-    with (
-        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
-        _patch_dataset_features(_dataset_features(height=240, width=320)),
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/small_ds")
-    assert "480x640 -> 240x320" in caplog.text
-
-
-def test_check_feature_space_silent_when_either_side_is_unreadable(tmp_path) -> None:
-    """The discipline the neighbouring guards keep: an unverifiable pair must
-    not block a launch. None means "not established", never "fine"."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    bare = tmp_path / "no_config"
-    bare.mkdir()
-    with _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)):
-        _check_pretrained_feature_space(str(bare), "user/bimanual_ds")
-
-    # A config.json with no feature maps at all says nothing either.
-    typed_only = tmp_path / "type_only"
-    typed_only.mkdir()
-    (typed_only / "config.json").write_text(_json.dumps({"type": "act"}))
-    with _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)):
-        _check_pretrained_feature_space(str(typed_only), "user/bimanual_ds")
-
-    # Unreadable dataset meta (offline, or a repo we can't see).
-    ckpt = _feature_ckpt(tmp_path, "readable", state_dim=6)
-    with _patch_dataset_features(None):
-        _check_pretrained_feature_space(str(ckpt), "user/unknown_ds")
-
-
-def test_read_pretrained_feature_space_reads_a_step_ref(monkeypatch, tmp_path) -> None:
-    """The read must look inside the step the ref names, not at the repo root —
-    otherwise the guard would validate different weights than the run trains
-    from."""
-    from makermodslab.jobs import read_pretrained_feature_space
-
-    cfg_file = tmp_path / "config.json"
-    cfg_file.write_text(
-        _json.dumps(
-            {
-                "type": "smolvla",
-                "input_features": {"observation.state": {"type": "STATE", "shape": [6]}},
-                "output_features": {"action": {"type": "ACTION", "shape": [6]}},
-            }
-        )
-    )
-    seen: dict = {}
-
-    def fake_download(**kwargs):
-        seen.update(kwargs)
-        return str(cfg_file)
-
-    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", fake_download)
-
-    inputs, outputs = read_pretrained_feature_space("user/repo@checkpoints/000500")
-    assert inputs["observation.state"]["shape"] == [6]
-    assert outputs["action"]["shape"] == [6]
-    assert seen["filename"] == "checkpoints/000500/pretrained_model/config.json"
-
-
-def test_start_rejects_feature_space_mismatch_and_leaves_no_record(tmp_path) -> None:
-    """End to end: the refusal is synchronous, is a 400-shaped ValueError, and
-    happens before anything is materialized — no record, no output dir, no
-    prepare thread."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobRegistry, JobTarget
-    from makermodslab.train import TrainingRequest
-
-    ckpt = _feature_ckpt(tmp_path, "single_arm", policy_type="smolvla")
-    reg = JobRegistry(tmp_path / "root")
-
-    cfg = TrainingRequest(
-        dataset_repo_id="user/bimanual_ds",
-        policy_type="smolvla",
-        policy_pretrained_path=str(ckpt),
-    )
-    with (
-        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
-        _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)),
-        pytest.raises(ValueError, match="12-dim robot state"),
-    ):
-        reg.start(cfg, JobTarget(runner="local"))
-
-    assert reg.list(limit=10) == []
-    assert list(reg._output_root.iterdir()) == []
-    assert reg._prepare_threads == {}
-
-
-def test_start_allows_matching_feature_space(tmp_path) -> None:
-    """The guard must not become a new way for an ordinary fine-tune to fail:
-    a matching checkpoint/dataset pair still reaches the normal start path."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobRegistry, JobTarget
-    from makermodslab.train import TrainingRequest
-
-    ckpt = _feature_ckpt(tmp_path, "matched")
-    reg = JobRegistry(tmp_path / "root")
-
-    cfg = TrainingRequest(
-        dataset_repo_id="user/ds",
-        policy_type="act",
-        policy_pretrained_path=str(ckpt),
-    )
-    fake_runner = MagicMock()
-    fake_runner.pid.return_value = 4242
-    with (
-        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner),
-        _patch_dataset_features(_dataset_features()),
-    ):
-        record = reg.start(cfg, JobTarget(runner="local"))
-    assert record.state == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -4338,3 +4017,116 @@ def test_start_refuses_a_cloud_parent_resumed_locally(tmp_path, monkeypatch) -> 
     # which would itself call the stand-in above.
     assert list(reg._records) == ["src"]
     _assert_nothing_was_created(reg)
+def _named_request(job_name: str | None):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(dataset_repo_id="user/ds", policy_type="act", job_name=job_name)
+
+
+def _start_local(reg, cfg):
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        return reg.start(cfg, JobTarget(runner="local"))
+
+
+def test_start_builds_the_job_id_from_the_model_name(tmp_path) -> None:
+    """The human stem replaces the machine prefix: `{name}_{timestamp}`. The
+    timestamp keeps the shape utils.naming.RUN_REPO_TIMESTAMP_RE peels off for
+    display titles, so a named run still reads as a MakerMods Lab run — and the
+    record's display name stays the verbatim name the user typed."""
+    from makermodslab.jobs import JobRegistry
+    from makermodslab.utils.naming import RUN_REPO_TIMESTAMP_RE
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_local(reg, _named_request("eraser_stack"))
+
+    match = RUN_REPO_TIMESTAMP_RE.search(record.id)
+    assert match is not None
+    assert record.id[: match.start()] == "eraser_stack"
+    assert record.name == "eraser_stack"
+    # The id is the job directory's name, so the whole run's storage follows it.
+    assert (reg._output_root / record.id).is_dir()
+
+
+def test_start_falls_back_to_machine_naming_without_a_model_name(tmp_path) -> None:
+    """`job_name` stays optional on the API — the requirement lives in the form,
+    the same division of labour recording uses. A bare caller gets the legacy
+    `{policy}_{dataset_slug}_{timestamp}` id, unchanged."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_local(reg, _named_request(None))
+
+    assert record.id.startswith("act_user_ds_")
+    assert record.name == "ACT · user/ds"
+
+    # Whitespace-only is "no name", not a name made of spaces.
+    reg._records[record.id].state = "done"  # the local-run mutex allows only one
+    blank = _start_local(reg, _named_request("   "))
+    assert blank.id.startswith("act_user_ds_")
+
+
+@pytest.mark.parametrize(
+    "job_name",
+    [
+        "my model",  # spaces
+        "user/model",  # a slash would smuggle in a namespace
+        "-leading-dash",
+        "model!",
+        "..",
+        "x" * 97,
+    ],
+)
+def test_start_refuses_a_model_name_that_isnt_a_repo_segment(tmp_path, job_name) -> None:
+    """The name becomes one path segment of the run's Hub repo id, so a name
+    that can't be one is REFUSED (ValueError → 400) rather than slugified into
+    something the user never typed. The refusal is synchronous and leaves no
+    record, directory or log behind."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    with pytest.raises(ValueError, match="Model name"):
+        _start_local(reg, _named_request(job_name))
+
+    assert reg.list(limit=10) == []
+    _assert_nothing_was_created(reg)
+
+
+def test_two_runs_of_the_same_model_name_get_unique_ids(tmp_path, monkeypatch) -> None:
+    """Two runs sharing a NAME is the ordinary case for the human shape (train
+    the same skill twice), so the collision guard must cover it too — a second
+    run within the same second gets `-2`, not the first run's directory."""
+    from makermodslab import jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "_job_id_timestamp", lambda: "2026-08-04_11-02-19")
+    reg = jobs_mod.JobRegistry(tmp_path / "root")
+    first = _start_local(reg, _named_request("eraser_stack"))
+    reg._records[first.id].state = "done"  # the local-run mutex allows only one
+    second = _start_local(reg, _named_request("eraser_stack"))
+
+    assert first.id == "eraser_stack_2026-08-04_11-02-19"
+    assert second.id == "eraser_stack_2026-08-04_11-02-19-2"
+    assert {r.id for r in reg.list(limit=10)} == {first.id, second.id}
+
+
+def test_resume_is_unaffected_by_model_naming(tmp_path) -> None:
+    """A continuation keeps the parent run's identity — the form locks the name
+    field, so no name is sent and the id falls back to the machine shape. The
+    resume resolution itself is untouched."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert record.config.resume is True
+    assert record.id.startswith("act_user_ds_")

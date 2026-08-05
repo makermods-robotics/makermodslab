@@ -2,21 +2,31 @@ import React from "react";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
+import { validateModelName } from "@/lib/datasetName";
 import { ConfigComponentProps, RESUME_INHERITED_SHORT } from "../types";
 
-/** The run's headline settings — steps, batch size, and name.
+/** The run's headline settings — steps, batch size, and the model's name.
  * Flat: each control carries its own <Label> and the section has no eyebrow
  * heading, so nothing sits above a single field restating it. The policy
  * select lives in PolicyField, which renders earlier in the form.
  *
  * On a resume, `steps` stays editable (the resume branch passes --steps, and
  * raising it is the whole point of a continuation) while `batch_size` does not
- * — lerobot takes it from the checkpoint's train_config.json. */
+ * — lerobot takes it from the checkpoint's train_config.json. The model name is
+ * inert there too, and for a stronger reason: a continuation keeps the parent
+ * run's identity (a cloud resume publishes into the parent's own repo), so
+ * there is no new name to choose. */
 const EssentialsCard: React.FC<ConfigComponentProps> = ({
   config,
   updateConfig,
   resumeLocked,
 }) => {
+  const modelName = config.job_name || "";
+  // null when the name is usable; a message otherwise (incl. empty). Mirrors
+  // the backend's validate_model_name, so Start can't fire a run the registry
+  // would refuse. Suppressed on a resume, where the field is inert.
+  const nameError = resumeLocked ? null : validateModelName(modelName);
+
   return (
     <section className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
@@ -50,18 +60,32 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="job_name">Run name</Label>
+        <Label htmlFor="job_name">Model name *</Label>
         <Input
           id="job_name"
-          value={config.job_name || ""}
+          value={modelName}
           onChange={(e) => updateConfig("job_name", e.target.value)}
-          placeholder={`${(config.policy_type || "policy").toUpperCase()} · ${
-            config.dataset_repo_id || "dataset"
-          }`}
+          placeholder="eraser_stack"
+          disabled={resumeLocked}
+          aria-invalid={!!modelName.trim() && nameError !== null}
+          className="aria-[invalid=true]:border-destructive"
         />
-        <p className="text-xs text-muted-foreground">
-          Optional — shown on the job card and searchable.
-        </p>
+        {resumeLocked ? (
+          <p className="text-xs text-muted-foreground">
+            {RESUME_INHERITED_SHORT}
+          </p>
+        ) : modelName.trim() && nameError ? (
+          <p className="text-xs text-destructive">{nameError}</p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            This is the model's identity — it trains, saves and publishes as{" "}
+            <span className="font-mono text-foreground">
+              {(modelName.trim() || "name") + "_<timestamp>"}
+            </span>
+            . Letters, numbers, <code>.</code> <code>_</code> <code>-</code>{" "}
+            only; start and end with a letter or number.
+          </p>
+        )}
       </div>
     </section>
   );
