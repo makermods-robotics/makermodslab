@@ -86,8 +86,9 @@ interface Described {
   /** What the title line MEANS: the untouched name, for the hover title. Equal
    * to `name` whenever nothing was peeled. */
   fullName: string;
-  /** The policy the peel took out of `name`, as a chip label — null when
-   * nothing was peeled, so a human-named or imported row gains no chip. */
+  /** The run's policy, as a chip label — read off the record's own
+   * `config.policy_type`, never inferred from the name. Null only when the
+   * record states no policy (a Hub-only job). */
   policyLabel: string | null;
   /** Hover text for that chip: the policy's full display name. */
   policyTitle: string;
@@ -143,20 +144,23 @@ function describeEntry(entry: JobsEntry): Described {
   const target = job.config?.steps || job.metrics.total_steps || 0;
   const current = job.metrics.current_step;
   const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
-  // Peel the generated "{POLICY} · {namespace}/{task}" down to the task, and
-  // hand the policy it removed to a chip of its own. A rename, an import or a
-  // human-typed name is returned untouched by runTaskTitle, and `peeled` is
-  // then false — those rows render exactly as they did before, chip included
-  // (i.e. absent).
+  // Peel the generated "{POLICY} · {namespace}/{task}" down to the task. A
+  // rename, an import or a human-typed name is returned untouched.
   const fullName = jobDisplayName(job);
   const name = runTaskTitle(fullName);
-  const peeled = name !== fullName;
+  // The policy chip reads the record's OWN config, not the peel: a run names
+  // its policy in `config.policy_type` whatever it is called, so a human-named
+  // run ({name}_{timestamp}, the only shape new runs have) and an import state
+  // their policy here exactly like a generated name does. Gating this on "did
+  // the title lose a policy token?" left every named run's policy column blank
+  // while the detail card below it (JobCard's Policy meta row, same field) had
+  // the value all along.
   const policyType = job.config?.policy_type;
   return {
     name,
     fullName,
-    policyLabel: peeled && policyType ? policyTypeShortLabel(policyType) : null,
-    policyTitle: peeled && policyType ? policyTypeDisplayName(policyType) : "",
+    policyLabel: policyType ? policyTypeShortLabel(policyType) : null,
+    policyTitle: policyType ? policyTypeDisplayName(policyType) : "",
     present,
     when: relativeTime(
       job.ended_at != null ? job.ended_at * 1000 : (job.started_at ?? 0) * 1000,
@@ -187,9 +191,9 @@ const canResumeEntry = (entry: JobsEntry): boolean =>
   entry.job.checkpoint_count > 0;
 
 const COL_STATE = "w-[4.75rem] shrink-0";
-// The policy the title no longer carries. Always occupies its column — an
-// imported or human-named row leaves it empty rather than shifting where/when
-// out of alignment with the rows around it.
+// The run's policy. Always occupies its column — a row whose record names no
+// policy (a Hub-only job) leaves it empty rather than shifting where/when out
+// of alignment with the rows around it.
 const COL_POLICY = "w-[4rem] shrink-0";
 const COL_WHERE = "w-[4.5rem] shrink-0";
 const COL_WHEN = "w-[3.5rem] shrink-0 text-right";
