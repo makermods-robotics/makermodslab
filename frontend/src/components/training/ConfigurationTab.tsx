@@ -13,6 +13,12 @@ interface ConfigurationTabProps extends ConfigComponentProps {
   /** True when a base skill (fine-tune) or resume seed fixes the policy —
    * the run must train the source checkpoint's architecture. */
   policyLocked?: boolean;
+  /** True when a resume seed fixes the compute target — a resume can only
+   * continue on the parent run's runner (F7). Narrower than `resumeLocked`:
+   * that one covers the hyperparameters lerobot rebuilds from the checkpoint,
+   * this one is only about WHERE the continuation executes, and it leaves the
+   * cloud flavor editable. */
+  runnerLocked?: boolean;
 }
 
 const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
@@ -23,6 +29,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
   hardwareLoading,
   policyLocked,
   resumeLocked,
+  runnerLocked,
 }) => {
   return (
     // Order matters: Policy answers "what am I training" and so belongs with
@@ -41,6 +48,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
         flavors={flavors}
         loading={hardwareLoading}
         resumeLocked={resumeLocked}
+        runnerLocked={runnerLocked}
       />
       <EssentialsCard
         config={config}

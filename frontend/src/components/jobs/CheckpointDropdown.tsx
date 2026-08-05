@@ -36,9 +36,11 @@ export const CheckpointDropdown: React.FC<Props> = ({
   className,
   id,
 }) => {
-  // step 0 is the sentinel for an imported single-model checkpoint (lerobot
-  // never saves at step 0), so it has no meaningful step number — show
-  // "latest" instead. Real training checkpoints keep their step label.
+  // step 0 is the sentinel for a whole-repo/single-model checkpoint — an
+  // imported flat model, or a tracked run whose repo holds only the final
+  // policy pushed at the end of training (no checkpoints/ tree). lerobot never
+  // saves at step 0, so there is no meaningful step number to show: label it
+  // "latest". Real training checkpoints keep their step label.
   const labelFor = (step: number) => (step === 0 ? "latest" : `step ${step}`);
   // Render newest-first regardless of the caller's order (the backend lists
   // ascending; JobCard pre-sorts descending — this is the one authoritative

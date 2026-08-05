@@ -10,6 +10,13 @@ export type ModelSource = "local" | "hub" | "both";
  * present; `hf_repo_id` the Hub repo when the model is (or was pushed) on the
  * Hub. `dataset` / `steps` / `policy_type` come from the checkpoint's
  * train_config and may be null for a Hub-only model that didn't record them.
+ *
+ * `name` is display-only and NEVER an identity: for a repo-keyed row the
+ * backend replaces the bare repo id with the name of the tracked run that
+ * produced it (a cloud resume chain shares ONE repo, named after the FIRST run,
+ * so the repo id alone never names the run that finished), and fills in the
+ * detail fields the repo listing couldn't know. Route every request on
+ * `id` / `hf_repo_id`.
  */
 export interface ModelItem {
   id: string;
