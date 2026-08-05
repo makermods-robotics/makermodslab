@@ -41,6 +41,7 @@ import {
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
+import { displayDedupeSuffix, splitDedupeSuffix } from "@/lib/modelNames";
 
 interface Props {
   /** The model, represented by its backing job record: an import, or a
@@ -54,22 +55,6 @@ interface Props {
    * join this model's own in the checkpoint dropdown, so a resumed lineage
    * reads as one model with its run history folded in behind it. */
   ancestors?: JobRecord[];
-}
-
-/** A display name split into its base and the collision disambiguator the
- * backend may have appended.
- *
- * `utils/naming.dedupe_display_names` breaks a tie between two models that
- * derive the same title by appending a parenthesised suffix — "orange_box
- * (2026-08-03)", "orange_box (2026-08-03 12:53)". The suffix is structured, so
- * it can be split back off and rendered as its own non-shrinking element; the
- * regex is deliberately tight (a single trailing parenthesised group, no nested
- * parens) so a name that merely happens to end in brackets isn't mangled. No
- * match ⇒ the whole string is the base.
- */
-function splitDedupeSuffix(name: string): [base: string, suffix: string | null] {
-  const match = /^(.*) (\([^)]+\))$/.exec(name);
-  return match ? [match[1], match[2]] : [name, null];
 }
 
 /** A trained run's auto-generated name peeled down to the TASK it learned.
@@ -149,9 +134,15 @@ const ModelCard: React.FC<Props> = ({
     : runIdentityTitle(model.name, model.config?.policy_type);
   // Only an auto-derived imported title carries a dedupe suffix; a trained
   // run's name (or a user's own alias) is rendered whole, so don't split it.
-  const [titleBase, titleSuffix] = isImported
+  const { base: titleBase, suffix: titleSuffix } = isImported
     ? splitDedupeSuffix(displayName)
-    : [displayName, null];
+    : { base: displayName, suffix: null };
+  // The suffix is rendered a year shorter than it is stored, so the two spans
+  // below no longer spell the full name between them — see the render comment.
+  // `splitDedupeSuffix` hands back the suffix with its parentheses already
+  // stripped (lib/modelNames, shared with components/library/DisplayName), so
+  // they go back on here, where the pair is rendered.
+  const titleSuffixText = titleSuffix && `(${displayDedupeSuffix(titleSuffix)})`;
   const importedSource = model.hf_repo_id || model.output_dir;
 
   // Hover title for the name — only when the name is actually shortened (see
@@ -159,10 +150,20 @@ const ModelCard: React.FC<Props> = ({
   // either span truncating means the visible name is incomplete, so the title
   // hangs on their container and carries the whole thing. An import adds its
   // source, which is the identity that actually locates the weights.
+  //
+  // The suffix's dropped year is the OTHER kind of shortening, the one the DOM
+  // can't see: nothing is clipped, yet what's on screen is not the whole name.
+  // The caller knows it, so it passes it in — comparing what the pair actually
+  // renders against the full name, which stays true however the suffix's
+  // display form changes later.
+  const renderedTitle = titleSuffixText
+    ? `${titleBase} ${titleSuffixText}`
+    : titleBase;
   const titleHover = useTruncationTitle(
     isImported && importedSource
       ? `${displayName}\n${importedSource}`
       : displayName,
+    renderedTitle !== displayName,
   );
 
   // Where the model came from — the header chip mirrors the dataset/job cards'
@@ -585,7 +586,7 @@ const ModelCard: React.FC<Props> = ({
               So: split the structured name and let flexbox do the shortening.
               The base shrinks and takes ONE CSS ellipsis of its own; the suffix
               is shrink-0 and always renders whole. Adapts to any card width —
-              "eraser_place… (2026-07-31 12:22)". A trained model's name has no
+              "eraser_place… (07-31 12:22)". A trained model's name has no
               such suffix and takes plain truncation. When either half is
               shortened the hover title carries the full identity; when the
               whole name fits, there is nothing to reveal and no title. */}
@@ -593,20 +594,34 @@ const ModelCard: React.FC<Props> = ({
             className="flex items-baseline gap-1 text-foreground font-semibold leading-tight"
             {...titleHover}
           >
-            {/* Both sides degrade, neither wins outright. The base has
-                `flex-1` (basis 0), so it can't shrink on its own — it simply
-                takes what the suffix leaves, which starved it to "era…" when
-                the suffix was `shrink-0`. The floor below stops that; the
-                suffix is shrinkable and truncating, so once the base is at its
-                floor the remaining squeeze comes out of the suffix instead of
-                overflowing. No max-width on the suffix: the base's floor is
-                already what bounds it, and a percentage cap would truncate a
-                timestamp that still had room to render whole. 10ch is tuned to
-                the ~239px card interior — enough for a readable name stem
-                beside a full "(2026-07-31 17:35)". */}
-            <span className="min-w-[10ch] flex-1 truncate">{titleBase}</span>
-            {titleSuffix ? (
-              <span className="min-w-0 truncate">{titleSuffix}</span>
+            {/* The base is the only half that degrades. It has `flex-1`
+                (basis 0), so it takes whatever the suffix leaves, down to the
+                floor below.
+
+                The suffix never degrades: `shrink-0`, no `truncate`. Letting it
+                ellipsize was the earlier arrangement and it produced exactly
+                the failure this element exists to prevent — "eraser_plac…
+                (2026-0…", where the disambiguator itself is the thing cut off
+                and the two colliding cards read identically again. What buys
+                the room instead is the year (displayDedupeSuffix): ~5
+                characters off a form whose remaining fields are the ones that
+                actually separate two same-day runs. No max-width either: the
+                base's floor is what bounds this, and a percentage cap would
+                truncate a timestamp that still had room to render whole.
+
+                A floor is still needed — with none, the base starves to "era…"
+                beside a shrink-0 suffix — but because that suffix can no longer
+                give, the floor is now what decides whether the pair OVERFLOWS
+                the card, so it is sized against the narrowest interior rather
+                than the roomiest. 6ch (~53px) + the 4px gap + a whole
+                "(07-31 17:35)" (~98px at the inherited 16px semibold) ≈ 155px:
+                inside the ~170px interior of a 2-up card in a 1280px window,
+                and far inside the ~239px of CappedGrid's documented 263px card.
+                At the retired 10ch the pair needed ~190px and spilled past the
+                card edge below a ~1400px viewport. */}
+            <span className="min-w-[6ch] flex-1 truncate">{titleBase}</span>
+            {titleSuffixText ? (
+              <span className="shrink-0">{titleSuffixText}</span>
             ) : null}
           </div>
           {/* When aliased, keep the true identity visible: the run id for
