@@ -9,6 +9,7 @@
  * whose distinguishing text sits at the end.
  */
 
+import { POLICY_TYPE_OPTIONS } from "@/components/training/types";
 import { validateModelName } from "@/lib/datasetName";
 
 /**
@@ -118,4 +119,57 @@ export function proposeModelName(source: string): string {
     .replace(DATASET_SESSION_STAMP_RE, "")
     .replace(RUN_TIMESTAMP_RE, "");
   return validateModelName(stem) === null ? stem : "";
+}
+
+// The separator jobs.start puts between the two halves of a generated run name
+// (`f"{policy_type.upper()} · {dataset_repo_id}"`, jobs.py). A thin space-padded
+// middle dot, not a hyphen — nothing a dataset or policy name contains.
+const RUN_NAME_SEPARATOR = " · ";
+
+// The policy vocabulary the peel is gated on. Reuses the picker's own option
+// list rather than restating it: every generated name this frontend can meet
+// was produced from a `policy_type` the picker offered, so the two lists cannot
+// drift apart in the direction that matters. The backend's KNOWN_POLICY_TYPES
+// (utils/naming.py) is the wider set — it also knows types lerobot can load but
+// the trainer doesn't offer (pi05, wall_x, multi_task_dit) — so a name built
+// from one of those falls through unpeeled here. That is the safe direction:
+// the name renders exactly as it does today, nothing is mangled.
+const KNOWN_POLICY_TYPES = new Set(POLICY_TYPE_OPTIONS.map((o) => o.value));
+
+/**
+ * A run's name peeled down to the TASK it learned — the frontend mirror of
+ * `_run_identity_name` (makermodslab/models.py), which does this for the model
+ * library's cards.
+ *
+ *   "SMOLVLA · makermods/eraser_place_unblurry_real"  ->  "eraser_place_unblurry_real"
+ *
+ * Both peeled halves are stated elsewhere on every surface that renders this:
+ * the policy by its own chip / meta row, the dataset (namespace included) by
+ * its own field. The title line is the widest and the first to truncate, so
+ * spending it on facts printed twice is what makes every row of one
+ * policy+namespace collapse to the same "SMOLVLA · makermods/era…".
+ *
+ * Only the GENERATED shape is peeled, and only when the head is a policy type
+ * we recognize — a human-typed name that happens to contain " · " keeps every
+ * word, and so does a name whose head isn't a policy (the retired
+ * "Imported · …" prefix among them). The namespace peel sits behind that same
+ * gate, so it can never eat a slash out of a name a person wrote. Callers pass
+ * `jobDisplayName(job)`, which prefers a rename outright — an alias reaches
+ * here only if the user typed this exact shape themselves, and the gate then
+ * hands it back whole.
+ *
+ * Pure and total: anything unrecognized returns byte-identical, which is what
+ * keeps imported records and `{name}_{timestamp}` runs rendering as they do.
+ */
+export function runTaskTitle(name: string): string {
+  const at = name.indexOf(RUN_NAME_SEPARATOR);
+  if (at < 0) return name;
+  const head = name.slice(0, at);
+  const tail = name.slice(at + RUN_NAME_SEPARATOR.length);
+  if (!tail || !KNOWN_POLICY_TYPES.has(head.toLowerCase())) return name;
+  // The tail is a dataset repo id: keep everything after the namespace. A bare
+  // name with no slash is already the task.
+  const slash = tail.indexOf("/");
+  if (slash < 0) return tail;
+  return tail.slice(slash + 1) || tail;
 }

@@ -4,10 +4,11 @@ import { RefreshCw } from "lucide-react";
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import LibraryHeader from "@/components/library/LibraryHeader";
+import { GRID_H } from "@/components/library/CappedGrid";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useApi } from "@/contexts/ApiContext";
-import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
+import { cn } from "@/lib/utils";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
@@ -49,7 +50,8 @@ interface JobsLibraryProps {
  * list gives one row per run with its state, where it ran, when, and the
  * row-level primary actions; and the selected run's card below the dropdown
  * keeps every other affordance — monitor, rename, checkpoint picker,
- * Run / Continue / Resume-from-step / Download / delete.
+ * Continue / Resume-from-step / delete. (Run and Download are model-shaped
+ * actions and live on ModelCard.)
  *
  * The models column that used to sit beside this lives in the Deploy panel
  * (ModelsLibrary) — a model artifact is deployed, not trained.
@@ -71,17 +73,9 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     dismissHub,
   } = useJobsData();
 
-  // Run on a job card doesn't open a dialog: it prefills the Deploy panel's
-  // skill/checkpoint picker and focuses that panel.
-  const { openStudio } = useStudio();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const navigate = useNavigate();
-  const handlePlay = useCallback(
-    (job: JobRecord, step: number) =>
-      openStudio("deploy", { deploy: { source: "job", id: job.id, step } }),
-    [openStudio],
-  );
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<JobsFilter>("all");
@@ -326,33 +320,62 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
           {/* The run picker, then the selected run's detail card. Local and
               online runs share one list, newest-first inside their launched-by
-              group; each row's Local/Cloud chip says where it runs. */}
-          <div className="space-y-2">
-            <JobsDropdown
-              entries={activeEntries}
-              untracked={untrackedEntries}
-              selectedKey={selectedKey}
-              onSelect={(entry) => setPickedKey(entry.key)}
-              onStop={stop}
-              onResume={handleResume}
-              onDismissHub={dismissHub}
-              resumingId={resumingId}
-              emptyMessage={emptyMessage}
-            />
-            {selected ? (
-              selected.kind === "job" ? (
-                <JobCard
-                  job={selected.job}
-                  onStop={stop}
-                  onDelete={remove}
-                  onPlay={handlePlay}
-                  onRenamed={refresh}
-                  ancestors={ancestorsOf(selected.job)}
-                />
-              ) : (
-                <HubJobCard job={selected.job} onDismiss={dismissHub} />
-              )
-            ) : null}
+              group; each row's Local/Cloud chip says where it runs.
+
+              The block is held at the libraries' one reserved height (GRID_H —
+              the same measurement the dataset and model grids floor themselves
+              at). That reservation is what puts the three studio panels'
+              `mt-auto` action rows on one visual row, and this library lost it
+              when its card grid became a dropdown: the Train panel's Start
+              button then rose and fell with whether a run was selected and how
+              tall its card was. Held in BOTH directions, so an empty selection
+              reserves the same height a tall card does — the card scrolls
+              inside the box rather than growing it. */}
+          <div className={cn(GRID_H, "flex flex-col gap-2 overflow-hidden")}>
+            <div className="shrink-0">
+              <JobsDropdown
+                entries={activeEntries}
+                untracked={untrackedEntries}
+                selectedKey={selectedKey}
+                onSelect={(entry) => setPickedKey(entry.key)}
+                onStop={stop}
+                onResume={handleResume}
+                onDismissHub={dismissHub}
+                resumingId={resumingId}
+                emptyMessage={emptyMessage}
+              />
+            </div>
+            {/* Overflow is spent HERE, on the detail card, never on the page:
+                the region takes whatever the dropdown leaves and scrolls its
+                own content. The inner wrapper is load-bearing — it leaves the
+                region's height indefinite for the card's own `h-full`, so a
+                card taller than the box hugs its content and scrolls whole
+                instead of being cut off at the box's edge. */}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div>
+                {selected ? (
+                  selected.kind === "job" ? (
+                    <JobCard
+                      // Remount on every run switch: JobCard holds per-run
+                      // state (its lineage checkpoint list and the selected
+                      // checkpoint ref) that its fetch effect only replaces
+                      // once the new run's fetch resolves. Without a key the
+                      // instance is reused and, in that window,
+                      // Continue/Resume would act on the PREVIOUS run while
+                      // the header already shows the new one.
+                      key={selected.key}
+                      job={selected.job}
+                      onStop={stop}
+                      onDelete={remove}
+                      onRenamed={refresh}
+                      ancestors={ancestorsOf(selected.job)}
+                    />
+                  ) : (
+                    <HubJobCard job={selected.job} onDismiss={dismissHub} />
+                  )
+                ) : null}
+              </div>
+            </div>
           </div>
         </div>
       </CollapsibleContent>

@@ -20,6 +20,16 @@ const WIDE_COLUMN_MIN_PX = 800;
  * can see as literals. */
 export const GRID_MIN_H = "min-h-[18.875rem]";
 
+/** The same reservation as a FIXED height, for a library whose content is not
+ * a fixed-height card row. A grid can floor its height and stop there — its
+ * rows are 16.5rem whatever they hold. Jobs renders a dropdown plus one
+ * variable-height detail card, so flooring alone would let a tall card push the
+ * Train panel's action row back out of line with its siblings; capping too, and
+ * scrolling inside the box, keeps the block one exact height in both
+ * directions. Same measurement as GRID_MIN_H — change them together (and keep
+ * both literal: Tailwind only generates classes it can see). */
+export const GRID_H = "h-[18.875rem]";
+
 /**
  * The shared library grid, capped at one row. Every studio library (datasets,
  * training jobs, models) renders one row of cards by default — three where the

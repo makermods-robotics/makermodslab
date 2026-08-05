@@ -20,6 +20,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { runTaskTitle } from "@/lib/modelNames";
+import {
+  policyTypeDisplayName,
+  policyTypeShortLabel,
+} from "@/components/training/types";
 import {
   HubJob,
   JobRecord,
@@ -76,7 +81,16 @@ const stagePresentation: Record<string, Presentation> = {
 };
 
 interface Described {
+  /** What the title line RENDERS: a generated run name peeled to its task. */
   name: string;
+  /** What the title line MEANS: the untouched name, for the hover title. Equal
+   * to `name` whenever nothing was peeled. */
+  fullName: string;
+  /** The policy the peel took out of `name`, as a chip label — null when
+   * nothing was peeled, so a human-named or imported row gains no chip. */
+  policyLabel: string | null;
+  /** Hover text for that chip: the policy's full display name. */
+  policyTitle: string;
   present: Presentation;
   when: string;
   whereLabel: string;
@@ -99,8 +113,16 @@ function describeEntry(entry: JobsEntry): Described {
       color: "text-muted-foreground",
       Icon: HelpCircle,
     };
+    // A Hub-only job is named by its image/space, never by the "{POLICY} · {ds}"
+    // shape, and nothing here knows what policy it trains — so no peel and no
+    // chip.
+    const hubName =
+      job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`;
     return {
-      name: job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`,
+      name: hubName,
+      fullName: hubName,
+      policyLabel: null,
+      policyTitle: "",
       present,
       when: relativeTime(entry.time),
       whereLabel: job.flavor ?? "Hub",
@@ -121,8 +143,20 @@ function describeEntry(entry: JobsEntry): Described {
   const target = job.config?.steps || job.metrics.total_steps || 0;
   const current = job.metrics.current_step;
   const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
+  // Peel the generated "{POLICY} · {namespace}/{task}" down to the task, and
+  // hand the policy it removed to a chip of its own. A rename, an import or a
+  // human-typed name is returned untouched by runTaskTitle, and `peeled` is
+  // then false — those rows render exactly as they did before, chip included
+  // (i.e. absent).
+  const fullName = jobDisplayName(job);
+  const name = runTaskTitle(fullName);
+  const peeled = name !== fullName;
+  const policyType = job.config?.policy_type;
   return {
-    name: jobDisplayName(job),
+    name,
+    fullName,
+    policyLabel: peeled && policyType ? policyTypeShortLabel(policyType) : null,
+    policyTitle: peeled && policyType ? policyTypeDisplayName(policyType) : "",
     present,
     when: relativeTime(
       job.ended_at != null ? job.ended_at * 1000 : (job.started_at ?? 0) * 1000,
@@ -153,6 +187,10 @@ const canResumeEntry = (entry: JobsEntry): boolean =>
   entry.job.checkpoint_count > 0;
 
 const COL_STATE = "w-[4.75rem] shrink-0";
+// The policy the title no longer carries. Always occupies its column — an
+// imported or human-named row leaves it empty rather than shifting where/when
+// out of alignment with the rows around it.
+const COL_POLICY = "w-[4rem] shrink-0";
 const COL_WHERE = "w-[4.5rem] shrink-0";
 const COL_WHEN = "w-[3.5rem] shrink-0 text-right";
 
@@ -175,7 +213,10 @@ interface RowProps {
 }
 
 /**
- * One run: state · name · where · when, plus the row-level primary actions.
+ * One run: state · task · policy · where · when, plus the row-level primary
+ * actions. The name column carries the TASK alone (the policy moved to its own
+ * chip, the dataset namespace is dropped) so rows of one policy+namespace stop
+ * reading identically once the column truncates.
  * Everything else about the run (rename, monitor, checkpoint picker, Run,
  * Continue/Resume-from-step, Download, delete) lives in the detail card the
  * selection drives.
@@ -228,11 +269,19 @@ const JobsRow: React.FC<RowProps> = ({
           />
           <span className="truncate">{d.present.label}</span>
         </span>
+        {/* The hover title is the FULL name — the peel is a display shortening,
+            so the exact identity stays one hover away. */}
         <span
           className="min-w-0 flex-1 truncate text-foreground"
-          title={d.name}
+          title={d.fullName}
         >
           {d.name}
+        </span>
+        <span
+          className={cn(COL_POLICY, "truncate text-muted-foreground")}
+          title={d.policyTitle || undefined}
+        >
+          {d.policyLabel}
         </span>
         <span
           className={cn(
@@ -446,7 +495,7 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
                 </span>
                 <span
                   className="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
-                  title={d.name}
+                  title={d.fullName}
                 >
                   {d.name}
                 </span>

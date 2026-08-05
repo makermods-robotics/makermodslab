@@ -17,6 +17,7 @@ import {
   jobDisplayName,
   renameJob,
 } from "@/lib/jobsApi";
+import { middleEllipsis, runTaskTitle } from "@/lib/modelNames";
 import {
   Square,
   Trash2,
@@ -124,12 +125,18 @@ const JobCard: React.FC<Props> = ({
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
   const importedSource = job.hf_repo_id || job.output_dir;
-  // The title line's two shortenings: middleEllipsis on an imported name (JS —
-  // the caller knows), and the div's own `truncate` (CSS — measured on hover).
-  // Either one earns a title; neither means the name is whole on screen and a
-  // tooltip would only echo it. Same identity as ModelCard's: the full name,
-  // plus the source for an import (the thing that actually locates the weights).
-  const titleText = isImported ? middleEllipsis(displayName) : displayName;
+  // The title line's shortenings: the task peel on a generated run name
+  // (`runTaskTitle` — the policy is already on the Policy meta row below and
+  // the dataset on its own, so the widest line stops repeating them),
+  // middleEllipsis on an imported name (JS — the caller knows), and the div's
+  // own `truncate` (CSS — measured on hover). Any of them earns a title; none
+  // means the name is whole on screen and a tooltip would only echo it. Same
+  // identity as ModelCard's: the full name, plus the source for an import (the
+  // thing that actually locates the weights). `displayName` stays the full name
+  // everywhere else on this card — the rename dialog prefills and compares
+  // against what the run is really called, never the peeled label.
+  const taskTitle = runTaskTitle(displayName);
+  const titleText = isImported ? middleEllipsis(taskTitle) : taskTitle;
   const titleHover = useTruncationTitle(
     isImported && importedSource
       ? `${displayName}\n${importedSource}`
@@ -359,30 +366,31 @@ const JobCard: React.FC<Props> = ({
   // Fine-tuning from the final checkpoint is the intended way to build on a
   // completed run: it starts a FRESH schedule from those weights. Blanket rule,
   // no per-policy exceptions.
-  const endedBeforeTarget =
-    (selectedJob.state === "failed" || selectedJob.state === "interrupted") &&
-    (selectedJob.config.steps === 0 ||
-      selectedStep == null ||
-      selectedStep < selectedJob.config.steps);
+  //
+  // Asked of a lineage ENTRY (its owning run + that checkpoint's step), not of
+  // the card, so the buttons and the row's visibility below share one
+  // definition: on a mixed lineage a done child can still offer Continue for a
+  // checkpoint inherited from a run that stopped short.
+  const canResumeEntry = (j: JobRecord, step: number) =>
+    (j.runner === "local" || j.runner === "hf_cloud") &&
+    !isRunning &&
+    (j.state === "failed" || j.state === "interrupted") &&
+    (j.config.steps === 0 || step < j.config.steps);
 
   // Continue (local resume) additionally needs the optimizer/step state to be
   // on THIS machine — i.e. a local run's own checkpoint dir.
   const canContinue =
-    selectedJob.runner === "local" &&
-    !isRunning &&
-    lineageCheckpoints.length > 0 &&
     selectedStep != null &&
-    endedBeforeTarget;
+    selectedJob.runner === "local" &&
+    canResumeEntry(selectedJob, selectedStep);
 
   // Resume (cloud): an HF Job is immutable once ended, so this launches a NEW
   // cloud job that continues from the parent's Hub checkpoint (restoring
   // optimizer + step, unlike Fine-tune).
   const canResumeCloud =
-    selectedJob.runner === "hf_cloud" &&
-    !isRunning &&
-    lineageCheckpoints.length > 0 &&
     selectedStep != null &&
-    endedBeforeTarget;
+    selectedJob.runner === "hf_cloud" &&
+    canResumeEntry(selectedJob, selectedStep);
 
   // The configurator PREFILLS from this seed, then renders read-only the
   // settings lerobot rebuilds from the checkpoint anyway (batch size, seed,
@@ -449,12 +457,15 @@ const JobCard: React.FC<Props> = ({
 
   const showProgressBar = isRunning;
   // The checkpoint row exists to serve Continue / Resume: it says which
-  // checkpoint they will start from. Rendered whenever there is a resume action
-  // OR a real choice to make — never as a lone dropdown wired to nothing.
+  // checkpoint they will start from. Rendered whenever SOME checkpoint in the
+  // lineage has such an action — never as a lone dropdown wired to nothing.
+  // The gate is lineage-wide, not selection-wide, on purpose: a done run whose
+  // ancestor stopped short must still show the dropdown, or the checkpoint that
+  // lights Continue could never be reached (the default selection is the
+  // newest, which is the done run's own).
   const showResumeRow =
-    lineageCheckpoints.length > 0 &&
     selectedStep != null &&
-    (canContinue || canResumeCloud || lineageCheckpoints.length > 1);
+    lineageCheckpoints.some((c) => canResumeEntry(c.job, c.ckpt.step));
 
   // Unified metadata rows (same format as the dataset/model cards). Imported
   // models keep their source path in the subtitle; trainings surface what they
