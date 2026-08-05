@@ -2522,17 +2522,21 @@ class JobRegistry:
         # carries the "model" placeholder. Skipped on resume: that path
         # passes --config_path instead and never emits pretrained_path (see
         # train.build_training_command), so there is no pair to contradict.
+        deferred_hub_ref: str | None = None
         if config.policy_pretrained_path and not config.resume:
-            # Deliberately BEFORE the materialization below: this reads only the
+            # Deliberately BEFORE the materialization: this reads only the
             # checkpoint's config.json, so a contradicting pair is refused
-            # without first downloading the weights it names.
+            # without first downloading the weights it names — and refused
+            # SYNCHRONOUSLY, as a 400, with no job record left behind.
             _check_pretrained_policy_type(config.policy_pretrained_path, config.policy_type)
-            if target.runner == "local":
+            if target.runner == "local" and needs_local_materialization(config.policy_pretrained_path):
                 # A step-suffixed hub ref becomes the real directory the local
-                # trainer loads. A cloud run keeps the ref: its container
-                # materializes the same ref pod-side (see the HF Jobs wrapper),
-                # because a host path is meaningless there.
-                config.policy_pretrained_path = localize_pretrained_path(config.policy_pretrained_path)
+                # trainer loads — but off-request, in _materialize_then_start,
+                # which rewrites policy_pretrained_path once the bytes are here.
+                # A cloud run keeps the ref: its container materializes the same
+                # ref pod-side (see the HF Jobs wrapper), because a host path is
+                # meaningless there.
+                deferred_hub_ref = config.policy_pretrained_path
 
         with self._lock:
             # Authoritative local-run mutex: re-checked here, under the lock

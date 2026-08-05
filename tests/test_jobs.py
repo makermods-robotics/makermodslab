@@ -2614,12 +2614,15 @@ def test_finetune_start_cloud_keeps_the_step_ref(monkeypatch, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _patch_hub_for_finetune(monkeypatch, tmp_path):
-    """Stand-in for the CHEAP Hub read a fine-tune start makes synchronously:
-    the source run's checkpoint listing."""
+def _patch_hub_for_finetune(monkeypatch, tmp_path, policy_type: str = "act"):
+    """Stand-ins for the CHEAP Hub reads a fine-tune start makes synchronously:
+    the source's checkpoint listing, and the checkpoint's own config.json."""
+    cfg_file = tmp_path / "base_config.json"
+    cfg_file.write_text(_json.dumps({"type": policy_type}))
     monkeypatch.setattr(
         "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("003000"))
     )
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", lambda **kw: str(cfg_file))
 
 
 def _hub_finetune_request(source_id: str, policy_type: str = "act"):
@@ -3332,6 +3335,53 @@ def test_finetune_start_accepts_matching_policy_type(tmp_path) -> None:
     assert record.config.policy_pretrained_path == str(src.resolve())
 
 
+def test_read_pretrained_policy_type_reads_a_step_ref(monkeypatch, tmp_path) -> None:
+    """The pre-download policy-type guard must look inside the step it names,
+    not at the repo root — otherwise it would validate different weights than
+    the ones the run trains from."""
+    from makermodslab.jobs import read_pretrained_policy_type
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(_json.dumps({"type": "smolvla"}))
+    seen: dict = {}
+
+    def fake_download(**kwargs):
+        seen.update(kwargs)
+        return str(cfg_file)
+
+    # This one reads through jobs' module-level binding (unlike
+    # _read_checkpoint_config, which re-imports), so patch it there.
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", fake_download)
+
+    assert read_pretrained_policy_type("user/repo@checkpoints/000500") == "smolvla"
+    assert seen["filename"] == "checkpoints/000500/pretrained_model/config.json"
+
+
+def test_contradicting_policy_type_still_refuses_before_any_record(monkeypatch, tmp_path) -> None:
+    """The cheap guards did NOT move behind the record. A request that can be
+    refused from the checkpoint's config.json alone still fails fast, with no
+    record, no job directory, and no download."""
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("a refused request must not download anything")
+
+    # The base checkpoint is smolvla; the request below asks for act.
+    _patch_hub_for_finetune(monkeypatch, tmp_path, policy_type="smolvla")
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    _fake_local_runner(monkeypatch)
+
+    with pytest.raises(ValueError, match="smolvla"):
+        reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
+
+    assert list(reg._records) == [source.id]
+    assert list(reg._output_root.iterdir()) == []
+    assert reg._prepare_threads == {}
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint-level policy-type guard. _check_finetune_policy_type compares the
 # source JobRecord's *recorded* type, so it is blind to a request that supplies
@@ -3906,3 +3956,51 @@ def test_tailing_runner_keeps_optimistic_zero_when_pid_was_already_gone(monkeypa
     runner.stop()
     assert runner.stop_signalled() is False
     assert runner.returncode() == 0
+
+
+def test_start_refuses_a_local_parent_resumed_on_the_cloud(tmp_path, monkeypatch) -> None:
+    """local parent → Cloud target (MT42). The refusal must name the parent's
+    runner, and must leave no record behind."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    # The cloud dataset preflight sits ahead of the resume block; keep it happy
+    # (and off the network) so the cross-runner refusal is what we observe.
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
+    ):
+        reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert "Local" in str(excinfo.value)
+    assert [r.id for r in reg.list(limit=10)] == ["src"]
+    _assert_nothing_was_created(reg)
+
+
+def test_start_refuses_a_cloud_parent_resumed_locally(tmp_path, monkeypatch) -> None:
+    """cloud parent → Local target (MT4). Refused BEFORE _resolve_cloud_resume
+    would go to the Hub — the exploding api stand-in is the assertion that the
+    guard lands first."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    def _no_hub():
+        raise AssertionError("cross-runner resume reached the Hub")
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", _no_hub)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert "Hugging Face Cloud" in str(excinfo.value)
+    # Read the registry directly: `list` counts a cloud record's checkpoints,
+    # which would itself call the stand-in above.
+    assert list(reg._records) == ["src"]
+    _assert_nothing_was_created(reg)
