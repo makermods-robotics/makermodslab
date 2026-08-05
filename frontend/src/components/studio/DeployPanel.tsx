@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertTriangle,
   Download,
@@ -77,6 +83,10 @@ const JOB_SCAN_LIMIT = 200;
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
 // just stops the stepper from offering a number that would be silently reduced.
 const MAX_EVAL_EPISODES = 200;
+
+/** Stable empty list, so "no checkpoints for the current skill" never hands
+ * children a fresh array identity on every render. */
+const NO_CHECKPOINTS: JobCheckpoint[] = [];
 
 /** Small preview for verifying which physical camera a role binds to.
  *
@@ -182,8 +192,28 @@ const DeployPanel: React.FC = () => {
   const [importModalOpen, setImportModalOpen] = useState(false);
 
   // --- Inference config state (ported from InferenceModal) ---------------
-  const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
-  const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  // The loaded checkpoint list is stored WITH the job it was fetched for. The
+  // panel never unmounts and switching skills is asynchronous, so a bare list
+  // would still hold the PREVIOUS skill's checkpoints while the new job's
+  // fetch is in flight — and a step-keyed selection would silently re-resolve
+  // against them (two skills can both have a step 20000), arming Start with a
+  // policy_ref from the skill the user just navigated away from. Tagging the
+  // list makes the stale window unrepresentable: `checkpoints` reads empty the
+  // instant `jobId` changes, in the same render.
+  const [loadedCheckpoints, setLoadedCheckpoints] = useState<{
+    jobId: string;
+    list: JobCheckpoint[];
+  } | null>(null);
+  // Selection is keyed on the checkpoint `ref` — its unique identity (owning
+  // repo/path plus step) — not on the step, mirroring JobCard. The step is
+  // derived for display and for the policy-config request.
+  const [selectedRef, setSelectedRef] = useState<string | null>(null);
+  // A step handed in by ANOTHER surface (a "Run on robot" prefill, a library
+  // card) names a checkpoint of the INCOMING job, so it can only be turned
+  // into a ref once that job's list has loaded. Parked here until then; a ref
+  // is never guessed from the list currently on screen. In a ref (not state)
+  // so consuming it doesn't re-run the fetch effect.
+  const pendingStepRef = useRef<number | null>(null);
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
   // Multi-episode evaluation. 1 (the default) is the plain single rollout; >1
@@ -226,6 +256,20 @@ const DeployPanel: React.FC = () => {
 
   const jobId = selectedJob?.id ?? null;
   const isBimanual = robot?.mode === "bimanual";
+
+  // Checkpoints of the CURRENTLY selected skill only — a list still tagged
+  // with the previous job counts as "not loaded yet", never as content.
+  const checkpoints =
+    loadedCheckpoints && loadedCheckpoints.jobId === jobId
+      ? loadedCheckpoints.list
+      : NO_CHECKPOINTS;
+  const checkpointsLoading =
+    jobId != null && loadedCheckpoints?.jobId !== jobId;
+  // The selected checkpoint itself. Resolved out of the current skill's list,
+  // so it is null for as long as that list is in flight.
+  const selectedCheckpoint =
+    checkpoints.find((c) => c.ref === selectedRef) ?? null;
+  const selectedStep = selectedCheckpoint?.step ?? null;
 
   const cameraMap = useMemo(
     () =>
@@ -306,13 +350,17 @@ const DeployPanel: React.FC = () => {
         if (deployPrefill.source === "job") {
           const job = await getJob(baseUrl, fetchWithHeaders, deployPrefill.id);
           if (cancelled) return;
-          setSelectedStep(deployPrefill.step ?? null);
+          // The prefill's step belongs to the INCOMING job — park it for the
+          // loader to resolve against that job's own list.
+          pendingStepRef.current = deployPrefill.step ?? null;
+          setSelectedRef(null);
           setSelectedJob(job);
           setSelectedModelId(job.id);
         } else {
           const imported = await importSource(deployPrefill.id);
           if (cancelled || !imported) return;
-          setSelectedStep(deployPrefill.step ?? null);
+          pendingStepRef.current = deployPrefill.step ?? null;
+          setSelectedRef(null);
           setSelectedJob(imported);
           setSelectedModelId(imported.id);
         }
@@ -350,9 +398,10 @@ const DeployPanel: React.FC = () => {
       setSelectedModelId(modelId);
       const model = models.find((m) => m.id === modelId);
       if (!model) return;
-      // New skill → drop the prior step so the load effect picks the new job's
-      // latest checkpoint.
-      setSelectedStep(null);
+      // New skill → drop the prior selection so the load effect picks the new
+      // job's latest checkpoint.
+      pendingStepRef.current = null;
+      setSelectedRef(null);
       setResolving(true);
       try {
         const jobs = await listJobs(
@@ -380,22 +429,39 @@ const DeployPanel: React.FC = () => {
   // Load checkpoints when the selected job changes.
   useEffect(() => {
     if (!open || !jobId) {
-      setCheckpoints([]);
+      setLoadedCheckpoints(null);
       return;
     }
     let cancelled = false;
     listJobCheckpoints(baseUrl, fetchWithHeaders, jobId)
       .then((cks) => {
         if (cancelled) return;
-        setCheckpoints(cks);
-        if (cks.length > 0) {
-          const latest = cks[cks.length - 1].step;
-          setSelectedStep((prev) => (prev != null ? prev : latest));
-        }
+        setLoadedCheckpoints({ jobId, list: cks });
+        // Resolve the selection against THIS job's list, in priority order:
+        // a step pinned by the surface that sent us here, else a still-valid
+        // previous pick (same job, refreshed list), else the latest
+        // checkpoint. The backend lists ascending, so the last entry is
+        // newest.
+        const pinned = pendingStepRef.current;
+        pendingStepRef.current = null;
+        setSelectedRef((prev) => {
+          if (pinned != null) {
+            const hit = cks.find((c) => c.step === pinned);
+            if (hit) return hit.ref;
+          }
+          // A ref from a DIFFERENT job never matches (it carries that job's
+          // repo/path), so a skill switch falls through to the latest.
+          if (prev != null && cks.some((c) => c.ref === prev)) return prev;
+          return cks.length > 0 ? cks[cks.length - 1].ref : null;
+        });
       })
       .catch(() => {
         if (cancelled) return;
-        setCheckpoints([]);
+        // Tagged with the job so a failed listing reads as "no checkpoints"
+        // rather than an endless loading state.
+        setLoadedCheckpoints({ jobId, list: [] });
+        pendingStepRef.current = null;
+        setSelectedRef(null);
       });
     return () => {
       cancelled = true;
@@ -504,11 +570,6 @@ const DeployPanel: React.FC = () => {
     };
   }, [open, baseUrl, fetchWithHeaders]);
 
-  const selectedRef =
-    selectedStep != null
-      ? checkpoints.find((c) => c.step === selectedStep)?.ref ?? null
-      : null;
-
   // Arm-count mismatch between CHECKPOINT and ROBOT — client mirror of the
   // server's `_arm_count_mismatch` 409 guard. (Ported verbatim.)
   const SO101_DOF = 6;
@@ -538,7 +599,7 @@ const DeployPanel: React.FC = () => {
     !!robot &&
     robot.follower_ready &&
     !robotCheckpointArmMismatch &&
-    selectedRef != null &&
+    selectedCheckpoint != null &&
     !!policyConfig &&
     allCamerasBound &&
     !submitting &&
@@ -548,7 +609,7 @@ const DeployPanel: React.FC = () => {
     if (
       !robot ||
       robotCheckpointArmMismatch ||
-      selectedRef == null ||
+      selectedCheckpoint == null ||
       !policyConfig
     )
       return;
@@ -585,7 +646,7 @@ const DeployPanel: React.FC = () => {
       await startInference(baseUrl, fetchWithHeaders, {
         follower_port: robot.follower_port,
         follower_config: robot.follower_config,
-        policy_ref: selectedRef,
+        policy_ref: selectedCheckpoint.ref,
         task,
         camera_bindings: cameraBindingPayload,
         camera_dims: cameraDimsPayload,
@@ -775,7 +836,12 @@ const DeployPanel: React.FC = () => {
           {/* Checkpoint ------------------------------------------------------- */}
           <div className="space-y-2">
             <Label htmlFor="deploy-checkpoint">Checkpoint</Label>
-            {checkpoints.length === 0 ? (
+            {checkpointsLoading ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading checkpoints…
+                </div>
+              ) : checkpoints.length === 0 ? (
                 <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
@@ -786,13 +852,8 @@ const DeployPanel: React.FC = () => {
                 <CheckpointDropdown
                   id="deploy-checkpoint"
                   checkpoints={checkpoints}
-                  // Single-job list: steps are unique here, so the step maps
-                  // 1:1 onto the checkpoint's identifying ref.
-                  selectedRef={
-                    checkpoints.find((c) => c.step === selectedStep)?.ref ??
-                    null
-                  }
-                  onChange={(c) => setSelectedStep(c.step)}
+                  selectedRef={selectedRef}
+                  onChange={(c) => setSelectedRef(c.ref)}
                 />
               )}
               {robotCheckpointArmMismatch ? (
@@ -1025,7 +1086,10 @@ const DeployPanel: React.FC = () => {
       <LibrarySection className="mt-0">
         <ModelsLibrary
           onPick={(job, step) => {
-            setSelectedStep(step);
+            // Same contract as a prefill: the step names a checkpoint of the
+            // picked job, resolved to a ref once that job's list loads.
+            pendingStepRef.current = step;
+            setSelectedRef(null);
             setSelectedJob(job);
             setSelectedModelId(job.id);
           }}
