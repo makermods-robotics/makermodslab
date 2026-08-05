@@ -932,6 +932,10 @@ def missing_checkpoint_files(names):
 # checkpoint" is otherwise a dead end for the user.
 _INCOMPLETE_REMEDY = "Resume an earlier checkpoint, or fine-tune from its weights instead."
 
+# Plain-language names for the runner ids, so a user-facing refusal reads like
+# the Compute control the user actually clicked rather than an internal literal.
+_RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
+
 
 # Plain-language names for the runner ids, so a user-facing refusal reads like
 # the Compute control the user actually clicked rather than an internal literal.
@@ -991,8 +995,20 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
     if not source.hf_repo_id:
         raise ValueError(f"Cloud run {source.id!r} has no output repo on the Hub to resume from.")
     api = shared_hf_api()
-    checkpoints = _list_hub_checkpoints(api, source.hf_repo_id)
+    # Keep only the checkpoints/<step>/ entries. A repo with no checkpoint tree
+    # but a policy at its root lists a single '@root' entry (_list_hub_checkpoints'
+    # fallback) — deployable and fine-tunable, but root weights carry no
+    # training_state/, so there is nothing to resume from. Filtering here keeps
+    # the refusal a plain-language one instead of the ref-shape error below.
+    listed = _list_hub_checkpoints(api, source.hf_repo_id)
+    checkpoints = [c for c in listed if _HUB_CKPT_REF_RE.match(c.ref)]
     if not checkpoints:
+        if listed:
+            raise ValueError(
+                f"Cloud run {source.id!r} published a final policy but saved no "
+                "checkpoints, so it has no optimizer state to resume from. "
+                "Fine-tune from its weights instead."
+            )
         raise ValueError(
             f"Cloud run {source.id!r} left no checkpoints on the Hub — nothing to "
             "resume from (the run died before its first save)."
@@ -1194,10 +1210,13 @@ def _check_finetune_policy_type(source: JobRecord, requested: str) -> None:
 def read_pretrained_policy_type(pretrained_path: str) -> str | None:
     """Read the architecture of the checkpoint at ``--policy.pretrained_path``.
 
-    `pretrained_path` is whatever lerobot would be handed: an absolute local
-    ``pretrained_model`` directory, or a Hub repo id whose ROOT holds the model
-    (``_resolve_finetune_pretrained_path`` never returns a Hub sub-path, because
-    lerobot's ``pretrained_path`` can't address one).
+    `pretrained_path` is whatever the run will be started from: an absolute
+    local ``pretrained_model`` directory, a Hub repo id whose ROOT holds the
+    model, or a step-suffixed hub ref ('repo@checkpoints/<step_dir>') that has
+    not been materialized yet — the check runs BEFORE the download, so that a
+    contradicting pair is refused without first pulling gigabytes.
+
+    Only the checkpoint's ``config.json`` is fetched in every case (a few KB).
 
     Returns the ``type`` field of the checkpoint's own ``config.json``, or None
     when it can't be read — missing file, malformed JSON, private/absent repo,
@@ -1210,10 +1229,17 @@ def read_pretrained_policy_type(pretrained_path: str) -> str | None:
             return _clean_policy_type(json.load(f).get("type"))
         return None
 
+    # A step-suffixed ref addresses one checkpoint inside the repo; anything
+    # else is a repo id whose root holds the config.
+    m = _HUB_CKPT_REF_RE.match(pretrained_path)
+    if m:
+        repo_id = m.group("repo")
+        filename = f"checkpoints/{m.group('step_dir')}/{_HUB_CKPT_SUBDIR}/config.json"
+    else:
+        repo_id, filename = pretrained_path, "config.json"
+
     with contextlib.suppress(Exception):
-        local = hf_hub_download(
-            repo_id=pretrained_path, filename="config.json", repo_type="model"
-        )
+        local = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
         with open(local) as f:
             return _clean_policy_type(json.load(f).get("type"))
     return None
@@ -1311,12 +1337,35 @@ def _list_imported_local(path: str) -> list[JobCheckpoint]:
 def _list_imported_hub(api, repo_id: str) -> list[JobCheckpoint]:
     """Auto-detect the layout of an imported Hub model repo.
 
-    A checkpoints/<step>/pretrained_model tree → reuse the tree parse.
-    Otherwise, a root config.json → a single step-0 checkpoint with a
-    'repo@root' ref (the whole repo is the pretrained_model)."""
+    A checkpoints/<step>/pretrained_model tree → the tree parse. Otherwise, a
+    root config.json → a single step-0 checkpoint with a 'repo@root' ref (the
+    whole repo is the pretrained_model).
+
+    That is now exactly _list_hub_checkpoints' rule — a trained run's repo and
+    an imported one are the same two layouts — so this delegates rather than
+    keeping a second copy that can drift. The name survives because call sites
+    (register_imported, _checkpoints_for) pass it explicitly to say WHICH kind
+    of record they are listing for."""
+    return _list_hub_checkpoints(api, repo_id)
+
+
+def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
+    """List checkpoints by introspecting the model repo file tree.
+
+    Falls back to the repo ROOT when there is no checkpoints/ tree but the root
+    holds a policy (config.json) — the same fallback _list_imported_hub applies,
+    for the same reason: a run trained with checkpoint saving off still pushes
+    its final policy to the root at the end of training, and without this the
+    job card reports zero checkpoints while a loadable model sits in the repo.
+    The '@root' ref is what the inference handler already resolves for imported
+    flat repos (rollout._resolve_policy_path), so the entry is runnable, not
+    merely listed. Resume is the one thing it can't do (root weights carry no
+    training_state/) — see _resolve_cloud_resume, which says so explicitly."""
     try:
         files = api.list_repo_files(repo_id, repo_type="model")
     except Exception:
+        # Repo may not exist yet (training just started, sidecar hasn't
+        # uploaded anything). Treat as no checkpoints.
         return []
     tree = _hub_checkpoints_from_files(files, repo_id)
     if tree:
@@ -1324,17 +1373,6 @@ def _list_imported_hub(api, repo_id: str) -> list[JobCheckpoint]:
     if "config.json" in files:
         return [JobCheckpoint(step=0, source="hub", ref=f"{repo_id}@root")]
     return []
-
-
-def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
-    """List checkpoints by introspecting the model repo file tree."""
-    try:
-        files = api.list_repo_files(repo_id, repo_type="model")
-    except Exception:
-        # Repo may not exist yet (training just started, sidecar hasn't
-        # uploaded anything). Treat as no checkpoints.
-        return []
-    return _hub_checkpoints_from_files(files, repo_id)
 
 
 _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
@@ -2476,18 +2514,31 @@ class JobRegistry:
             # pass. (The pre-flight copy above is only a fail-fast.)
             self._assert_no_running_local(target)
 
-            # Whatever put a pretrained_path on this request — the fine-tune
-            # resolution above, or a caller setting the public field directly —
-            # its architecture must match --policy.type before we spend a GPU on
-            # it. Checked against the CHECKPOINT'S OWN config.json, so it holds
-            # even when the registry's record of that checkpoint is missing or
-            # carries the "model" placeholder. Skipped on resume: that path
-            # passes --config_path instead and never emits pretrained_path (see
-            # train.build_training_command), so there is no pair to contradict.
-            if config.policy_pretrained_path and not config.resume:
-                _check_pretrained_policy_type(
-                    config.policy_pretrained_path, config.policy_type
-                )
+        # Whatever put a pretrained_path on this request — the fine-tune
+        # resolution above, or a caller setting the public field directly —
+        # its architecture must match --policy.type before we spend a GPU on
+        # it. Checked against the CHECKPOINT'S OWN config.json, so it holds
+        # even when the registry's record of that checkpoint is missing or
+        # carries the "model" placeholder. Skipped on resume: that path
+        # passes --config_path instead and never emits pretrained_path (see
+        # train.build_training_command), so there is no pair to contradict.
+        if config.policy_pretrained_path and not config.resume:
+            # Deliberately BEFORE the materialization below: this reads only the
+            # checkpoint's config.json, so a contradicting pair is refused
+            # without first downloading the weights it names.
+            _check_pretrained_policy_type(config.policy_pretrained_path, config.policy_type)
+            if target.runner == "local":
+                # A step-suffixed hub ref becomes the real directory the local
+                # trainer loads. A cloud run keeps the ref: its container
+                # materializes the same ref pod-side (see the HF Jobs wrapper),
+                # because a host path is meaningless there.
+                config.policy_pretrained_path = localize_pretrained_path(config.policy_pretrained_path)
+
+        with self._lock:
+            # Authoritative local-run mutex: re-checked here, under the lock
+            # that also inserts the record, so two concurrent starts can't both
+            # pass. (The pre-flight copy above is only a fail-fast.)
+            self._assert_no_running_local(target)
 
             # Resume: turn the selected source run + step into the config_path
             # lerobot needs. Do this under the lock (source lookup) and before

@@ -781,6 +781,55 @@ def test_list_imported_hub_empty_when_no_model() -> None:
     assert _list_imported_hub(FakeApi(), "user/repo") == []
 
 
+def test_list_hub_checkpoints_falls_back_to_root_policy() -> None:
+    """MT3 residual: a tracked run whose repo holds a root policy but NO
+    checkpoints/ tree (checkpoint saving off) used to list zero checkpoints, so
+    its job card said "no checkpoints" while a loadable model sat in the repo.
+    The cloud listing now falls back to the same '@root' entry the imported
+    listing has always returned."""
+    from makermodslab.jobs import _list_hub_checkpoints
+
+    out = _list_hub_checkpoints(_FakeHubApi(["config.json", "model.safetensors"]), "user/repo")
+    assert len(out) == 1
+    assert out[0].step == 0
+    assert out[0].source == "hub"
+    # The ref shape rollout._resolve_policy_path already downloads and runs, so
+    # the entry is deployable and not merely listed.
+    assert out[0].ref == "user/repo@root"
+
+
+def test_list_hub_checkpoints_prefers_tree_over_root() -> None:
+    """The root push is byte-identical to the final checkpoint, so a repo with
+    a tree must NOT also offer a root entry — that would be a duplicate of the
+    highest step under a second name."""
+    from makermodslab.jobs import _list_hub_checkpoints
+
+    files = ["config.json", "model.safetensors", *_hub_checkpoint_files("005000")]
+    out = _list_hub_checkpoints(_FakeHubApi(files), "user/repo")
+    assert [c.ref for c in out] == ["user/repo@checkpoints/005000"]
+
+
+def test_list_hub_checkpoints_empty_without_root_config() -> None:
+    from makermodslab.jobs import _list_hub_checkpoints
+
+    assert _list_hub_checkpoints(_FakeHubApi(["README.md", "model.safetensors"]), "user/repo") == []
+
+
+def test_resolve_cloud_resume_rejects_root_only_repo(monkeypatch) -> None:
+    """The root fallback makes a checkpoint-less repo listable and runnable, but
+    root weights carry no training_state/ — resume must refuse it in plain
+    language rather than tripping over the ref shape."""
+    from makermodslab.jobs import _resolve_cloud_resume
+
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(["config.json", "model.safetensors"]),
+    )
+    with pytest.raises(ValueError, match="saved no checkpoints") as excinfo:
+        _resolve_cloud_resume(_cloud_record(), None)
+    assert "Fine-tune from its weights" in str(excinfo.value)
+
+
 def test_read_checkpoint_config_local_reads_config_json(tmp_path) -> None:
     from makermodslab.jobs import JobCheckpoint, _read_checkpoint_config
 
@@ -3284,6 +3333,243 @@ def test_finetune_start_accepts_matching_policy_type(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# MT2 — fine-tuning a selected Hub step must actually train from THAT step.
+# The resolver used to return `ref.split("@")[0]`, so a picked step silently
+# became repo-ROOT weights. One rule now: a step-suffixed ref names the
+# checkpoint, and whoever will run the trainer materializes it — host-side for a
+# local run, in the container for a cloud one.
+# ---------------------------------------------------------------------------
+
+
+def _fake_snapshot(tmp_path: Path, seen: dict):
+    """A snapshot_download stand-in that records its kwargs and lays down the
+    tree the real one would (so the caller's path arithmetic is exercised)."""
+
+    def _download(**kwargs):
+        seen.update(kwargs)
+        root = tmp_path / "snapshot"
+        for pattern in kwargs.get("allow_patterns") or []:
+            (root / pattern.rsplit("/", 1)[0]).mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
+        return str(root)
+
+    return _download
+
+
+def test_download_hub_checkpoint_ref_scopes_to_the_selected_step(monkeypatch, tmp_path) -> None:
+    """Only that step's pretrained_model/ is pulled, and the returned path is
+    that directory — the whole point being that lerobot cannot address a Hub
+    sub-path itself."""
+    from makermodslab.jobs import download_hub_checkpoint_ref
+
+    seen: dict = {}
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(tmp_path, seen))
+
+    out = download_hub_checkpoint_ref("user/repo@checkpoints/000500")
+
+    assert seen["repo_id"] == "user/repo"
+    assert seen["allow_patterns"] == ["checkpoints/000500/pretrained_model/*"]
+    assert out.endswith("/checkpoints/000500/pretrained_model")
+
+
+def test_download_hub_checkpoint_ref_root_skips_the_heavy_trees(monkeypatch, tmp_path) -> None:
+    """A '@root' ref is the whole repo, minus the per-step snapshots and
+    optimizer state — neither is needed to load the policy and both can be GBs."""
+    from makermodslab.jobs import download_hub_checkpoint_ref
+
+    seen: dict = {}
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(tmp_path, seen))
+
+    out = download_hub_checkpoint_ref("user/repo@root")
+
+    assert seen["repo_id"] == "user/repo"
+    assert seen["ignore_patterns"] == ["checkpoints/**", "training_state/**"]
+    assert out == str(tmp_path / "snapshot")
+
+
+def test_download_hub_checkpoint_ref_rejects_a_non_ref() -> None:
+    from makermodslab.jobs import download_hub_checkpoint_ref
+
+    with pytest.raises(ValueError, match="Unrecognised policy ref"):
+        download_hub_checkpoint_ref("just-a-repo-id")
+
+
+def test_localize_pretrained_path_passes_through_non_step_values(monkeypatch, tmp_path) -> None:
+    """A local dir and a bare repo id are already loadable — lerobot resolves a
+    repo root itself, so materializing one here would only duplicate its fetch."""
+    from makermodslab.jobs import localize_pretrained_path
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("nothing to materialize for a non-step value")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+    assert localize_pretrained_path("user/some-model") == "user/some-model"
+    assert localize_pretrained_path(str(tmp_path)) == str(tmp_path)
+
+
+def test_localize_pretrained_path_reports_a_failed_download(monkeypatch) -> None:
+    """A Hub failure becomes a 400-shaped ValueError naming the checkpoint,
+    rather than a raw Hub exception surfacing as a 500."""
+    from makermodslab.jobs import localize_pretrained_path
+
+    def _boom(**kwargs):
+        raise RuntimeError("hub down")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+    with pytest.raises(ValueError, match="Could not download the base checkpoint") as excinfo:
+        localize_pretrained_path("user/repo@checkpoints/003000")
+    assert "hub down" in str(excinfo.value)
+
+
+def test_resolve_finetune_pretrained_path_keeps_the_selected_step(monkeypatch) -> None:
+    """MT2 core: the step the user picked survives resolution. It used to be
+    truncated to the repo id here, which is repo-ROOT weights."""
+    from makermodslab.jobs import _resolve_finetune_pretrained_path
+
+    files = _hub_checkpoint_files("001000") + _hub_checkpoint_files("005000")
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+
+    assert _resolve_finetune_pretrained_path(_cloud_record(), 1000) == "user/act_ds_2026@checkpoints/001000"
+    # step=None still means "the latest", now equally un-truncated.
+    assert _resolve_finetune_pretrained_path(_cloud_record(), None) == "user/act_ds_2026@checkpoints/005000"
+
+
+def test_resolve_finetune_pretrained_path_root_ref_stays_a_repo_id(monkeypatch) -> None:
+    """A repo whose ROOT is the model needs no materialization — lerobot loads a
+    repo id directly, so handing it the bare id avoids a pointless download."""
+    from makermodslab.jobs import _resolve_finetune_pretrained_path
+
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(["config.json", "model.safetensors"]),
+    )
+    assert _resolve_finetune_pretrained_path(_cloud_record(), None) == "user/act_ds_2026"
+
+
+def test_read_pretrained_policy_type_reads_a_step_ref(monkeypatch, tmp_path) -> None:
+    """The pre-download policy-type guard must look inside the step it names,
+    not at the repo root — otherwise it would validate different weights than
+    the ones the run trains from."""
+    from makermodslab.jobs import read_pretrained_policy_type
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(_json.dumps({"type": "smolvla"}))
+    seen: dict = {}
+
+    def fake_download(**kwargs):
+        seen.update(kwargs)
+        return str(cfg_file)
+
+    # This one reads through jobs' module-level binding (unlike
+    # _read_checkpoint_config, which re-imports), so patch it there.
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", fake_download)
+
+    assert read_pretrained_policy_type("user/repo@checkpoints/000500") == "smolvla"
+    assert seen["filename"] == "checkpoints/000500/pretrained_model/config.json"
+
+
+def _cloud_finetune_source(reg, repo_id: str = "user/act_ds_2026"):
+    """A tracked cloud run in `reg` whose weights live on the Hub."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    record = JobRecord(
+        id="cloud-src",
+        name="cloud src",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=10000),
+        output_dir="",
+        started_at=0.0,
+        runner="hf_cloud",
+        hf_repo_id=repo_id,
+    )
+    reg._records[record.id] = record
+    return record
+
+
+def test_finetune_start_local_materializes_the_selected_step(monkeypatch, tmp_path) -> None:
+    """LOCAL target: the ref becomes a real directory on this machine before the
+    trainer starts, and that directory is the SELECTED step."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(_json.dumps({"type": "act"}))
+    seen: dict = {}
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("003000"))
+    )
+    # jobs' module-level binding is what the policy-type guard calls; patching
+    # it here also guarantees the test never reaches the real Hub.
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", lambda **kw: str(cfg_file))
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(tmp_path, seen))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    monkeypatch.setattr("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner)
+
+    record = reg.start(
+        TrainingRequest(
+            dataset_repo_id="user/ds",
+            policy_type="act",
+            finetune_from_job_id=source.id,
+            finetune_from_step=3000,
+        ),
+        JobTarget(runner="local"),
+    )
+
+    resolved = record.config.policy_pretrained_path
+    assert "@" not in resolved  # materialized, not a ref
+    assert resolved.endswith("/checkpoints/003000/pretrained_model")
+    assert seen["allow_patterns"] == ["checkpoints/003000/pretrained_model/*"]
+
+
+def test_finetune_start_cloud_keeps_the_step_ref(monkeypatch, tmp_path) -> None:
+    """CLOUD target: the ref is passed through untouched — a host path means
+    nothing on the pod, so the container materializes the same ref itself. The
+    host must NOT download the weights for a run that happens elsewhere."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(_json.dumps({"type": "act"}))
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("the host must not download a cloud run's base weights")
+
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("003000"))
+    )
+    # jobs' module-level binding is what the policy-type guard calls; patching
+    # it here also guarantees the test never reaches the real Hub.
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", lambda **kw: str(cfg_file))
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock())
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+
+    record = reg.start(
+        TrainingRequest(
+            dataset_repo_id="user/ds",
+            policy_type="act",
+            finetune_from_job_id=source.id,
+            finetune_from_step=3000,
+        ),
+        JobTarget(runner="hf_cloud", flavor="a10g-small"),
+    )
+
+    assert record.config.policy_pretrained_path == "user/act_ds_2026@checkpoints/003000"
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint-level policy-type guard. _check_finetune_policy_type compares the
 # source JobRecord's *recorded* type, so it is blind to a request that supplies
 # policy_pretrained_path directly (a public TrainingRequest field, no
@@ -3857,3 +4143,321 @@ def test_tailing_runner_keeps_optimistic_zero_when_pid_was_already_gone(monkeypa
     runner.stop()
     assert runner.stop_signalled() is False
     assert runner.returncode() == 0
+
+
+# ── Imported-model card titles ───────────────────────────────────────────────
+# The name an imported record is born with, and how the registry keeps two of
+# them apart. The derivation rules themselves live in tests/test_naming.py.
+
+
+def _hub_reg(monkeypatch, tmp_path, root="root"):
+    """A registry whose Hub probe always reports a root-level checkpoint, so a
+    hub import succeeds offline."""
+    from makermodslab.jobs import JobRegistry
+
+    class FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            return ["config.json", "model.safetensors"]
+
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: FakeApi())
+    return JobRegistry(tmp_path / root)
+
+
+def test_imported_name_is_the_derived_task_not_the_repo_id(monkeypatch, tmp_path) -> None:
+    """No "Imported ·" prefix (the card's provenance chip already says it) and
+    no namespace or policy token (the policy row says that) — just the task, so
+    the title's pixels go to the one thing nothing else on the card states."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    rec = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+
+    assert rec.name == "orange_box"
+    assert "Imported" not in rec.name
+
+
+def test_imported_name_from_a_local_dir(tmp_path) -> None:
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "smolvla_me_orange_box_2026-08-03_12-53-30"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+    # No namespace on a path, so only the policy token and the timestamp go.
+    assert reg.register_imported(str(model)).name == "me_orange_box"
+
+
+def test_imported_name_keeps_a_community_repo_name(monkeypatch, tmp_path) -> None:
+    """A repo with no generated timestamp was named by a human, so nothing but
+    the namespace is dropped — the card falls back to a middle-ellipsized
+    basename rather than guessing at structure that isn't there."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    assert reg.register_imported("lerobot/smolvla_base").name == "smolvla_base"
+
+
+def test_explicit_import_name_wins_over_the_derivation(monkeypatch, tmp_path) -> None:
+    """POST /jobs/import may carry a name. It's the user's, so neither the
+    derivation nor the collision pass may overwrite it."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    rec = reg.register_imported(
+        "makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30",
+        name="Orange picker v2",
+    )
+    assert rec.name == "Orange picker v2"
+
+    reg2 = _hub_reg(monkeypatch, tmp_path)  # reload from disk
+    assert reg2.get(rec.id).name == "Orange picker v2"
+
+
+def test_rename_alias_survives_the_collision_pass(monkeypatch, tmp_path) -> None:
+    """A user-set display_name always wins on the card; re-deriving `name`
+    underneath it must not disturb the alias."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    rec = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    reg.rename(rec.id, "Orange picker")
+
+    reg2 = _hub_reg(monkeypatch, tmp_path)
+    reloaded = reg2.get(rec.id)
+    assert reloaded.display_name == "Orange picker"
+    assert reloaded.name == "orange_box"
+
+
+def test_two_imports_of_one_task_are_disambiguated(monkeypatch, tmp_path) -> None:
+    """Both titles derive to "orange_box". BOTH cards get the timestamp back as
+    a suffix — leaving the first bare would make it the ambiguous one."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    a = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    b = reg.register_imported("makermods/act_makermods_orange_box_2026-08-05_09-00-00")
+
+    names = {r.id: r.name for r in reg.list(limit=100)}
+    assert names[a.id] == "orange_box (2026-08-03)"
+    assert names[b.id] == "orange_box (2026-08-05)"
+
+
+def test_same_day_imports_escalate_to_the_time(monkeypatch, tmp_path) -> None:
+    reg = _hub_reg(monkeypatch, tmp_path)
+    a = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    b = reg.register_imported("makermods/act_makermods_orange_box_2026-08-03_18-04-00")
+
+    names = {r.id: r.name for r in reg.list(limit=100)}
+    assert names[a.id] == "orange_box (2026-08-03 12:53)"
+    assert names[b.id] == "orange_box (2026-08-03 18:04)"
+
+
+def test_collision_suffixes_are_recomputed_not_accumulated(monkeypatch, tmp_path) -> None:
+    """The pass is idempotent: it re-derives from the source every time, so a
+    reload (or a third import) never stacks "(date) (date)" onto a title."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    reg.register_imported("makermods/act_makermods_orange_box_2026-08-05_09-00-00")
+
+    reg2 = _hub_reg(monkeypatch, tmp_path)
+    reg3 = _hub_reg(monkeypatch, tmp_path)
+    assert sorted(r.name for r in reg3.list(limit=100)) == sorted(r.name for r in reg2.list(limit=100))
+    assert all(r.name.count("(") <= 1 for r in reg3.list(limit=100))
+
+
+def test_legacy_imported_name_is_re_derived_on_load(monkeypatch, tmp_path) -> None:
+    """Records written before titles were derived carry the old
+    "Imported · <repo id>" name. Boot upgrades them in place, so the fix reaches
+    the cards already in the user's library and not only the next import."""
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    root = tmp_path / "root"
+    job_dir = root / "smolvla_imported_2026-08-03_12-53-30"
+    job_dir.mkdir(parents=True)
+    legacy = JobRecord(
+        id=job_dir.name,
+        name="Imported · makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type="smolvla"),
+        output_dir="",
+        started_at=1.0,
+        ended_at=1.0,
+        runner="imported",
+        hf_repo_id="makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30",
+    )
+    (job_dir / "job.json").write_text(legacy.model_dump_json(indent=2))
+
+    reg = JobRegistry(root)
+    assert reg.get(legacy.id).name == "orange_box"
+    # Persisted, not just fixed in memory.
+    assert _json.loads((job_dir / "job.json").read_text())["name"] == "orange_box"
+
+
+# ── Resume is only for a run that stopped short ──────────────────────────────
+# A completed run's LR schedule is spent (SmolVLA's preset cosine-decays to a
+# 2.5e-6 floor over a fixed 30k-step horizon), so a continuation trains at floor
+# LR and the flat loss curve reads as convergence. The UI hides the button; this
+# is the backend half, which also catches a direct API call. Blanket by
+# decision — no per-policy exceptions.
+
+
+def _resumable_source(tmp_path, state: str, *, job_id: str = "src", steps: int = 200):
+    """A local run record with one real, fully-saved checkpoint at step 100."""
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    run_dir = tmp_path / job_id / "run"
+    run_dir.mkdir(parents=True)
+    _make_checkpoint(run_dir, 100)
+    reg = JobRegistry(tmp_path / "root")
+    reg._records[job_id] = JobRecord(
+        id=job_id,
+        name="run",
+        state=state,
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=steps),
+        output_dir=str(run_dir),
+        started_at=0.0,
+        runner="local",
+    )
+    return reg
+
+
+def _resume_request(job_id: str = "src"):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_job_id=job_id,
+    )
+
+
+def test_start_refuses_to_resume_a_completed_run(tmp_path) -> None:
+    """The point of the gate: a `done` source is refused with a 400-shaped
+    ValueError that names fine-tuning as the way forward. No record created."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="already reached its step target"),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert [r.id for r in reg.list(limit=10)] == ["src"]
+
+
+def test_start_refuses_to_resume_a_completed_cloud_run(tmp_path) -> None:
+    """The refusal is on the source's STATE, not its runner, so it lands before
+    the local/cloud branch and covers both."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    reg._records["src"].runner = "hf_cloud"
+    reg._records["src"].hf_repo_id = "user/some-model"
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="already reached its step target"),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+
+@pytest.mark.parametrize("state", ["interrupted", "failed"])
+def test_start_still_resumes_a_run_that_stopped_short(tmp_path, state) -> None:
+    """The gate must not swallow the case resume exists for: a run that ended
+    below its target still resumes, and still resolves its --config_path."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, state)
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert record.config.resume is True
+    assert record.config.config_path.endswith("train_config.json")
+    assert "checkpoints/100" in record.config.config_path
+
+
+# ── …and only on the runner it stopped on ────────────────────────────────────
+# Cross-runner resume isn't implemented (F7) and both directions fail badly:
+# cloud→local hands lerobot a --config_path that only ever existed inside the
+# pod (MT4), local→cloud silently restarts from step 0 while recording itself as
+# a resume (MT42). The form pins the Compute control; these cover the
+# defense-in-depth half, which catches a direct API call that flips it anyway.
+# Reuses the section's helpers above; a cloud parent is the same record with its
+# runner/repo flipped, exactly as the done-source pair does it.
+
+
+def _cloud_parent(reg, *, job_id: str = "src"):
+    """Turn a `_resumable_source` record into a cloud run in place."""
+    reg._records[job_id].runner = "hf_cloud"
+    reg._records[job_id].hf_repo_id = "user/some-model"
+    return reg
+
+
+def test_start_refuses_a_local_parent_resumed_on_the_cloud(tmp_path, monkeypatch) -> None:
+    """local parent → Cloud target (MT42). The refusal must name the parent's
+    runner, and must leave no record behind."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    # The cloud dataset preflight sits ahead of the resume block; keep it happy
+    # (and off the network) so the cross-runner refusal is what we observe.
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
+    ):
+        reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert "Local" in str(excinfo.value)
+    assert [r.id for r in reg.list(limit=10)] == ["src"]
+
+
+def test_start_refuses_a_cloud_parent_resumed_locally(tmp_path, monkeypatch) -> None:
+    """cloud parent → Local target (MT4). Refused BEFORE _resolve_cloud_resume
+    would go to the Hub — the exploding api stand-in is the assertion that the
+    guard lands first."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    def _no_hub():
+        raise AssertionError("cross-runner resume reached the Hub")
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", _no_hub)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert "Hugging Face Cloud" in str(excinfo.value)
+    # Read the registry directly: `list` counts a cloud record's checkpoints,
+    # which would itself call the stand-in above.
+    assert list(reg._records) == ["src"]
+
+
+def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> None:
+    """The other half of the gate: a same-runner cloud resume is untouched and
+    still resolves the parent's Hub checkpoint. (local→local is covered by
+    test_start_still_resumes_a_run_that_stopped_short above.)"""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "hfjob-1"
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert record.config.resume is True
+    assert record.config.resume_from_hub_repo == "user/some-model"
+    assert record.config.resume_from_hub_step == "000100"
