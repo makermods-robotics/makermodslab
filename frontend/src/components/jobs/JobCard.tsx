@@ -37,6 +37,7 @@ import DisplayName from "@/components/library/DisplayName";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
+import { useTruncationTitle } from "@/hooks/useTruncationTitle";
 import {
   JobCheckpoint,
   dedupeCheckpointEntries,
@@ -123,6 +124,18 @@ const JobCard: React.FC<Props> = ({
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
   const importedSource = job.hf_repo_id || job.output_dir;
+  // The title line's two shortenings: middleEllipsis on an imported name (JS —
+  // the caller knows), and the div's own `truncate` (CSS — measured on hover).
+  // Either one earns a title; neither means the name is whole on screen and a
+  // tooltip would only echo it. Same identity as ModelCard's: the full name,
+  // plus the source for an import (the thing that actually locates the weights).
+  const titleText = isImported ? middleEllipsis(displayName) : displayName;
+  const titleHover = useTruncationTitle(
+    isImported && importedSource
+      ? `${displayName}\n${importedSource}`
+      : displayName,
+    titleText !== displayName,
+  );
   const stateLabel = isImported ? "Imported" : present.label;
   const isStarting = isRunning && job.metrics.total_steps === 0;
   const progressPct =
@@ -562,10 +575,17 @@ const JobCard: React.FC<Props> = ({
           </div>
         </div>
         <div>
-          <DisplayName
-            name={displayName}
-            className="text-foreground font-semibold"
-          />
+          {/* An imported title is already peeled down to its task by the
+              backend (utils/naming.derive_imported_title), so it normally fits;
+              middleEllipsis only bites on the fallback — an unparseable
+              community repo name — where both ends carry meaning and `truncate`
+              would keep only the head. Whenever either shortening bites, the
+              hover title is the full name (plus the repo id / path for an
+              import), so the exact identity is one hover away; a name that
+              fits gets no title, since it is already all there. */}
+          <div className="text-foreground font-semibold truncate" {...titleHover}>
+            {titleText}
+          </div>
           {/* When aliased, keep the true identity visible: the run id for
               trainings (imported models already show their repo id / path in
               the subtitle below). */}

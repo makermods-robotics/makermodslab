@@ -27,8 +27,11 @@ import React, { useCallback, useState } from "react";
  *
  * Spread the returned props onto the element the name is IN — the truncating
  * span itself, or, where the name is rendered as a base+suffix pair, their
- * container (`components/library/DisplayName`), which the sweep below measures
- * as one unit.
+ * container (ModelCard's title line, `components/library/DisplayName`), which
+ * the sweep below measures as one unit.
+ *
+ * `components/ui/truncate-with-title.tsx` wraps this for the plain-span case
+ * and for lists, where a hook can't be called per row.
  */
 
 /**

@@ -25,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { TruncateWithTitle } from "@/components/ui/truncate-with-title";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useStudio } from "@/contexts/StudioContext";
@@ -737,8 +738,10 @@ const DeployPanel: React.FC = () => {
               )}
             >
               <PanelEntryDot className="bg-sky-500" />
+              {/* A skill name too long for the trigger is cut by CSS, so it
+                  reveals itself on hover — and only then. */}
               {selectedSkillLabel ? (
-                <DisplayName name={selectedSkillLabel} className="min-w-0" />
+                <TruncateWithTitle className="min-w-0" text={selectedSkillLabel} />
               ) : (
                 <SelectValue placeholder="Pick a skill" />
               )}
@@ -755,7 +758,7 @@ const DeployPanel: React.FC = () => {
               ) : (
                 models.map((m) => (
                   <SelectItem key={m.id} value={m.id}>
-                    <DisplayName name={m.name} className="min-w-0" />
+                    <TruncateWithTitle text={m.name} />
                     <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
                       {m.source === "hub"
                         ? "hub"

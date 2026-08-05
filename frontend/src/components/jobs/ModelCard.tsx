@@ -34,6 +34,7 @@ import MetaRows from "@/components/library/MetaRows";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
+import { useTruncationTitle } from "@/hooks/useTruncationTitle";
 import {
   JobCheckpoint,
   dedupeCheckpointEntries,
@@ -152,6 +153,17 @@ const ModelCard: React.FC<Props> = ({
     ? splitDedupeSuffix(displayName)
     : [displayName, null];
   const importedSource = model.hf_repo_id || model.output_dir;
+
+  // Hover title for the name — only when the name is actually shortened (see
+  // useTruncationTitle). The base+suffix pair below is measured as ONE unit:
+  // either span truncating means the visible name is incomplete, so the title
+  // hangs on their container and carries the whole thing. An import adds its
+  // source, which is the identity that actually locates the weights.
+  const titleHover = useTruncationTitle(
+    isImported && importedSource
+      ? `${displayName}\n${importedSource}`
+      : displayName,
+  );
 
   // Where the model came from — the header chip mirrors the dataset/job cards'
   // source badges (Imported / from Hub / Local / Cloud).
@@ -574,11 +586,12 @@ const ModelCard: React.FC<Props> = ({
               The base shrinks and takes ONE CSS ellipsis of its own; the suffix
               is shrink-0 and always renders whole. Adapts to any card width —
               "eraser_place… (2026-07-31 12:22)". A trained model's name has no
-              such suffix and takes plain truncation. The hover tooltip carries
-              the full identity either way. */}
+              such suffix and takes plain truncation. When either half is
+              shortened the hover title carries the full identity; when the
+              whole name fits, there is nothing to reveal and no title. */}
           <div
             className="flex items-baseline gap-1 text-foreground font-semibold leading-tight"
-            title={isImported ? importedSource : displayName}
+            {...titleHover}
           >
             {/* Both sides degrade, neither wins outright. The base has
                 `flex-1` (basis 0), so it can't shrink on its own — it simply
