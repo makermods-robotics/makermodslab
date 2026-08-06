@@ -493,6 +493,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const [cameras, setCameras] = useState<string[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [infoCardKey, setInfoCardKey] = useState(0);
   const [deleteTarget, setDeleteTarget] = useState<EpisodeSummary | null>(null);
   const [deleteHubStatus, setDeleteHubStatus] = useState<HubStatus | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -573,6 +574,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       });
       setDeleteTarget(null);
       if (result.hub_sync === "started") {
+        setInfoCardKey((k) => k + 1);
         toast({
           title: "Episode deleted",
           description: "Syncing the Hub copy…",
@@ -736,7 +738,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
             <div className="p-3">
               <DatasetInfoCard
-                key={reloadKey}
+                key={`${reloadKey}-${infoCardKey}`}
                 repoId={repoId}
                 canDelete
                 onDelete={() => setPendingDatasetDelete(true)}
