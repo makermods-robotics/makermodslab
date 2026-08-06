@@ -453,25 +453,29 @@ def _is_transient_camera_error(msg: str) -> bool:
 
     An AVCaptureSession opened into another session's asynchronous teardown
     (e.g. right after a hot-unplug) intermittently comes up wrong —
-    forensically established 2026-07-09, extended 2026-07-31 after the
-    capture_width/height case below was caught reproducing on the bench with
-    no retry and no cleanup:
+    forensically established 2026-07-09:
       * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
-      * "failed to set capture_width=..."/"failed to set capture_height=..."
-        — cold-open width/height read-back (the same read-back failure as
-        fps, just from lerobot's width/height negotiation step instead)
       * "do not match configured" — session landed the neighboring native
         format (e.g. 640x360 instead of 640x480), caught on the later
         frame-size check
       * "timed out waiting for frame" — session came up frame-dead (opens
         fine, background reader never receives a frame)
+
+    NOT included: "failed to set capture_" (width/height mismatch). That
+    string is also produced when a camera simply doesn't support the
+    configured resolution — a permanent misconfiguration, not turbulence —
+    and `utils/errors.py::friendly_hint` already classifies it that way for
+    the operator. Folding it into this retryable set would make the two
+    classifiers disagree about the same string, and burn ~9s retrying a
+    failure that can't succeed (see PR #38 discussion) before showing the
+    operator the correct "click Auto" hint. Don't add it here without first
+    resolving that conflict in `friendly_hint` too.
     """
     low = msg.lower()
     return any(
         marker in low
         for marker in (
             "failed to set fps",
-            "failed to set capture_",
             "do not match configured",
             "timed out waiting for frame",
         )

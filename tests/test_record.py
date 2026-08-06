@@ -326,28 +326,29 @@ def test_build_camera_configs_skips_non_opencv_type() -> None:
     assert configs == {}
 
 
-def test_is_transient_camera_error_matches_capture_width_mismatch() -> None:
-    """Real hardware regression: lerobot's OpenCVCamera raises "failed to set
-    capture_width=640 (actual_width=1920, width_success=True)." when a camera
-    comes up in a cold-open/turbulent state (e.g. right after a hot-unplug) —
-    the same class of transient failure "failed to set fps" already covers,
-    just from the width/height negotiation step instead of the fps step. Only
-    "do not match configured" (the later frame-size check) and "failed to set
-    fps" were recognized before; a capture_width/height failure fell through
-    to a terminal (non-retried) failure with no cleanup pass, reproduced twice
-    on the bench unplugging the wrist camera mid-connect."""
-    from makerlab.record import _is_transient_camera_error
+def test_is_transient_camera_error_markers_pinned_against_lerobot_source() -> None:
+    """Pins the marker set against lerobot's *actual* raise sites, not
+    hand-typed copies of them — a `str.__contains__` over a literal tuple
+    can't fail on its own, so the thing worth testing is whether upstream
+    still emits these strings, not whether the tuple matches itself. If
+    lerobot rewords one of these RuntimeErrors, this test goes red instead of
+    the retry silently stopping firing.
 
-    assert _is_transient_camera_error(
-        "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
-    )
-    assert _is_transient_camera_error(
-        "OpenCVCamera(0) failed to set capture_height=480 (actual_height=1080, height_success=True)."
-    )
+    "failed to set capture_" is deliberately NOT pinned here — it's excluded
+    from `_is_transient_camera_error` on purpose (see its docstring)."""
+    import inspect
+
+    from lerobot.cameras.opencv import camera_opencv
+
+    source = inspect.getsource(camera_opencv)
+
+    assert "failed to set fps={self.fps} ({actual_fps=})" in source
+    assert "do not match configured width={self.capture_width} or height={self.capture_height}" in source
+    assert "Timed out waiting for frame from camera {self}" in source
 
 
 def test_is_transient_camera_error_matches_existing_markers() -> None:
-    from makerlab.record import _is_transient_camera_error
+    from makermodslab.record import _is_transient_camera_error
 
     assert _is_transient_camera_error("OpenCVCamera(0) failed to set fps=30 (actual_fps=5.0).")
     assert _is_transient_camera_error(
@@ -357,10 +358,36 @@ def test_is_transient_camera_error_matches_existing_markers() -> None:
 
 
 def test_is_transient_camera_error_false_for_unrelated_errors() -> None:
-    from makerlab.record import _is_transient_camera_error
+    from makermodslab.record import _is_transient_camera_error
 
     assert not _is_transient_camera_error("Could not connect on port '/dev/ttyUSB0'.")
     assert not _is_transient_camera_error("Failed to open OpenCVCamera(97).")
+
+
+def test_is_transient_camera_error_false_for_capture_size_mismatch() -> None:
+    """`friendly_hint()` (utils/errors.py) already classifies "failed to set
+    capture_" as a permanent misconfiguration ("camera doesn't support the
+    configured resolution — click Auto"). Retrying it wastes ~9s telling the
+    operator the same thing three times. Don't add this marker here without
+    reconciling the two classifiers first."""
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+    )
+
+
+def test_is_transient_camera_error_false_for_fourcc_mismatch() -> None:
+    """lerobot logs a fourcc mismatch as a warning (camera_opencv.py's
+    `_validate_fourcc`) rather than raising — it never reaches this
+    classifier as an exception message. Not retried, but for a different
+    reason than the negative cases above: excluded by construction, not by
+    policy."""
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set fourcc=MJPG (actual=YUYV, success=False)."
+    )
 
 
 def _make_dataset_dir(cache, repo_id: str, total_episodes: int):
