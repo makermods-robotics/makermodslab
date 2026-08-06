@@ -13,7 +13,6 @@ import { Input } from "@/components/ui/input";
 import MetaRows from "@/components/library/MetaRows";
 import { middleEllipsis } from "@/lib/modelNames";
 import { HubModel, deleteHubModel } from "@/lib/jobsApi";
-import { middleEllipsis } from "@/lib/modelNames";
 import { ApiError } from "@/lib/apiClient";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
