@@ -431,6 +431,7 @@ _POLICY_TYPE_TO_LEROBOT = {
     "act": "act",
     "diffusion": "diffusion",
     "pi0": "pi0",
+    "pi05": "pi05",
     "smolvla": "smolvla",
     "tdmpc": "tdmpc",
     "vqbet": "vqbet",

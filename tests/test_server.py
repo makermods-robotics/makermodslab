@@ -428,6 +428,7 @@ def test_policy_optimizer_defaults_reports_availability(client: TestClient) -> N
     assert data["available"]["act"] is True
     assert data["defaults"]["act"] is not None
     assert data["available"]["pi0_fast"] is True
+    assert data["available"]["pi05"] is True
     assert data["available"]["reward_classifier"] is False
     assert data["defaults"]["reward_classifier"] is None
 

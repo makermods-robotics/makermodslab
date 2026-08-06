@@ -247,6 +247,7 @@ POLICY_EXTRAS: dict[str, tuple[str, str]] = {
     "smolvla": ("transformers", "lerobot[smolvla]"),
     "pi0": ("transformers", "lerobot[pi]"),
     "pi0_fast": ("transformers", "lerobot[pi]"),
+    "pi05": ("transformers", "lerobot[pi]"),
     "diffusion": ("diffusers", "lerobot[diffusion]"),
 }
 
