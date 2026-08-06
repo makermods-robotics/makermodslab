@@ -198,6 +198,30 @@ export async function listEpisodes(
   );
 }
 
+/** Delete one episode from a locally-cached dataset. Local-only — never
+ * touches a Hub copy. Rewrites the dataset via the backend's atomic
+ * directory swap, so this can take a moment for a shared-video-file episode.
+ * Throws ApiError (400 invalid index / dataset's only episode, 404 not
+ * local, 409 busy) with the backend message in `.detail`.
+ * POST /datasets/episode-delete. */
+export async function deleteEpisode(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndex: number,
+): Promise<{
+  success: boolean;
+  repo_id: string;
+  deleted_episode: number;
+  total_episodes: number;
+}> {
+  return apiRequest(baseUrl, fetcher, "/datasets/episode-delete", {
+    method: "POST",
+    body: { repo_id: repoId, episode_index: episodeIndex },
+    action: "Delete episode",
+  });
+}
+
 export interface EpisodeJointSeries {
   joint_names: string[];
   timestamps: number[];
