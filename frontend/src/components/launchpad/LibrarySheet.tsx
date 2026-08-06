@@ -415,6 +415,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
         // The sheet sits above the studio overlay — close it when a dataset
         // action opens a studio panel, or the panel appears "behind" it.
         onStudioAction={() => onOpenChange(false)}
+        onDeleted={refreshDatasets}
       />
 
       <SkillManageDialog

@@ -42,6 +42,8 @@ import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
+import DeleteConfirmDialog from "@/components/dialogs/DeleteConfirmDialog";
+import { DeleteResolution } from "@/lib/deleteSemantics";
 import {
   deleteDataset,
   deleteEpisode,
@@ -63,6 +65,10 @@ export interface DatasetDetailDialogProps {
   /** Called when an action navigates to the studio, so a parent surface that
    * would otherwise cover the studio (e.g. the library sheet) can close too. */
   onStudioAction?: () => void;
+  /** Called after the dataset itself (not just an episode) is deleted, so a
+   * parent list (LibrarySheet, CollectPanel) can refresh. Not called for a
+   * "remove local copy" action that keeps the dataset listed as Hub-only. */
+  onDeleted?: () => void;
 }
 
 // Best (cols, tileW, tileH) for `n` tiles inside a box of `boxW` x `boxH`:
@@ -474,6 +480,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   open,
   onOpenChange,
   onStudioAction,
+  onDeleted,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio } = useStudio();
@@ -488,6 +495,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const [deleteHubStatus, setDeleteHubStatus] = useState<HubStatus | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pendingDatasetDelete, setPendingDatasetDelete] = useState(false);
 
   useEffect(() => {
     if (!repoId || !open) return;
@@ -509,7 +517,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey]);
 
   useEffect(() => {
-    if (!deleteTarget || !repoId) {
+    if (!(deleteTarget || pendingDatasetDelete) || !repoId) {
       setDeleteHubStatus(null);
       return;
     }
@@ -518,7 +526,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       .then(setDeleteHubStatus)
       .catch(() => setDeleteHubStatus(null));
     return () => controller.abort();
-  }, [deleteTarget, repoId, baseUrl, fetchWithHeaders]);
+  }, [deleteTarget, pendingDatasetDelete, repoId, baseUrl, fetchWithHeaders]);
 
   if (!repoId) return null;
 
@@ -563,6 +571,18 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       );
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const confirmDatasetDelete = async (resolution: DeleteResolution) => {
+    if (!repoId) return;
+    await deleteDataset(baseUrl, fetchWithHeaders, repoId);
+    setPendingDatasetDelete(false);
+    if (resolution.clearsSelection) {
+      onOpenChange(false);
+      onDeleted?.();
+    } else {
+      setReloadKey((k) => k + 1);
     }
   };
 
@@ -679,7 +699,10 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
             <div className="p-3">
               <DatasetInfoCard
+                key={reloadKey}
                 repoId={repoId}
+                canDelete
+                onDelete={() => setPendingDatasetDelete(true)}
                 onDownloaded={() => setReloadKey((k) => k + 1)}
               />
             </div>
@@ -766,6 +789,18 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+
+        <DeleteConfirmDialog
+          kind="dataset"
+          item={
+            pendingDatasetDelete
+              ? { source: deleteHubStatus?.status === "on_hub" ? "both" : "local" }
+              : null
+          }
+          label={repoId ?? undefined}
+          onOpenChange={(o) => !o && setPendingDatasetDelete(false)}
+          onConfirm={confirmDatasetDelete}
+        />
       </DialogContent>
     </Dialog>
   );

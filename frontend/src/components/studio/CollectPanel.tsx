@@ -405,6 +405,7 @@ const CollectPanel: React.FC = () => {
         repoId={viewRepo}
         open={viewOpen}
         onOpenChange={setViewOpen}
+        onDeleted={refresh}
       />
 
       {/* The live recording session — a modal dialog over the studio instead
