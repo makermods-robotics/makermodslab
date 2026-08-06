@@ -3213,20 +3213,11 @@ def test_start_inference_clears_the_previous_runs_log_pointer(monkeypatch, tmp_p
     so nothing spawns.
     """
     from makermodslab import rollout
-    from makermodslab.rollout import InferenceRequest
 
     monkeypatch.setattr(rollout, "_last_log_path", "/tmp/some-previous-run.log")
     monkeypatch.setattr(rollout, "_arm_count_mismatch", lambda mode, dim: "nope")
 
-    # Built inline rather than via a shared helper so this case stays
-    # self-contained on this branch.
-    request = InferenceRequest(
-        follower_port="/dev/ttyUSB0",
-        follower_config="robot_a",
-        policy_ref="user/repo@checkpoints/000050",
-        checkpoint_state_dim=12,
-    )
-    result = rollout.handle_start_inference(request)
+    result = rollout.handle_start_inference(_inference_request(checkpoint_state_dim=12))
 
     assert result["success"] is False
     assert rollout._last_log_path is None, "a new claim must not inherit the previous run's log"

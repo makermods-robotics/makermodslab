@@ -1615,6 +1615,12 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
                 "duration_s": request.duration_s,
                 "log_path": str(log_path),
                 "phase": carried_phase,
+                # Carried forward, NOT re-derived: this dict REPLACES the meta
+                # seeded at claim time, so anything the stop path needs has to be
+                # re-stated here or it silently disappears the moment a session
+                # actually spawns — which is precisely when a stop needs it
+                # (P0-3 / N1).
+                "follower_ports": _follower_ports(request),
             }
             # Warn-but-allow arm-identity findings, surfaced once via the status
             # payload now that the POST returned before the preflight ran.

@@ -1557,6 +1557,7 @@ def test_model_download_falls_back_when_the_cache_fetch_errors(
         d = Path(local_dir)
         d.mkdir(parents=True, exist_ok=True)
         (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("weights")
         (d / "model.safetensors").write_text("downloaded")
 
     monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
@@ -1591,6 +1592,7 @@ def test_model_download_falls_back_when_the_snapshot_copy_errors(
         d = Path(local_dir)
         d.mkdir(parents=True, exist_ok=True)
         (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("weights")
         (d / "model.safetensors").write_text("downloaded")
 
     def _boom(_snapshot, _target):
