@@ -831,6 +831,10 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
             side_effect=_stub_delete_episodes_success(2),
         ),
         patch("makermodslab.datasets.invalidate_dataset_listing_cache") as inval,
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "makermods/three", "status": "local_only", "url": None},
+        ),
     ):
         result = delete_local_episode("makermods/three", 1)
 
@@ -839,6 +843,8 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
         "repo_id": "makermods/three",
         "deleted_episode": 1,
         "total_episodes": 2,
+        "hub_sync": "not_on_hub",
+        "hub_sync_message": None,
     }
     live = tmp_lerobot_home / "makermods" / "three"
     assert (live / "marker.bin").read_bytes() == b"new-data"
@@ -847,6 +853,114 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
     leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
     assert leftovers == []
     inval.assert_called_once()
+
+
+def test_delete_episode_resyncs_to_hub_when_on_hub(tmp_lerobot_home: Path) -> None:
+    """A non-last-episode delete on a dataset that's also on the Hub kicks off
+    a background resync push preserving the repo's current visibility/tags."""
+    from makermodslab import record
+    from makermodslab.datasets import delete_local_episode
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "makermods/three", "status": "on_hub", "url": "x"},
+        ),
+        patch(
+            "makermodslab.datasets.get_hub_settings",
+            return_value={"repo_id": "makermods/three", "private": True, "tags": ["custom-tag"]},
+        ),
+        patch.object(
+            record.upload_manager,
+            "start",
+            return_value={"started": True, "repo_id": "makermods/three", "message": "Upload started"},
+        ) as start_mock,
+    ):
+        result = delete_local_episode("makermods/three", 1)
+
+    assert result["hub_sync"] == "started"
+    assert result["hub_sync_message"] is None
+    start_mock.assert_called_once()
+    request = start_mock.call_args[0][0]
+    assert request.dataset_repo_id == "makermods/three"
+    assert request.tags == ["custom-tag"]
+    assert request.private is True
+
+
+def test_delete_episode_resync_skipped_when_hub_settings_unreadable(tmp_lerobot_home: Path) -> None:
+    """If the current Hub settings can't be read (offline/error), the resync
+    is skipped rather than guessed at — the local delete still succeeds."""
+    from makermodslab import record
+    from makermodslab.datasets import delete_local_episode
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "makermods/three", "status": "on_hub", "url": "x"},
+        ),
+        patch("makermodslab.datasets.get_hub_settings", side_effect=RuntimeError("offline")),
+        patch.object(record.upload_manager, "start") as start_mock,
+    ):
+        result = delete_local_episode("makermods/three", 1)
+
+    assert result["success"] is True
+    assert result["hub_sync"] == "skipped"
+    assert result["hub_sync_message"]
+    start_mock.assert_not_called()
+
+
+def test_delete_episode_resync_skipped_when_upload_slot_busy(tmp_lerobot_home: Path) -> None:
+    """If the single global upload slot refuses to start (e.g. busy with
+    another dataset), the resync is reported skipped with that reason — the
+    local delete has already committed and is not rolled back."""
+    from makermodslab import record
+    from makermodslab.datasets import delete_local_episode
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "makermods/three", "status": "on_hub", "url": "x"},
+        ),
+        patch(
+            "makermodslab.datasets.get_hub_settings",
+            return_value={"repo_id": "makermods/three", "private": False, "tags": []},
+        ),
+        patch.object(
+            record.upload_manager,
+            "start",
+            return_value={
+                "started": False,
+                "repo_id": "makermods/other",
+                "message": "An upload is already running for makermods/other",
+            },
+        ),
+    ):
+        result = delete_local_episode("makermods/three", 1)
+
+    assert result["success"] is True
+    assert result["hub_sync"] == "skipped"
+    assert result["hub_sync_message"] == "An upload is already running for makermods/other"
 
 
 def test_delete_episode_rewrite_failure_leaves_original_intact(tmp_lerobot_home: Path) -> None:
@@ -963,6 +1077,10 @@ def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: P
             "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "makermods/three", "status": "local_only", "url": None},
+        ),
     ):
         resp = client.post(
             "/datasets/episode-delete",
@@ -974,6 +1092,8 @@ def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: P
         "repo_id": "makermods/three",
         "deleted_episode": 1,
         "total_episodes": 2,
+        "hub_sync": "not_on_hub",
+        "hub_sync_message": None,
     }
 
 

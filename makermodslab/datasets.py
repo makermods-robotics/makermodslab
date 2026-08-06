@@ -1161,6 +1161,56 @@ class DatasetEpisodeDeleteError(Exception):
         self.message = message
 
 
+def _resync_episode_delete_to_hub(repo_id: str) -> tuple[str, str | None]:
+    """After a local episode delete, push the rewritten dataset to the Hub if
+    a Hub copy exists, so the two don't silently disagree on episode count.
+
+    Reuses the existing UploadManager background job ("Upload to Hub") rather
+    than a new push mechanism, preserving the repo's CURRENT Hub visibility
+    and tags (never guesses defaults that could flip a private repo public or
+    drop existing tags).
+
+    Returns (hub_sync, hub_sync_message):
+      * ("not_on_hub", None) — no Hub copy, nothing to sync.
+      * ("started", None) — a background resync push was kicked off; poll
+        the existing /upload-status for progress/errors, same as any other
+        Hub upload.
+      * ("skipped", <reason>) — a Hub copy exists but the resync couldn't be
+        started (current Hub settings unreadable, or the single global
+        upload slot is busy with another dataset).
+
+    Never raises — a resync failure must not undo an already-committed local
+    delete; the caller has already swapped the local directory in by the
+    time this runs.
+    """
+    if get_hub_status(repo_id)["status"] != "on_hub":
+        return "not_on_hub", None
+
+    try:
+        settings = get_hub_settings(repo_id)
+    except Exception as exc:
+        logger.info(
+            "Could not read Hub settings for %s before episode-delete resync: %s", repo_id, exc
+        )
+        return "skipped", "Couldn't read current Hub settings — use Upload to Hub to sync manually."
+
+    # Lazy import: record.py already imports from datasets.py at call time to
+    # avoid a datasets<->record import cycle (see _dataset_in_use); this is
+    # the same trick in the other direction.
+    from . import record as _record
+
+    result = _record.upload_manager.start(
+        _record.UploadRequest(
+            dataset_repo_id=repo_id,
+            tags=settings["tags"],
+            private=settings["private"],
+        )
+    )
+    if not result.get("started"):
+        return "skipped", result.get("message") or "Could not start the Hub resync."
+    return "started", None
+
+
 def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
     """Delete one episode from a locally-cached dataset.
 
@@ -1171,12 +1221,19 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
     entirely new dataset directory rather than mutating in place — into a
     temp sibling directory here, then atomically swapped in for the original.
 
-    Local-only: never touches a Hub copy of `repo_id`. Raises
-    DatasetEpisodeDeleteError (status + message) when: the dataset isn't
-    found locally (404), it's busy — recording / merge / upload / local
-    training (409), the dataset can't be loaded, the index is out of range,
-    or it's the dataset's only episode (400), or the rewrite/swap itself
-    fails (500, rolling back to the original directory when possible).
+    If the dataset also exists on the Hub, this kicks off a background push
+    (reusing the same UploadManager "Upload to Hub" already uses) to bring
+    the Hub copy back in sync — see ``_resync_episode_delete_to_hub``. The
+    local swap always happens first and is never rolled back if that resync
+    fails to start or later fails; poll /upload-status the same way
+    "Upload to Hub" is polled.
+
+    Raises DatasetEpisodeDeleteError (status + message) when: the dataset
+    isn't found locally (404), it's busy — recording / merge / upload /
+    local training (409), the dataset can't be loaded, the index is out of
+    range, or it's the dataset's only episode (400), or the rewrite/swap
+    itself fails (500, rolling back to the original directory when
+    possible).
     """
     target = _resolve_local_dataset_path(repo_id)
     if target is None:
@@ -1247,6 +1304,8 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
     shutil.rmtree(backup_dir, ignore_errors=True)
     invalidate_dataset_listing_cache()
 
+    hub_sync, hub_sync_message = _resync_episode_delete_to_hub(repo_id)
+
     new_total = total_episodes - 1
     logger.info("Deleted episode %s from %s (%s episode(s) remain)", episode_index, repo_id, new_total)
     return {
@@ -1254,6 +1313,8 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
         "repo_id": repo_id,
         "deleted_episode": episode_index,
         "total_episodes": new_total,
+        "hub_sync": hub_sync,
+        "hub_sync_message": hub_sync_message,
     }
 
 
