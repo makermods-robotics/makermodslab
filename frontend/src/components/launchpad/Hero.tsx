@@ -68,7 +68,10 @@ const Hero: React.FC<HeroProps> = ({ search, onSearchChange }) => {
         robot skills
       </h1>
 
-      <label className="flex w-full max-w-xl items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 shadow-1 focus-within:border-ring">
+      <label
+        data-tour="launchpad-search"
+        className="flex w-full max-w-xl items-center gap-2 rounded-full border border-border bg-card px-4 py-2.5 shadow-1 focus-within:border-ring"
+      >
         <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
         <input
           value={search}

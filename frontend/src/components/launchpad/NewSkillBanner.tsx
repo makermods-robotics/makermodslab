@@ -21,6 +21,7 @@ const NewSkillBanner: React.FC = () => {
   return (
     <button
       type="button"
+      data-tour="launchpad-new-skill"
       onClick={() => openStudio("collect")}
       className="group w-full rounded-lg border border-border bg-card px-6 py-7 text-left shadow-1 transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none"
       aria-label="Open the skill studio — collect, train, and deploy a new skill"

@@ -111,7 +111,11 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
   };
 
   return (
-    <section className="w-full" aria-label="Skills">
+    <section
+      data-tour="launchpad-skills"
+      className="w-full"
+      aria-label="Skills"
+    >
       <div className="flex items-center gap-2">
         <button
           type="button"
