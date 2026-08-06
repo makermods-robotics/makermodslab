@@ -1395,6 +1395,78 @@ def test_cloud_start_passes_resume_total_to_the_runner(tmp_path) -> None:
     assert seen and seen[0][-1] == 15000
 
 
+def test_start_seeds_a_resumed_records_progress_at_the_checkpoint_step(tmp_path) -> None:
+    """The record a resume starts must already read 4,000/15,000 — not 0/0.
+
+    resume_total only helps once lerobot's tqdm bar exists, and nothing fills
+    the gap before it: on a real local resume that window was 12s of a 69s run,
+    during which every progress readout in the app said step 0. The seed has to
+    be on the RECORD (not just the runner) so the persisted job.json, the /jobs
+    payload and the ~1Hz progress broadcast all carry it from the first tick."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(
+        dataset_repo_id="user/on_hub",
+        policy_type="act",
+        resume=True,
+        config_path="/somewhere/checkpoints/004000/pretrained_model/train_config.json",
+        steps=15000,
+    )
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch(
+            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
+            lambda *a, **k: fake_runner,
+        ),
+    ):
+        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert (record.metrics.current_step, record.metrics.total_steps) == (4000, 15000)
+    # And it survives to disk, which is what a reattach after a restart reloads.
+    persisted = _json.loads((tmp_path / "root" / record.id / "job.json").read_text())
+    assert persisted["metrics"]["current_step"] == 4000
+
+
+def test_start_leaves_a_fresh_records_progress_at_zero(tmp_path) -> None:
+    """The non-resumed path is untouched: 0/0 is correct there, and total_steps
+    == 0 is the signal the UI renders as "Training starting…"."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act", steps=15000)
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch(
+            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
+            lambda *a, **k: fake_runner,
+        ),
+    ):
+        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert (record.metrics.current_step, record.metrics.total_steps) == (0, 0)
+
+
 def test_cloud_reattach_passes_resume_total_to_the_runner(monkeypatch, tmp_path) -> None:
     """Re-attaching to a running cloud job after a restart must carry the resume
     target too — otherwise the progress readout silently rebases itself on the
@@ -1644,78 +1716,6 @@ def test_two_imports_of_one_task_and_policy_are_still_disambiguated(monkeypatch,
     names = {r.id: r.name for r in reg.list(limit=100)}
     assert names[a.id] == "orange_box (2026-08-03)"
     assert names[b.id] == "orange_box (2026-08-05)"
-
-
-def test_start_seeds_a_resumed_records_progress_at_the_checkpoint_step(tmp_path) -> None:
-    """The record a resume starts must already read 4,000/15,000 — not 0/0.
-
-    The tqdm rebase only helps once lerobot's bar exists, and nothing fills the
-    gap before it: on a real local resume that window was 12s of a 69s run,
-    during which every progress readout in the app said step 0. The seed has to
-    be on the RECORD (not just the runner) so the persisted job.json, the /jobs
-    payload and the ~1Hz progress broadcast all carry it from the first tick."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobRegistry, JobTarget
-    from makermodslab.train import TrainingRequest
-
-    reg = JobRegistry(tmp_path / "root")
-    cfg = TrainingRequest(
-        dataset_repo_id="user/on_hub",
-        policy_type="act",
-        resume=True,
-        config_path="/somewhere/checkpoints/004000/pretrained_model/train_config.json",
-        steps=15000,
-    )
-    fake_runner = MagicMock()
-    fake_runner.hf_job_id.return_value = "job-xyz"
-    fake_runner.hf_job_url.return_value = None
-
-    with (
-        patch(
-            "makermodslab.datasets.get_hub_status",
-            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
-        ),
-        patch(
-            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
-            lambda *a, **k: fake_runner,
-        ),
-    ):
-        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
-
-    assert (record.metrics.current_step, record.metrics.total_steps) == (4000, 15000)
-    # And it survives to disk, which is what a reattach after a restart reloads.
-    persisted = _json.loads((tmp_path / "root" / record.id / "job.json").read_text())
-    assert persisted["metrics"]["current_step"] == 4000
-
-
-def test_start_leaves_a_fresh_records_progress_at_zero(tmp_path) -> None:
-    """The non-resumed path is untouched: 0/0 is correct there, and total_steps
-    == 0 is the signal the UI renders as "Training starting…"."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobRegistry, JobTarget
-    from makermodslab.train import TrainingRequest
-
-    reg = JobRegistry(tmp_path / "root")
-    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act", steps=15000)
-    fake_runner = MagicMock()
-    fake_runner.hf_job_id.return_value = "job-xyz"
-    fake_runner.hf_job_url.return_value = None
-
-    with (
-        patch(
-            "makermodslab.datasets.get_hub_status",
-            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
-        ),
-        patch(
-            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
-            lambda *a, **k: fake_runner,
-        ),
-    ):
-        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
-
-    assert (record.metrics.current_step, record.metrics.total_steps) == (0, 0)
 
 
 # ── Resume is only for a run that stopped short ──────────────────────────────
@@ -2865,48 +2865,6 @@ def test_an_unknown_finetune_source_still_refuses_before_any_record(monkeypatch,
 _DEFAULT_CAMERAS = ("front", "wrist")
 
 
-def test_check_feature_space_rejects_disjoint_cameras_at_different_counts(tmp_path) -> None:
-    """Zero overlap is the rename mistake at an unequal count: a 1-camera `left`
-    dataset against a wrist/front checkpoint would otherwise fall past the
-    rename rule (counts differ) into the benign count-change branch. None of the
-    checkpoint's cameras survive, so it is refused."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "two_cam_ckpt", cameras=("front", "wrist"))
-    with (
-        _patch_dataset_features(_dataset_features(cameras=("left",))),
-        pytest.raises(ValueError) as exc,
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/left_only_ds")
-    message = str(exc.value)
-    assert "no camera in common" in message
-    assert "front, wrist" in message
-    assert "left" in message
-    # The two ways out the message must offer.
-    assert "base model" in message
-    assert "from scratch" in message
-
-
-def test_check_feature_space_exempts_a_generic_base_from_the_disjoint_rule(tmp_path, caplog) -> None:
-    """The canonical smolvla_base fine-tune is disjoint AND unequal in count
-    (camera1/2/3 vs a real 2-camera rig), so the generic-base exemption has to
-    cover the disjoint rule too or it would refuse the commonest fine-tune there
-    is."""
-    import logging
-
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(
-        tmp_path, "generic_base", policy_type="smolvla", cameras=("camera1", "camera2", "camera3")
-    )
-    with (
-        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
-        _patch_dataset_features(_dataset_features(cameras=("front", "wrist"))),
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/two_cam_ds")
-    assert "placeholder camera names" in caplog.text
-
-
 # ---------------------------------------------------------------------------
 # Fine-tune policy-type guard: --policy.type must match the source checkpoint's
 # architecture, because lerobot loads pretrained weights non-strictly and would
@@ -3376,6 +3334,47 @@ def test_check_feature_space_exempts_a_generic_base_from_the_rename_rule(tmp_pat
         _check_pretrained_feature_space(str(ckpt), "user/named_rig_ds")
     assert "placeholder camera names" in caplog.text
     assert "front, top, wrist" in caplog.text
+
+
+def test_check_feature_space_rejects_disjoint_cameras_at_different_counts(tmp_path) -> None:
+    """Zero overlap is the rename mistake at an unequal count, and it slipped
+    through live: a 1-camera `left` dataset against a wrist/front checkpoint
+    fell past the rename rule (counts differ) into the benign count-change
+    branch. None of the checkpoint's cameras survive, so it is refused."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "two_cam_ckpt", cameras=("front", "wrist"))
+    with (
+        _patch_dataset_features(_dataset_features(cameras=("left",))),
+        pytest.raises(ValueError) as exc,
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/left_only_ds")
+    message = str(exc.value)
+    assert "no camera in common" in message
+    assert "front, wrist" in message
+    assert "left" in message
+    # The two ways out the message must offer.
+    assert "base model" in message
+    assert "from scratch" in message
+
+
+def test_check_feature_space_exempts_a_generic_base_from_the_disjoint_rule(tmp_path, caplog) -> None:
+    """The canonical smolvla_base fine-tune is disjoint AND unequal in count
+    (camera1/2/3 vs a real 2-camera rig), so the generic-base exemption has to
+    cover the new rule too or it would refuse the commonest fine-tune there is."""
+    import logging
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(
+        tmp_path, "generic_base", policy_type="smolvla", cameras=("camera1", "camera2", "camera3")
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
+        _patch_dataset_features(_dataset_features(cameras=("front", "wrist"))),
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/two_cam_ds")
+    assert "placeholder camera names" in caplog.text
 
 
 def test_check_feature_space_exemption_is_all_or_nothing(tmp_path) -> None:
