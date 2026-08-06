@@ -1008,7 +1008,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                   {/* Delete/remove — semantics resolved by the parent
                       (resolveDeleteAction) and routed through its confirm
                       dialog; nothing is deleted inline. */}
-                  {canDelete && onDelete && (
+                  {!isHubOnly && canDelete && onDelete && (
                     <button
                       type="button"
                       onClick={onDelete}
