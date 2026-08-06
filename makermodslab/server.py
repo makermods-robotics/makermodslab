@@ -689,6 +689,24 @@ def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
     return FileResponse(video_path, media_type="video/mp4")
 
 
+class DatasetEpisodeDeleteBody(BaseModel):
+    repo_id: str
+    episode_index: int
+
+
+@app.post("/datasets/episode-delete")
+def datasets_episode_delete(body: DatasetEpisodeDeleteBody):
+    """Delete one episode from a locally-cached dataset, rewriting it via
+    lerobot's delete_episodes (local-only — never touches a Hub copy).
+    Refuses (409) if the dataset is being recorded, merged, uploaded, or
+    trained on locally; 400 if the index is invalid or it's the dataset's
+    only episode."""
+    try:
+        return dataset_browser.delete_local_episode(body.repo_id, body.episode_index)
+    except dataset_browser.DatasetEpisodeDeleteError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
 @app.get("/datasets/hub-status")
 def datasets_hub_status(repo_id: str):
     """Whether a dataset repo with this id exists on the Hub.

@@ -952,6 +952,51 @@ def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> N
     assert tmp_dirs == []
 
 
+# --- Episode delete endpoint ---
+
+def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: Path) -> None:
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makerlab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+    ):
+        resp = client.post(
+            "/datasets/episode-delete",
+            json={"repo_id": "makermods/three", "episode_index": 1},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "success": True,
+        "repo_id": "makermods/three",
+        "deleted_episode": 1,
+        "total_episodes": 2,
+    }
+
+
+def test_delete_episode_endpoint_404_missing(client: TestClient, tmp_lerobot_home: Path) -> None:
+    resp = client.post(
+        "/datasets/episode-delete",
+        json={"repo_id": "makermods/ghost", "episode_index": 0},
+    )
+    assert resp.status_code == 404
+    assert isinstance(resp.json()["detail"], str)
+
+
+def test_delete_episode_endpoint_last_episode_400s(client: TestClient, tmp_lerobot_home: Path) -> None:
+    _make_dataset(tmp_lerobot_home, "makermods/solo", episodes=1)
+
+    with patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(1)):
+        resp = client.post(
+            "/datasets/episode-delete",
+            json={"repo_id": "makermods/solo", "episode_index": 0},
+        )
+    assert resp.status_code == 400
+
+
 # --- Hub visibility / tags editing (post-upload) ----------------------------
 
 
