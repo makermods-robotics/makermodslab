@@ -40,6 +40,7 @@ import {
 import { useStudio } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
+import { useToast } from "@/hooks/use-toast";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
 import DeleteConfirmDialog from "@/components/dialogs/DeleteConfirmDialog";
@@ -485,6 +486,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio } = useStudio();
   const { setSelectedDataset } = useSelectedDataset();
+  const { toast } = useToast();
 
   const [episodes, setEpisodes] = useState<EpisodeSummary[] | null>(null);
   const [episodesLoading, setEpisodesLoading] = useState(true);
@@ -576,13 +578,31 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
   const confirmDatasetDelete = async (resolution: DeleteResolution) => {
     if (!repoId) return;
-    await deleteDataset(baseUrl, fetchWithHeaders, repoId);
-    setPendingDatasetDelete(false);
-    if (resolution.clearsSelection) {
-      onOpenChange(false);
-      onDeleted?.();
-    } else {
-      setReloadKey((k) => k + 1);
+    try {
+      const result = await deleteDataset(baseUrl, fetchWithHeaders, repoId);
+      if (!result.success) {
+        setPendingDatasetDelete(false);
+        toast({
+          title: "Delete failed",
+          description: result.message ?? "Something went wrong",
+          variant: "destructive",
+        });
+        return;
+      }
+      setPendingDatasetDelete(false);
+      if (resolution.clearsSelection) {
+        onOpenChange(false);
+        onDeleted?.();
+      } else {
+        setReloadKey((k) => k + 1);
+      }
+    } catch (e) {
+      setPendingDatasetDelete(false);
+      toast({
+        title: "Delete failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
     }
   };
 
