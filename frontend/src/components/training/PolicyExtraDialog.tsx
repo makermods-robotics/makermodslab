@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useInstallExtra } from "@/hooks/useInstallExtra";
+import { policyTypeShortLabel } from "./types";
 import {
   InstallProgress,
   InstallTitleIcon,
@@ -21,11 +22,18 @@ interface Props {
   packageName: string; // the probed module, e.g. "transformers"
   installTarget: string; // e.g. "lerobot[smolvla]"
   installHint: string; // e.g. "pip install 'lerobot[smolvla]'"
+  purpose: "training" | "inference"; // what the caller was about to do
 }
 
+const PURPOSE_COPY: Record<Props["purpose"], { verb: string; noun: string }> = {
+  training: { verb: "Training", noun: "training" },
+  inference: { verb: "Running", noun: "inference" },
+};
+
 // Some policies (smolvla, pi0, pi0_fast, diffusion) need an optional LeRobot
-// extra. This catches the missing package before training starts and offers a
-// one-click install, instead of the run dying with a buried ImportError.
+// extra. This catches the missing package before training/inference starts
+// and offers a one-click install, instead of the run dying with a buried
+// ImportError.
 const PolicyExtraDialog: React.FC<Props> = ({
   open,
   onOpenChange,
@@ -33,9 +41,12 @@ const PolicyExtraDialog: React.FC<Props> = ({
   packageName,
   installTarget,
   installHint,
+  purpose,
 }) => {
   const install = useInstallExtra(`system/policy-extra/${policyType}`, open);
-  const title = `${policyType.toUpperCase()} needs an extra package`;
+  const shortLabel = policyTypeShortLabel(policyType);
+  const title = `${shortLabel} needs an extra package`;
+  const { verb, noun } = PURPOSE_COPY[purpose];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -46,7 +57,7 @@ const PolicyExtraDialog: React.FC<Props> = ({
             {installTitle(install.state, title)}
           </DialogTitle>
           <DialogDescription className="sr-only">
-            Install {installTarget} to train {policyType}.
+            Install {installTarget} for {noun} with {shortLabel}.
           </DialogDescription>
         </DialogHeader>
 
@@ -63,14 +74,14 @@ const PolicyExtraDialog: React.FC<Props> = ({
             idleTitle={title}
             idleDescription={
               <>
-                Training a <span className="font-semibold">{policyType}</span> policy needs the{" "}
+                {verb} a <span className="font-semibold">{shortLabel}</span> policy needs the{" "}
                 <code className="px-1 py-0.5 rounded bg-muted text-info">{packageName}</code>{" "}
                 package (installed via{" "}
                 <code className="px-1 py-0.5 rounded bg-muted text-info">{installTarget}</code>),
-                which isn't in this environment yet. Install it to train this policy.
+                which isn't in this environment yet. Install it to {purpose === "training" ? "train" : "run"} this policy.
               </>
             }
-            doneDescription={<ReadyInstructions purpose={`${policyType} training`} />}
+            doneDescription={<ReadyInstructions purpose={`${shortLabel} ${noun}`} />}
           />
         </div>
       </DialogContent>

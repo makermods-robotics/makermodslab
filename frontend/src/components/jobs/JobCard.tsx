@@ -816,6 +816,7 @@ const JobCard: React.FC<Props> = ({
           packageName={missingExtra.packageName}
           installTarget={missingExtra.installTarget}
           installHint={missingExtra.installHint}
+          purpose="training"
         />
       ) : null}
     </Card>
