@@ -22,6 +22,7 @@ branches here — the parts that matter for safety."""
 from __future__ import annotations
 
 import io
+import subprocess
 import threading
 from pathlib import Path
 
@@ -2806,6 +2807,261 @@ def test_runner_death_before_the_first_episode_fails_the_session(monkeypatch) ->
     assert rollout._eval_session is None
     # Idempotent, like every other terminal payload.
     assert rollout.handle_inference_status()["phase"] == rollout.PHASE_ERROR
+
+
+# ---------------------------------------------------------------------------
+# P0-3 / Inference N1: a stop that has to SIGKILL the child must still leave the
+# follower de-energized.
+#
+# The child's own teardown is what disables torque (lerobot eases the arm home
+# over a 3.0s floor, THEN calls robot.disconnect()). A SIGKILL mid-teardown skips
+# that entirely, so the parent has to release the arm itself.
+#
+# No real serial port is ever opened here: `_connect_follower_bus` is the seam,
+# and it is stubbed in every test below.
+# ---------------------------------------------------------------------------
+
+
+class _StubbornProc:
+    """A child that ignores SIGTERM — it never finishes its teardown."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout=None):
+        if timeout is not None and not self.killed:
+            raise subprocess.TimeoutExpired(cmd="lerobot-rollout", timeout=timeout)
+        return 0
+
+
+class _CompliantProc:
+    """A child that exits on SIGTERM having run its own teardown."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class _FakeBus:
+    def __init__(self) -> None:
+        self.motors: dict = {}
+        self.disconnected = False
+
+    def disconnect(self, disable_torque: bool = True) -> None:
+        self.disconnected = True
+
+
+def _inference_request(**overrides):
+    """An InferenceRequest with the required fields filled in."""
+    from makermodslab.rollout import InferenceRequest
+
+    fields = {
+        "follower_port": "/dev/ttyUSB0",
+        "follower_config": "robot_a",
+        "policy_ref": "user/repo@checkpoints/000050",
+    }
+    fields.update(overrides)
+    return InferenceRequest(**fields)
+
+
+def _capture_release(monkeypatch, rollout) -> tuple[list, list]:
+    """Stub the bus seam and the torque helper; return (ports opened, labels)."""
+    from makermodslab import torque
+
+    opened: list[str] = []
+    released: list[str] = []
+
+    def _connect(port: str):
+        opened.append(port)
+        return _FakeBus()
+
+    monkeypatch.setattr(rollout, "_connect_follower_bus", _connect)
+    monkeypatch.setattr(
+        torque, "force_disable_bus_torque", lambda bus, label="device": released.append(label) or []
+    )
+    return opened, released
+
+
+def test_stop_teardown_budget_is_not_tighter_than_the_eval_path() -> None:
+    """The single-run stop and the eval QUIT wait for the SAME teardown.
+
+    N1 was, at root, the two paths disagreeing about how long that takes: eval
+    allowed 10s while the single-run stop allowed 5s and SIGKILLed into a live
+    teardown. Pinning the relationship (rather than the literal) keeps a future
+    tuning pass from reintroducing the gap.
+    """
+    from makermodslab import rollout
+
+    assert rollout._STOP_TEARDOWN_TIMEOUT_S >= rollout._RUNNER_QUIT_TIMEOUT_S
+
+
+def test_stop_force_releases_torque_after_a_kill(monkeypatch) -> None:
+    """SIGKILL means the child never disabled torque — the parent must."""
+    from makermodslab import rollout
+
+    opened, released = _capture_release(monkeypatch, rollout)
+    proc = _StubbornProc()
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", proc)
+    monkeypatch.setattr(
+        rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING, "follower_ports": ["/dev/fake0"]}
+    )
+
+    result = rollout.handle_stop_inference()
+
+    assert proc.terminated and proc.killed, "precondition: the child had to be killed"
+    assert result["success"] is True
+    assert opened == ["/dev/fake0"]
+    assert released == ["inference follower"]
+
+
+def test_stop_force_releases_both_arms_when_bimanual(monkeypatch) -> None:
+    """A bimanual session holds two buses; a kill must de-energize both.
+
+    One arm left rigid is the same defect as two.
+    """
+    from makermodslab import rollout
+
+    opened, released = _capture_release(monkeypatch, rollout)
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _StubbornProc())
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_RUNNING, "follower_ports": ["/dev/left", "/dev/right"]},
+    )
+
+    rollout.handle_stop_inference()
+
+    assert opened == ["/dev/left", "/dev/right"]
+    assert len(released) == 2
+
+
+def test_stop_does_not_force_release_when_the_child_exits_cleanly(monkeypatch) -> None:
+    """The emergency path must stay off the happy path.
+
+    A child that ran its own teardown has already eased the arm home and
+    disconnected; reopening the port to yank torque would undo that.
+    """
+    from makermodslab import rollout
+
+    opened, released = _capture_release(monkeypatch, rollout)
+    proc = _CompliantProc()
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", proc)
+    monkeypatch.setattr(
+        rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING, "follower_ports": ["/dev/fake0"]}
+    )
+
+    rollout.handle_stop_inference()
+
+    assert not proc.killed
+    assert opened == [] and released == []
+
+
+def test_force_release_reports_a_port_it_cannot_reopen(monkeypatch) -> None:
+    """If the port can't be reopened, say so loudly instead of raising.
+
+    This runs on an already-failing path, so it must never mask the original
+    problem — but it must also never silently pretend the arm is safe.
+    """
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_RELEASE_PORT_RETRY_DELAY_S", 0)
+
+    def _refuse(port: str):
+        raise OSError("device busy")
+
+    monkeypatch.setattr(rollout, "_connect_follower_bus", _refuse)
+
+    problems = rollout._force_release_follower_torque(["/dev/fake0"])
+
+    assert len(problems) == 1
+    assert "TORQUE MAY STILL BE ENABLED" in problems[0]
+    assert "/dev/fake0" in problems[0]
+
+
+def test_force_release_retries_a_port_that_is_briefly_busy(monkeypatch) -> None:
+    """The killed child may not have handed the tty back yet — retry briefly.
+
+    Failing on the first EBUSY would abandon an energized arm over a race that
+    resolves in milliseconds.
+    """
+    from makermodslab import rollout, torque
+
+    monkeypatch.setattr(rollout, "_RELEASE_PORT_RETRY_DELAY_S", 0)
+    attempts: list[int] = []
+    released: list[str] = []
+
+    def _busy_once(port: str):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("device busy")
+        return _FakeBus()
+
+    monkeypatch.setattr(rollout, "_connect_follower_bus", _busy_once)
+    monkeypatch.setattr(
+        torque, "force_disable_bus_torque", lambda bus, label="device": released.append(label) or []
+    )
+
+    problems = rollout._force_release_follower_torque(["/dev/fake0"])
+
+    assert len(attempts) == 2 and released and problems == []
+
+
+def test_force_release_disconnects_without_re_disabling_torque(monkeypatch) -> None:
+    """The bus is closed afterwards, and with disable_torque=False.
+
+    Torque was just released motor by motor; letting disconnect() do it again
+    means one failing motor can abort the close and leak the port.
+    """
+    from makermodslab import rollout, torque
+
+    bus = _FakeBus()
+    seen: dict = {}
+    monkeypatch.setattr(rollout, "_connect_follower_bus", lambda port: bus)
+    monkeypatch.setattr(torque, "force_disable_bus_torque", lambda b, label="device": [])
+
+    def _disconnect(disable_torque: bool = True) -> None:
+        seen["disable_torque"] = disable_torque
+
+    bus.disconnect = _disconnect
+
+    rollout._force_release_follower_torque(["/dev/fake0"])
+
+    assert seen == {"disable_torque": False}
+
+
+def test_follower_ports_covers_single_and_bimanual() -> None:
+    """The ports recorded at start are what the stop path has to work with."""
+    from makermodslab import rollout
+
+    single = _inference_request(follower_port="/dev/one")
+    assert rollout._follower_ports(single) == ["/dev/one"]
+
+    bi = _inference_request(follower_port="/dev/left", mode="bimanual", right_follower_port="/dev/right")
+    assert rollout._follower_ports(bi) == ["/dev/left", "/dev/right"]
+
+    # A bimanual request with a blank right port contributes nothing rather than
+    # an empty string the release loop would try to open.
+    half = _inference_request(follower_port="/dev/left", mode="bimanual")
+    assert rollout._follower_ports(half) == ["/dev/left"]
 
 
 # ---------------------------------------------------------------------------

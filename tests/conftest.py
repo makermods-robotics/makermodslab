@@ -21,6 +21,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from huggingface_hub import constants as hf_constants
+
+import lerobot.utils.constants as lr_constants
 
 
 @pytest.fixture
@@ -41,10 +44,45 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     importing them through `from makermodslab.utils.config import LEADER_CONFIG_PATH`
     sees the redirected path. Also sets `HF_LEROBOT_HOME` env var for any
     consumer (e.g. `makermodslab.datasets._lerobot_cache_root`) reading it directly.
+
+    THE CACHE ROOT IS READ THROUGH THREE INDEPENDENT MECHANISMS and patching one
+    does not patch the others — all three are covered here:
+
+      * the ``HF_LEROBOT_HOME`` env var → `datasets._lerobot_cache_root()`, which
+        re-reads it on every call;
+      * ``lerobot.utils.constants.HF_LEROBOT_HOME`` → a module attribute computed
+        at lerobot IMPORT time, so setting the env var afterwards changes
+        nothing. `record.handle_delete_dataset` imports it inside the function
+        body, so before this was patched here a delete test resolved against the
+        developer's REAL ~/.cache/huggingface/lerobot — a `shutil.rmtree` target
+        one careless test away from destroying real calibration data;
+      * ``huggingface_hub.constants.HF_HUB_CACHE`` → the shared Hub cache, read
+        at call time by `models._hub_cache_has_repo` (and anything else asking
+        "is this repo already downloaded?"). Left alone, tests answer that
+        question from whatever the developer happens to have downloaded, which
+        is machine-dependent and silently different in CI.
+
+    The assertion below is the load-bearing part: it verifies the redirect from
+    the perspective of the code under test, so a future refactor that reintroduces
+    an unpatched path fails loudly here instead of quietly writing to the real
+    cache. (`tests/repro/conftest.py` keeps its own copy of this protection —
+    those tests call `rmtree` handlers deliberately and must not depend on this
+    fixture being used.)
     """
     cache = tmp_path / "lerobot"
     cache.mkdir()
     monkeypatch.setenv("HF_LEROBOT_HOME", str(cache))
+    monkeypatch.setattr(lr_constants, "HF_LEROBOT_HOME", cache)
+
+    hub_cache = tmp_path / "hub"
+    hub_cache.mkdir(exist_ok=True)
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(hub_cache))
+
+    real_cache = Path("~/.cache/huggingface/lerobot").expanduser().resolve()
+    for probe in (Path(lr_constants.HF_LEROBOT_HOME).resolve(), Path(hf_constants.HF_HUB_CACHE).resolve()):
+        assert real_cache not in [probe, *probe.parents], (
+            f"REFUSING TO RUN: {probe} is inside the real cache {real_cache}"
+        )
 
     from makermodslab.utils import config as cfg
 
