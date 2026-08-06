@@ -24,12 +24,27 @@ export function useSpotlightTarget(selector: string): SpotlightRect | null {
 
   useEffect(() => {
     let frame: number | null = null;
+    let observedElement: Element | null = null;
+    let resizeObserver: ResizeObserver;
 
     const measureNow = () => {
       const el = document.querySelector(selector);
       if (!el) {
         setRect(null);
+        // Detach ResizeObserver if target disappeared
+        if (observedElement) {
+          resizeObserver.unobserve(observedElement);
+          observedElement = null;
+        }
         return;
+      }
+      // Lazily attach ResizeObserver when we first find the target
+      if (observedElement !== el) {
+        if (observedElement) {
+          resizeObserver.unobserve(observedElement);
+        }
+        observedElement = el;
+        resizeObserver.observe(el);
       }
       const next = measure(el);
       setRect(next.width > 0 && next.height > 0 ? next : null);
@@ -43,16 +58,15 @@ export function useSpotlightTarget(selector: string): SpotlightRect | null {
       });
     };
 
-    measureNow();
+    resizeObserver = new ResizeObserver(scheduleMeasure);
 
-    const resizeObserver = new ResizeObserver(scheduleMeasure);
-    const target = document.querySelector(selector);
-    if (target) resizeObserver.observe(target);
+    measureNow();
 
     const mutationObserver = new MutationObserver(scheduleMeasure);
     mutationObserver.observe(document.body, {
       childList: true,
       subtree: true,
+      attributes: true,
     });
 
     window.addEventListener("resize", scheduleMeasure);

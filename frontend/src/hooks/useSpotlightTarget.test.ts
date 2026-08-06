@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { useSpotlightTarget } from "./useSpotlightTarget";
 
 afterEach(() => {
@@ -48,5 +48,24 @@ describe("useSpotlightTarget", () => {
     mockRect(el, { top: 10, left: 20, width: 100, height: 40 });
     const { result } = renderHook(() => useSpotlightTarget("[data-tour=real]"));
     expect(result.current).toEqual({ top: 10, left: 20, width: 100, height: 40 });
+  });
+
+  it("picks up element that appears after hook mount (late-appearing target)", async () => {
+    const { result } = renderHook(() =>
+      useSpotlightTarget("[data-tour=late]"),
+    );
+    // Initially no element exists
+    expect(result.current).toBeNull();
+
+    // Append the element after hook is mounted
+    const el = document.createElement("div");
+    el.setAttribute("data-tour", "late");
+    document.body.appendChild(el);
+    mockRect(el, { top: 5, left: 15, width: 80, height: 60 });
+
+    // Wait for the MutationObserver to trigger and the hook to update
+    await waitFor(() => {
+      expect(result.current).toEqual({ top: 5, left: 15, width: 80, height: 60 });
+    });
   });
 });
