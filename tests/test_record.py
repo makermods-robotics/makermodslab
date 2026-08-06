@@ -326,6 +326,43 @@ def test_build_camera_configs_skips_non_opencv_type() -> None:
     assert configs == {}
 
 
+def test_is_transient_camera_error_matches_capture_width_mismatch() -> None:
+    """Real hardware regression: lerobot's OpenCVCamera raises "failed to set
+    capture_width=640 (actual_width=1920, width_success=True)." when a camera
+    comes up in a cold-open/turbulent state (e.g. right after a hot-unplug) —
+    the same class of transient failure "failed to set fps" already covers,
+    just from the width/height negotiation step instead of the fps step. Only
+    "do not match configured" (the later frame-size check) and "failed to set
+    fps" were recognized before; a capture_width/height failure fell through
+    to a terminal (non-retried) failure with no cleanup pass, reproduced twice
+    on the bench unplugging the wrist camera mid-connect."""
+    from makerlab.record import _is_transient_camera_error
+
+    assert _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+    )
+    assert _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set capture_height=480 (actual_height=1080, height_success=True)."
+    )
+
+
+def test_is_transient_camera_error_matches_existing_markers() -> None:
+    from makerlab.record import _is_transient_camera_error
+
+    assert _is_transient_camera_error("OpenCVCamera(0) failed to set fps=30 (actual_fps=5.0).")
+    assert _is_transient_camera_error(
+        "OpenCVCamera(0) frame width=360 or height=640 do not match configured width=480 or height=640."
+    )
+    assert _is_transient_camera_error("Timed out waiting for frame from camera OpenCVCamera(0) after 200 ms.")
+
+
+def test_is_transient_camera_error_false_for_unrelated_errors() -> None:
+    from makerlab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error("Could not connect on port '/dev/ttyUSB0'.")
+    assert not _is_transient_camera_error("Failed to open OpenCVCamera(97).")
+
+
 def _make_dataset_dir(cache, repo_id: str, total_episodes: int):
     """Create a minimal on-disk LeRobot dataset dir (meta/info.json) under the
     tmp cache root, plus a fake video file so 'removed' is observable."""

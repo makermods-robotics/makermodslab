@@ -447,6 +447,37 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
+def _is_transient_camera_error(msg: str) -> bool:
+    """True when a robot-connect failure is transient camera-session
+    turbulence, curable by a clean re-connect, rather than a real failure.
+
+    An AVCaptureSession opened into another session's asynchronous teardown
+    (e.g. right after a hot-unplug) intermittently comes up wrong —
+    forensically established 2026-07-09, extended 2026-07-31 after the
+    capture_width/height case below was caught reproducing on the bench with
+    no retry and no cleanup:
+      * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
+      * "failed to set capture_width=..."/"failed to set capture_height=..."
+        — cold-open width/height read-back (the same read-back failure as
+        fps, just from lerobot's width/height negotiation step instead)
+      * "do not match configured" — session landed the neighboring native
+        format (e.g. 640x360 instead of 640x480), caught on the later
+        frame-size check
+      * "timed out waiting for frame" — session came up frame-dead (opens
+        fine, background reader never receives a frame)
+    """
+    low = msg.lower()
+    return any(
+        marker in low
+        for marker in (
+            "failed to set fps",
+            "failed to set capture_",
+            "do not match configured",
+            "timed out waiting for frame",
+        )
+    )
+
+
 def create_record_config(request: RecordingRequest, cameras: dict | None = None) -> RecordConfig:
     """Create a RecordConfig from the recording request.
 
@@ -1632,23 +1663,7 @@ def record_with_web_events(
             break
         except Exception as e:
             msg = str(e)
-            # Transient camera-session turbulence, all observed on this bench and
-            # all curable by a clean re-connect (an AVCaptureSession opened into
-            # another session's asynchronous teardown intermittently comes up
-            # wrong — forensically established 2026-07-09):
-            #   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
-            #   * "do not match configured"   — session landed the neighboring
-            #     native format (e.g. 640x360 instead of 640x480)
-            #   * "timed out waiting for frame" — session came up frame-dead
-            #     (opens fine, background reader never receives a frame)
-            transient_camera = any(
-                marker in msg.lower()
-                for marker in (
-                    "failed to set fps",
-                    "do not match configured",
-                    "timed out waiting for frame",
-                )
-            )
+            transient_camera = _is_transient_camera_error(msg)
             logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
             # If robot connection fails due to camera conflict, provide clear error
             if (
