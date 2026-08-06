@@ -715,6 +715,13 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                     Episode {deleteTarget?.episode_index} is the only episode
                     in <span className="font-mono text-foreground">{repoId}</span>.
                     Deleting it deletes the whole dataset. This can't be undone.
+                    {deleteHubStatus?.status === "on_hub" && (
+                      <>
+                        {" "}
+                        This dataset is on the Hugging Face Hub — the Hub copy
+                        will be unaffected and will still exist there.
+                      </>
+                    )}
                   </>
                 ) : (
                   <>
@@ -743,6 +750,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   e.preventDefault();
                   handleConfirmDelete();
                 }}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               >
                 {deleting ? (
                   <Loader2 className="mr-1 h-4 w-4 animate-spin" />
