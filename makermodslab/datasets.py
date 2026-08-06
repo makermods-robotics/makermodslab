@@ -1037,11 +1037,21 @@ class DatasetRenameError(Exception):
         self.message = message
 
 
+# In-progress tracker for delete_local_episode. It's a plain function (no
+# module-level singleton of its own to check, unlike recording/upload/merge),
+# so it has to publish itself here for the other entry points that consult
+# _dataset_in_use (whole-dataset delete, rename, upload-start) to know a
+# directory is mid-swap, and for a second concurrent episode-delete on the
+# same repo to be refused instead of racing the first one's swap.
+_episode_delete_lock = threading.Lock()
+_episode_deletes_in_progress: set[str] = set()
+
+
 def _dataset_in_use(repo_id: str) -> str | None:
     """If `repo_id`'s directory is in use by a running operation, return a
     legible reason to refuse a rename; else None.
 
-    Checks the four ways a dataset dir can be actively read/written:
+    Checks the five ways a dataset dir can be actively read/written:
       * recording — the active session's (timestamp-stamped) repo id, OR the
         base name the user typed (recording stamps ``name`` → ``name_<ts>``,
         so a rename of the base while a session writes ``name_<ts>`` would
@@ -1049,7 +1059,9 @@ def _dataset_in_use(repo_id: str) -> str | None:
       * merge — the output dataset currently being aggregated;
       * upload — the dataset currently being pushed to the Hub (renaming or
         deleting the directory mid-push would corrupt the upload);
-      * local training — any running local job whose config trains on it.
+      * local training — any running local job whose config trains on it;
+      * episode delete — a delete_local_episode call currently rewriting this
+        directory (see _episode_deletes_in_progress above).
 
     Read-only imports; each module owns its own state. Kept deliberately
     simple: a false "in use" is safer than yanking a directory mid-write.
@@ -1068,6 +1080,11 @@ def _dataset_in_use(repo_id: str) -> str | None:
     # lazy import (datasets<->record cycle) as recording above.
     if _record.upload_manager.state == "running" and _record.upload_manager.repo_id == repo_id:
         return "This dataset is being uploaded to the Hub right now. Wait for it to finish."
+
+    # Episode delete: datasets.py owns this state directly (see above).
+    with _episode_delete_lock:
+        if repo_id in _episode_deletes_in_progress:
+            return "An episode is being deleted from this dataset right now. Wait for it to finish."
 
     # Merge: merge.py exposes a MergeManager singleton with state + output id.
     from . import merge as _merge
@@ -1243,79 +1260,95 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
     if in_use is not None:
         raise DatasetEpisodeDeleteError(409, in_use)
 
-    from lerobot.datasets import LeRobotDataset
-
-    try:
-        dataset = LeRobotDataset(repo_id=repo_id, root=target)
-    except Exception as exc:
-        logger.error("Failed to load dataset %s for episode delete: %s", repo_id, exc)
-        raise DatasetEpisodeDeleteError(400, f"Could not read dataset: {exc}") from exc
-
-    total_episodes = dataset.meta.total_episodes
-    if episode_index < 0 or episode_index >= total_episodes:
-        raise DatasetEpisodeDeleteError(
-            400,
-            f"Episode {episode_index} does not exist in '{repo_id}' ({total_episodes} episode(s))",
-        )
-    if total_episodes <= 1:
-        raise DatasetEpisodeDeleteError(
-            400, "This is the dataset's only episode — delete the whole dataset instead."
-        )
-
-    tmp_dir = target.parent / f".{target.name}.delete-tmp-{uuid.uuid4().hex[:8]}"
-    try:
-        delete_episodes(dataset, [episode_index], output_dir=tmp_dir, repo_id=repo_id)
-    except ValueError as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise DatasetEpisodeDeleteError(400, str(exc)) from exc
-    except Exception as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        logger.error("Failed to delete episode %s from %s: %s", episode_index, repo_id, exc)
-        raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
-
-    backup_dir = target.parent / f".{target.name}.pre-delete-{uuid.uuid4().hex[:8]}"
-    try:
-        os.rename(target, backup_dir)
-    except OSError as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        logger.error("Failed to stage %s aside for episode delete: %s", target, exc)
-        raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
-
-    try:
-        os.rename(tmp_dir, target)
-    except OSError as exc:
-        try:
-            os.rename(backup_dir, target)
-        except OSError:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            logger.error(
-                "Failed to roll back %s after a failed episode-delete swap — dataset directory "
-                "may be missing; original data is at %s",
-                target,
-                backup_dir,
-            )
+    # Publish + claim atomically: _dataset_in_use above only looks at OTHER
+    # features' state, so without this a second concurrent call for the same
+    # repo_id would sail through the same check and race this one's swap.
+    with _episode_delete_lock:
+        if repo_id in _episode_deletes_in_progress:
             raise DatasetEpisodeDeleteError(
-                500, f"Failed to delete episode and could not restore the original dataset: {exc}"
-            ) from exc
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        logger.error("Failed to swap in the edited dataset for %s: %s", target, exc)
-        raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+                409, "An episode is already being deleted from this dataset. Wait for it to finish."
+            )
+        _episode_deletes_in_progress.add(repo_id)
 
-    shutil.rmtree(backup_dir, ignore_errors=True)
-    invalidate_dataset_listing_cache()
+    try:
+        from lerobot.datasets import LeRobotDataset
 
-    hub_sync, hub_sync_message = _resync_episode_delete_to_hub(repo_id)
+        try:
+            dataset = LeRobotDataset(repo_id=repo_id, root=target)
+        except Exception as exc:
+            logger.error("Failed to load dataset %s for episode delete: %s", repo_id, exc)
+            raise DatasetEpisodeDeleteError(400, f"Could not read dataset: {exc}") from exc
 
-    new_total = total_episodes - 1
-    logger.info("Deleted episode %s from %s (%s episode(s) remain)", episode_index, repo_id, new_total)
-    return {
-        "success": True,
-        "repo_id": repo_id,
-        "deleted_episode": episode_index,
-        "total_episodes": new_total,
-        "hub_sync": hub_sync,
-        "hub_sync_message": hub_sync_message,
-    }
+        total_episodes = dataset.meta.total_episodes
+        if episode_index < 0 or episode_index >= total_episodes:
+            raise DatasetEpisodeDeleteError(
+                400,
+                f"Episode {episode_index} does not exist in '{repo_id}' ({total_episodes} episode(s))",
+            )
+        if total_episodes <= 1:
+            raise DatasetEpisodeDeleteError(
+                400, "This is the dataset's only episode — delete the whole dataset instead."
+            )
+
+        tmp_dir = target.parent / f".{target.name}.delete-tmp-{uuid.uuid4().hex[:8]}"
+        try:
+            delete_episodes(dataset, [episode_index], output_dir=tmp_dir, repo_id=repo_id)
+        except ValueError as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise DatasetEpisodeDeleteError(400, str(exc)) from exc
+        except Exception as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.error("Failed to delete episode %s from %s: %s", episode_index, repo_id, exc)
+            raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+
+        backup_dir = target.parent / f".{target.name}.pre-delete-{uuid.uuid4().hex[:8]}"
+        try:
+            os.rename(target, backup_dir)
+        except OSError as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.error("Failed to stage %s aside for episode delete: %s", target, exc)
+            raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+
+        try:
+            os.rename(tmp_dir, target)
+        except OSError as exc:
+            try:
+                os.rename(backup_dir, target)
+            except OSError:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                logger.error(
+                    "Failed to roll back %s after a failed episode-delete swap — dataset directory "
+                    "may be missing; original data is at %s",
+                    target,
+                    backup_dir,
+                )
+                raise DatasetEpisodeDeleteError(
+                    500, f"Failed to delete episode and could not restore the original dataset: {exc}"
+                ) from exc
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.error("Failed to swap in the edited dataset for %s: %s", target, exc)
+            raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        invalidate_dataset_listing_cache()
+
+        hub_sync, hub_sync_message = _resync_episode_delete_to_hub(repo_id)
+
+        new_total = total_episodes - 1
+        logger.info(
+            "Deleted episode %s from %s (%s episode(s) remain)", episode_index, repo_id, new_total
+        )
+        return {
+            "success": True,
+            "repo_id": repo_id,
+            "deleted_episode": episode_index,
+            "total_episodes": new_total,
+            "hub_sync": hub_sync,
+            "hub_sync_message": hub_sync_message,
+        }
+    finally:
+        with _episode_delete_lock:
+            _episode_deletes_in_progress.discard(repo_id)
 
 
 def list_user_datasets() -> list[dict[str, Any]]:

@@ -747,6 +747,35 @@ def test_delete_episode_busy_guard_merge(tmp_lerobot_home: Path) -> None:
     assert exc.value.status == 409
 
 
+def test_delete_episode_busy_guard_concurrent_episode_delete(tmp_lerobot_home: Path) -> None:
+    """A second delete_local_episode call for the same repo_id, while the
+    first is still mid-swap, is refused (409) instead of racing it."""
+    from makermodslab import datasets as ds
+
+    _make_dataset(tmp_lerobot_home, "makermods/busy", episodes=3)
+
+    ds._episode_deletes_in_progress.add("makermods/busy")
+    try:
+        with pytest.raises(ds.DatasetEpisodeDeleteError) as exc:
+            ds.delete_local_episode("makermods/busy", 0)
+        assert exc.value.status == 409
+    finally:
+        ds._episode_deletes_in_progress.discard("makermods/busy")
+
+
+def test_dataset_in_use_reports_episode_delete_in_progress() -> None:
+    """_dataset_in_use (used by rename, whole-dataset delete, and
+    upload-start) refuses a dataset that's mid-episode-delete, so those
+    operations can't race delete_local_episode's swap."""
+    from makermodslab import datasets as ds
+
+    ds._episode_deletes_in_progress.add("makermods/mid-swap")
+    try:
+        assert ds._dataset_in_use("makermods/mid-swap") is not None
+    finally:
+        ds._episode_deletes_in_progress.discard("makermods/mid-swap")
+
+
 def test_delete_episode_load_failure_400s(tmp_lerobot_home: Path) -> None:
     """A dataset dir that passes the cheap `_is_dataset_dir` check (has
     meta/info.json) but isn't a real loadable LeRobotDataset (e.g. corrupt,
