@@ -95,14 +95,15 @@ _HUB_FANOUT_MAX_WORKERS = 8
 # fast and degrades to "whatever the finished authors returned".
 _HUB_FANOUT_TIMEOUT_S = 5.0
 
-# In-process cache of Hub existence checks, keyed by repo_id. /whoami-v2 and
-# repo-existence lookups hit the network, so the info card fetches this lazily
-# and we memoize the "on Hub" answer for the process lifetime. A successful
-# upload invalidates the entry (see invalidate_hub_status), so the card can
-# flip Local only -> On Hub without waiting for a cache expiry. "unknown" (the
-# offline/unauthenticated/error degrade) is never cached, so connectivity
-# returning is picked up on the next check.
-_HUB_STATUS_CACHE: dict[str, str] = {}
+# In-process cache of Hub existence checks, keyed by the repo_id the caller
+# passed in (bare local id or already-namespaced) -> (status, url). /whoami-v2
+# and repo-existence lookups hit the network, so the info card fetches this
+# lazily and we memoize the "on Hub" answer for the process lifetime. A
+# successful upload invalidates the entry (see invalidate_hub_status), so the
+# card can flip Local only -> On Hub without waiting for a cache expiry.
+# "unknown" (the offline/unauthenticated/error degrade) is never cached, so
+# connectivity returning is picked up on the next check.
+_HUB_STATUS_CACHE: dict[str, tuple[str, str | None]] = {}
 _HUB_STATUS_LOCK = threading.Lock()
 
 
@@ -210,38 +211,61 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
     are NOT cached (a later record/merge/download can make an ``absent`` dataset
     appear locally without a hub-status invalidation, and a transient failure
     should self-heal) so both re-check on the next call.
-    """
-    url = f"https://huggingface.co/datasets/{repo_id}"
 
+    A locally-recorded dataset's repo_id is bare (no "namespace/" prefix) —
+    that's the only form the app naturally has for it. Unlike
+    ``HfApi.create_repo()``, ``HfApi.repo_exists()`` does a literal lookup and
+    does NOT resolve a bare id to the caller's own namespace, so a bare id is
+    qualified with the caller's namespace for the existence check (and for the
+    returned ``url``) when authenticated. The public contract is unchanged:
+    the returned ``repo_id`` is always exactly what was passed in, and the
+    cache stays keyed by that same string, matching the bare id every
+    ``invalidate_hub_status()`` caller already uses.
+    """
     with _HUB_STATUS_LOCK:
         cached = _HUB_STATUS_CACHE.get(repo_id)
     if cached is not None:
-        return {"repo_id": repo_id, "status": cached, "url": url if cached == "on_hub" else None}
+        cached_status, cached_url = cached
+        return {"repo_id": repo_id, "status": cached_status, "url": cached_url}
+
+    hub_repo_id = repo_id
+    if "/" not in hub_repo_id:
+        who = cached_whoami()
+        if who is not None:
+            hub_repo_id = f"{who['name']}/{hub_repo_id}"
+        # else: no auth — fall back to the literal bare-id lookup below rather
+        # than raising; get_hub_status is documented to never raise, and an
+        # unauthenticated caller has no namespace to qualify with anyway.
 
     api = shared_hf_api()
     try:
-        exists = api.repo_exists(repo_id, repo_type="dataset")
+        exists = api.repo_exists(hub_repo_id, repo_type="dataset")
     except Exception as exc:
         # Offline / rate-limited / any other transport error: degrade to
         # "unknown" without caching so it re-checks once connectivity returns.
-        logger.info("hub-status repo_exists(%s) failed: %s", repo_id, exc)
+        logger.info("hub-status repo_exists(%s) failed: %s", hub_repo_id, exc)
         return {"repo_id": repo_id, "status": "unknown", "url": None}
 
     if exists:
         status = "on_hub"
+        # Use the resolved/namespaced id so the URL is one the Hub actually
+        # serves — building it from a bare repo_id would 404.
+        url = f"https://huggingface.co/datasets/{hub_repo_id}"
     elif is_dataset_available_locally(repo_id):
         # Not on the Hub, but a usable local copy exists — genuinely local-only.
         status = "local_only"
+        url = None
     else:
         # Neither on the Hub nor local: don't mislabel this "local_only".
         status = "absent"
+        url = None
 
     with _HUB_STATUS_LOCK:
         # Cache only the definitive, stable answers; "absent" can flip to local
         # without a hub-status invalidation, so leave it uncached (like "unknown").
         if status in ("on_hub", "local_only"):
-            _HUB_STATUS_CACHE[repo_id] = status
-    return {"repo_id": repo_id, "status": status, "url": url if exists else None}
+            _HUB_STATUS_CACHE[repo_id] = (status, url)
+    return {"repo_id": repo_id, "status": status, "url": url}
 
 
 class DatasetHubEditError(Exception):

@@ -458,6 +458,95 @@ def test_invalidate_hub_status_forces_recheck() -> None:
     assert fake_api.repo_exists.call_count == 2
 
 
+def test_get_hub_status_resolves_bare_repo_id_via_own_namespace() -> None:
+    """A locally-recorded dataset's repo_id is bare (no namespace). Unlike
+    create_repo(), repo_exists() does a literal lookup and won't auto-resolve
+    a bare id to the caller's namespace — so the bare id must be qualified
+    before the existence check, or an already-uploaded dataset reports
+    "local_only" forever (this was the bug). The response's own `repo_id`
+    stays exactly what was passed in (bare) — only the Hub lookup and the
+    returned `url` use the resolved, namespaced id."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+    ):
+        result = ds.get_hub_status("makermods_logo_20260805_152059")
+
+    assert result["repo_id"] == "makermods_logo_20260805_152059"
+    assert result["status"] == "on_hub"
+    assert result["url"] == "https://huggingface.co/datasets/makermods/makermods_logo_20260805_152059"
+    fake_api.repo_exists.assert_called_once_with(
+        "makermods/makermods_logo_20260805_152059", repo_type="dataset"
+    )
+
+
+def test_get_hub_status_does_not_qualify_already_namespaced_id() -> None:
+    """A repo_id that already has a namespace (a Hub-only dataset that was
+    never recorded locally) must be used as-is — never re-qualified — and
+    cached_whoami should not even be consulted for it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami") as mock_whoami,
+    ):
+        result = ds.get_hub_status("someuser/some-dataset")
+
+    assert result["status"] == "on_hub"
+    assert result["url"] == "https://huggingface.co/datasets/someuser/some-dataset"
+    fake_api.repo_exists.assert_called_once_with("someuser/some-dataset", repo_type="dataset")
+    mock_whoami.assert_not_called()
+
+
+def test_get_hub_status_bare_id_falls_back_when_unauthenticated() -> None:
+    """No cached token/whoami: there's no namespace to qualify with, so this
+    degrades to the literal bare-id lookup (today's pre-fix behavior) instead
+    of raising — get_hub_status is documented to never raise."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value=None),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        result = ds.get_hub_status("some_local_dataset")
+
+    assert result["status"] == "local_only"
+    fake_api.repo_exists.assert_called_once_with("some_local_dataset", repo_type="dataset")
+
+
+def test_get_hub_status_cache_hit_preserves_resolved_url() -> None:
+    """The cache is keyed by the bare repo_id (matching invalidate_hub_status
+    callers), but must remember the resolved URL from the first lookup so a
+    cache hit doesn't regress to the unqualified (wrong) URL."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+    ):
+        first = ds.get_hub_status("makermods_logo_20260805_152059")
+        second = ds.get_hub_status("makermods_logo_20260805_152059")
+
+    assert first == second
+    assert second["url"] == "https://huggingface.co/datasets/makermods/makermods_logo_20260805_152059"
+    fake_api.repo_exists.assert_called_once()
+
+
 def test_hub_status_endpoint(client: TestClient) -> None:
     _clear_hub_status_cache()
     fake_api = MagicMock()
