@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,6 +43,7 @@ import {
   dedupeCheckpointEntries,
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
+import { buildResumeSeed } from "./resumeSeed";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
@@ -110,10 +110,9 @@ const JobCard: React.FC<Props> = ({
   onRenamed,
   ancestors = [],
 }) => {
-  const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
-  const { openJobMonitor } = useStudio();
+  const { openJobMonitor, openStudio } = useStudio();
   const present = statePresentation[job.state];
   const Icon = present.Icon;
   const isRunning = job.state === "running";
@@ -392,61 +391,29 @@ const JobCard: React.FC<Props> = ({
     selectedJob.runner === "hf_cloud" &&
     canResumeEntry(selectedJob, selectedStep);
 
-  // The configurator PREFILLS from this seed, then renders read-only the
-  // settings lerobot rebuilds from the checkpoint anyway (batch size, seed,
-  // device, optimizer, AMP). Steps, the log/save cadence, the worker count,
-  // the cloud flavor and the timeout stay editable — those a continuation can
-  // really change.
-  const goToResume = (runner: "local" | "hf_cloud") => {
+  // No dialog and no route jump: continuing opens the Train panel's
+  // "Start a new training" form in resume mode, seeded from this run and the
+  // dropdown's checkpoint — the same in-place flow ModelCard's Fine-tune uses,
+  // rather than navigating away to /training and losing the studio.
+  //
+  // The payload itself comes from the ONE shared builder (buildResumeSeed), so
+  // this and the library's row-level quick-resume can no longer drift. The
+  // runner is derived there from the job: local Continue is gated on
+  // canContinue and cloud Resume on canResumeCloud, both of which already
+  // require selectedJob.runner to match, so there is nothing to pass.
+  const goToResume = () => {
     if (selectedStep == null) return;
-    // Carry the parent run's whole configured shape forward. The registry
-    // already holds it as `selectedJob.config` (the persisted TrainingRequest),
-    // so this needs no extra fetch and no reading of the checkpoint's
-    // train_config.json. The configurator PREFILLS from these, then renders
-    // read-only the ones lerobot rebuilds from the checkpoint anyway (batch
-    // size, seed, device, optimizer). Steps, the log/save cadence, the worker
-    // count, hardware and the timeout stay editable — those a continuation can
-    // really change.
-    const parent = selectedJob.config;
-    navigate("/training", {
-      state: {
-        resume: {
-          jobId: selectedJob.id,
-          step: selectedStep,
-          name: jobDisplayName(selectedJob),
-          datasetRepoId: parent.dataset_repo_id,
-          policyType: parent.policy_type,
-          sourceSteps: parent.steps,
-          logFreq: parent.log_freq,
-          saveFreq: parent.save_freq,
-          runner,
-          flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
-          // Cloud-only: without this a Continue fell back to the runner's 2h
-          // default, capping the tail of a run already known to need longer.
-          hfJobTimeout:
-            runner === "hf_cloud" ? (parent.hf_job_timeout ?? undefined) : undefined,
-          batchSize: parent.batch_size,
-          seed: parent.seed,
-          numWorkers: parent.num_workers,
-          policyDevice: parent.policy_device,
-          policyUseAmp: parent.policy_use_amp,
-          optimizerType: parent.optimizer_type,
-          optimizerLr: parent.optimizer_lr,
-          optimizerWeightDecay: parent.optimizer_weight_decay,
-          optimizerGradClipNorm: parent.optimizer_grad_clip_norm,
-        },
-      },
-    });
+    openStudio("train", { train: { resume: buildResumeSeed(selectedJob, selectedStep) } });
   };
 
   const handleContinue = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("local");
+    goToResume();
   };
 
   const handleResumeCloud = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("hf_cloud");
+    goToResume();
   };
 
   // Fine-tune, Run and Download used to live here too. They act on the WEIGHTS

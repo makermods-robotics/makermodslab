@@ -1,5 +1,4 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
@@ -7,14 +6,16 @@ import LibraryHeader from "@/components/library/LibraryHeader";
 import { GRID_H } from "@/components/library/CappedGrid";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useApi } from "@/contexts/ApiContext";
+import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
+import { buildResumeSeed, latestResumableStep } from "./resumeSeed";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import JobsDropdown, { JobsEntry } from "./JobsDropdown";
 import { isJobActive, useJobsData } from "./JobsDataContext";
-import { HubJob, JobRecord, isHubJobActive, jobDisplayName } from "@/lib/jobsApi";
+import { HubJob, JobRecord, isHubJobActive } from "@/lib/jobsApi";
 
 /** Recency keys (ms) for the mixed local/cloud/hub list — every library is
  * ordered newest-first regardless of where a run lives. */
@@ -75,7 +76,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
-  const navigate = useNavigate();
+  const { openStudio } = useStudio();
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<JobsFilter>("all");
@@ -200,15 +201,17 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
       : autoKey;
   const selected = allEntries.find((e) => e.key === selectedKey) ?? null;
 
-  // Resume from the row: resolve the run's newest checkpoint and hand the
-  // Training page the same resume state the card's Continue/Resume does.
-  // Choosing a *specific* step stays on the selected run's card below.
+  // Resume from the row: resolve the run's newest checkpoint and open the
+  // Train panel's form in resume mode with exactly the seed the card's
+  // Continue/Resume produces — same shared builder, so the two can't drift
+  // (this path used to assemble its own, thinner payload). Choosing a
+  // *specific* step stays on the selected run's card below.
   const handleResume = useCallback(
     async (job: JobRecord) => {
       setResumingId(job.id);
       try {
         const cks = await listJobCheckpoints(baseUrl, fetchWithHeaders, job.id);
-        const step = cks.length > 0 ? cks[cks.length - 1].step : null;
+        const step = latestResumableStep(cks);
         if (step == null) {
           toast({
             title: "Nothing to resume from",
@@ -217,32 +220,35 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           });
           return;
         }
+        // KNOWN APPROXIMATION — the step above may not be this run's own.
+        // A resumed CLOUD run reuses its parent's Hub output repo, so
+        // listJobCheckpoints(job.id) returns the whole lineage's checkpoints,
+        // including ones written by sibling runs. This lineage is the live
+        // example: two children forked off one parent, and the sibling that
+        // ran to completion left checkpoints at the shared target in the same
+        // repo — so "the newest checkpoint" here can belong to that sibling.
+        //
+        // True per-run checkpoint attribution is the identity-redesign /
+        // training-PR item, not a fix that belongs at this call site: with
+        // FORKS in the lineage even a "newest checkpoint below our own target"
+        // pick would still land on the done sibling's interleaved checkpoints,
+        // which is semantically wrong rather than merely approximate.
+        // JobCard's lineage merge + dedupeCheckpointEntries defends the CARD
+        // path (and lets the user pick a step by hand); the row's one-click
+        // resume knowingly accepts the approximation and is honest about it in
+        // the message below.
         const target = job.config?.steps ?? 0;
         if (target > 0 && step >= target) {
           toast({
             title: "Nothing to resume",
-            description: "This run already reached its step target.",
+            description:
+              "The newest checkpoint in this run's repo is already at the step target. " +
+              "Raise the step target to continue, or fine-tune from the final checkpoint. " +
+              "A resumed run shares its repo with its lineage, so this checkpoint may belong to a sibling run.",
           });
           return;
         }
-        const runner = job.runner === "hf_cloud" ? "hf_cloud" : "local";
-        navigate("/training", {
-          state: {
-            resume: {
-              jobId: job.id,
-              step,
-              name: jobDisplayName(job),
-              datasetRepoId: job.config.dataset_repo_id,
-              policyType: job.config.policy_type,
-              sourceSteps: job.config.steps,
-              logFreq: job.config.log_freq,
-              saveFreq: job.config.save_freq,
-              runner,
-              flavor:
-                runner === "hf_cloud" ? (job.hf_flavor ?? undefined) : undefined,
-            },
-          },
-        });
+        openStudio("train", { train: { resume: buildResumeSeed(job, step) } });
       } catch (e) {
         toast({
           title: "Couldn't load checkpoints",
@@ -253,7 +259,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         setResumingId(null);
       }
     },
-    [baseUrl, fetchWithHeaders, navigate, toast],
+    [baseUrl, fetchWithHeaders, openStudio, toast],
   );
 
   const emptyMessage = query

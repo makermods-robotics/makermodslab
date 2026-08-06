@@ -40,6 +40,7 @@ import {
 import { HUB_REPO_ID_RE } from "@/lib/repoId";
 import TrainingConfigurator, {
   FinetuneSeed,
+  ResumeSeed,
 } from "@/components/training/TrainingConfigurator";
 import TrainingJobDialog from "@/components/training/TrainingJobDialog";
 import JobsLibrary from "@/components/jobs/JobsLibrary";
@@ -156,16 +157,29 @@ const TrainPanel: React.FC = () => {
   // disabled stand-in keeps the action visible at the same spot.
   const [actionsEl, setActionsEl] = useState<HTMLDivElement | null>(null);
 
-  const toggleForm = (open: boolean) => {
-    setFormOpen(open);
-    setJobsOpen(!open);
-  };
-
   // ── Starting point (fine-tune base) ───────────────────────────────────────
   const [models, setModels] = useState<ModelItem[]>([]);
   const [baseModelId, setBaseModelId] = useState<string>(NONE);
   const [finetuneSeed, setFinetuneSeed] = useState<FinetuneSeed | null>(null);
   const [resolvingBase, setResolvingBase] = useState(false);
+
+  // ── Continue / Resume ─────────────────────────────────────────────────────
+  // A resume arrives already resolved (see TrainPrefill.resume), so unlike a
+  // fine-tune base there is nothing to look up — it goes straight into state
+  // and the configurator switches to resume mode.
+  const [resumeSeed, setResumeSeed] = useState<ResumeSeed | null>(null);
+
+  const toggleForm = (open: boolean) => {
+    setFormOpen(open);
+    setJobsOpen(!open);
+    // Closing the form is the way out of a resume: resume mode hides the
+    // dataset and starting-point controls (both are the parent run's and not
+    // editable), so unlike a fine-tune — which can be dropped by setting
+    // Starting point back to "Train from scratch" — it has no in-form escape
+    // hatch. Reopening then gives a fresh form, which is also what the user
+    // gets after a launch (onStarted folds the form the same way).
+    if (!open) setResumeSeed(null);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -308,7 +322,15 @@ const TrainPanel: React.FC = () => {
     if (trainPrefill.datasetRepoId) {
       setSelectedId(trainPrefill.datasetRepoId);
     }
-    if (trainPrefill.baseJobId) {
+    if (trainPrefill.resume) {
+      // Continue / Resume-cloud. Mutually exclusive with a fine-tune base, so
+      // clear that side rather than letting a stale one ride along.
+      setResumeSeed(trainPrefill.resume);
+      setBaseModelId(NONE);
+      setFinetuneSeed(null);
+      // The parent's architecture, same as the /training route seeds it with.
+      setPolicyType(trainPrefill.resume.policyType);
+    } else if (trainPrefill.baseJobId) {
       setBaseModelId(trainPrefill.baseJobId);
       resolveFinetune({
         jobId: trainPrefill.baseJobId,
@@ -336,7 +358,15 @@ const TrainPanel: React.FC = () => {
   }, [selectedDataset]);
 
   // Empty keeps the configurator's Start disabled until a dataset is picked.
-  const trainingDatasetRepoId = selectedId ?? "";
+  // A resume inherits the parent run's dataset and can't be re-pointed, so its
+  // seed wins over the shared selection outright — same precedence the
+  // /training route applies (`resumeSource?.datasetRepoId ?? selectedDataset`).
+  // Deliberately NOT written back into selectedId/setSelectedDataset: pressing
+  // Continue shouldn't silently re-target the studio-wide dataset selection
+  // that Collect and Deploy also read.
+  const trainingDatasetRepoId = resumeSeed
+    ? resumeSeed.datasetRepoId
+    : (selectedId ?? "");
 
   // Keep the shared selection (Deploy panel, direct /training route) in step
   // with the dataset chosen here.
@@ -398,13 +428,33 @@ const TrainPanel: React.FC = () => {
         <CollapsibleContent className={SLIDE}>
           <div className="space-y-6">
             <p className="text-sm leading-relaxed text-muted-foreground">
-              Choose what to train on, where the run executes, and how long it
-              trains — then start.
+              {resumeSeed
+                ? "Continuing an existing run — its dataset and weights are fixed. Set how much further it trains, then start."
+                : "Choose what to train on, where the run executes, and how long it trains — then start."}
             </p>
 
             {/* Dataset picker — search-driven, no standing list. Flat: the
                 label rides on the control, so no "Dataset" category heading
-                sits above it restating the same word. */}
+                sits above it restating the same word.
+
+                A resume shows the parent's dataset read-only instead: a
+                continuation trains on the dataset baked into the checkpoint,
+                so a live picker here would offer an edit the run can't honour.
+                (The seed also wins in trainingDatasetRepoId, so what's shown
+                is exactly what launches.) */}
+            {resumeSeed ? (
+              <div className="space-y-2">
+                <Label>Dataset</Label>
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="inline-flex max-w-full items-center rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs text-muted-foreground">
+                    <span className="truncate">{resumeSeed.datasetRepoId}</span>
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Inherited from the run being continued.
+                </p>
+              </div>
+            ) : (
             <div className="space-y-2">
               <Label htmlFor="train-dataset-search">Dataset *</Label>
               {selectedId ? (
@@ -495,10 +545,17 @@ const TrainPanel: React.FC = () => {
                 </p>
               ) : null}
             </div>
+            )}
 
             {/* Starting point — the optional fine-tune base. Sits directly
                 under Dataset because both answer "what is this run built
-                from"; Policy follows from inside the configurator. */}
+                from"; Policy follows from inside the configurator.
+
+                Hidden entirely while resuming: a continuation's starting point
+                IS the checkpoint it resumes from — picking a different base
+                would make it a fine-tune, not a resume — and the configurator's
+                "Continuing <name> from step N" banner already names it. */}
+            {resumeSeed ? null : (
             <div className="space-y-2">
               <Label htmlFor="train-starting-point">Starting point</Label>
               <Select value={baseModelId} onValueChange={handleBaseModelChange}>
@@ -535,16 +592,23 @@ const TrainPanel: React.FC = () => {
                 )}
               </p>
             </div>
+            )}
 
             {/* Shared configuration form: compute target, run configuration,
                 advanced, extras gates, and the Start button with all its
-                gating. Policy is chosen inside Run configuration. */}
+                gating. Policy is chosen inside Run configuration.
+
+                Keyed on both seeds (same composite the /training route uses):
+                switching between runs — or between resuming and fine-tuning —
+                must rebuild the form, since the seeds are read once as initial
+                state. Both null ⇒ a stable fresh key. */}
             <TrainingConfigurator
-              key={finetuneSeed?.jobId ?? "fresh"}
+              key={`${resumeSeed?.jobId ?? ""}::${finetuneSeed?.jobId ?? "fresh"}`}
               policyType={policyType}
               onPolicyTypeChange={setPolicyType}
               datasetRepoId={trainingDatasetRepoId}
               finetuneSeed={finetuneSeed}
+              resumeSeed={resumeSeed}
               // Launch opens the monitor dialog over this panel (via
               // openJobMonitor in the configurator); fold the form back so
               // closing the dialog lands on the jobs library, not a stale form.
