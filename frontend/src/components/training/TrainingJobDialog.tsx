@@ -8,6 +8,7 @@ import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import TruncateWithTitle from "@/components/ui/truncate-with-title";
 import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
 
 import {
@@ -398,22 +399,20 @@ const TrainingJobDialog: React.FC<{
               )}
             </div>
 
-            {/* One line, always — whatever the trainer prints. `truncate` on
-                its own is inert here: a flex item's `min-width` defaults to
-                `auto`, which for nowrap text resolves to the FULL text width,
-                so the span could never shrink and a long line escaped the box
-                instead of ellipsing inside it. `min-w-0 flex-1` is what makes
-                the clamp real, and it holds for any future long line, not just
-                objc's. `title` keeps the whole line one hover away. */}
+            {/* One line, always — whatever the trainer prints. The `truncate`
+                here was inert: a flex item's `min-width` defaults to `auto`,
+                which for nowrap text resolves to the FULL text width, so the
+                span could never shrink and a long line escaped the box instead
+                of ellipsing inside it. `min-w-0 flex-1` is what makes the clamp
+                real, and it holds for any future long line, not just objc's.
+                Hover reveals the whole line, and only when it was shortened. */}
             {preStepStatus ? (
               <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                <span
-                  className="min-w-0 flex-1 truncate"
-                  title={preStepStatus}
-                >
-                  {preStepStatus}
-                </span>
+                <TruncateWithTitle
+                  text={preStepStatus}
+                  className="min-w-0 flex-1"
+                />
               </div>
             ) : null}
 
