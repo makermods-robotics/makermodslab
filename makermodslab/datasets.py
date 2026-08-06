@@ -467,6 +467,9 @@ def list_local_datasets() -> list[dict[str, Any]]:
         except OSError:
             continue
 
+        if top.name.startswith("."):
+            continue
+
         if _is_dataset_dir(top):
             # It IS a dataset (empty or not) — record it only if non-empty, but
             # don't descend into its subdirs either way.
@@ -491,6 +494,10 @@ def list_local_datasets() -> list[dict[str, Any]]:
                     continue
             except OSError:
                 continue
+
+            if sub.name.startswith("."):
+                continue
+
             if _is_dataset_dir(sub) and _dataset_has_episodes(sub):
                 out.append(
                     {
@@ -1223,6 +1230,7 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
         try:
             os.rename(backup_dir, target)
         except OSError:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.error(
                 "Failed to roll back %s after a failed episode-delete swap — dataset directory "
                 "may be missing; original data is at %s",

@@ -104,6 +104,30 @@ def test_list_local_datasets_hides_empty_dataset(
     assert "empty_ds" not in repo_ids
 
 
+def test_list_local_datasets_skips_dot_prefixed_dirs(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Dot-prefixed directories (scratch/hidden by convention, including
+    temporary episode-delete swap dirs) are skipped even if they contain
+    valid meta/info.json and episodes."""
+    from makerlab.datasets import list_local_datasets
+
+    # Create a normal dataset that should appear.
+    _make_dataset(tmp_lerobot_home, "normal", episodes=3)
+
+    # Create a dot-prefixed dataset that should NOT appear.
+    dot_dataset = tmp_lerobot_home / ".hidden"
+    dot_dataset.mkdir(parents=True)
+    (dot_dataset / "meta").mkdir()
+    (dot_dataset / "meta" / "info.json").write_text(json.dumps({"total_episodes": 3}))
+
+    repo_ids = [d["repo_id"] for d in list_local_datasets()]
+    assert "normal" in repo_ids
+    # The dot-prefixed dir name doesn't appear even though it has valid structure.
+    assert ".hidden" not in repo_ids
+    assert not any(".hidden" in rid for rid in repo_ids)
+
+
 def test_list_user_datasets_returns_empty_when_not_logged_in(
     tmp_lerobot_home: Path,
 ) -> None:
@@ -887,6 +911,45 @@ def test_delete_episode_swap_failure_rolls_back(tmp_lerobot_home: Path) -> None:
     assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
     leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
     assert leftovers == []
+
+
+def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> None:
+    """If both the tmp_dir -> target swap AND the backup_dir -> target rollback
+    fail, tmp_dir must be cleaned up (backup_dir is the safety net and stays)."""
+    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    real_rename = os.rename
+    call_count = {"n": 0}
+
+    def _flaky_rename(src, dst):
+        call_count["n"] += 1
+        # First rename is target -> backup (let it through); second is
+        # tmp_dir -> target (fail it); third is backup_dir -> target
+        # (also fail it) to exercise the double-failure rollback cleanup path.
+        if call_count["n"] in (2, 3):
+            raise OSError("disk full")
+        real_rename(src, dst)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makerlab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch("makerlab.datasets.os.rename", side_effect=_flaky_rename),
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        delete_local_episode("makermods/three", 1)
+
+    assert exc.value.status == 500
+    # backup_dir exists (safety net with original data).
+    backups = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if ".pre-delete-" in p.name]
+    assert len(backups) == 1
+    # tmp_dir is cleaned up (not left as orphan).
+    tmp_dirs = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if ".delete-tmp-" in p.name]
+    assert tmp_dirs == []
 
 
 # --- Hub visibility / tags editing (post-upload) ----------------------------
