@@ -228,9 +228,9 @@ export function jobDisplayName(job: JobRecord): string {
  *
  * Lives here, beside JobState and jobDisplayName, rather than in whichever
  * component renders a badge. The badges keep their own colour and icon —
- * those legitimately differ — but the WORDS have to agree, and they did not:
- * the card said "Interrupted" while the monitor dialog showed the raw wire
- * string for the same run.
+ * those legitimately differ (only the dropdown spins its running icon) — but
+ * the WORDS have to agree, and they did not: the card said "Interrupted"
+ * while the dropdown beside it said "Stopped" for the same run.
  */
 export const JOB_STATE_LABELS: Record<JobState, string> = {
   running: "Running",

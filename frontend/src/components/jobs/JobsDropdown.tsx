@@ -27,6 +27,7 @@ import {
 } from "@/components/training/types";
 import {
   HubJob,
+  JOB_STATE_LABELS,
   JobRecord,
   isHubJobActive,
   jobDisplayName,
@@ -59,10 +60,27 @@ interface Presentation {
 }
 
 const statePresentation: Record<JobRecord["state"], Presentation> = {
-  running: { label: "Running", color: "text-ok", Icon: Loader2, spin: true },
-  done: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
-  failed: { label: "Failed", color: "text-destructive", Icon: XCircle },
-  interrupted: { label: "Stopped", color: "text-warn", Icon: AlertTriangle },
+  running: {
+    label: JOB_STATE_LABELS.running,
+    color: "text-ok",
+    Icon: Loader2,
+    spin: true,
+  },
+  done: {
+    label: JOB_STATE_LABELS.done,
+    color: "text-muted-foreground",
+    Icon: CheckCircle2,
+  },
+  failed: {
+    label: JOB_STATE_LABELS.failed,
+    color: "text-destructive",
+    Icon: XCircle,
+  },
+  interrupted: {
+    label: JOB_STATE_LABELS.interrupted,
+    color: "text-warn",
+    Icon: AlertTriangle,
+  },
 };
 
 const stagePresentation: Record<string, Presentation> = {

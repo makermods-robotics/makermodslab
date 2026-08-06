@@ -376,7 +376,7 @@ const TrainingJobDialog: React.FC<{
                   ) : null}
                   {/* The label, not the wire value: this line rendered the raw
                       state, so a stopped run read "interrupted" here while the
-                      card behind the dialog called it something else. */}
+                      card and dropdown behind the dialog both named it. */}
                   <p className="text-xs text-muted-foreground">
                     {jobStateLabel(job.state)}
                     {job.error_message ? ` — ${job.error_message}` : ""}
