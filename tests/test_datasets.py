@@ -110,7 +110,7 @@ def test_list_local_datasets_skips_dot_prefixed_dirs(
     """Dot-prefixed directories (scratch/hidden by convention, including
     temporary episode-delete swap dirs) are skipped even if they contain
     valid meta/info.json and episodes."""
-    from makerlab.datasets import list_local_datasets
+    from makermodslab.datasets import list_local_datasets
 
     # Create a normal dataset that should appear.
     _make_dataset(tmp_lerobot_home, "normal", episodes=3)
@@ -696,7 +696,7 @@ def test_rename_invalidates_hub_status_for_both_ids(tmp_lerobot_home: Path) -> N
 
 
 def test_delete_episode_missing_dataset_404s(tmp_lerobot_home: Path) -> None:
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     with pytest.raises(DatasetEpisodeDeleteError) as exc:
         delete_local_episode("makermods/ghost", 0)
@@ -704,7 +704,7 @@ def test_delete_episode_missing_dataset_404s(tmp_lerobot_home: Path) -> None:
 
 
 def test_delete_episode_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     for bad in ["../outside", "..", "."]:
         with pytest.raises(DatasetEpisodeDeleteError) as exc:
@@ -715,8 +715,8 @@ def test_delete_episode_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
 def test_delete_episode_busy_guard_recording(tmp_lerobot_home: Path) -> None:
     """Refused (409) while a recording session writes to the id — before ever
     touching lerobot's delete_episodes."""
-    from makerlab import record as rec
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab import record as rec
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/live", episodes=3)
 
@@ -733,8 +733,8 @@ def test_delete_episode_busy_guard_recording(tmp_lerobot_home: Path) -> None:
 
 
 def test_delete_episode_busy_guard_merge(tmp_lerobot_home: Path) -> None:
-    from makerlab import merge
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab import merge
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/out", episodes=3)
 
@@ -751,7 +751,7 @@ def test_delete_episode_load_failure_400s(tmp_lerobot_home: Path) -> None:
     """A dataset dir that passes the cheap `_is_dataset_dir` check (has
     meta/info.json) but isn't a real loadable LeRobotDataset (e.g. corrupt,
     or predates v3.0) 400s instead of raising an unhandled exception."""
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/corrupt", episodes=3)
 
@@ -770,7 +770,7 @@ def _fake_loaded_dataset(total_episodes: int) -> MagicMock:
 
 
 def test_delete_episode_out_of_range_400s(tmp_lerobot_home: Path) -> None:
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
 
@@ -786,7 +786,7 @@ def test_delete_episode_last_remaining_400s(tmp_lerobot_home: Path) -> None:
     """The only episode in the dataset — refused; the frontend is expected to
     route this through whole-dataset delete instead, but the backend must not
     silently misbehave if it's hit directly."""
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/solo", episodes=1)
 
@@ -820,17 +820,17 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
     """The live directory ends up as whatever lerobot's delete_episodes wrote
     into output_dir, the temp/backup dirs are cleaned up, and the listing
     cache is invalidated."""
-    from makerlab.datasets import delete_local_episode
+    from makermodslab.datasets import delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
 
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
         patch(
-            "makerlab.datasets.delete_episodes",
+            "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
-        patch("makerlab.datasets.invalidate_dataset_listing_cache") as inval,
+        patch("makermodslab.datasets.invalidate_dataset_listing_cache") as inval,
     ):
         result = delete_local_episode("makermods/three", 1)
 
@@ -852,7 +852,7 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
 def test_delete_episode_rewrite_failure_leaves_original_intact(tmp_lerobot_home: Path) -> None:
     """If lerobot's delete_episodes itself raises, the original dataset
     directory is untouched and no temp dir is left behind."""
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
 
@@ -863,7 +863,7 @@ def test_delete_episode_rewrite_failure_leaves_original_intact(tmp_lerobot_home:
 
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
-        patch("makerlab.datasets.delete_episodes", side_effect=_boom),
+        patch("makermodslab.datasets.delete_episodes", side_effect=_boom),
         pytest.raises(DatasetEpisodeDeleteError) as exc,
     ):
         delete_local_episode("makermods/three", 1)
@@ -878,7 +878,7 @@ def test_delete_episode_rewrite_failure_leaves_original_intact(tmp_lerobot_home:
 def test_delete_episode_swap_failure_rolls_back(tmp_lerobot_home: Path) -> None:
     """If the final tmp_dir -> target rename fails, the original directory is
     restored from the backup rather than left missing."""
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
     live = tmp_lerobot_home / "makermods" / "three"
@@ -897,10 +897,10 @@ def test_delete_episode_swap_failure_rolls_back(tmp_lerobot_home: Path) -> None:
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
         patch(
-            "makerlab.datasets.delete_episodes",
+            "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
-        patch("makerlab.datasets.os.rename", side_effect=_flaky_rename),
+        patch("makermodslab.datasets.os.rename", side_effect=_flaky_rename),
         pytest.raises(DatasetEpisodeDeleteError) as exc,
     ):
         delete_local_episode("makermods/three", 1)
@@ -916,7 +916,7 @@ def test_delete_episode_swap_failure_rolls_back(tmp_lerobot_home: Path) -> None:
 def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> None:
     """If both the tmp_dir -> target swap AND the backup_dir -> target rollback
     fail, tmp_dir must be cleaned up (backup_dir is the safety net and stays)."""
-    from makerlab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
 
     _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
 
@@ -935,10 +935,10 @@ def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> N
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
         patch(
-            "makerlab.datasets.delete_episodes",
+            "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
-        patch("makerlab.datasets.os.rename", side_effect=_flaky_rename),
+        patch("makermodslab.datasets.os.rename", side_effect=_flaky_rename),
         pytest.raises(DatasetEpisodeDeleteError) as exc,
     ):
         delete_local_episode("makermods/three", 1)
@@ -960,7 +960,7 @@ def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: P
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
         patch(
-            "makerlab.datasets.delete_episodes",
+            "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
     ):
