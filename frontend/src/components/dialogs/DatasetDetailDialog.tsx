@@ -493,7 +493,6 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const [cameras, setCameras] = useState<string[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [infoCardKey, setInfoCardKey] = useState(0);
   const [deleteTarget, setDeleteTarget] = useState<EpisodeSummary | null>(null);
   const [deleteHubStatus, setDeleteHubStatus] = useState<HubStatus | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -527,7 +526,12 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     const controller = new AbortController();
     getDatasetHubStatus(baseUrl, fetchWithHeaders, repoId, controller.signal)
       .then(setDeleteHubStatus)
-      .catch(() => setDeleteHubStatus(null));
+      // Fall back to a definitive (not null) status so the whole-dataset
+      // confirm dialog below can still open on a fetch failure instead of
+      // staying stuck forever — see the `deleteHubStatus !== null` gate.
+      .catch(() =>
+        setDeleteHubStatus({ repo_id: repoId, status: "local_only", url: null }),
+      );
     return () => controller.abort();
   }, [deleteTarget, pendingDatasetDelete, repoId, baseUrl, fetchWithHeaders]);
 
@@ -562,19 +566,19 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         repoId,
         deleteTarget.episode_index,
       );
-      const deletedIndex = result.deleted_episode;
-      const prevList = episodes ?? [];
-      const removedAt = prevList.findIndex((e) => e.episode_index === deletedIndex);
-      const nextList = prevList.filter((e) => e.episode_index !== deletedIndex);
-      setEpisodes(nextList);
-      setSelectedEpisode((prevSelected) => {
-        if (prevSelected !== deletedIndex) return prevSelected;
-        const fallback = nextList[removedAt] ?? nextList[removedAt - 1] ?? null;
-        return fallback ? fallback.episode_index : null;
-      });
       setDeleteTarget(null);
+      // Re-fetch rather than filtering the deleted row out of local state:
+      // lerobot's delete_episodes renumbers every surviving episode to stay
+      // contiguous from 0 (old episode 2 of [0,1,2] becomes episode 1 of
+      // [0,1]), so carrying forward the OLD episode_index values on the
+      // remaining rows would show one episode's data under another's label.
+      // This also remounts DatasetInfoCard (its key includes reloadKey),
+      // which both re-reads the now-stale episode/frame counts AND — for the
+      // Hub-resync case below — re-attaches useDatasetUpload to the
+      // just-started background push so its "Uploading…" state and
+      // onDone/onError toasts actually fire.
+      setReloadKey((k) => k + 1);
       if (result.hub_sync === "started") {
-        setInfoCardKey((k) => k + 1);
         toast({
           title: "Episode deleted",
           description: "Syncing the Hub copy…",
@@ -738,7 +742,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
             <div className="p-3">
               <DatasetInfoCard
-                key={`${reloadKey}-${infoCardKey}`}
+                key={reloadKey}
                 repoId={repoId}
                 canDelete
                 onDelete={() => setPendingDatasetDelete(true)}
@@ -831,9 +835,15 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
         <DeleteConfirmDialog
           kind="dataset"
+          // Wait for deleteHubStatus to resolve before opening: it starts
+          // null the instant pendingDatasetDelete flips true, and treating
+          // that as "local" would briefly show the permanent-delete framing
+          // for a dataset that's actually on the Hub (only its local copy
+          // would go) — the opposite of LibrarySheet's version of this same
+          // dialog, which has the real source synchronously and never races.
           item={
-            pendingDatasetDelete
-              ? { source: deleteHubStatus?.status === "on_hub" ? "both" : "local" }
+            pendingDatasetDelete && deleteHubStatus !== null
+              ? { source: deleteHubStatus.status === "on_hub" ? "both" : "local" }
               : null
           }
           label={repoId ?? undefined}
