@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -2494,3 +2495,116 @@ def test_recording_status_reports_saved_episodes_at_session_end(
 
     assert status["session_ended"] is True
     assert status["saved_episodes"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Delete guards: not-a-dataset (P0-5) and resume-awareness (P0-4 / R6).
+#
+# Both are destructive-by-omission defects — the handler used to delete whatever
+# directory the id resolved to. These mirror guards in tests/repro/, which is
+# gitignored and therefore never runs in CI; these are the tracked copies.
+# ---------------------------------------------------------------------------
+
+
+def _seed_dataset(root: Path, repo_id: str, episodes: int = 3) -> Path:
+    """A directory `_is_dataset_dir` accepts (it needs meta/info.json)."""
+    import json
+
+    target = root / repo_id
+    (target / "meta").mkdir(parents=True, exist_ok=True)
+    (target / "meta" / "info.json").write_text(json.dumps({"total_episodes": episodes}))
+    return target
+
+
+@pytest.fixture
+def delete_sandbox(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make `handle_delete_dataset` resolve inside tmp, and keep it offline.
+
+    SAFETY: `handle_delete_dataset` reads `HF_LEROBOT_HOME` from
+    `lerobot.utils.constants` — a module attribute computed at lerobot import
+    time — and imports it INSIDE the function body. The shared `tmp_lerobot_home`
+    fixture only sets the env var, which that attribute never re-reads, so
+    without this patch a delete test resolves against the developer's REAL
+    ~/.cache/huggingface/lerobot. (tests/repro/conftest.py patches all three
+    mechanisms for exactly this reason.)
+
+    `_dataset_in_use` is stubbed to "not in use" so these tests exercise the
+    guards under test rather than the busy-check, and stay free of the Hub
+    probes its local-training branch can make.
+    """
+    import lerobot.utils.constants as lr_constants
+    import makermodslab.datasets as _datasets
+
+    monkeypatch.setattr(lr_constants, "HF_LEROBOT_HOME", tmp_lerobot_home)
+    monkeypatch.setattr(_datasets, "_dataset_in_use", lambda repo_id: None)
+
+    resolved = Path(lr_constants.HF_LEROBOT_HOME).resolve()
+    real = Path("~/.cache/huggingface/lerobot").expanduser().resolve()
+    assert real not in [resolved, *resolved.parents], (
+        "REFUSING TO RUN: delete tests must not see the real cache"
+    )
+    return tmp_lerobot_home
+
+
+def test_delete_dataset_refuses_a_directory_that_is_not_a_dataset(delete_sandbox) -> None:
+    """A non-dataset directory under the cache root is not deletable.
+
+    This is what stands between "delete the dataset called calibration" and the
+    loss of every calibration profile on the machine (P0-5). Keyed on what the
+    directory IS, so it also covers state dirs nobody remembered to reserve.
+    """
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    victim = delete_sandbox / "calibration"
+    (victim / "robots" / "so_follower").mkdir(parents=True)
+    (victim / "robots" / "so_follower" / "my_arm.json").write_text('{"irreplaceable": true}')
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id="calibration"))
+
+    assert result["success"] is False
+    assert "not a recorded dataset" in result["message"]
+    assert (victim / "robots" / "so_follower" / "my_arm.json").is_file()
+
+
+def test_delete_dataset_request_defaults_resume_to_false() -> None:
+    """The wire contract: `resume` exists (so a caller CAN express it) and
+    defaults False (so every existing caller is unchanged)."""
+    from makermodslab.record import DatasetInfoRequest
+
+    assert "resume" in DatasetInfoRequest.model_fields
+    assert DatasetInfoRequest(dataset_repo_id="a/b").resume is False
+
+
+def test_delete_dataset_refuses_when_the_session_was_a_resume(delete_sandbox) -> None:
+    """ "Discard & exit" on a resumed session must not delete the dataset.
+
+    A resume appended to a dataset that already existed, so its earlier episodes
+    are not this session's to throw away (P0-4 / R6). Refused loudly rather than
+    skipped silently, so the caller never believes a delete happened.
+    """
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "bench/long_lived"
+    dataset = _seed_dataset(delete_sandbox, repo_id, episodes=12)
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id, resume=True))
+
+    assert result["success"] is False
+    assert "already existed" in result["message"]
+    assert (dataset / "meta" / "info.json").is_file()
+
+
+def test_delete_dataset_still_deletes_a_real_dataset(delete_sandbox) -> None:
+    """Control for the two guards above: an ordinary delete still works.
+
+    Without this, either guard could be satisfied by breaking delete entirely.
+    """
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "bench/throwaway"
+    dataset = _seed_dataset(delete_sandbox, repo_id, episodes=2)
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id, resume=False))
+
+    assert result["success"] is True
+    assert not dataset.exists()

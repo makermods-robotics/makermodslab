@@ -127,20 +127,76 @@ def _subprocess_output_path(device_type: str, config_stem: str) -> str:
     return os.path.join(CALIBRATION_BASE_PATH_ROBOTS, robot_type, f"{config_stem}.json")
 
 
+# Output paths this PROCESS created during the current run — i.e. paths that did
+# NOT exist when the run was launched. Only these may be cleaned up afterwards.
+#
+# The distinction is the whole of Config entry 1 / C1: re-calibrating an arm
+# under its existing name is the ordinary re-calibrate flow, and the subprocess
+# writes its --save output only at the natural end of a fully successful run. So
+# on any failed or stopped run the file sitting at that path is ALWAYS the user's
+# previous, still-valid calibration — deleting it destroyed the one artifact that
+# could have recovered the arm (and, combined with the servo-EEPROM half of P0-1,
+# left neither file nor servo state).
+#
+# Keyed by absolute path. A path absent from this set is treated as
+# "predates the run" and is never removed, which makes the SAFE answer the
+# default for any caller that never recorded a baseline.
+_RUN_CREATED_CALIBRATION_PATHS: set[str] = set()
+
+
+def _note_calibration_file_baseline(device_type: str, config_stem: str) -> None:
+    """Record, at run start, whether this run's --save output already exists.
+
+    Called immediately before the subprocess is spawned, while "does this file
+    exist?" still answers a question about the PREVIOUS calibration rather than
+    about this run. A path that already exists is deliberately NOT registered, so
+    the cleanup below will refuse to touch it."""
+    path = _subprocess_output_path(device_type, config_stem)
+    try:
+        pre_existing = os.path.exists(path)
+    except OSError:
+        pre_existing = True  # Can't tell → assume the user's file is there.
+    if pre_existing:
+        _RUN_CREATED_CALIBRATION_PATHS.discard(path)
+        logger.info("Auto-calibration will overwrite an existing calibration file on success: %s", path)
+    else:
+        _RUN_CREATED_CALIBRATION_PATHS.add(path)
+
+
 def _remove_stray_calibration_file(device_type: str, config_stem: str) -> None:
     """Best-effort removal of the subprocess's --save output on a non-success
-    run. The subprocess only writes it at the natural end of a fully-successful
+    run — but ONLY when this run is the one that created it.
+
+    The subprocess only writes the file at the natural end of a fully-successful
     calibration (an interrupt raises before its save block), so on the normal
-    failed/stopped path there is nothing to remove; this is the belt-and-braces
-    guard for the case where the process wrote the file and then exited non-zero
-    (or post-processing failed), which would otherwise leave a phantom entry."""
+    failed/stopped path there is nothing to remove; this stays as the
+    belt-and-braces guard for the case where the process wrote the file and then
+    exited non-zero (or post-processing failed), which would otherwise leave a
+    phantom entry.
+
+    What changed (Config entry 1 / C1): it used to `os.remove` the path
+    unconditionally, which on a re-calibration under an existing name deleted the
+    user's PREVIOUS valid calibration. Now a path is removed only if
+    `_note_calibration_file_baseline` recorded that it did not exist when the run
+    started. No baseline recorded → assume the file predates the run and keep it;
+    a phantom entry is a cosmetic problem, a deleted calibration is not."""
     path = _subprocess_output_path(device_type, config_stem)
+    if path not in _RUN_CREATED_CALIBRATION_PATHS:
+        if os.path.exists(path):
+            logger.info(
+                "Keeping the calibration file at %s — it predates this run, so it is the "
+                "previous valid calibration rather than a stray output of this one.",
+                path,
+            )
+        return
     try:
         if os.path.exists(path):
             os.remove(path)
             logger.info(f"Removed stray auto-calibration file from a non-successful run: {path}")
     except OSError as e:
         logger.warning(f"Could not remove stray auto-calibration file {path}: {e}")
+    finally:
+        _RUN_CREATED_CALIBRATION_PATHS.discard(path)
 
 
 def _calibration_name_taken(device_type: str, config_stem: str) -> bool:
@@ -267,6 +323,10 @@ class _AutoCalArmRunner:
             self._logs.clear()
             self._request = request
             self._stop_thread = None
+            # Record whether the --save target already exists BEFORE the run can
+            # write it, so the non-success cleanup can tell "a file this run
+            # created" from "the user's previous calibration" (C1).
+            _note_calibration_file_baseline(request.device_type, config_stem)
             try:
                 self._proc = subprocess.Popen(
                     command,

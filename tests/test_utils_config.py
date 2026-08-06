@@ -352,6 +352,73 @@ def test_validate_dataset_repo_id_rejects_bad(repo_id) -> None:
     assert not ok and reason
 
 
+# --- Reserved state-dir names (design-debt P0-5) ----------------------------
+# A single-segment id resolves to `<HF_LEROBOT_HOME>/<name>` — the level that
+# holds MakerMods Lab's own state — so a dataset called `calibration` aliases
+# every calibration profile on the machine, and the dataset delete path then
+# removes it.
+
+
+@pytest.mark.parametrize("name", sorted(cfg.RESERVED_CACHE_ROOT_NAMES))
+def test_validate_dataset_repo_id_rejects_reserved_state_dir_names(name) -> None:
+    """Every reserved name is refused as a BARE id, with a reason that names it."""
+    from makermodslab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_repo_id(name)
+    assert not ok, f"{name!r} aliases a MakerMods Lab state directory and must be refused"
+    assert name in reason, "the message should name the offending id so the user can fix it"
+
+
+@pytest.mark.parametrize("name", ["calibration", "robots", "outputs"])
+def test_validate_dataset_repo_id_allows_reserved_names_under_a_namespace(name) -> None:
+    """Only the BARE form is reserved: `me/calibration` resolves one level deeper
+    than any state dir, so it is unaffected and stays legal."""
+    from makermodslab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_repo_id(f"me/{name}")
+    assert ok and reason == ""
+
+
+def test_validate_dataset_repo_id_still_accepts_ordinary_bare_names() -> None:
+    """The fix reserves names, not the single-segment SHAPE.
+
+    Bare ids are produced by the app itself — a disk import defaults to the
+    source folder's basename, and Collect falls back to an un-namespaced name
+    when the user isn't logged in (an offline station) — so rejecting them as a
+    class would break real flows.
+    """
+    from makermodslab.utils import config as cfg
+
+    for name in ("pick_place", "sock-sorting", "run1"):
+        ok, reason = cfg.validate_dataset_repo_id(name)
+        assert ok and reason == "", f"{name!r} is an ordinary dataset name and must stay valid"
+
+
+def test_reserved_names_cover_the_documented_state_dirs() -> None:
+    """Pin the contents, not just the mechanism.
+
+    The reserved set only protects what is actually in it, and the failure mode
+    when it drifts out of step with the directories the app creates is a
+    destructive delete. Each name here is a real directory some module writes to
+    directly under the cache root.
+    """
+    from makermodslab.utils import config as cfg
+
+    required = {
+        "calibration",  # CALIBRATION_BASE_PATH_* parent
+        "robots",  # ROBOTS_PATH
+        "ports",  # PORT_CONFIG_PATH
+        "outputs",  # jobs' outputs/train root
+        "hub",  # datasets.py's hub mirror
+        "merge_logs",  # merge.py
+        "inference_logs",  # rollout.py
+        "makermodslab_biso",  # MAKERMODSLAB_BISO_STAGING_PATH
+        "makermodslab_models",  # models._local_models_root
+        "lelab_models",  # pre-rebrand, still live in the migration branch
+    }
+    assert required <= cfg.RESERVED_CACHE_ROOT_NAMES
+
+
 def test_save_imported_calibration_writes_and_normalizes(tmp_lerobot_home: Path) -> None:
     from makermodslab.utils import config as cfg
 

@@ -1172,11 +1172,62 @@ def validate_model_name(name: object) -> tuple[bool, str]:
     return ok, reason.replace("Dataset name", "Model name")
 
 
+# Directory names MakerMods Lab keeps its own state in, directly under the
+# LeRobot cache root — the exact level a SINGLE-SEGMENT dataset id resolves to
+# (`<HF_LEROBOT_HOME>/<name>`). A dataset named `calibration` therefore aliases
+# every calibration profile on the machine, `robots` every robot record, and
+# `outputs` the local job registry; the dataset delete path then `rmtree`s it
+# (design-debt P0-5 / Dataset N20).
+#
+# Each entry is a real directory some module creates — kept in sync with, in
+# order: CALIBRATION_BASE_PATH_* (parent), ROBOTS_PATH, PORT_CONFIG_PATH,
+# jobs' outputs/train root, datasets.py's `hub` mirror,
+# MAKERMODSLAB_BISO_STAGING_PATH, models._local_models_root, merge._merge_log_dir
+# and rollout's inference_logs. The `lelab_*` / `makerlab_*` entries are the
+# pre-rebrand names: `lelab_models` is still live in
+# `models._local_models_root`'s migration branch, and the others are reserved
+# defensively because the cost is wildly asymmetric — reserving a name that
+# never existed only refuses an odd dataset name, while missing one that did
+# leaves a destructive delete reachable on an upgraded install.
+#
+# Two-segment ids are deliberately NOT checked against this set: `me/calibration`
+# resolves to `<root>/me/calibration`, one level deeper than any state dir, so it
+# is unaffected and stays legal.
+RESERVED_CACHE_ROOT_NAMES = frozenset(
+    {
+        "calibration",
+        "robots",
+        "ports",
+        "outputs",
+        "hub",
+        "merge_logs",
+        "inference_logs",
+        "makermodslab_biso",
+        "makermodslab_models",
+        "lelab_biso",
+        "lelab_models",
+        "makerlab_biso",
+        "makerlab_models",
+    }
+)
+
+
 def validate_dataset_repo_id(repo_id: object) -> tuple[bool, str]:
     """Validate a full dataset id: a bare name, or 'namespace/name' (one slash).
 
     Returns (ok, human_readable_reason). Used by both recording and merge so a bad
     name is refused at the point of creation, not silently rewritten.
+
+    A bare (single-segment) name stays legal — the app itself produces them in
+    ordinary use, so rejecting the shape outright would break real flows: a disk
+    import defaults to the source folder's basename, and Collect falls back to an
+    un-namespaced name whenever the user isn't logged in (i.e. on an offline
+    station). What IS rejected is the small set of bare names that collide with
+    MakerMods Lab's own state directories (see RESERVED_CACHE_ROOT_NAMES) — those
+    don't name a dataset, they alias the app's state, and the delete path would
+    remove it. This is the first of two layers; `record.handle_delete_dataset`
+    independently refuses to delete anything that isn't a LeRobot dataset, so a
+    name that predates this rule is still safe.
     """
     if not isinstance(repo_id, str) or not repo_id.strip():
         return False, "Dataset name can't be empty."
@@ -1188,7 +1239,16 @@ def validate_dataset_repo_id(repo_id: object) -> tuple[bool, str]:
         if not ns_ok:
             return False, ns_reason.replace("Dataset name", "Namespace")
         return validate_dataset_name(parts[1])
-    return validate_dataset_name(parts[0])
+    ok, reason = validate_dataset_name(parts[0])
+    if not ok:
+        return False, reason
+    if parts[0] in RESERVED_CACHE_ROOT_NAMES:
+        return False, (
+            f"'{parts[0]}' is reserved — MakerMods Lab stores its own data in a folder "
+            f"with that name. Add a namespace (e.g. 'my-name/{parts[0]}') or pick a "
+            "different dataset name."
+        )
+    return True, ""
 
 
 def validate_calibration_data(data: object) -> tuple[bool, str]:

@@ -654,14 +654,19 @@ const RecordingSessionDialog: React.FC<{
         await fetchWithHeaders(`${baseUrl}/delete-dataset`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dataset_repo_id: repoId }),
+          // `resume` is load-bearing, not informational: on a resume session the
+          // dataset existed before we ever opened it and its earlier episodes are
+          // not ours to throw away, so the backend refuses the delete outright.
+          // Without this flag "Discard & exit" deletes the whole dataset — every
+          // episode recorded in every previous session (design-debt P0-4 / R6).
+          body: JSON.stringify({ dataset_repo_id: repoId, resume }),
         });
       } catch {
         /* best-effort — we're leaving regardless */
       }
     }
     onExitRef.current();
-  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders]);
+  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders, resume]);
 
   // Re-record is keyboard-driven on DELETE (and Backspace, for keyboards/
   // muscle memory where Delete sends Backspace — explicit user request; the

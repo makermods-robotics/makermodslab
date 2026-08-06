@@ -687,11 +687,20 @@ def _run_with_bus(
         # and would otherwise skip the release.
         _graceful_stop(bus, rest_pose)
         bus.safe_disable_all()
+        # MakerMods Lab patch (P0-1): this is what a Stop takes. Put the servos'
+        # own calibration back now that they're limp and the arm has finished
+        # returning to rest — the return runs in the Stage-0 frame that
+        # _graceful_stop already accounts for, so restoring after it (rather
+        # than before) keeps that logic untouched.
+        _restore_calibration(bus)
         print("\nUser interrupt; releasing all servos...")
         return 130
     except Exception as e:
         print(f"Exception: {e}", file=sys.stderr)
         bus.safe_disable_all()
+        # MakerMods Lab patch (P0-1): a failed run destroyed the calibration just
+        # as thoroughly as a stopped one.
+        _restore_calibration(bus)
         if interactive:
             try:
                 input("Press Enter to exit...")
@@ -707,6 +716,78 @@ def _run_with_bus(
         except Exception as e:
             print(f"Disconnect failed: {e}", file=sys.stderr)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# MakerMods Lab patch (design-debt P0-1): snapshot/restore of the servos' own
+# calibration registers.
+#
+# Stage 0 zeroes Homing_Offset and opens the travel limits to (0, 4095) on every
+# motor BEFORE a single measurement is taken, and does it behind Lock=1 — i.e.
+# into EEPROM, so it survives a power cycle. Upstream writes real calibration
+# back only at the natural end of a fully successful run; both terminal failure
+# paths (KeyboardInterrupt, which is what a Stop sends, and a generic exception)
+# released torque and returned without restoring anything. A single Stop
+# therefore left the arm with no calibration and no firmware end-stop clamp, and
+# nothing in MakerMods Lab rewrites calibration on a later session (it connects
+# with calibrate=False), so every reading stayed silently shifted.
+#
+# Kept deliberately small: one snapshot taken where the destruction happens, one
+# restore on the paths that aren't a successful run, and no change to the success
+# path (which legitimately writes fresh calibration).
+_PRE_RUN_CALIBRATION: dict[str, dict[str, object]] = {}
+
+
+def _snapshot_calibration(bus: FeetechMotorsBus) -> None:
+    """Record each motor's pre-run Homing_Offset and travel limits.
+
+    Best-effort and never raises: a motor that won't answer is simply absent from
+    the snapshot and is left alone on restore. Reading is free of side effects,
+    so doing this even on runs that go on to succeed costs only ~12 register
+    reads."""
+    _PRE_RUN_CALIBRATION.clear()
+    for m in MOTOR_NAMES:
+        entry: dict[str, object] = {}
+        try:
+            entry["Homing_Offset"] = bus.read("Homing_Offset", m, normalize=False)
+        except Exception as e:  # noqa: BLE001 - a motor that won't answer just isn't restorable
+            print(f"  [Warning] Could not snapshot Homing_Offset on {m}: {e}")
+        try:
+            entry["limits"] = bus.read_position_limits(m)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [Warning] Could not snapshot position limits on {m}: {e}")
+        if entry:
+            _PRE_RUN_CALIBRATION[m] = entry
+
+
+def _restore_calibration(bus: FeetechMotorsBus) -> None:
+    """Put the pre-run calibration back after a stopped or failed run.
+
+    Call AFTER torque is released. Homing_Offset re-frames what the servo
+    considers its current position, so writing it while torque is still enabled
+    invites a jump as the motor chases its old goal in the new frame — the
+    restore is not urgent, and doing it limp is the safe order.
+
+    Best-effort throughout: this runs on a path that is already failing, and it
+    must never replace the original error (or block the disconnect) with one of
+    its own."""
+    if not _PRE_RUN_CALIBRATION:
+        return
+    print("Restoring the pre-run servo calibration...")
+    for m, entry in _PRE_RUN_CALIBRATION.items():
+        homing = entry.get("Homing_Offset")
+        if homing is not None:
+            try:
+                bus.write("Homing_Offset", m, homing, normalize=False)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [Warning] Could not restore Homing_Offset on {m}: {e}", file=sys.stderr)
+        limits = entry.get("limits")
+        if isinstance(limits, tuple) and len(limits) == 2:
+            try:
+                bus.write_position_limits(m, limits[0], limits[1])
+            except Exception as e:  # noqa: BLE001
+                print(f"  [Warning] Could not restore position limits on {m}: {e}", file=sys.stderr)
+    _PRE_RUN_CALIBRATION.clear()
 
 
 # Stage 0 init: per-register write -> read -> compare, table-driven; special items
@@ -731,6 +812,10 @@ def _run_init(bus: FeetechMotorsBus, *, interactive: bool = True) -> None:
     """Stage 0: Lock=1, PID, limits, Homing_Offset, enable torque. On parameter anomaly,
     if interactive, wait for Enter."""
     print(f"\n{'='*20} Stage 0: Initialization {'='*20}")
+    # MakerMods Lab patch (P0-1): capture the calibration this stage is about to
+    # destroy, BEFORE the first motor is touched. Without this there is nothing
+    # for the failure paths in _run_with_bus to restore from.
+    _snapshot_calibration(bus)
     for m in MOTOR_NAMES:
         print(f"Configuring servo: {motor_label(m)}")
         try:

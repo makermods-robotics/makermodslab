@@ -35,6 +35,7 @@ from .arm_identity import ArmIdentityError, verify_devices
 from .camera_identity import resolve_cv2_index
 from .camera_preview import camera_preview_manager
 from .datasets import (
+    _is_dataset_dir,
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
     invalidate_hub_dataset_info,
@@ -385,6 +386,15 @@ class UploadRequest(BaseModel):
 
 class DatasetInfoRequest(BaseModel):
     dataset_repo_id: str
+    # True when the session that is asking to delete was a RESUME — it appended
+    # to a dataset that already existed, so its episodes are not this session's
+    # to throw away. "Discard & exit" sends this; the worker-side discard helpers
+    # (_discard_session_dataset / _discard_empty_dataset) take the same flag and
+    # early-return on it, and handle_delete_dataset now matches them (P0-4 / R6).
+    # Defaults False so every other caller of this model is unchanged, and so an
+    # older frontend that omits it keeps today's behaviour rather than silently
+    # becoming a no-op.
+    resume: bool = False
 
 
 def _platform_backend():
@@ -1170,6 +1180,24 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     if target == root or root not in target.parents:
         return {"success": False, "message": "Invalid dataset path"}
 
+    # A resume session appended to a dataset that already existed, so "discard
+    # what this session did" must not mean "delete the dataset". lerobot commits
+    # episodes as they save, so the pre-existing ones are already durable and are
+    # emphatically not ours to remove — the worker-side discard helpers have
+    # always early-returned here, and this is the HTTP path reaching parity with
+    # them (design-debt P0-4 / R6). Reported as a refusal rather than a silent
+    # success so the caller never believes a delete happened.
+    if request.resume:
+        logger.info("Refusing to delete %s — the session that asked was a resume", repo_id)
+        return {
+            "success": False,
+            "message": (
+                f"'{repo_id}' already existed before this session, which only added to it. "
+                "Discarding this session won't delete it — the episodes recorded earlier are "
+                "kept. Delete it from the dataset library if you really want it gone."
+            ),
+        }
+
     # Don't yank the directory out from under an active writer/reader. Reuses
     # the full rename busy-guard (recording / merge / upload / local training)
     # instead of the old upload-only check; lazy import to avoid the
@@ -1182,6 +1210,31 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
 
     if not target.exists():
         return {"success": False, "message": f"Dataset not found on disk: {repo_id}"}
+
+    # Only ever delete something that actually IS a LeRobot dataset. The traversal
+    # guard above only proves the target sits under the cache root — but so do
+    # MakerMods Lab's own state dirs (calibration/, robots/, outputs/, …), which a
+    # single-segment dataset id resolves to exactly (design-debt P0-5). Deleting
+    # "the dataset called calibration" would remove every calibration profile on
+    # the machine.
+    #
+    # `validate_dataset_repo_id` now reserves those names at the point of
+    # creation, but this check is the layer that matters: it is keyed on what the
+    # directory IS (meta/info.json) rather than on what it is called, so it also
+    # covers ids created before that rule existed, ids that never went through the
+    # validator, and any future state dir nobody remembered to add to the reserved
+    # list. Refused loudly — a silent skip reporting success would leave the user
+    # believing a real dataset was deleted.
+    if not _is_dataset_dir(target):
+        logger.warning("Refusing to delete %s — not a LeRobot dataset directory", target)
+        return {
+            "success": False,
+            "message": (
+                f"'{repo_id}' is not a recorded dataset, so it wasn't deleted. That folder "
+                "holds MakerMods Lab's own data (calibration profiles, robot records, "
+                "training outputs) or something else that isn't a dataset."
+            ),
+        }
 
     try:
         shutil.rmtree(target)

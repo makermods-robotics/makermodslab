@@ -330,17 +330,36 @@ def _plant_follower_file(base: str, stem: str) -> str:
     return path
 
 
+def _follower_file_path(base: str, stem: str) -> str:
+    """Where the subprocess WOULD write, without creating it.
+
+    Stray-file tests must let the run itself create the file (see
+    `_write_during_run`): a file planted before `start()` is, by construction,
+    indistinguishable from the user's previous calibration under the same name,
+    and the cleanup deliberately keeps those (P0-1 / C1)."""
+    path = os.path.join(base, "so_follower", f"{stem}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
 def test_stray_file_removed_when_run_fails_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A run that exits non-zero after the subprocess already wrote its file
-    must not leave a phantom library entry behind."""
+    must not leave a phantom library entry behind.
+
+    The file is written by the fake subprocess DURING the run (not planted
+    before `start`), so it is genuinely this run's output — which is what makes
+    it a stray rather than the user's previous calibration (P0-1 / C1).
+    """
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    stray = _follower_file_path(str(tmp_path), "my_arm")
 
     class FailProc:
         def __init__(self) -> None:
             self.stdout = iter(["Stage 0: init\n"])
 
         def wait(self) -> int:
+            with open(stray, "w") as f:  # the subprocess wrote it, then failed
+                f.write("{}")
             return 1
 
         def terminate(self) -> None:
@@ -360,15 +379,21 @@ def test_stray_file_removed_when_run_fails_nonzero(monkeypatch: pytest.MonkeyPat
 def test_stray_file_removed_when_post_processing_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A successful subprocess whose post-processing (_finalize_success) raises
     must clean up the file the subprocess wrote — the run is 'failed', so its
-    name must not persist as a phantom entry."""
+    name must not persist as a phantom entry.
+
+    As above, the fake subprocess writes the file during the run so it is this
+    run's output rather than a pre-existing calibration.
+    """
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    stray = _follower_file_path(str(tmp_path), "my_arm")
 
     class OkProc:
         def __init__(self) -> None:
             self.stdout = iter(["calibration done\n"])
 
         def wait(self) -> int:
+            with open(stray, "w") as f:  # the subprocess succeeded and wrote it
+                f.write("{}")
             return 0
 
         def terminate(self) -> None:
@@ -392,13 +417,21 @@ def test_stray_file_removed_when_post_processing_fails(monkeypatch: pytest.Monke
 
 def test_stray_file_removed_on_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A stopped run must leave no phantom file even if a stop landed just after
-    the subprocess wrote it."""
+    the subprocess wrote it.
+
+    The file appears AFTER `start()` — i.e. the running subprocess wrote it —
+    which is what distinguishes it from the user's previous calibration under the
+    same name (P0-1 / C1).
+    """
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    stray = _follower_file_path(str(tmp_path), "my_arm")
 
     proc = StoppableFakeProc()
     released: list[str] = []
     mgr, _ = _start_with_fake_proc(monkeypatch, proc, released)
+
+    with open(stray, "w") as f:  # written mid-run, just before the stop lands
+        f.write("{}")
 
     assert mgr.stop()["success"] is True
     _join_stop(mgr)
@@ -1269,3 +1302,195 @@ def test_batch_status_idle() -> None:
     assert status["total"] == 0
     assert status["completed"] == 0
     assert status["failed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Calibration-file cleanup: only remove what THIS run created (P0-1 / C1).
+#
+# The subprocess writes its --save output only at the natural end of a fully
+# successful run, so on any stopped/failed run the file at that path is the
+# user's previous, still-valid calibration. Deleting it used to leave the arm
+# with neither a calibration file nor its servo EEPROM.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_created_calibration_paths():
+    """The created-paths registry is module-level (one autocal run per process in
+    production); keep tests independent of each other."""
+    auto_calibrate._RUN_CREATED_CALIBRATION_PATHS.clear()
+    yield
+    auto_calibrate._RUN_CREATED_CALIBRATION_PATHS.clear()
+
+
+def test_stray_cleanup_keeps_a_calibration_file_that_predates_the_run(tmp_lerobot_home) -> None:
+    """The re-calibrate flow: the name is already in use, the run fails/stops."""
+    stem = "home"
+    path = auto_calibrate._subprocess_output_path("robot", stem)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write('{"shoulder_pan": {"homing_offset": -142}}')
+
+    # Baseline recorded at run start (the file already existed) …
+    auto_calibrate._note_calibration_file_baseline("robot", stem)
+    # … then the run does not succeed.
+    auto_calibrate._remove_stray_calibration_file("robot", stem)
+
+    assert os.path.exists(path), "the previous valid calibration must survive a failed re-run"
+
+
+def test_stray_cleanup_removes_a_file_this_run_created(tmp_lerobot_home) -> None:
+    """Control: "never delete the user's file" must not become "never delete"."""
+    stem = "fresh"
+    path = auto_calibrate._subprocess_output_path("robot", stem)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    auto_calibrate._note_calibration_file_baseline("robot", stem)  # nothing there yet
+    with open(path, "w") as fh:  # the run wrote it, then died
+        fh.write("{}")
+    auto_calibrate._remove_stray_calibration_file("robot", stem)
+
+    assert not os.path.exists(path), "a phantom file this run created should still be cleaned up"
+
+
+# ---------------------------------------------------------------------------
+# Servo-EEPROM snapshot/restore in the vendored script (P0-1).
+#
+# Stage 0 zeroes Homing_Offset and opens the limits to (0, 4095) behind Lock=1
+# (EEPROM) before any measurement. Upstream restored nothing on a Stop, so one
+# Stop left the arm uncalibrated AND without its firmware end-stop clamp.
+# ---------------------------------------------------------------------------
+
+_PRE_HOMING = -142
+_PRE_LIMITS = (512, 3600)
+
+
+class _CalibrationBus:
+    """Minimal bus double recording register access in order."""
+
+    def __init__(self) -> None:
+        self.motors = dict.fromkeys(acs.MOTOR_NAMES)
+        self.homing = dict.fromkeys(acs.MOTOR_NAMES, _PRE_HOMING)
+        self.limits = dict.fromkeys(acs.MOTOR_NAMES, _PRE_LIMITS)
+        self.log: list[tuple] = []
+
+    def read(self, reg: str, motor: str, normalize: bool = True):
+        value = self.homing[motor] if reg == "Homing_Offset" else 0
+        self.log.append(("read", reg, motor, value))
+        return value
+
+    def write(self, reg: str, motor: str, value, normalize: bool = True) -> None:
+        self.log.append(("write", reg, motor, value))
+        if reg == "Homing_Offset":
+            self.homing[motor] = value
+
+    def read_position_limits(self, motor: str):
+        self.log.append(("read", "Position_Limits", motor, self.limits[motor]))
+        return self.limits[motor]
+
+    def write_position_limits(self, motor: str, minimum: int, maximum: int) -> None:
+        self.log.append(("write", "Position_Limits", motor, (minimum, maximum)))
+        self.limits[motor] = (minimum, maximum)
+
+
+@pytest.fixture
+def _no_script_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(acs.time, "sleep", lambda *_a, **_k: None)
+
+
+def test_stage0_reads_calibration_before_it_overwrites_it(_no_script_sleep) -> None:
+    """The snapshot must be taken BEFORE the wipe, per motor.
+
+    Ordering is the whole point: a snapshot taken after Stage 0 records the
+    zeroed values and would "restore" garbage, which no restore test would catch.
+    """
+    bus = _CalibrationBus()
+
+    acs._run_init(bus, interactive=False)
+
+    for motor in acs.MOTOR_NAMES:
+        entries = [e for e in bus.log if e[2] == motor]
+        first_write = next(
+            i
+            for i, e in enumerate(entries)
+            if e[0] == "write" and e[1] in ("Homing_Offset", "Position_Limits")
+        )
+        reads_before = [
+            e
+            for e in entries[:first_write]
+            if e[0] == "read" and e[1] in ("Homing_Offset", "Position_Limits")
+        ]
+        assert reads_before, f"{motor}: Stage 0 destroyed the calibration without reading it first"
+
+    # And the wipe itself still happens — Stage 0's job is unchanged.
+    assert all(v == 0 for v in bus.homing.values())
+    assert all(v == (0, 4095) for v in bus.limits.values())
+
+
+def test_restore_calibration_puts_back_the_pre_run_values(_no_script_sleep) -> None:
+    """After a stopped/failed run the servos are left as they were found."""
+    bus = _CalibrationBus()
+    acs._run_init(bus, interactive=False)
+    assert all(v == 0 for v in bus.homing.values()), "precondition: Stage 0 wiped the offsets"
+
+    acs._restore_calibration(bus)
+
+    assert bus.homing == dict.fromkeys(acs.MOTOR_NAMES, _PRE_HOMING)
+    assert bus.limits == dict.fromkeys(acs.MOTOR_NAMES, _PRE_LIMITS), (
+        "the firmware travel clamp must come back too — (0, 4095) leaves the joints unprotected"
+    )
+
+
+def test_restore_calibration_is_a_noop_without_a_snapshot() -> None:
+    """Never invent values: with nothing snapshotted, write nothing.
+
+    Guards the failure mode where a restore on a path that never ran Stage 0
+    would push zeroes into EEPROM itself.
+    """
+    acs._PRE_RUN_CALIBRATION.clear()
+    bus = _CalibrationBus()
+
+    acs._restore_calibration(bus)
+
+    assert not [e for e in bus.log if e[0] == "write"]
+
+
+def test_restore_calibration_survives_an_unresponsive_motor(_no_script_sleep) -> None:
+    """Best-effort: this runs on an already-failing path and must never raise.
+
+    One motor that NAKs must not stop the other five from being restored.
+    """
+    bus = _CalibrationBus()
+    acs._run_init(bus, interactive=False)
+
+    dead = acs.MOTOR_NAMES[0]
+    original_write = bus.write
+
+    def _flaky(reg, motor, value, normalize=True):
+        if motor == dead:
+            raise ConnectionError("no response")
+        original_write(reg, motor, value, normalize)
+
+    bus.write = _flaky
+
+    acs._restore_calibration(bus)  # must not raise
+
+    for motor in acs.MOTOR_NAMES[1:]:
+        assert bus.homing[motor] == _PRE_HOMING, f"{motor} should still have been restored"
+
+
+def test_stray_cleanup_without_a_baseline_keeps_the_file(tmp_lerobot_home) -> None:
+    """No baseline recorded → assume the file predates the run and keep it.
+
+    The safe answer is the default: a phantom library entry is cosmetic, a
+    deleted calibration is not.
+    """
+    stem = "unknown"
+    path = auto_calibrate._subprocess_output_path("robot", stem)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("{}")
+
+    auto_calibrate._remove_stray_calibration_file("robot", stem)
+
+    assert os.path.exists(path)
