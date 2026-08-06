@@ -55,8 +55,14 @@ from typing import IO, Any, Literal
 
 from pydantic import BaseModel
 
+from lerobot.motors.feetech import FeetechMotorsBus
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+# `torque` is imported as a MODULE, not `from .torque import
+# force_disable_bus_torque`: the emergency-release path below is exercised by
+# tests that patch `torque.force_disable_bus_torque`, and a from-import would
+# bind the original function here and step straight past the patch.
+from . import torque as _torque
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_identity import list_cameras_fresh, resolve_in_enumeration
 from .camera_preview import camera_preview_manager
@@ -90,6 +96,7 @@ from .utils.config import (
     stage_bimanual_follower_calibrations,
 )
 from .utils.errors import friendly_hint, is_cleanup_error
+from .vendor.feetech_autocal.calibration_defaults import SO_FOLLOWER_MOTORS
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +246,31 @@ _state_lock = threading.Lock()
 # cooperative cancellation checkpoint inside _prepare_robot), so it's a
 # bounded wait-and-report rather than a true force-release.
 _STARTUP_STOP_JOIN_TIMEOUT_S = 5.0
+
+# How long a SIGTERMed rollout child gets to run its OWN teardown before the
+# parent escalates to SIGKILL (design-debt P0-3 / Inference N1).
+#
+# Derived from what that teardown actually does, not picked round: lerobot's
+# `EpisodicStrategy._teardown_hardware` stops the inference engine, then runs
+# `_return_to_initial_position(duration_s=3.0, fps=50)` — 150 `send_action`
+# round-trips over the serial bus sitting on a 3.0s `precise_sleep` floor — and
+# only THEN calls `robot.disconnect()`, which is the call that disables torque.
+# Camera and teleop disconnects follow. The previous hard 5s budget left almost
+# nothing for the 150 bus round-trips, the disconnects, or a policy that is slow
+# to unwind, so the SIGKILL routinely landed mid-teardown with torque still on.
+#
+# 10.0s is deliberately the same figure as `_RUNNER_QUIT_TIMEOUT_S` below, which
+# this module already budgets for the SAME teardown on the eval path (its
+# docstring: "the same teardown a one-shot rollout does at the end of its
+# process"). The two paths asking different amounts of time for identical work
+# was the inconsistency at the root of N1.
+_STOP_TEARDOWN_TIMEOUT_S = 10.0
+
+# Bounded retry while re-opening the follower port for the emergency release.
+# The child was just SIGKILLed; the OS can take a moment to hand the tty back,
+# and failing on the first EBUSY would abandon an energized arm.
+_RELEASE_PORT_RETRIES = 3
+_RELEASE_PORT_RETRY_DELAY_S = 0.5
 # The two hub-ref shapes /jobs/{id}/checkpoints hands out. Kept here for the
 # cheap no-network shape check below; the DOWNLOAD they imply lives once, in
 # jobs.download_hub_checkpoint_ref, so inference and fine-tune resolve a ref
@@ -1708,7 +1740,14 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         _inference_started_at = time.time()
         _inference_cancel = threading.Event()
         cancel_event = _inference_cancel
-        _inference_meta = {"phase": PHASE_STARTING, "policy_ref": request.policy_ref}
+        _inference_meta = {
+            "phase": PHASE_STARTING,
+            "policy_ref": request.policy_ref,
+            # Recorded now so a stop that has to SIGKILL the child can still find
+            # the bus to de-energize — by then the request is long out of scope
+            # (P0-3 / N1).
+            "follower_ports": _follower_ports(request),
+        }
         # A new run supersedes the previous run's terminal payload — status
         # polls must reflect THIS session from the first tick.
         _last_result = None
@@ -1799,6 +1838,94 @@ def inference_in_use_path() -> str | None:
         return _inference_meta.get("policy_path")
 
 
+def _follower_ports(request: InferenceRequest) -> list[str]:
+    """The follower serial port(s) this session will drive — one, or two when
+    bimanual. Recorded on the session meta so the stop path can reach the bus
+    after the child is dead (see `_force_release_follower_torque`)."""
+    ports = [request.follower_port]
+    if request.mode == "bimanual":
+        ports.append(request.right_follower_port)
+    return [p for p in ports if p]
+
+
+def _connect_follower_bus(port: str):
+    """Open a bare Feetech bus on `port` for an emergency torque release.
+
+    Its own function so tests can stub the one line that would touch real
+    hardware. `handshake=False` mirrors `auto_calibrate._release_arm_torque`: a
+    motor left mid-motion by a SIGKILLed policy can be slow to answer pings yet
+    still accept the Torque_Enable=0 writes that follow."""
+    bus = FeetechMotorsBus(port=port, motors=SO_FOLLOWER_MOTORS.copy())
+    bus.connect(handshake=False)
+    return bus
+
+
+def _force_release_follower_torque(ports: Sequence[str]) -> list[str]:
+    """De-energize the follower(s) from THIS process after killing the child.
+
+    Only ever called when the graceful path already failed — the child was
+    SIGKILLed, so it never reached `robot.disconnect()` and the arm is still
+    holding torque with the UI about to report idle (design-debt P0-3 / N1).
+    The hand-mirrored twin of `auto_calibrate._release_arm_torque`, for the same
+    reason and with the same shape: reconnect a fresh bus to the now-free port
+    and disable torque motor by motor, loudly.
+
+    Deliberately INSTANT — no return-to-rest like the child's own teardown would
+    have done. The bus state is unknown after a kill, and the priority is
+    de-energizing the arm, not landing it nicely.
+
+    Returns problem descriptions; empty means every motor on every port was
+    released. Never raises: this runs on a path that is already failing.
+    """
+    problems: list[str] = []
+    for port in ports:
+        logger.warning("Inference stop: force-releasing follower torque on %s after SIGKILL", port)
+        bus = None
+        for attempt in range(1, _RELEASE_PORT_RETRIES + 1):
+            try:
+                bus = _connect_follower_bus(port)
+                break
+            except Exception as exc:
+                if attempt == _RELEASE_PORT_RETRIES:
+                    message = (
+                        f"TORQUE MAY STILL BE ENABLED on {port} — could not reconnect to release "
+                        f"the follower after the inference subprocess was killed ({exc}). "
+                        "The arm can stay rigid; unplug its power to release it."
+                    )
+                    logger.error(message)
+                    problems.append(message)
+                else:
+                    # The killed child may not have handed the tty back yet.
+                    logger.warning(
+                        "Inference stop: port %s not ready for the release yet (%s); retry %d/%d",
+                        port,
+                        exc,
+                        attempt,
+                        _RELEASE_PORT_RETRIES,
+                    )
+                    time.sleep(_RELEASE_PORT_RETRY_DELAY_S)
+        if bus is None:
+            continue
+        try:
+            found = _torque.force_disable_bus_torque(bus, "inference follower")
+            problems.extend(found)
+            if not found:
+                logger.warning("Inference stop: follower torque released directly on %s", port)
+        except Exception as exc:
+            message = (
+                f"TORQUE MAY STILL BE ENABLED on {port} — the fallback release itself failed "
+                f"({exc}). The arm can stay rigid; unplug its power to release it."
+            )
+            logger.error(message)
+            problems.append(message)
+        finally:
+            try:
+                bus.disconnect(disable_torque=False)
+            except Exception as exc:
+                logger.warning("Inference stop: disconnect after the fallback release failed: %s", exc)
+    return problems
+
+
 def _go_idle_locked() -> None:
     """Drop every per-session global back to the idle shape.
 
@@ -1886,6 +2013,9 @@ def handle_stop_inference() -> dict[str, Any]:
             _inference_cancel.set()
         proc = _inference_proc
         ev = _eval_session
+        # Read the ports out BEFORE _go_idle_locked wipes the meta below — if the
+        # child has to be killed they are the only way back to the arm.
+        follower_ports = list(_inference_meta.get("follower_ports") or [])
         # Surface the stop as its own phase so a status poll racing the
         # terminate/wait below sees "stopping" rather than a stale "running".
         if _inference_meta:
@@ -1919,11 +2049,15 @@ def handle_stop_inference() -> dict[str, Any]:
         try:
             proc.terminate()
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=_STOP_TEARDOWN_TIMEOUT_S)
             except subprocess.TimeoutExpired:
-                logger.warning("Inference did not exit in 5s; killing")
+                # The child did NOT finish its teardown, so it never reached the
+                # robot.disconnect() that disables torque. Kill it, then release
+                # the arm from here — the port is free once the child is dead.
+                logger.warning("Inference did not exit in %.0fs; killing", _STOP_TEARDOWN_TIMEOUT_S)
                 proc.kill()
                 proc.wait()
+                _force_release_follower_torque(follower_ports)
         except Exception as exc:
             logger.exception("Stop inference: %s", exc)
 
