@@ -25,6 +25,7 @@ const Spotlight: React.FC = () => {
   const { activeTour, stepIndex, advance, back, skip } = useOnboarding();
   const step = activeTour?.steps[stepIndex] ?? null;
   const rect = useSpotlightTarget(step?.target ?? "[data-tour=__none__]");
+  const spotlightRef = useRef<HTMLDivElement>(null);
 
   // Auto-skip a step whose target isn't actually on screen right now.
   useEffect(() => {
@@ -37,8 +38,10 @@ const Spotlight: React.FC = () => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
       // Same guard as StudioOverlay's Escape handler — don't steal Escape
-      // from a dialog layered above the tour.
-      if (target?.closest('[role="dialog"], [role="alertdialog"]')) return;
+      // from a dialog layered above the tour, but don't ignore our own
+      // Escape either (the self-exclusion check mirrors overlayRef there).
+      const dialogAbove = target?.closest('[role="dialog"], [role="alertdialog"]');
+      if (dialogAbove && dialogAbove !== spotlightRef.current) return;
       skip();
     };
     window.addEventListener("keydown", onKey);
@@ -105,7 +108,12 @@ const Spotlight: React.FC = () => {
   const isLast = stepIndex === activeTour.steps.length - 1;
 
   return (
-    <div role="dialog" aria-label="Feature tour" className="fixed inset-0 z-[60]">
+    <div
+      ref={spotlightRef}
+      role="dialog"
+      aria-label="Feature tour"
+      className="fixed inset-0 z-[60]"
+    >
       {/* Cutout backdrop: a huge box-shadow punches a hole over the target
           rect instead of an SVG mask. Not interactive — clicks pass through
           to the app so the tour never blocks normal use. */}

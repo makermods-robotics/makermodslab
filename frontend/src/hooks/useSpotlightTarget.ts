@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 export interface SpotlightRect {
   top: number;
@@ -12,6 +12,13 @@ function measure(el: Element): SpotlightRect {
   return { top: r.top, left: r.left, width: r.width, height: r.height };
 }
 
+function measureSelector(selector: string): SpotlightRect | null {
+  const el = document.querySelector(selector);
+  if (!el) return null;
+  const next = measure(el);
+  return next.width > 0 && next.height > 0 ? next : null;
+}
+
 /**
  * Resolves a CSS selector to its live position, re-measuring on resize/scroll
  * and whenever the DOM changes (the target may not exist yet on first paint —
@@ -20,9 +27,26 @@ function measure(el: Element): SpotlightRect {
  * whose element isn't actually visible.
  */
 export function useSpotlightTarget(selector: string): SpotlightRect | null {
-  const [rect, setRect] = useState<SpotlightRect | null>(null);
+  const [rect, setRect] = useState<SpotlightRect | null>(() =>
+    measureSelector(selector),
+  );
+  const lastSelector = useRef(selector);
 
-  useEffect(() => {
+  // The `rect` state belongs to `lastSelector`, not necessarily to this
+  // render's `selector` — the effect below only re-measures for a new
+  // selector *after* this render commits. Without this reset, a caller like
+  // Spotlight's auto-skip effect would see the previous step's rect (or
+  // null) on the render right after the selector changes, wrongly judging
+  // the new step's target as visible or missing based on stale data. Resetting
+  // synchronously during render (React's documented pattern for clearing
+  // state on a prop change) means this render already reflects the new
+  // selector, with no stale value ever observable.
+  if (lastSelector.current !== selector) {
+    lastSelector.current = selector;
+    setRect(measureSelector(selector));
+  }
+
+  useLayoutEffect(() => {
     let frame: number | null = null;
     let observedElement: Element | null = null;
     let resizeObserver: ResizeObserver;
