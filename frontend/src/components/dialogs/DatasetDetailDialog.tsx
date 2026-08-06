@@ -545,9 +545,14 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     setDeleteError(null);
     try {
       if (isLastEpisode) {
-        await deleteDataset(baseUrl, fetchWithHeaders, repoId);
+        const result = await deleteDataset(baseUrl, fetchWithHeaders, repoId);
+        if (!result.success) {
+          setDeleteError(result.message ?? "Something went wrong");
+          return;
+        }
         setDeleteTarget(null);
         onOpenChange(false);
+        onDeleted?.();
         return;
       }
       const result = await deleteEpisode(
