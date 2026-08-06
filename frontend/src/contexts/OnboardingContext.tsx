@@ -58,8 +58,9 @@ export const OnboardingProvider: React.FC<{ children: React.ReactNode }> = ({
   }, []);
 
   const skip = useCallback(() => {
+    if (!tour) return;
     finish();
-  }, [finish]);
+  }, [tour, finish]);
 
   const value = useMemo(
     () => ({ activeTour: tour, stepIndex, start, advance, back, skip }),

@@ -69,4 +69,14 @@ describe("OnboardingContext", () => {
       /useOnboarding must be used within OnboardingProvider/,
     );
   });
+
+  it("skip() called twice only invokes onDone once", () => {
+    const { result } = setup();
+    const onDone = vi.fn();
+    act(() => result.current.start(tour, onDone));
+    act(() => result.current.skip());
+    act(() => result.current.skip());
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(result.current.activeTour).toBeNull();
+  });
 });
