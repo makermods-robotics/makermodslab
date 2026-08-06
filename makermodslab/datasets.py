@@ -19,6 +19,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ from huggingface_hub import (
     try_to_load_from_cache,
 )
 from huggingface_hub.errors import HfHubHTTPError
+from lerobot.datasets.dataset_tools import delete_episodes
 
 from .utils.config import (
     get_hidden_datasets,
@@ -1138,6 +1140,113 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
 
     logger.info("Renamed dataset directory %s -> %s", src, dst)
     return new_repo_id
+
+
+class DatasetEpisodeDeleteError(Exception):
+    """Raised by delete_local_episode when the delete can't proceed. `status`
+    is the HTTP status the route should return (400 invalid/last-episode,
+    404 not found, 409 busy, 500 rewrite/swap failure); `message` is the
+    user-facing reason."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
+    """Delete one episode from a locally-cached dataset.
+
+    Episode deletion isn't a row removal: lerobot's v3.0 layout packs
+    consecutive episodes into shared per-camera video files, so removing one
+    episode can require re-encoding whatever physical file it shares with a
+    kept episode. We reuse lerobot's own ``delete_episodes``, which builds an
+    entirely new dataset directory rather than mutating in place — into a
+    temp sibling directory here, then atomically swapped in for the original.
+
+    Local-only: never touches a Hub copy of `repo_id`. Raises
+    DatasetEpisodeDeleteError (status + message) when: the dataset isn't
+    found locally (404), it's busy — recording / merge / upload / local
+    training (409), the dataset can't be loaded, the index is out of range,
+    or it's the dataset's only episode (400), or the rewrite/swap itself
+    fails (500, rolling back to the original directory when possible).
+    """
+    target = _resolve_local_dataset_path(repo_id)
+    if target is None:
+        raise DatasetEpisodeDeleteError(404, f"Dataset '{repo_id}' not found in the local cache")
+
+    in_use = _dataset_in_use(repo_id)
+    if in_use is not None:
+        raise DatasetEpisodeDeleteError(409, in_use)
+
+    from lerobot.datasets import LeRobotDataset
+
+    try:
+        dataset = LeRobotDataset(repo_id=repo_id, root=target)
+    except Exception as exc:
+        logger.error("Failed to load dataset %s for episode delete: %s", repo_id, exc)
+        raise DatasetEpisodeDeleteError(400, f"Could not read dataset: {exc}") from exc
+
+    total_episodes = dataset.meta.total_episodes
+    if episode_index < 0 or episode_index >= total_episodes:
+        raise DatasetEpisodeDeleteError(
+            400,
+            f"Episode {episode_index} does not exist in '{repo_id}' ({total_episodes} episode(s))",
+        )
+    if total_episodes <= 1:
+        raise DatasetEpisodeDeleteError(
+            400, "This is the dataset's only episode — delete the whole dataset instead."
+        )
+
+    tmp_dir = target.parent / f".{target.name}.delete-tmp-{uuid.uuid4().hex[:8]}"
+    try:
+        delete_episodes(dataset, [episode_index], output_dir=tmp_dir, repo_id=repo_id)
+    except ValueError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise DatasetEpisodeDeleteError(400, str(exc)) from exc
+    except Exception as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to delete episode %s from %s: %s", episode_index, repo_id, exc)
+        raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+
+    backup_dir = target.parent / f".{target.name}.pre-delete-{uuid.uuid4().hex[:8]}"
+    try:
+        os.rename(target, backup_dir)
+    except OSError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to stage %s aside for episode delete: %s", target, exc)
+        raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+
+    try:
+        os.rename(tmp_dir, target)
+    except OSError as exc:
+        try:
+            os.rename(backup_dir, target)
+        except OSError:
+            logger.error(
+                "Failed to roll back %s after a failed episode-delete swap — dataset directory "
+                "may be missing; original data is at %s",
+                target,
+                backup_dir,
+            )
+            raise DatasetEpisodeDeleteError(
+                500, f"Failed to delete episode and could not restore the original dataset: {exc}"
+            ) from exc
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to swap in the edited dataset for %s: %s", target, exc)
+        raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    invalidate_dataset_listing_cache()
+
+    new_total = total_episodes - 1
+    logger.info("Deleted episode %s from %s (%s episode(s) remain)", episode_index, repo_id, new_total)
+    return {
+        "success": True,
+        "repo_id": repo_id,
+        "deleted_episode": episode_index,
+        "total_episodes": new_total,
+    }
 
 
 def list_user_datasets() -> list[dict[str, Any]]:
