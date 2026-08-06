@@ -214,6 +214,8 @@ export async function deleteEpisode(
   repo_id: string;
   deleted_episode: number;
   total_episodes: number;
+  hub_sync: "started" | "not_on_hub" | "skipped";
+  hub_sync_message?: string;
 }> {
   return apiRequest(baseUrl, fetcher, "/datasets/episode-delete", {
     method: "POST",

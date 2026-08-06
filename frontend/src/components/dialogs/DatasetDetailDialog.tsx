@@ -572,6 +572,18 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         return fallback ? fallback.episode_index : null;
       });
       setDeleteTarget(null);
+      if (result.hub_sync === "started") {
+        toast({
+          title: "Episode deleted",
+          description: "Syncing the Hub copy…",
+        });
+      } else if (result.hub_sync === "skipped") {
+        toast({
+          title: "Hub sync skipped",
+          description: result.hub_sync_message ?? "Use Upload to Hub to sync manually.",
+          variant: "destructive",
+        });
+      }
     } catch (err) {
       setDeleteError(
         err instanceof ApiError ? (err.detail ?? err.message) : "Something went wrong",
@@ -780,7 +792,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                       <>
                         {" "}
                         This dataset is on the Hugging Face Hub — the Hub copy
-                        will still have this episode and won't be updated.
+                        will be updated to match.
                       </>
                     )}
                   </>
