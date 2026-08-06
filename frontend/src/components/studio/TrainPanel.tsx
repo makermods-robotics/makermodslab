@@ -615,11 +615,13 @@ const TrainPanel: React.FC = () => {
               //
               // And pull the job list, because the new run has to be IN it:
               // the panel never unmounts across a launch, so nothing else
-              // re-reads /jobs. A launch's only route into the list is
-              // otherwise the fire-and-forget `jobs_changed` broadcast; miss
-              // it once and the run stays invisible until the next mount
-              // (page reload). This is the same after-mutation refetch every
-              // other studio action (stop, delete, rename) already does.
+              // re-reads /jobs. That refetch used to happen by accident —
+              // Continue navigated to /training and the post-launch
+              // navigate("/") remounted the whole studio, provider included —
+              // until the in-place Continue flow removed the navigation.
+              // Since then a launch's only route into the list was the
+              // fire-and-forget `jobs_changed` broadcast; miss it once and the
+              // run stayed invisible until the next mount (page reload).
               onStarted={() => {
                 toggleForm(false);
                 refreshJobs();
