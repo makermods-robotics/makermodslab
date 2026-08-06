@@ -7,6 +7,7 @@ import {
   GitMerge,
   Play,
   Plus,
+  Trash2,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -22,7 +23,10 @@ import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelItem, downloadModel, saveCustomModel } from "@/lib/modelsApi";
 import {
   DatasetItem,
+  deleteDataset,
   downloadDataset,
+  hideDataset,
+  removeCustomDataset,
   saveCustomDataset,
 } from "@/lib/replayApi";
 import AddDatasetFromHubDialog from "@/components/landing/AddDatasetFromHubDialog";
@@ -37,7 +41,9 @@ import {
 } from "@/components/launchpad/SkillCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
+import DeleteConfirmDialog from "@/components/dialogs/DeleteConfirmDialog";
 import SkillManageDialog from "@/components/dialogs/SkillManageDialog";
+import { DeleteResolution } from "@/lib/deleteSemantics";
 
 export interface LibrarySheetProps {
   open: boolean;
@@ -92,6 +98,8 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   const [manageCachesOpen, setManageCachesOpen] = useState(false);
   const [addModelOpen, setAddModelOpen] = useState(false);
   const [importModelOpen, setImportModelOpen] = useState(false);
+  const [pendingDeleteDataset, setPendingDeleteDataset] =
+    useState<DatasetItem | null>(null);
 
   const username = auth.status === "authenticated" ? auth.username : null;
 
@@ -127,6 +135,48 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     setSelectedDataset(repoId);
     refreshDatasets();
     toast({ title: "Dataset imported", description: repoId });
+  };
+
+  const confirmDeleteDataset = async (resolution: DeleteResolution) => {
+    const item = pendingDeleteDataset;
+    if (!item) return;
+    setPendingDeleteDataset(null);
+    try {
+      let result: { success: boolean; message?: string };
+      if (resolution.action === "unpin") {
+        result = await removeCustomDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      } else if (resolution.action === "hide") {
+        result = await hideDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      } else {
+        result = await deleteDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      }
+      if (!result.success) {
+        toast({
+          title:
+            resolution.action === "delete-local" ? "Delete failed" : "Couldn't remove",
+          description: result.message ?? "Something went wrong",
+          variant: "destructive",
+        });
+        return;
+      }
+      toast({
+        title:
+          resolution.action === "delete-local-copy"
+            ? "Local copy removed"
+            : resolution.action === "delete-local"
+              ? "Dataset deleted"
+              : "Removed from list",
+        description: item.repo_id,
+      });
+      refreshDatasets();
+    } catch (e) {
+      toast({
+        title:
+          resolution.action === "delete-local" ? "Delete failed" : "Couldn't remove",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
   };
 
   // Models twins of the two handlers above (ported from ModelsPanel).
@@ -296,26 +346,42 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                     </p>
                   ) : (
                     myDatasets.map((d) => (
-                      <button
+                      <div
                         key={d.repo_id}
-                        type="button"
-                        onClick={() => openDatasetDetail(d)}
-                        className="flex items-center gap-2 rounded-md border border-border bg-card p-3 text-left transition-colors hover:border-ring"
+                        className="flex items-center gap-2 rounded-md border border-border bg-card p-3 transition-colors hover:border-ring"
                       >
-                        <div className="min-w-0 flex-1">
-                          <span className="block truncate font-medium">
-                            {d.repo_id}
-                          </span>
-                          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                            {d.source === "both"
-                              ? "local + Hub"
-                              : d.source === "hub"
-                                ? "on Hub"
-                                : "local only"}
-                            {d.private ? " · private" : ""}
-                          </p>
-                        </div>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => openDatasetDetail(d)}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <span className="block truncate font-medium">
+                              {d.repo_id}
+                            </span>
+                            <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                              {d.source === "both"
+                                ? "local + Hub"
+                                : d.source === "hub"
+                                  ? "on Hub"
+                                  : "local only"}
+                              {d.private ? " · private" : ""}
+                            </p>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPendingDeleteDataset(d);
+                          }}
+                          aria-label={`Delete ${d.repo_id}`}
+                          title="Delete dataset"
+                          className="shrink-0 rounded p-1.5 text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     ))
                   )}
                 </div>
@@ -416,6 +482,14 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
         // action opens a studio panel, or the panel appears "behind" it.
         onStudioAction={() => onOpenChange(false)}
         onDeleted={refreshDatasets}
+      />
+
+      <DeleteConfirmDialog
+        kind="dataset"
+        item={pendingDeleteDataset}
+        label={pendingDeleteDataset?.repo_id}
+        onOpenChange={(o) => !o && setPendingDeleteDataset(null)}
+        onConfirm={confirmDeleteDataset}
       />
 
       <SkillManageDialog
