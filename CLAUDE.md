@@ -43,6 +43,18 @@ Treat the resolution above as "plain `kill -TERM` against a prod-mode, single-ar
 
 Close this specific finding — the original SIGTERM-does-nothing report was a test-setup artifact, not a defect, for the scope actually tested. Don't broaden that to "I8 is fully validated on real hardware": `--reload`, bimanual, and mid-release SIGTERM are all still open and worth a real-hardware pass before treating those specifically as safe. PR #29's own diff was not found to have any defect by this investigation.
 
+## Concurrent sessions: claim files before editing
+
+Multiple Claude sessions may work this repo at once and cannot see each other.
+Before editing repo files (inline or via a deployed agent), read
+`.agents/fences.json` (gitignored; missing file = no claims): an unexpired
+claim by another owner overlapping your target files means don't touch — queue
+or ask the user. Claim your own targets before editing (entry:
+`owner`/`scope`/`reason`/`claimed_at`/`ttl_hours`, default TTL 8h) and remove
+the entry once the change is committed or discarded — uncommitted
+pending-review diffs keep their claim. Full protocol: the global deploy-agent
+skill's "Cross-session fence protocol" section.
+
 ## Repository purpose
 
 MakerMods Lab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm (single or bimanual). It exposes teleoperation, dataset recording, calibration, training, inference, and replay as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows. It is a fork of Hugging Face's [leLab](https://github.com/huggingface/leLab), heavily extended by [makermods-robotics](https://github.com/makermods-robotics).
