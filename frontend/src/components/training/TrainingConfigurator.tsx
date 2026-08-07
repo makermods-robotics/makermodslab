@@ -58,8 +58,9 @@ export type ResumeSeed = {
   flavor?: string;
   // Cloud resume: the parent run's HF Jobs timeout. Omitting it let the form
   // render blank, which `configToRequest` sends as undefined and the runner
-  // resolves to HF_JOB_TIMEOUT ("2h") — silently capping the continuation of a
-  // run that had already proved it needs a longer budget. See NEW-12.
+  // resolves to HF_JOB_TIMEOUT (see makermodslab/runners/hf_cloud.py) —
+  // silently capping the continuation of a run that had already proved it
+  // needs a longer budget. See NEW-12.
   hfJobTimeout?: string;
   // The parent's dataloader worker count — a starting point, not a lock: the
   // resume branch DOES pass --num_workers, so an edit here really takes effect
@@ -255,7 +256,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // a run that died at config validation. The request field stays.
     use_policy_training_preset: true,
     // Cloud-only. Prefilled from the parent so a Continue keeps its budget
-    // instead of silently falling back to the runner's 2h default; the field
+    // instead of silently falling back to the runner's default; the field
     // stays editable so the user can raise it for a longer tail.
     hf_job_timeout: resumeSeed?.hfJobTimeout,
   });
@@ -665,7 +666,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               <span className="font-medium">
                 {config.hf_job_timeout?.trim()
                   ? config.hf_job_timeout
-                  : "2h (default)"}
+                  : "24h (default)"}
               </span>{" "}
               — a continuation needs at least as long as the tail it has left.
             </p>

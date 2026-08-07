@@ -31,7 +31,7 @@ export function latestResumableStep(checkpoints: JobCheckpoint[]): number | null
  * job card's step-selectable Continue / Resume-cloud and the jobs library's
  * row-level quick-resume — because they previously built the same payload
  * independently and had already drifted: the row version omitted the parent's
- * HF Jobs timeout (silently capping a cloud continuation at the runner's 2h
+ * HF Jobs timeout (silently capping a cloud continuation at the runner's own
  * default, the NEW-12 bug the card version was fixed for), the worker count,
  * and every hyperparameter the form displays read-only. Unifying means the row
  * path now carries the same full parent shape the card path does.
@@ -65,7 +65,7 @@ export function buildResumeSeed(job: JobRecord, step: number): ResumeSeed {
     saveFreq: parent.save_freq,
     runner,
     flavor: runner === "hf_cloud" ? (job.hf_flavor ?? undefined) : undefined,
-    // Cloud-only: without this a Continue fell back to the runner's 2h
+    // Cloud-only: without this a Continue fell back to the runner's own
     // default, capping the tail of a run already known to need longer.
     hfJobTimeout:
       runner === "hf_cloud" ? (parent.hf_job_timeout ?? undefined) : undefined,

@@ -147,7 +147,8 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
   const policyLabel = policyShortLabel(config.policy_type);
 
   // Cloud-only "Job timeout": the raw string drives both the input and the
-  // (mirror-of-backend) inline validity check. Blank = HF Jobs default (2h).
+  // (mirror-of-backend) inline validity check. Blank = the runner's
+  // HF_JOB_TIMEOUT default (makermodslab/runners/hf_cloud.py).
   const isCloud = config.target.runner === "hf_cloud";
   const timeoutValue = config.hf_job_timeout ?? "";
   const timeoutInvalid =
@@ -363,7 +364,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
                 onChange={(e) =>
                   updateConfig("hf_job_timeout", e.target.value)
                 }
-                placeholder="2h (default)"
+                placeholder="24h (default)"
                 aria-invalid={timeoutInvalid}
                 className={cn("w-32", timeoutInvalid && "border-destructive")}
               />
@@ -375,7 +376,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
               ) : (
                 <p className="text-xs text-muted-foreground">
                   HF Jobs kills the run after this long. Leave blank for the
-                  2h default.
+                  24h default.
                 </p>
               )}
             </div>
