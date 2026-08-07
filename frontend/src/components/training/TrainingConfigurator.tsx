@@ -504,8 +504,8 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
 
-    // Pre-flight: smolvla/pi0/diffusion need an optional package installed
-    // locally. Catch it here with a one-click installer instead of a buried
+    // Pre-flight: smolvla/pi0/pi0_fast/pi05/diffusion need an optional package
+    // installed locally. Catch it here with a one-click installer instead of a buried
     // ImportError after the job has already started. Cloud jobs run in their
     // own environment, so the local package is irrelevant — skip the check.
     if (config.target.runner === "local") {

@@ -30,10 +30,10 @@ const PURPOSE_COPY: Record<Props["purpose"], { verb: string; noun: string }> = {
   inference: { verb: "Running", noun: "inference" },
 };
 
-// Some policies (smolvla, pi0, pi0_fast, diffusion) need an optional LeRobot
-// extra. This catches the missing package before training/inference starts
-// and offers a one-click install, instead of the run dying with a buried
-// ImportError.
+// Some policies (smolvla, pi0, pi0_fast, pi05, diffusion) need an optional
+// LeRobot extra. This catches the missing package before training/inference
+// starts and offers a one-click install, instead of the run dying with a
+// buried ImportError.
 const PolicyExtraDialog: React.FC<Props> = ({
   open,
   onOpenChange,
