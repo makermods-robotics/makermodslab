@@ -9,7 +9,9 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
+import { ApiError } from "@/lib/apiClient";
 import { useRobots, robotSetupGap } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
@@ -33,7 +35,7 @@ import {
   SLIDE,
 } from "@/components/studio/panel/primitives";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
-import type { DatasetItem } from "@/lib/replayApi";
+import { uploadDataset, type DatasetItem } from "@/lib/replayApi";
 
 /**
  * Studio panel 1 · Collect. Stacked sections (the shared studio anatomy):
@@ -53,6 +55,7 @@ import type { DatasetItem } from "@/lib/replayApi";
  */
 const CollectPanel: React.FC = () => {
   const { auth } = useHfAuth();
+  const { baseUrl, fetchWithHeaders } = useApi();
   const { selectedRecord } = useRobots();
   const { datasets, loading: datasetsLoading, refresh } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
@@ -100,6 +103,15 @@ const CollectPanel: React.FC = () => {
   const [activeRecording, setActiveRecording] =
     useState<RecordingConfig | null>(null);
   const [sessionCount, setSessionCount] = useState(0);
+
+  // Set once a recording session ends with saved episodes, holding the
+  // handoff payload until Finalize (or discarding the whole dataset)
+  // resolves it. Reuses the same viewer dialog instance as the library's
+  // "view" trigger (viewRepo/viewOpen below), just adds the `finalize`
+  // prop while this is set.
+  const [pendingFinalize, setPendingFinalize] = useState<RecordedInfo | null>(
+    null,
+  );
 
   const toggleForm = (open: boolean) => {
     updateCollectForm({ formOpen: open });
@@ -230,29 +242,89 @@ const CollectPanel: React.FC = () => {
     setActiveRecording(recordingConfig);
   };
 
-  // Every exit path of the session dialog lands here. A `recorded` payload
-  // (clean finish / "keep episodes") closes the studio and stamps the router
-  // state the CollectHandoff banner reads — same contract the old /recording
-  // page fulfilled by navigating home.
+  // Every exit path of the session dialog lands here. A discarded (empty)
+  // session has nothing to review — hand off to the Launchpad exactly as
+  // before. A dataset that was actually saved instead opens the viewer in
+  // finalize mode; folding the form and navigating are deferred to
+  // handleFinalize below, so nothing is uploaded before the user has
+  // reviewed it.
   const handleRecordingExit = useCallback(
     (recorded?: RecordedInfo) => {
       setActiveRecording(null);
       setSessionCount((n) => n + 1);
-      if (recorded) {
-        // A dataset was saved: fold the record-new form so the next studio
-        // visit opens onto the library (with the fresh dataset preselected by
-        // CollectHandoff). A discarded (empty) session keeps the form + draft
-        // open for a retry.
-        if (!recorded.discarded_empty) {
-          updateCollectForm({ formOpen: false });
-          setLibraryOpen(true);
-        }
+      if (!recorded) return;
+      if (recorded.discarded_empty) {
         closeStudio();
         navigate("/", { state: { recorded } });
+        return;
       }
+      setPendingFinalize(recorded);
+      setViewRepo(recorded.repo_id);
+      setViewOpen(true);
     },
-    [closeStudio, navigate, updateCollectForm],
+    [closeStudio, navigate],
   );
+
+  // Finalize: fire the first Hub upload (only if Push to Hub was on at
+  // record time, and the repo id has a namespace — no namespace means the
+  // user wasn't logged in at record time, so the push would only 401),
+  // fire-and-forget, then run the same fold-form/navigate-home handoff that
+  // used to run immediately on a clean finish. A refused start (409 busy /
+  // another upload running) surfaces as a toast; the manual "Upload to Hub"
+  // button on the Launchpad banner is the retry path.
+  const handleFinalize = useCallback(async () => {
+    const recorded = pendingFinalize;
+    if (!recorded) return;
+    setViewOpen(false);
+    setPendingFinalize(null);
+    if (pushToHub && recorded.repo_id.includes("/")) {
+      try {
+        const res = await uploadDataset(
+          baseUrl,
+          fetchWithHeaders,
+          recorded.repo_id,
+          [],
+          false,
+        );
+        if (!res.started) {
+          toast({
+            title: "Automatic Hub upload not started",
+            description: res.message,
+          });
+        }
+      } catch (e) {
+        toast({
+          title: "Automatic Hub upload not started",
+          description:
+            e instanceof ApiError && e.detail
+              ? e.detail
+              : e instanceof Error
+                ? e.message
+                : "Could not reach the backend to upload.",
+        });
+      }
+    }
+    updateCollectForm({ formOpen: false });
+    setLibraryOpen(true);
+    closeStudio();
+    navigate("/", { state: { recorded } });
+  }, [
+    pendingFinalize,
+    pushToHub,
+    baseUrl,
+    fetchWithHeaders,
+    toast,
+    updateCollectForm,
+    closeStudio,
+    navigate,
+  ]);
+
+  // The whole dataset got deleted during review — nothing left to finalize.
+  // Just close and stay on the Studio panel; no navigate, no upload.
+  const handleDiscardFinalize = useCallback(() => {
+    setViewOpen(false);
+    setPendingFinalize(null);
+  }, []);
 
   // Gate for the pinned Start button: robot ready + every required parameter
   // filled in (name valid per the backend's rules, task described).
@@ -406,6 +478,11 @@ const CollectPanel: React.FC = () => {
         open={viewOpen}
         onOpenChange={setViewOpen}
         onDeleted={refresh}
+        finalize={
+          pendingFinalize
+            ? { onFinalize: handleFinalize, onDiscarded: handleDiscardFinalize }
+            : undefined
+        }
       />
 
       {/* The live recording session — a modal dialog over the studio instead
