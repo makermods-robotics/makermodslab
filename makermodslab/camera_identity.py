@@ -38,16 +38,29 @@ trusted it is re-anchored to the uniqueID:
   fresh enumeration, which is what the subprocess's own cv2 will see.
 
 A device attached after this process started is invisible to in-process
-AVFoundation entirely; resolution returns None for that case and callers
-must fail loudly (telling the user to restart MakerMods Lab) rather than open
-whatever now sits at the stale index.
+AVFoundation entirely — and, worse, a camera replugged into the SAME port
+keeps its uniqueID, so it stays *present* in the stale list as a dead device
+object that opens "successfully" and then never produces a frame (silently
+blank previews, reads that can block forever). Resolution returns None only
+for the verifiably-absent case; callers must fail loudly (telling the user to
+restart MakerMods Lab) rather than open whatever now sits at the stale index.
+
+Both failure modes disappear while :func:`pump_avfoundation_runloop` runs:
+AVFoundation queues its device-cache updates on the main dispatch queue,
+which only the MAIN thread's runloop drains, and uvicorn's asyncio loop —
+though it runs on the main thread — never pumps it. Pumping briefly on a
+timer keeps the in-process snapshot live (hardware-verified 2026-08-07 via
+camera_runloop_experiment.py: a background-thread runloop does NOT refresh
+the cache; pumping the main thread's does).
 """
 
+import asyncio
 import json
 import logging
 import platform
 import subprocess
 import sys
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +222,44 @@ def resolve_cv2_index(unique_id: str | None, fallback_index: int) -> int | None:
     if cameras is None:
         return fallback_index
     return resolve_in_enumeration(cameras, unique_id, fallback_index)
+
+
+async def pump_avfoundation_runloop(interval_s: float = 0.5, pump_s: float = 0.05) -> None:
+    """Keep this process's AVFoundation camera snapshot live (macOS).
+
+    Run as an asyncio background task from server startup. It must live in the
+    main thread's event loop — AVFoundation delivers device connect/disconnect
+    cache updates via the main dispatch queue, and only the main thread's
+    runloop drains that queue (a background thread's runloop verifiably does
+    not — see the module docstring). Each cycle blocks the loop for at most
+    ``pump_s`` (~50 ms) every ``interval_s``, then yields back to asyncio.
+
+    No-op on non-macOS or when PyObjC is unavailable; exits with a warning if
+    scheduled off the main thread; cancels cleanly on shutdown.
+    """
+    if platform.system() != "Darwin":
+        return
+    if threading.current_thread() is not threading.main_thread():
+        logger.warning(
+            "AVFoundation runloop pump scheduled off the main thread — "
+            "hotplug refresh disabled (cache updates only drain on the main runloop)"
+        )
+        return
+    try:
+        import objc
+        from Foundation import NSDate, NSDefaultRunLoopMode, NSRunLoop
+    except ImportError:
+        logger.warning("PyObjC unavailable — AVFoundation hotplug refresh disabled")
+        return
+    # First AVFoundation touch from the main thread, so the snapshot exists
+    # before the first pump and is anchored where the updates get drained.
+    list_cameras_in_process()
+    runloop = NSRunLoop.currentRunLoop()
+    logger.info("AVFoundation runloop pump running — camera hotplug/replug is live")
+    while True:
+        with objc.autorelease_pool():
+            runloop.runMode_beforeDate_(NSDefaultRunLoopMode, NSDate.dateWithTimeIntervalSinceNow_(pump_s))
+        await asyncio.sleep(interval_s)
 
 
 def resolve_fresh_index(unique_id: str | None, fallback_index: int) -> int | None:

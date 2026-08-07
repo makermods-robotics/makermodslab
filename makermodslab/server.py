@@ -60,7 +60,7 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_identity import list_cameras_fresh, resolve_cv2_index
+from .camera_identity import list_cameras_fresh, pump_avfoundation_runloop, resolve_cv2_index
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .focus_tune import get_focus_tune_status, handle_start_focus_tune
 from .identify import identify_arm_by_motion
@@ -2652,10 +2652,33 @@ def startup_event():
     warn_if_cuda_mismatch()
 
 
+# Strong reference so the loop's task set can't drop the pump mid-flight.
+_avf_pump_task: asyncio.Task | None = None
+
+
+@app.on_event("startup")
+async def start_avfoundation_pump():
+    """Keep the in-process camera list live on macOS (hotplug/replug).
+
+    Async handler on purpose: it runs inside the event loop (main thread),
+    which is where the pump must live — AVFoundation's device-cache updates
+    only drain on the main thread's runloop (see camera_identity). A sync
+    startup handler would run in the threadpool and couldn't schedule it.
+    No-op off macOS.
+    """
+    global _avf_pump_task
+    _avf_pump_task = asyncio.create_task(pump_avfoundation_runloop())
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
+
+    # Stop the AVFoundation pump first so its next tick can't interleave with
+    # shutdown (and so --reload restarts don't log a destroyed-pending-task).
+    if _avf_pump_task is not None:
+        _avf_pump_task.cancel()
 
     # Teleoperation and recording drive the follower(s) as background threads
     # INSIDE this process (teleoperation_thread / recording_thread); auto-
