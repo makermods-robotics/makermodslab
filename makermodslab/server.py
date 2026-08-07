@@ -697,12 +697,11 @@ class DatasetEpisodeDeleteBody(BaseModel):
 @app.post("/datasets/episode-delete")
 def datasets_episode_delete(body: DatasetEpisodeDeleteBody):
     """Delete one episode from a locally-cached dataset, rewriting it via
-    lerobot's delete_episodes. If the dataset is also on the Hub, this kicks
-    off a background push to resync it (see ``hub_sync`` in the response;
-    poll /upload-status for progress, same as "Upload to Hub"). Refuses
-    (409) if the dataset is being recorded, merged, uploaded, or trained on
-    locally; 400 if the index is invalid or it's the dataset's only
-    episode."""
+    lerobot's delete_episodes. Never touches the Hub — if this dataset is
+    also on the Hub, its published copy is left exactly as it was; use
+    "Upload to Hub" to push the edited version manually. Refuses (409) if
+    the dataset is being recorded, merged, uploaded, or trained on locally;
+    400 if the index is invalid or it's the dataset's only episode."""
     try:
         return dataset_browser.delete_local_episode(body.repo_id, body.episode_index)
     except dataset_browser.DatasetEpisodeDeleteError as exc:
