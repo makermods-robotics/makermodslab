@@ -854,11 +854,9 @@ def test_single_robot_args_appends_bound_record_cameras(
     assert "wrist" not in cam_arg
     assert "index_or_path: 0" in cam_arg
     assert "width: 640" in cam_arg
-    # Record-keeping keys never reach lerobot's config parser, and neither does
-    # the record's own device identity (lerobot has no `unique_id` field).
+    # Record-keeping keys never reach lerobot's config parser.
     assert "device_id" not in cam_arg
     assert "id:" not in cam_arg
-    assert "unique_id" not in cam_arg
 
 
 def test_single_robot_args_captures_at_the_checkpoints_resolution(

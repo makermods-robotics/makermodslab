@@ -514,7 +514,8 @@ def session_camera_config(entry: dict) -> dict:
 
     That shape is what `record._build_camera_configs` and
     `rollout._format_cameras_arg` already take (both of which keep their own
-    hardening: platform backend pin and the MJPG fourcc default).
+    hardening: platform backend pin, MJPG fourcc default, and the unique_id
+    re-anchoring that stops a stale index from opening the wrong device).
 
     Keys the entry doesn't carry are omitted rather than sent as None, so the
     consumers' own defaults still apply. `type` defaults to "opencv" — records
