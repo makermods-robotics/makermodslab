@@ -48,14 +48,15 @@ interface JobsDataValue {
   supersededIds: Set<string>;
   /** Resume lineage of a job, nearest parent first. */
   ancestorsOf: (job: JobRecord) => JobRecord[];
-  /** Checkpoints reachable from a job: its own plus its loaded ancestors'.
-   * The number to gate a chain's Resume affordance on — a leaf that died
-   * before its first save still has its ancestors' to continue from. */
-  chainCheckpointCount: (job: JobRecord) => number;
-  /** Running, or with a checkpoint anywhere in its chain to resume from —
-   * i.e. worth showing outside the libraries' UNTRACKED fold. Lives on the
-   * context rather than being a pure helper because the answer depends on the
-   * ancestor records only the provider holds. */
+  /** Running, or with a checkpoint anywhere in its chain — i.e. worth showing
+   * outside the libraries' UNTRACKED fold. Lives on the context rather than
+   * being a pure helper because the answer depends on the ancestor records
+   * only the provider holds.
+   *
+   * (The chain-wide checkpoint count this reads used to be exported too, as
+   * the libraries' Resume gate. Under the sticks rule that gate is the leaf's
+   * own `checkpoint_count` — a plain field, no provider needed — so the count
+   * is now an implementation detail of this one answer.) */
   isJobActive: (job: JobRecord) => boolean;
   hubAuthenticated: boolean;
   hubJobsPermission: boolean;
@@ -337,9 +338,12 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
   // resumed, so it is hidden from the top level and reached through the
   // descendant that continued it — one row per LEAF, one row per chain.
   //
-  // Each job names one parent, but a parent can have SEVERAL children (nothing
-  // stops two resumes off one run), so the lineage is a forest of trees rather
-  // than a set of chains — hence `child_ids` rather than a single successor.
+  // New lineages are CHAINS: jobs.py refuses a resume whose source already has
+  // a child (sticks only, user decision 2026-08-07), so a run created from here
+  // on can gain at most one. `child_ids` stays a LIST and everything below
+  // stays fork-tolerant anyway, because registries written before that rule
+  // hold real forks and must keep rendering exactly as they did — several
+  // leaves off one trunk, each with its own row, no migration.
   const byId = useMemo(() => {
     const m = new Map(jobs.map((j) => [j.id, j]));
     // Cached ancestors fill in parents paged out of the list (never overriding
@@ -370,11 +374,14 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
   );
 
   // Checkpoints reachable from a run: its own plus every LOADED ancestor's.
-  // A row stands for a whole CHAIN (the libraries render one row per leaf), so
-  // this — not the tip's own `checkpoint_count` — is what says whether there is
-  // anything to continue from: the commonest resumable shape after the leaf
-  // collapse is a tip that died before saving anything, whose only checkpoints
-  // are inherited.
+  //
+  // NOT the resume gate any more — under sticks only a leaf's own checkpoints
+  // can be continued from (see `resumableCheckpoints`), and the row gates on
+  // `job.checkpoint_count` directly. What this still answers is whether a row
+  // has anything BEHIND it at all, which is what `isJobActive` needs: a tip
+  // that saved nothing but inherited a chain is exactly the row a user has to
+  // reach in order to delete it and free its parent for a new continuation, so
+  // it must not be filed away as a leftover.
   const chainCheckpointCount = useCallback(
     (job: JobRecord): number =>
       [job, ...ancestorsOf(job)].reduce((n, j) => n + j.checkpoint_count, 0),
@@ -392,15 +399,16 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     [byId],
   );
 
-  // Active = still running, or resumable — i.e. the CHAIN has a checkpoint to
-  // continue from. Everything else folds under UNTRACKED in the libraries, so
-  // this decides whether a run is reachable without opening the fold, and a
-  // resumable chain must not be filed away as leftovers.
+  // Active = still running, or the CHAIN has a checkpoint. Everything else
+  // folds under UNTRACKED in the libraries, so this decides whether a run is
+  // reachable without opening the fold.
   //
-  // Chain-aware for the same reason the resume gate is: after the leaf
-  // collapse a row's own `checkpoint_count` is the wrong number — a tip that
-  // died before its first save is exactly the run the user wants to resume,
-  // and it has zero of its own.
+  // Deliberately still chain-aware, where the resume gate no longer is: this
+  // asks "is there anything here worth looking at", not "can this be
+  // continued". A tip that died before its first save inherits a whole chain's
+  // history and checkpoints — it charts, it can serve inference from an
+  // inherited checkpoint, and deleting it is the move that frees its parent to
+  // be resumed. Folding it away would hide the only handle on that.
   //
   // While the ancestor backfill is in flight the answer is INDETERMINATE, and
   // indeterminate resolves to active: a chain that flickered into the fold on
@@ -444,7 +452,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       untrackedHubModels,
       supersededIds,
       ancestorsOf,
-      chainCheckpointCount,
       isJobActive,
       hubAuthenticated,
       hubJobsPermission,
@@ -465,7 +472,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       untrackedHubModels,
       supersededIds,
       ancestorsOf,
-      chainCheckpointCount,
       isJobActive,
       hubAuthenticated,
       hubJobsPermission,

@@ -40,6 +40,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useTruncationTitle } from "@/hooks/useTruncationTitle";
 import {
   LineageCheckpoint,
+  blockedByContinuedOwner,
   buildResumeSeed,
   loadLineageCheckpoints,
   resumableCheckpoints,
@@ -362,6 +363,17 @@ const JobCard: React.FC<Props> = ({
   // a checkpoint inherited from an ancestor that stopped short. That chain
   // reached its target — the way to build on it is Fine-tune, which starts a
   // fresh LR schedule instead of restoring a spent one.
+  //
+  // Sticks (user decision 2026-08-07), the second and larger narrowing: an
+  // INHERITED checkpoint is no longer a resume source at all. Its owner has a
+  // child by construction — the run below it on this card's own path — and
+  // jobs.py refuses a second continuation of a run that already has one, so
+  // the button would only buy a 409. The dropdown still lists the whole
+  // lineage, and an inherited checkpoint remains selectable for inference; it
+  // is Resume alone that dims, via the existing `selectedIsResumable` gate.
+  // The empty-handed case (this tip saved nothing, so no selection lights the
+  // button) is recoverable by deleting this run and resuming its parent —
+  // which the library row's toast spells out.
   const resumable = resumableCheckpoints(job, lineageCheckpoints);
   const selectedIsResumable =
     !isRunning &&
@@ -421,7 +433,32 @@ const JobCard: React.FC<Props> = ({
   // lineage-wide, not selection-wide, on purpose: the selection can be moved
   // to a checkpoint the rule excludes, and hiding the whole row on that basis
   // would strand the user with no way back to a resumable one.
-  const showResumeRow = selectedStep != null && resumable.length > 0;
+  // The empty-handed tip: this run saved nothing of its own, and everything it
+  // inherited belongs to a run that has already been continued — so under the
+  // sticks rule nothing here is resumable, and the recovery is to delete THIS
+  // run and resume the one behind it. Without this the card just dropped its
+  // whole action row and said nothing, which is the one case where silence is
+  // worst: the checkpoints are visibly there, and the reason they can't be
+  // used is a rule the card never mentions.
+  //
+  // Keyed on `resumable.length === 0`, not on `canResume`: when this run does
+  // have resumable checkpoints of its own, a selection that lands on an
+  // inherited one is a choice the user just made (the default is the newest
+  // resumable), and the answer there is to pick another step, not to delete
+  // the run.
+  const continuedOwnerHint =
+    resumable.length === 0
+      ? blockedByContinuedOwner(job, lineageCheckpoints)
+      : null;
+
+  // The row carries the checkpoint LIST as well as the button, so it survives
+  // a run having nothing resumable — inspection of what a chain saved is not
+  // the same affordance as continuing it, and the sticks rule narrowed only
+  // the second. Still hidden when there is nothing to say at all, so this is
+  // unchanged for every case except the empty-handed tip above.
+  const showResumeRow =
+    selectedStep != null &&
+    (resumable.length > 0 || continuedOwnerHint != null);
 
   // Unified metadata rows (same format as the dataset/model cards). Imported
   // models keep their source path in the subtitle; trainings surface what they
@@ -618,6 +655,19 @@ const JobCard: React.FC<Props> = ({
                 <FastForward className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">{resumeLabel}</span>
               </Button>
+            ) : continuedOwnerHint ? (
+              // Where the button would be, the two-step way to get it back.
+              // Names the run and the step so it can be acted on without
+              // opening anything else — same guidance, same numbers, as the
+              // library row's toast (both read the rule, not a re-derivation).
+              <div className="min-w-0 flex-1 text-[11px] leading-tight text-muted-foreground">
+                Saved no checkpoints of its own, and its parent was already
+                continued. Delete this run, then resume{" "}
+                <span className="text-foreground font-medium">
+                  {jobDisplayName(continuedOwnerHint.job)}
+                </span>{" "}
+                from step {continuedOwnerHint.ckpt.step.toLocaleString()}.
+              </div>
             ) : null}
           </div>
         ) : null}
