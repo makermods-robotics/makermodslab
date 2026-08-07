@@ -291,7 +291,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
       <CollapsibleContent className={SLIDE}>
         <div className="space-y-3">
-          <LibraryToolbar
+          <LibraryToolbar<JobsFilter>
             query={search}
             onQueryChange={setSearch}
             searchPlaceholder="Search jobs"

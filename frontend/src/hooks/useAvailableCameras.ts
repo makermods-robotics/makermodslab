@@ -5,12 +5,11 @@ export interface AvailableCamera {
   index: number;
   name: string;
   deviceId: string;
-  /** AVFoundation uniqueID (macOS; "" elsewhere). Stable per physical port —
-   * the canonical device identity the backend re-anchors indices against. */
-  uniqueId: string;
   available: boolean;
   /** Stable OS-level device identity (AVFoundation uniqueID on macOS).
-   * Unlike the cv2 index, it survives replugs and identically-named devices. */
+   * Unlike the cv2 index, it survives replugs and identically-named devices.
+   * Absent on Windows/Linux/generic enumerations, which report no unique_id —
+   * hence optional. Callers must guard before trusting it (see cameraResolve). */
   uniqueId?: string;
 }
 
@@ -93,7 +92,6 @@ export function useAvailableCameras({
         name?: string;
         unique_id?: string;
         available: boolean;
-        unique_id?: string;
       }[] = data.cameras ?? [];
 
       // Browser's MediaDeviceInfo.label starts with AVFoundation's localizedName
@@ -117,7 +115,6 @@ export function useAvailableCameras({
           index: cam.index,
           name: label,
           deviceId: match?.deviceId ?? "",
-          uniqueId: cam.unique_id ?? "",
           available: cam.available,
           uniqueId: cam.unique_id,
         };

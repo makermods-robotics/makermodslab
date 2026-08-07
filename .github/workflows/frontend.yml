@@ -61,8 +61,16 @@ jobs:
       - name: Install (npm ci)
         run: npm ci
 
+      # Build mode (`-b`), NOT `tsc --noEmit`. frontend/tsconfig.json is a
+      # solution-style root: `"files": []` plus references to tsconfig.app.json
+      # (src) and tsconfig.node.json (vite.config.ts). Plain `tsc --noEmit` does
+      # not follow project references, so it checked *zero* files and passed
+      # unconditionally — this step was a no-op from the day it was added.
+      # `-b` walks the references and checks both projects. Both already set
+      # `noEmit: true`, so nothing is written but the .tsbuildinfo files, which
+      # frontend/.gitignore already covers.
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: npx tsc -b
 
       # Non-blocking: `npm run lint` currently reports 3 pre-existing errors, all
       # `require()`-style imports in tailwind.config.ts, plus 24 warnings. Per

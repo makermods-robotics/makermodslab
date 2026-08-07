@@ -61,7 +61,14 @@ export const loadMeshFile = (
     case "dae":
       new ColladaLoader(manager).load(
         path,
-        (result) => done(result.scene),
+        // ColladaLoader is typed `Loader<Collada | null>` — `parse` returns null
+        // for a document it can't turn into a scene. Report that through the
+        // same failure channel as every other branch, rather than letting the
+        // property read throw an opaque TypeError inside three's callback.
+        (result) =>
+          result
+            ? done(result.scene)
+            : done(null, new Error(`Could not parse COLLADA file: ${path}`)),
         undefined,
         (err) => done(null, err as Error)
       );

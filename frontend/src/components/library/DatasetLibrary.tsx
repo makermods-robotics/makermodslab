@@ -272,7 +272,7 @@ export const DatasetLibraryList: React.FC<{
 
   return (
     <div className="space-y-3">
-      <LibraryToolbar
+      <LibraryToolbar<LibraryFilter>
         query={query}
         onQueryChange={setQuery}
         searchPlaceholder="Search datasets"

@@ -549,6 +549,14 @@ const RobotConfigWindow = ({
     }
   }, [robotName, baseUrl, fetchWithHeaders]);
 
+  // `fetchRobot` resolves to the record; callbacks typed `() => void |
+  // Promise<void>` (CalibrationLibrary's `onAssigned`) can't take it directly.
+  // Wrapped in its own useCallback rather than inlined so the identity stays
+  // stable — `onAssigned` is a dependency of several callbacks over there.
+  const refreshRobot = useCallback(async (): Promise<void> => {
+    await fetchRobot();
+  }, [fetchRobot]);
+
   // Open the side's calibration folder in the OS file browser (Finder/Explorer/
   // xdg-open). A local, non-network action handled server-side; the dir is
   // created there if missing so a fresh install still opens an empty folder.
@@ -2400,7 +2408,7 @@ const RobotConfigWindow = ({
                           excludeConfig={excludeConfig}
                           excludeConfigField={excludeConfigField}
                           robotName={robotName}
-                          onAssigned={fetchRobot}
+                          onAssigned={refreshRobot}
                           onLibraryChanged={() =>
                             setCalibReloadToken((t) => t + 1)
                           }

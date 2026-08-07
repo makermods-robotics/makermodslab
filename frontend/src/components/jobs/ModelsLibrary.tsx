@@ -262,7 +262,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
           </div>
         ) : (
           <div className="space-y-3">
-            <LibraryToolbar
+            <LibraryToolbar<ModelsFilter>
               query={search}
               onQueryChange={setSearch}
               searchPlaceholder="Search skills"
