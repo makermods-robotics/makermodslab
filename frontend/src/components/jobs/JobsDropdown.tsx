@@ -32,6 +32,7 @@ import {
   isHubJobActive,
   jobDisplayName,
 } from "@/lib/jobsApi";
+import { isResumableLeaf } from "./resumeSeed";
 
 /**
  * One selectable run in the jobs dropdown. Local/cloud runs (`job`) and
@@ -40,7 +41,22 @@ import {
  * into a row of em dashes.
  */
 export type JobsEntry =
-  | { kind: "job"; key: string; time: number; job: JobRecord }
+  | {
+      kind: "job";
+      key: string;
+      time: number;
+      job: JobRecord;
+      /** Checkpoints reachable from this row's run — its own plus those of the
+       * runs it resumed from. A row is a whole CHAIN (the list shows one row
+       * per leaf), so the run's own `checkpoint_count` is the wrong number to
+       * gate the Resume button on: the most common resumable shape after the
+       * leaf collapse is a tip that died before saving anything, whose only
+       * checkpoints are inherited. Counted by JobsDataContext, which holds the
+       * ancestor records — and which files a chain whose ancestors are still
+       * being backfilled as active, so a row is never hidden away in the
+       * UNTRACKED fold on the strength of a count that hasn't settled. */
+      chainCheckpointCount: number;
+    }
   | { kind: "hub"; key: string; time: number; job: HubJob };
 
 function relativeTime(ms: number): string {
@@ -200,13 +216,20 @@ function describeEntry(entry: JobsEntry): Described {
   };
 }
 
-/** Resume is offered on a run that ended before its target with something to
- * resume from. The row's button takes the newest checkpoint; picking a
- * specific step stays in the selected run's detail card below the dropdown. */
+/** Resume is offered on a chain whose tip ended before its target with
+ * something, anywhere in the chain, to resume from. The state half is the ONE
+ * shared leaf rule (`isResumableLeaf`), so this row's button and the detail
+ * card's Resume can't disagree; the checkpoint half is deliberately the
+ * cheap chain-wide count, because the exact per-step answer needs a fetch. The
+ * click resolves the real list and says so if it comes back empty.
+ *
+ * ONE verb across both levels of control: this row is the shortcut — same
+ * action, same default (the newest resumable checkpoint) — and the detail
+ * card below is that action plus the choice of which step to start from. */
 const canResumeEntry = (entry: JobsEntry): boolean =>
   entry.kind === "job" &&
-  (entry.job.state === "failed" || entry.job.state === "interrupted") &&
-  entry.job.checkpoint_count > 0;
+  isResumableLeaf(entry.job) &&
+  entry.chainCheckpointCount > 0;
 
 const COL_STATE = "w-[4.75rem] shrink-0";
 // The run's policy. Always occupies its column — a row whose record names no
@@ -240,7 +263,7 @@ interface RowProps {
  * chip, the dataset namespace is dropped) so rows of one policy+namespace stop
  * reading identically once the column truncates.
  * Everything else about the run (rename, monitor, checkpoint picker, Run,
- * Continue/Resume-from-step, Download, delete) lives in the detail card the
+ * Resume-from-step, Download, delete) lives in the detail card the
  * selection drives.
  */
 const JobsRow: React.FC<RowProps> = ({
@@ -339,8 +362,8 @@ const JobsRow: React.FC<RowProps> = ({
                 e.stopPropagation();
                 onResume(record);
               }}
-              aria-label="Resume this run from its last checkpoint"
-              title="Resume from the last checkpoint (pick a specific step below)"
+              aria-label="Resume from the newest usable checkpoint"
+              title="Resume from the newest usable checkpoint (pick a specific step in the card below)"
               className="flex h-5 w-5 items-center justify-center rounded text-info transition-colors hover:bg-info/10 disabled:opacity-50"
             >
               {resuming ? (

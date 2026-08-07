@@ -53,6 +53,7 @@ from .datasets import (
     _lerobot_cache_root,
 )
 from .jobs import (
+    JobHasChildrenError,
     JobRecord,
     _list_local_checkpoints,
     _read_checkpoint_config,
@@ -1363,6 +1364,18 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
         raise ModelError(
             409,
             f"Model {model_id!r} is still training — stop the run before deleting it.",
+        ) from exc
+    except JobHasChildrenError as exc:
+        # Mid-chain delete, reached from the MODEL library rather than the jobs
+        # one: another run resumed out of this run's checkpoint dir, which the
+        # delete would take with it. Same refusal and same shape the /jobs
+        # route returns (409, naming the continuations) — without this it fell
+        # into the catch-all below and surfaced as a 502 "Failed to delete".
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise ModelError(
+            409,
+            f"Model {model_id!r} was continued by {continued_by}, which would be left "
+            "pointing at a deleted run. Delete the continuation(s) first.",
         ) from exc
     except JobNotFoundError as exc:
         raise ModelError(404, f"Model {model_id!r} not found.") from exc

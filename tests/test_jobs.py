@@ -4085,3 +4085,242 @@ def test_resume_is_unaffected_by_model_naming(tmp_path) -> None:
 
     assert record.config.resume is True
     assert record.id.startswith("act_user_ds_")
+
+
+# ---------------------------------------------------------------------------
+# Resume lineage: the child index, the ancestor walk, and the delete guard that
+# reads them. All pure registry state — no runner is started here.
+
+
+def _lineage_record(
+    job_id: str,
+    *,
+    parent: str | None = None,
+    started_at: float = 0.0,
+    finetune_parent: str | None = None,
+    state: str = "failed",
+):
+    """A bare record whose only interesting property is who it continues from."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    return JobRecord(
+        id=job_id,
+        name=job_id,
+        state=state,
+        config=TrainingRequest(
+            dataset_repo_id="user/ds",
+            resume=parent is not None,
+            resume_from_job_id=parent,
+            finetune_from_job_id=finetune_parent,
+        ),
+        output_dir=f"/nonexistent/{job_id}",
+        started_at=started_at,
+    )
+
+
+def test_build_child_index_maps_parents_to_children_newest_first() -> None:
+    from makermodslab.jobs import build_child_index
+
+    index = build_child_index(
+        [
+            _lineage_record("A"),
+            _lineage_record("B", parent="A", started_at=10.0),
+            _lineage_record("C", parent="B", started_at=20.0),
+        ]
+    )
+
+    assert index == {"A": ["B"], "B": ["C"]}
+
+
+def test_build_child_index_keeps_every_child_of_a_fork_newest_first() -> None:
+    """Nothing stops two runs resuming one parent, so the lineage is a forest,
+    not a set of chains — both forks must be indexed, newest first."""
+    from makermodslab.jobs import build_child_index
+
+    index = build_child_index(
+        [
+            _lineage_record("A"),
+            _lineage_record("older", parent="A", started_at=10.0),
+            _lineage_record("newer", parent="A", started_at=20.0),
+        ]
+    )
+
+    assert index["A"] == ["newer", "older"]
+
+
+def test_build_child_index_ignores_finetune_edges() -> None:
+    """A fine-tune starts a fresh schedule from a checkpoint's weights: a new
+    model, not a continuation, so it must NOT supersede (hide) its source."""
+    from makermodslab.jobs import build_child_index
+
+    index = build_child_index(
+        [
+            _lineage_record("A"),
+            _lineage_record("F", finetune_parent="A", started_at=10.0),
+        ]
+    )
+
+    assert index == {}
+
+
+def test_build_child_index_drops_a_self_edge() -> None:
+    from makermodslab.jobs import build_child_index
+
+    assert build_child_index([_lineage_record("A", parent="A")]) == {}
+
+
+def test_ancestor_ids_walk_nearest_parent_first() -> None:
+    from makermodslab.jobs import ancestor_ids_of
+
+    records = {
+        r.id: r
+        for r in [
+            _lineage_record("A"),
+            _lineage_record("B", parent="A"),
+            _lineage_record("C", parent="B"),
+        ]
+    }
+
+    assert ancestor_ids_of(records, "C") == ["B", "A"]
+    assert ancestor_ids_of(records, "A") == []
+
+
+def test_ancestor_ids_of_forked_siblings_share_the_trunk() -> None:
+    from makermodslab.jobs import ancestor_ids_of
+
+    records = {
+        r.id: r
+        for r in [
+            _lineage_record("A"),
+            _lineage_record("B", parent="A"),
+            _lineage_record("fork1", parent="B"),
+            _lineage_record("fork2", parent="B"),
+        ]
+    }
+
+    assert ancestor_ids_of(records, "fork1") == ["B", "A"]
+    assert ancestor_ids_of(records, "fork2") == ["B", "A"]
+
+
+def test_ancestor_ids_truncate_at_a_deleted_ancestor() -> None:
+    """A source run that no longer exists ends the walk — the lineage just
+    starts later, exactly as read_metrics_history's curve does."""
+    from makermodslab.jobs import ancestor_ids_of
+
+    records = {
+        r.id: r
+        for r in [
+            _lineage_record("B", parent="gone"),
+            _lineage_record("C", parent="B"),
+        ]
+    }
+
+    assert ancestor_ids_of(records, "C") == ["B"]
+
+
+def test_ancestor_ids_survive_a_cycle() -> None:
+    """Corrupt data that points a chain back at itself must terminate, not spin."""
+    from makermodslab.jobs import ancestor_ids_of
+
+    records = {
+        r.id: r
+        for r in [
+            _lineage_record("A", parent="B"),
+            _lineage_record("B", parent="A"),
+        ]
+    }
+
+    assert ancestor_ids_of(records, "A") == ["B"]
+
+
+def test_list_annotates_lineage_and_marks_leaves(tmp_path) -> None:
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path)
+    for rec in [
+        _lineage_record("A", started_at=1.0),
+        _lineage_record("B", parent="A", started_at=2.0),
+        _lineage_record("C", parent="B", started_at=3.0),
+    ]:
+        reg._records[rec.id] = rec
+
+    by_id = {r.id: r for r in reg.list(limit=10)}
+
+    assert by_id["A"].child_ids == ["B"] and by_id["A"].ancestor_ids == []
+    assert by_id["B"].child_ids == ["C"] and by_id["B"].ancestor_ids == ["A"]
+    # The tip of the chain is the leaf: no children, whole trunk behind it.
+    assert by_id["C"].child_ids == [] and by_id["C"].ancestor_ids == ["B", "A"]
+
+
+def test_list_sees_a_child_that_fell_off_the_page(tmp_path) -> None:
+    """The child index is built over the whole registry, so a parent is still
+    known to be superseded when its successor is past the listing's limit —
+    the hole in the old client-side approximation."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path)
+    reg._records["A"] = _lineage_record("A", started_at=1.0)
+    reg._records["B"] = _lineage_record("B", parent="A", started_at=2.0)
+
+    # limit=1 returns only the newest (B); A is off the page entirely.
+    page = reg.list(limit=1)
+    assert [r.id for r in page] == ["B"]
+    # ...and asking for A alone still reports its successor.
+    assert reg.get("A").child_ids == ["B"]
+
+
+def test_get_annotates_lineage(tmp_path) -> None:
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path)
+    reg._records["A"] = _lineage_record("A", started_at=1.0)
+    reg._records["B"] = _lineage_record("B", parent="A", started_at=2.0)
+
+    record = reg.get("B")
+    assert record.child_ids == []
+    assert record.ancestor_ids == ["A"]
+
+
+def test_delete_refuses_a_run_that_was_continued(tmp_path) -> None:
+    """Deleting mid-chain would orphan the subtree (and wipe the local
+    checkpoint dir its children resumed out of), so it is refused."""
+    from makermodslab.jobs import JobHasChildrenError, JobRegistry
+
+    reg = JobRegistry(tmp_path)
+    reg._records["A"] = _lineage_record("A", started_at=1.0)
+    reg._records["B"] = _lineage_record("B", parent="A", started_at=2.0)
+
+    with pytest.raises(JobHasChildrenError) as excinfo:
+        reg.delete("A")
+    assert excinfo.value.child_ids == ["B"]
+    # Nothing was removed.
+    assert set(reg._records) == {"A", "B"}
+
+
+def test_delete_allows_a_leaf_then_its_freed_parent(tmp_path) -> None:
+    """Deleting from the tip inwards works: once the child is gone the parent
+    is itself a leaf."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path)
+    reg._records["A"] = _lineage_record("A", started_at=1.0)
+    reg._records["B"] = _lineage_record("B", parent="A", started_at=2.0)
+
+    reg.delete("B")
+    reg.delete("A")
+
+    assert reg._records == {}
+
+
+def test_delete_is_unaffected_by_a_finetune_child(tmp_path) -> None:
+    """A fine-tune is not a lineage edge, so its source stays deletable."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path)
+    reg._records["A"] = _lineage_record("A", started_at=1.0)
+    reg._records["F"] = _lineage_record("F", finetune_parent="A", started_at=2.0)
+
+    reg.delete("A")
+
+    assert set(reg._records) == {"F"}
