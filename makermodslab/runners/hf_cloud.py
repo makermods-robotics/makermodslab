@@ -685,7 +685,7 @@ class HfCloudJobRunner:
             # uploaded checkpoint, so it publishes to its own repo instead —
             # otherwise the staging repo would accumulate the child's
             # checkpoints too and parent and child would again be
-            # indistinguishable inside one tree.
+            # indistinguishable inside one tree (the MT12 shape).
             config.policy_repo_id = (
                 f"{username}/{job_id}"
                 if config.resume_from_uploaded_checkpoint

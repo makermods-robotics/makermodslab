@@ -114,7 +114,7 @@ class JobRecord(BaseModel):
     # cross-runner resume of the same step re-uses the upload instead of
     # pushing the same GBs again.
     checkpoints_hub_repo_id: str | None = None
-    # Step dirs known to be present under checkpoints/ in that repo.
+    # Zero-padded step dirs known to be present under checkpoints/ in that repo.
     checkpoints_hub_steps: list[str] = []
 
 
@@ -939,19 +939,12 @@ _INCOMPLETE_REMEDY = "Resume an earlier checkpoint, or fine-tune from its weight
 _RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
 
 
-# Plain-language names for the runner ids, so a user-facing refusal reads like
-# the Compute control the user actually clicked rather than an internal literal.
-_RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
+def hub_checkpoint_missing_files(api, repo_id: str, step_dir: str) -> list[str]:
+    """Which required files of `repo_id`'s checkpoints/<step_dir>/ are absent.
 
-
-def hub_checkpoint_has_training_state(api, repo_id: str, step_dir: str) -> bool:
-    """Is checkpoints/<step_dir>/ on `repo_id` resumable — i.e. did its
-    training_state/ (optimizer + step counter) reach the Hub?
-
-    Reads the repo's file listing (no bytes), so an unresumable checkpoint can
-    be refused before anything is downloaded or a GPU is rented.
-    `_HUB_TRAINING_STATE_FILE` is the cheapest existence probe for that subtree,
-    the same one the cloud runner's uploader uses.
+    Reads the repo's file listing (no bytes), so it can refuse an unresumable
+    checkpoint before anything is downloaded or a GPU is rented. An empty list
+    means complete and resumable — see missing_checkpoint_files for the rule.
 
     Shared by every consumer of a Hub checkpoint's completeness so they agree:
     the cloud→cloud resolver, the cloud→local resolver, and the re-use check
@@ -968,7 +961,8 @@ def hub_checkpoint_has_training_state(api, repo_id: str, step_dir: str) -> bool:
         raise ValueError(
             f"Could not read {repo_id!r} to verify its checkpoint at step {step_dir}: {exc}"
         ) from exc
-    return f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" in files
+    prefix = f"checkpoints/{step_dir}/"
+    return missing_checkpoint_files({f[len(prefix) :] for f in files if f.startswith(prefix)})
 
 
 def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
@@ -1026,15 +1020,7 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
     if not m:
         raise ValueError(f"Unexpected checkpoint ref for cloud run {source.id!r}: {chosen.ref!r}")
     step_dir = m.group("step_dir")
-    try:
-        files = set(api.list_repo_files(source.hf_repo_id, repo_type="model"))
-    except Exception as exc:
-        raise ValueError(
-            f"Could not read cloud run {source.id!r}'s repo to verify the "
-            f"checkpoint at step {chosen.step}: {exc}"
-        ) from exc
-    prefix = f"checkpoints/{step_dir}/"
-    missing = missing_checkpoint_files({f[len(prefix) :] for f in files if f.startswith(prefix)})
+    missing = hub_checkpoint_missing_files(api, source.hf_repo_id, step_dir)
     if missing:
         raise ValueError(
             f"Checkpoint at step {chosen.step} is incomplete on the Hub (a known "
@@ -1512,9 +1498,9 @@ def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None, with_training_stat
 
     ``with_training_state`` widens the step-ref case to the WHOLE
     checkpoints/<step_dir>/ tree — the optimizer/rng/step state a RESUME needs
-    and a deploy or fine-tune never reads (hundreds of MB per step, so it stays
-    opt-in). The return value is unchanged (still the ``pretrained_model/``
-    dir); its parent is then the reconstructed checkpoint dir. See
+    and a deploy or fine-tune never reads (~394 MB per step, so it stays opt-in).
+    The return value is unchanged (still the ``pretrained_model/`` dir); its
+    parent is then the reconstructed checkpoint dir. See
     download_hub_resume_checkpoint, the only caller that wants it.
 
     ``tqdm_class`` is forwarded to snapshot_download for byte-progress reporting
@@ -1571,39 +1557,35 @@ def download_hub_resume_checkpoint(ref: str, *, tqdm_class=None) -> str:
         load_training_state; update_last_checkpoint runs on the checkpoints it
         WRITES, under --output_dir), so a shared-cache path is enough;
       * the weights half then stays in the shared HF cache where a later deploy
-        of the same checkpoint reuses it instead of pulling it again;
+        of the same checkpoint reuses it instead of pulling it again (F6);
       * and the child's own checkpoints/ tree stays free of a step it did not
-        produce.
+        produce — which is exactly the parent/child confusion MT12 describes on
+        the cloud side, not worth importing into the local one.
 
     Refuses (ValueError → the job's error_message) a checkpoint that arrives
-    incomplete, rather than letting the trainer die on a missing training_state/
-    halfway through startup — MT4's failure mode. The Hub listing is checked
-    before this runs (hub_checkpoint_has_training_state); this second check is on
-    the bytes that actually landed.
+    incomplete, rather than letting the trainer die on a missing
+    optimizer_state.safetensors halfway through startup — MT4's failure mode.
+    The Hub listing is checked before this runs (hub_checkpoint_missing_files);
+    this second check is on the bytes that actually landed.
 
     Downloads GBs: never call it while holding a lock others need.
     """
     pretrained_dir = Path(download_hub_checkpoint_ref(ref, tqdm_class=tqdm_class, with_training_state=True))
     checkpoint_dir = pretrained_dir.parent
-    train_config = pretrained_dir / _TRAIN_CONFIG_NAME
-    missing = [
-        name
-        for name, path in (
-            (_TRAIN_CONFIG_NAME, train_config),
-            (_HUB_TRAINING_STATE_FILE, checkpoint_dir / _HUB_TRAINING_STATE_FILE),
-        )
-        if not path.is_file()
-    ]
+    names, _fingerprint = scan_checkpoint_dir(checkpoint_dir)
+    missing = missing_checkpoint_files(names)
     if missing:
         raise ValueError(
             f"The downloaded checkpoint {hub_ref_step_label(ref)} from "
-            f"{hub_ref_repo_id(ref)} is incomplete — missing {', '.join(missing)}. "
-            "Resume an earlier checkpoint, or fine-tune from its weights instead."
+            f"{hub_ref_repo_id(ref)} is incomplete — missing "
+            f"{', '.join(missing)}. {_INCOMPLETE_REMEDY}"
         )
-    return str(train_config)
+    return str(pretrained_dir / _TRAIN_CONFIG_NAME)
 
 
-def upload_local_checkpoint(checkpoint_dir: Path, repo_id: str, step_dir: str, *, api=None) -> None:
+def upload_local_checkpoint(
+    checkpoint_dir: Path, repo_id: str, step_dir: str, *, api=None
+) -> None:
     """Push one local checkpoints/<step_dir>/ tree to `repo_id` on the Hub.
 
     F7's local→cloud direction: a pod cannot see this machine's disk, so the
@@ -1642,7 +1624,8 @@ def checkpoints_staging_repo_id(username: str, job_id: str) -> str:
         name, so a staging upload can't land in a repo full of someone else's
         lineage; and
       * the continuation it feeds pushes to its OWN output repo rather than back
-        into this one, so parent and child checkpoints stay distinguishable.
+        into this one, so parent and child checkpoints stay distinguishable —
+        the ambiguity MT12 records for cloud→cloud is not inherited here.
     """
     return f"{username}/{job_id}_checkpoints"
 
@@ -2554,7 +2537,17 @@ class JobRegistry:
         # carries the "model" placeholder. Skipped on resume: that path
         # passes --config_path instead and never emits pretrained_path (see
         # train.build_training_command), so there is no pair to contradict.
+        # The three things that can still have to MOVE before a trainer starts,
+        # each resolved (and refused) synchronously below but carried out in the
+        # preparing thread because each is potentially GBs over the network:
+        #   * a local fine-tune's base checkpoint, downloaded here;
+        #   * a cloud parent's checkpoint, downloaded here for a local resume;
+        #   * a local parent's checkpoint, uploaded to the Hub for a cloud one.
+        # At most one is ever set: fine-tune and resume are mutually exclusive
+        # (refused above), and a resume moves bytes in one direction only.
         deferred_hub_ref: str | None = None
+        deferred_resume_ref: str | None = None
+        deferred_resume_upload: tuple[Path, str, str] | None = None
         if config.policy_pretrained_path and not config.resume:
             # Deliberately BEFORE the materialization: this reads only the
             # checkpoint's config.json, so a contradicting pair is refused
@@ -2659,7 +2652,9 @@ class JobRegistry:
                             deferred_resume_ref = f"{repo_id}@checkpoints/{step_dir}"
                             config.resume_from_step = int(step_dir)
                     elif target.runner == "local":
-                        config.config_path = _resolve_resume_config_path(source, config.resume_from_step)
+                        config.config_path = _resolve_resume_config_path(
+                            source, config.resume_from_step
+                        )
                     else:
                         # local → Cloud: the parent's checkpoint exists only on
                         # this machine, so it must reach the Hub before the pod
@@ -2739,7 +2734,7 @@ class JobRegistry:
                         f"{hub_ref_step_label(deferred_hub_ref)} from "
                         f"{hub_ref_repo_id(deferred_hub_ref)}…"
                     )
-                    thread_target: Callable[..., None] = self._materialize_then_start
+                    thread_target = self._materialize_then_start
                     thread_args: tuple = (job_id, deferred_hub_ref, lerobot_output_dir, prep)
                 elif deferred_resume_ref is not None:
                     prep.emit(
@@ -2929,10 +2924,9 @@ class JobRegistry:
         try:
             prep.emit(f"Uploading {step_dir} from {checkpoint_dir}…")
             upload_local_checkpoint(checkpoint_dir, repo_id, step_dir)
-            if not hub_checkpoint_has_training_state(shared_hf_api(), repo_id, step_dir):
-                raise ValueError(
-                    f"the upload finished but {repo_id} is still missing {_HUB_TRAINING_STATE_FILE}"
-                )
+            missing = hub_checkpoint_missing_files(shared_hf_api(), repo_id, step_dir)
+            if missing:
+                raise ValueError(f"the upload finished but {repo_id} is still missing {', '.join(missing)}")
         except Exception as exc:
             logger.exception("Resume-checkpoint upload failed for job %s", job_id)
             self._fail_prepare(
@@ -2947,7 +2941,7 @@ class JobRegistry:
         self._start_after_prepare(
             job_id,
             # A cloud runner ignores the host output dir (its pod writes to a
-            # container path); pass it anyway so the callers stay identical.
+            # container path); pass it anyway so the two callers stay identical.
             str(_job_dir(self._output_root, job_id) / "run"),
             prep,
             target,
@@ -3099,7 +3093,7 @@ class JobRegistry:
         # must produce a fresh upload, not a job that dies looking for bytes.
         if source.checkpoints_hub_repo_id and step_dir in source.checkpoints_hub_steps:
             with contextlib.suppress(Exception):
-                if hub_checkpoint_has_training_state(
+                if not hub_checkpoint_missing_files(
                     shared_hf_api(), source.checkpoints_hub_repo_id, step_dir
                 ):
                     return None, source.checkpoints_hub_repo_id, step_dir

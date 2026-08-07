@@ -486,7 +486,7 @@ def _submitted_command(config, tmp_path, monkeypatch, job_id: str = "child_run")
 
 def test_cloud_resume_from_a_cloud_parent_publishes_into_the_parents_repo(tmp_path, monkeypatch) -> None:
     """Unchanged behaviour, pinned: a cloud→cloud continuation keeps the whole
-    lineage in one repo."""
+    lineage in one repo (its known cost is MT12's parent/child ambiguity)."""
     config = _request(resume=True, resume_from_hub_repo="user/parent-run", resume_from_hub_step="005000")
     command = _submitted_command(config, tmp_path, monkeypatch)
 
@@ -497,8 +497,8 @@ def test_cloud_resume_from_a_cloud_parent_publishes_into_the_parents_repo(tmp_pa
 def test_cloud_resume_from_an_uploaded_local_checkpoint_gets_its_own_repo(tmp_path, monkeypatch) -> None:
     """F7, local→cloud: the source repo is a private STAGING repo holding the
     local parent's uploaded checkpoint, not an output repo. Publishing into it
-    would put parent and child checkpoints in one tree again, so the run takes
-    its own repo — while still resuming from the staged step."""
+    would put parent and child checkpoints in one tree again (MT12's shape), so
+    the run takes its own repo — while still resuming from the staged step."""
     config = _request(
         resume=True,
         resume_from_hub_repo="alice/src_checkpoints",
