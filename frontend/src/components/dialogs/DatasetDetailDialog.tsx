@@ -80,6 +80,12 @@ export interface DatasetDetailDialogProps {
   finalize?: {
     onFinalize: () => void;
     onDiscarded: () => void;
+    /** True when clicking Finalize will actually attempt the dataset's first
+     * Hub upload (Push to Hub was on at record time and the repo has a
+     * namespace) — the same gate CollectPanel's handleFinalize itself uses.
+     * Drives the button label / review subtitle so Finalize honestly
+     * discloses that it's about to publish, instead of silently doing so. */
+    willUploadToHub: boolean;
   };
 }
 
@@ -652,6 +658,8 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
           {finalize && (
             <p className="pt-1 text-sm text-muted-foreground">
               Review your recording — delete any bad episodes, then finalize.
+              {finalize.willUploadToHub &&
+                " Finalizing will publish this dataset to the Hugging Face Hub."}
             </p>
           )}
         </DialogHeader>
@@ -764,7 +772,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
               {finalize ? (
                 <Button onClick={finalize.onFinalize} className="w-full gap-2">
                   <Check className="h-4 w-4" />
-                  Finalize
+                  {finalize.willUploadToHub
+                    ? "Finalize & Upload to Hub"
+                    : "Finalize"}
                 </Button>
               ) : (
                 <Button onClick={handleTrain} className="w-full gap-2">

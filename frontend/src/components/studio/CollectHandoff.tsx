@@ -32,6 +32,13 @@ const CollectHandoff: React.FC = () => {
   const { openStudio } = useStudio();
 
   const recorded = location.state?.recorded as RecordedInfo | undefined;
+  // Set by CollectPanel's handleFinalize when it just started this repo's
+  // first Hub upload, moments before this navigation landed — see
+  // useDatasetUpload's trustFirstSeed doc comment for why UploadToHubAction
+  // needs to know that.
+  const hubUploadJustStarted = location.state?.hubUploadJustStarted as
+    | string
+    | undefined;
   const [dismissed, setDismissed] = useState(false);
 
   const discardedEmpty = recorded?.discarded_empty ?? false;
@@ -99,7 +106,12 @@ const CollectHandoff: React.FC = () => {
                 <Button size="sm" onClick={trainOnThis}>
                   Train on this dataset
                 </Button>
-                {repoId && <UploadToHubAction repoId={repoId} />}
+                {repoId && (
+                  <UploadToHubAction
+                    repoId={repoId}
+                    trustFirstSeed={hubUploadJustStarted === repoId}
+                  />
+                )}
               </div>
             </>
           )}
@@ -124,11 +136,20 @@ const CollectHandoff: React.FC = () => {
  * The first upload after a recording session now happens via the Finalize
  * step in the post-recording dataset viewer (see CollectPanel); this button
  * is the manual fallback — Push to Hub was off at record time, or the
- * automatic push from Finalize was refused (see its toast). */
-const UploadToHubAction: React.FC<{ repoId: string }> = ({ repoId }) => {
+ * automatic push from Finalize was refused (see its toast).
+ *
+ * `trustFirstSeed` is true when Finalize just started an upload for this
+ * exact repo moments before this component mounted — it lets the hook report
+ * that upload's outcome (toast) even if it already finished by the time this
+ * mounts, instead of discarding a terminal status as stale history. */
+const UploadToHubAction: React.FC<{
+  repoId: string;
+  trustFirstSeed?: boolean;
+}> = ({ repoId, trustFirstSeed }) => {
   const { toast } = useToast();
   const { uploading, start } = useDatasetUpload({
     repoId,
+    trustFirstSeed,
     onDone: (url) => {
       toast({
         title: "Uploaded to Hub",

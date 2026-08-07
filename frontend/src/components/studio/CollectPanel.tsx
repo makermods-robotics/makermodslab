@@ -272,11 +272,20 @@ const CollectPanel: React.FC = () => {
   // used to run immediately on a clean finish. A refused start (409 busy /
   // another upload running) surfaces as a toast; the manual "Upload to Hub"
   // button on the Launchpad banner is the retry path.
+  //
+  // When the upload actually starts, `hubUploadJustStarted` rides along in
+  // router state so CollectHandoff's UploadToHubAction — the only thing that
+  // mounts a fresh useDatasetUpload for this repo afterward — knows to trust
+  // a terminal status on its very first poll instead of discarding it as
+  // stale. Without this, a fast (or already-failed) upload can finish before
+  // that component mounts, and its outcome would otherwise be silently lost
+  // — see useDatasetUpload's trustFirstSeed doc comment.
   const handleFinalize = useCallback(async () => {
     const recorded = pendingFinalize;
     if (!recorded) return;
     setViewOpen(false);
     setPendingFinalize(null);
+    let hubUploadJustStarted: string | undefined;
     if (pushToHub && recorded.repo_id.includes("/")) {
       try {
         const res = await uploadDataset(
@@ -286,7 +295,9 @@ const CollectPanel: React.FC = () => {
           [],
           false,
         );
-        if (!res.started) {
+        if (res.started) {
+          hubUploadJustStarted = recorded.repo_id;
+        } else {
           toast({
             title: "Automatic Hub upload not started",
             description: res.message,
@@ -307,7 +318,7 @@ const CollectPanel: React.FC = () => {
     updateCollectForm({ formOpen: false });
     setLibraryOpen(true);
     closeStudio();
-    navigate("/", { state: { recorded } });
+    navigate("/", { state: { recorded, hubUploadJustStarted } });
   }, [
     pendingFinalize,
     pushToHub,
@@ -480,7 +491,16 @@ const CollectPanel: React.FC = () => {
         onDeleted={refresh}
         finalize={
           pendingFinalize
-            ? { onFinalize: handleFinalize, onDiscarded: handleDiscardFinalize }
+            ? {
+                onFinalize: handleFinalize,
+                onDiscarded: handleDiscardFinalize,
+                // Same gate handleFinalize uses to decide whether it will
+                // actually attempt the upload — reused verbatim so the
+                // dialog's disclosure never drifts out of sync with what
+                // clicking the button really does.
+                willUploadToHub:
+                  pushToHub && pendingFinalize.repo_id.includes("/"),
+              }
             : undefined
         }
       />
