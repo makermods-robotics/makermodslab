@@ -6,6 +6,7 @@ import React, {
 } from "react";
 import {
   Boxes,
+  Check,
   Loader2,
   Pause,
   Play,
@@ -70,6 +71,16 @@ export interface DatasetDetailDialogProps {
    * parent list (LibrarySheet, CollectPanel) can refresh. Not called for a
    * "remove local copy" action that keeps the dataset listed as Hub-only. */
   onDeleted?: () => void;
+  /** Post-recording review mode (set by CollectPanel right after a session
+   * ends). While set: the dialog can't be dismissed by ESC / outside-click /
+   * close button, and its footer shows Finalize instead of Train. onFinalize
+   * fires when the user clicks Finalize. onDiscarded fires (IN ADDITION to
+   * onDeleted, not instead of it) when the whole dataset gets deleted during
+   * review — there's nothing left to finalize. */
+  finalize?: {
+    onFinalize: () => void;
+    onDiscarded: () => void;
+  };
 }
 
 // Best (cols, tileW, tileH) for `n` tiles inside a box of `boxW` x `boxH`:
@@ -482,6 +493,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   onOpenChange,
   onStudioAction,
   onDeleted,
+  finalize,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio } = useStudio();
@@ -558,6 +570,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         setDeleteTarget(null);
         onOpenChange(false);
         onDeleted?.();
+        finalize?.onDiscarded();
         return;
       }
       await deleteEpisode(
@@ -601,6 +614,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       if (resolution.clearsSelection) {
         onOpenChange(false);
         onDeleted?.();
+        finalize?.onDiscarded();
       } else {
         setReloadKey((k) => k + 1);
       }
@@ -623,12 +637,23 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0">
+      <DialogContent
+        hideClose={!!finalize}
+        onEscapeKeyDown={finalize ? (e) => e.preventDefault() : undefined}
+        onPointerDownOutside={finalize ? (e) => e.preventDefault() : undefined}
+        onInteractOutside={finalize ? (e) => e.preventDefault() : undefined}
+        className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0"
+      >
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
           <p className="eyebrow">MakerMods Lab Dataset Viewer</p>
           <DialogTitle className="break-all pt-1 font-mono text-base font-semibold">
             {repoId}
           </DialogTitle>
+          {finalize && (
+            <p className="pt-1 text-sm text-muted-foreground">
+              Review your recording — delete any bad episodes, then finalize.
+            </p>
+          )}
         </DialogHeader>
 
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px]">
@@ -736,10 +761,17 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
             </div>
 
             <div className="p-3">
-              <Button onClick={handleTrain} className="w-full gap-2">
-                <Boxes className="h-4 w-4" />
-                Train a skill from this
-              </Button>
+              {finalize ? (
+                <Button onClick={finalize.onFinalize} className="w-full gap-2">
+                  <Check className="h-4 w-4" />
+                  Finalize
+                </Button>
+              ) : (
+                <Button onClick={handleTrain} className="w-full gap-2">
+                  <Boxes className="h-4 w-4" />
+                  Train a skill from this
+                </Button>
+              )}
             </div>
           </div>
         </div>
