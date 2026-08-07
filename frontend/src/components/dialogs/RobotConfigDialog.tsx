@@ -16,7 +16,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -47,8 +46,6 @@ import {
   Plus,
   Square,
   Circle,
-  Camera,
-  ShieldQuestion,
   Hand,
   RefreshCw,
   Wand2,
@@ -453,18 +450,6 @@ const RobotConfigWindow = ({
   const [portsScanned, setPortsScanned] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const releaseStreamsRef = useRef<(() => void) | null>(null);
-  // Off by default so merely opening the settings window never grabs a camera.
-  // The user explicitly starts a scan, which is when cameras are turned on,
-  // enumerated, and the browser permission prompt is requested.
-  const [camerasActive, setCamerasActive] = useState(false);
-
-  const handleCamerasActiveChange = (active: boolean) => {
-    if (!active) {
-      releaseStreamsRef.current?.();
-    }
-    setCamerasActive(active);
-  };
-
   useEffect(() => {
     return () => {
       releaseStreamsRef.current?.();
@@ -2448,56 +2433,18 @@ const RobotConfigWindow = ({
             </section>
           )}
 
-          {/* 03 · Cameras */}
+          {/* 03 · Cameras — always live: opening robot config scans and
+              previews immediately (dialog close/unmount releases the streams).
+              The former on/off toggle was an extra click on every visit for
+              edge cases (freeing a camera for another app, camera-less
+              visits) that don't outweigh it. */}
           <section className="space-y-4 py-5">
-            <div className="flex items-center gap-2">
-              <PanelHeader step="03" title="Attached cameras" />
-              <div className="ml-auto flex items-center gap-2">
-                <Label
-                  htmlFor="cameras-toggle"
-                  className="cursor-pointer text-sm text-muted-foreground"
-                >
-                  {camerasActive ? "On" : "Off"}
-                </Label>
-                <Switch
-                  id="cameras-toggle"
-                  checked={camerasActive}
-                  onCheckedChange={handleCamerasActiveChange}
-                  aria-label="Turn cameras on or off"
-                />
-              </div>
-            </div>
-            {camerasActive ? (
-              <CameraConfiguration
-                cameras={cameras}
-                onCamerasChange={handleCamerasChange}
-                releaseStreamsRef={releaseStreamsRef}
-              />
-            ) : (
-              <div className="space-y-3 rounded-md border border-border bg-muted/30 p-6 text-center">
-                <Camera className="mx-auto h-10 w-10 text-muted-foreground" />
-                <div className="space-y-1">
-                  <p className="font-medium text-foreground">Cameras are off</p>
-                  <p className="mx-auto max-w-md text-sm text-muted-foreground">
-                    Turn cameras on to scan for connected devices and preview
-                    them. The browser may briefly open a camera to read device
-                    labels, and configured cameras stay active while previews
-                    are visible; your browser will ask for camera permission.
-                    Nothing is recorded.
-                  </p>
-                  {cameras.length > 0 && (
-                    <p className="pt-1 text-xs text-muted-foreground">
-                      {cameras.length} camera
-                      {cameras.length === 1 ? "" : "s"} saved to this robot.
-                    </p>
-                  )}
-                </div>
-                <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-                  <ShieldQuestion className="h-3.5 w-3.5" />
-                  You'll be asked to grant camera access.
-                </p>
-              </div>
-            )}
+            <PanelHeader step="03" title="Attached cameras" />
+            <CameraConfiguration
+              cameras={cameras}
+              onCamerasChange={handleCamerasChange}
+              releaseStreamsRef={releaseStreamsRef}
+            />
           </section>
         </div>
 
