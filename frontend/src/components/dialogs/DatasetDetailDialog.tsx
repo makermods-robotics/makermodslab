@@ -560,7 +560,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         onDeleted?.();
         return;
       }
-      const result = await deleteEpisode(
+      await deleteEpisode(
         baseUrl,
         fetchWithHeaders,
         repoId,
@@ -572,24 +572,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       // contiguous from 0 (old episode 2 of [0,1,2] becomes episode 1 of
       // [0,1]), so carrying forward the OLD episode_index values on the
       // remaining rows would show one episode's data under another's label.
-      // This also remounts DatasetInfoCard (its key includes reloadKey),
-      // which both re-reads the now-stale episode/frame counts AND — for the
-      // Hub-resync case below — re-attaches useDatasetUpload to the
-      // just-started background push so its "Uploading…" state and
-      // onDone/onError toasts actually fire.
+      // This also remounts DatasetInfoCard (its key includes reloadKey), so
+      // it re-reads the now-stale episode/frame counts.
       setReloadKey((k) => k + 1);
-      if (result.hub_sync === "started") {
-        toast({
-          title: "Episode deleted",
-          description: "Syncing the Hub copy…",
-        });
-      } else if (result.hub_sync === "skipped") {
-        toast({
-          title: "Hub sync skipped",
-          description: result.hub_sync_message ?? "Use Upload to Hub to sync manually.",
-          variant: "destructive",
-        });
-      }
     } catch (err) {
       setDeleteError(
         err instanceof ApiError ? (err.detail ?? err.message) : "Something went wrong",
@@ -797,8 +782,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                     {deleteHubStatus?.status === "on_hub" && (
                       <>
                         {" "}
-                        This dataset is on the Hugging Face Hub — the Hub copy
-                        will be updated to match.
+                        This dataset is on the Hugging Face Hub — the Hub
+                        copy will NOT be updated. Use "Upload to Hub" to push
+                        the edited version.
                       </>
                     )}
                   </>
