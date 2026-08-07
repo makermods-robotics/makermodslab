@@ -200,6 +200,22 @@ class TrainingRequest(BaseModel):
     # resume source is a cloud run; never set for local runs.
     resume_from_hub_repo: str | None = None
     resume_from_hub_step: str | None = None
+    # Cross-runner resume, local parent → cloud target (F7). The parent's
+    # checkpoint is on THIS machine, so it has to be uploaded to the Hub before
+    # a pod can read it. That upload is a deliberate act, not a side effect of
+    # clicking Continue: the client must say yes here, and the registry refuses
+    # the launch otherwise (naming the control that grants it). Ignored on every
+    # other path — nothing is uploaded when the checkpoint is already on the Hub,
+    # including a re-resume of a step a previous continuation already pushed.
+    upload_resume_checkpoint: bool = False
+    # Set by the registry (never by a client) when `resume_from_hub_repo` is the
+    # staging repo above rather than a cloud parent's own output repo. It tells
+    # the cloud runner not to adopt the source repo as this run's OUTPUT repo:
+    # a cloud→cloud continuation shares its parent's repo on purpose (one
+    # lineage, one place), but a local→cloud one must not publish into a staging
+    # repo that exists only to carry the parent's bytes. Defaults False so
+    # configs persisted before F7 — all of them cloud→cloud — keep their meaning.
+    resume_from_uploaded_checkpoint: bool = False
 
     # Weights & Biases
     wandb_enable: bool = False

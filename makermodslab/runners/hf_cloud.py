@@ -206,6 +206,19 @@ def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
             "source checkpoint's train_config.json lives on this machine, not in "
             "the container. Resume a cloud run from its Hub output instead."
         )
+    # MT42, stated as an invariant rather than a hope: a cloud run that CALLS
+    # itself a resume must name the Hub checkpoint it continues from. Without
+    # one, build_training_command falls through to its fresh-run branch and the
+    # pod starts a brand-new run at step 0 while every UI surface reports a
+    # continuation. Refuse instead — the registry only reaches this point after
+    # the checkpoint is confirmed on the Hub (its own resume resolvers), so this
+    # can only fire for a request that bypassed them.
+    if config.resume and not config.resume_from_hub_repo:
+        raise ValueError(
+            "This cloud run is marked as a continuation but names no Hub checkpoint "
+            "to continue from, so it would silently start over at step 0. Resume "
+            "from a run's checkpoint via Continue rather than setting resume by hand."
+        )
     # A fine-tune base is allowed to be a HUB ref — either a bare repo id (whose
     # root lerobot resolves itself) or the step-suffixed 'repo@checkpoints/<step>'
     # form, which the wrapper materializes pod-side before launching the trainer
@@ -683,12 +696,24 @@ class HfCloudJobRunner:
         # The mutated config is what gets persisted in JobRecord.config, so
         # the historical record reflects what actually ran.
         config.policy_push_to_hub = True
-        # Resume continues the SAME output repo as the parent run so the whole
-        # lineage lives in one place; a fresh run gets its own repo named after
-        # its unique job id slug (e.g. "act_dataset_2026-05-04_10-22-03").
+        # A fresh run gets its own repo named after its unique job id slug (e.g.
+        # "act_dataset_2026-05-04_10-22-03"); a continuation picks between that
+        # and the parent's repo — see the branch below.
         resume_directive: str | None = None
         if config.resume and config.resume_from_hub_repo:
-            config.policy_repo_id = config.resume_from_hub_repo
+            # Where this run PUBLISHES is not always where it resumes FROM. A
+            # cloud→cloud continuation keeps the parent's output repo so the
+            # lineage lives in one place. A local→cloud one (F7) resumes from a
+            # private staging repo that exists only to carry the local parent's
+            # uploaded checkpoint, so it publishes to its own repo instead —
+            # otherwise the staging repo would accumulate the child's
+            # checkpoints too and parent and child would again be
+            # indistinguishable inside one tree.
+            config.policy_repo_id = (
+                f"{username}/{job_id}"
+                if config.resume_from_uploaded_checkpoint
+                else config.resume_from_hub_repo
+            )
             step_dir = config.resume_from_hub_step or "last"
             # The wrapper downloads checkpoints/<step_dir>/ into this exact path;
             # lerobot's resume reads config_path.parent.parent as the checkpoint

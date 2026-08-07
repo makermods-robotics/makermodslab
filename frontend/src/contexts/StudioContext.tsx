@@ -5,7 +5,6 @@ import React, {
   useMemo,
   useState,
 } from "react";
-import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
 export type StudioPanel = "collect" | "train" | "deploy";
 
@@ -24,11 +23,11 @@ export interface CollectFormState {
    * session ends (via the background UploadManager, not the recorder's
    * blocking in-session push). Consumed by CollectHandoff. */
   pushToHub: boolean;
-  cameras: CameraConfig[];
-  /** Robot name the cameras were last seeded from (null = seeded with no
-   * robot; undefined = never seeded). Kept here so a panel remount doesn't
-   * re-seed and clobber the user's camera edits. */
-  camerasSeededFor: string | null | undefined;
+  // Cameras are deliberately NOT part of this draft. A session records the
+  // selected robot's cameras, resolved server-side from the robot record, so a
+  // session-local editable copy could only diverge from what actually runs —
+  // its edits were never written back and never sent. The Collect panel now
+  // shows the record's cameras read-only; they're edited in Robot settings.
 }
 
 const DEFAULT_COLLECT_FORM: CollectFormState = {
@@ -40,8 +39,6 @@ const DEFAULT_COLLECT_FORM: CollectFormState = {
   resetTimeS: 15,
   streamingEncoding: true,
   pushToHub: true,
-  cameras: [],
-  camerasSeededFor: undefined,
 };
 
 /** Pre-fills the Deploy panel when a skill card / job row says "Run on robot".

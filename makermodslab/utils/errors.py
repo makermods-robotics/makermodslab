@@ -96,6 +96,29 @@ def friendly_hint(error_text: str | None) -> str | None:
             "A follower motor isn't responding (often the gripper, id 6). If a skill was holding an object "
             "it likely overloaded — remove it, power-cycle the arm, then try teleoperation first."
         )
+    # Servo bus comms: lerobot's motors_bus raises these as ConnectionError with
+    # a "Failed to <read|write|sync read|sync write> ... [TxRxResult] ..." body
+    # when a servo doesn't answer or answers with a corrupt packet (arm powered
+    # down mid-session, a loose daisy-chain link, a half-seated cable). Keyed on
+    # the bus-specific phrasing, and placed before the Hub branches because the
+    # exception TYPE name is the same "ConnectionError" a download failure has.
+    # `in_download_step` is rollout's own prefix for anything raised inside the
+    # model fetch — the arm has not been touched yet, so the generic
+    # read/write wording below cannot be about a servo there.
+    in_download_step = "failed to download the model" in low
+    if not in_download_step and (
+        "txrxresult" in low
+        or "incorrect status packet" in low
+        or "failed to sync read" in low
+        or "failed to sync write" in low
+        or "failed to write" in low
+        or "failed to read" in low
+    ):
+        return (
+            "A motor stopped answering on the servo bus — usually the arm lost power, or a servo "
+            "cable/daisy-chain link is loose. Power-cycle the arm, re-seat the cables, then try "
+            "teleoperation before inference."
+        )
     # Hub model-download failures (snapshot_download, before the arm is ever
     # touched). Keyed on hub-specific tokens so a network/404/disk error while
     # fetching a checkpoint isn't mistaken for an arm-connection problem below.
@@ -109,7 +132,12 @@ def friendly_hint(error_text: str | None) -> str | None:
         or ("404" in low and ("huggingface" in low or "hf.co" in low or "repo" in low))
     ):
         return "Couldn't find the model on the Hub — check the repo id, and that you have access if it's private or gated."
-    if ("huggingface.co" in low or "hf.co" in low or "max retries" in low or "connectionerror" in low) and (
+    # The trigger tokens must be HUB-specific. A bare "connectionerror" is not:
+    # lerobot's motors bus raises ConnectionError for every serial failure, and
+    # the type name itself contains "connect", so keying on it labelled arm-side
+    # startup crashes "couldn't download the model". `in_download_step` (rollout's
+    # own prefix) is the one marker that says the failure really was the fetch.
+    if ("huggingface.co" in low or "hf.co" in low or "max retries" in low or in_download_step) and (
         "connect" in low or "reach" in low or "retries" in low or "timed out" in low or "timeout" in low
     ):
         return "Couldn't download the model — check your internet connection, then confirm the repo id."

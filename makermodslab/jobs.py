@@ -43,7 +43,7 @@ from tqdm.auto import tqdm as _base_tqdm
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
-from .utils.hf_auth import shared_hf_api
+from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
 from .utils.naming import (
     dedupe_display_names,
     derive_imported_title,
@@ -108,6 +108,16 @@ class JobRecord(BaseModel):
     # Number of checkpoints currently visible (local: filesystem; cloud:
     # Hub repo). Filled in by JobRegistry.list/get; persisted as zero.
     checkpoint_count: int = 0
+    # Where THIS run's on-disk checkpoints were uploaded so a cloud
+    # continuation could read them (local runner only; F7's local→cloud
+    # direction). Distinct from `hf_repo_id`, which is a cloud run's own output
+    # repo: this one is a staging repo MakerMods Lab creates, private, holding
+    # only the steps listed below. Recorded on the PARENT record so a second
+    # cross-runner resume of the same step re-uses the upload instead of
+    # pushing the same GBs again.
+    checkpoints_hub_repo_id: str | None = None
+    # Step dirs known to be present under checkpoints/ in that repo.
+    checkpoints_hub_steps: list[str] = []
 
 
 class JobCheckpoint(BaseModel):
@@ -287,9 +297,7 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
-def parse_metrics_into(
-    line: str, metrics: TrainingMetrics, resume_total: int | None = None
-) -> None:
+def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | None = None) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
@@ -420,9 +428,7 @@ def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
     return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
-def _read_log_metrics(
-    path: Path, resume_total: int | None
-) -> builtins.list[MetricsHistoryPoint]:
+def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
     Feed every line through ONE accumulator rather than a fresh one per line.
@@ -742,9 +748,7 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(
-                            log_line.message, self._metrics, self._resume_total
-                        )
+                        parse_metrics_into(log_line.message, self._metrics, self._resume_total)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -963,22 +967,59 @@ def missing_checkpoint_files(names):
 _INCOMPLETE_REMEDY = "Resume an earlier checkpoint, or fine-tune from its weights instead."
 
 
+# A Hub checkpoint's training_state/ is what makes it resumable (optimizer +
+# step). The cloud wrapper uploads the whole checkpoints/<step>/ entry, so both
+# subtrees land in the repo; this file is the cheapest existence probe.
+_HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
+
+
 # Plain-language names for the runner ids, so a user-facing refusal reads like
 # the Compute control the user actually clicked rather than an internal literal.
 _RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
 
 
-def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
-    """Return (repo_id, step_dir) identifying the Hub checkpoint a cloud run
-    should resume from (`step` = None ⇒ the latest available on the Hub).
+def hub_checkpoint_has_training_state(api, repo_id: str, step_dir: str) -> bool:
+    """Is checkpoints/<step_dir>/ on `repo_id` resumable — i.e. did its
+    training_state/ (optimizer + step counter) reach the Hub?
 
-    The cloud container downloads checkpoints/<step_dir>/ (both pretrained_model/
-    and training_state/) from `repo_id` and hands lerobot the reconstructed
-    output-dir layout, so resume restores the optimizer and step counter — true
-    resume, not a weights-only re-init.
+    Reads the repo's file listing (no bytes), so an unresumable checkpoint can
+    be refused before anything is downloaded or a GPU is rented.
+    `_HUB_TRAINING_STATE_FILE` is the cheapest existence probe for that subtree,
+    the same one the cloud runner's uploader uses.
+
+    Shared by every consumer of a Hub checkpoint's completeness so they agree:
+    the cloud→cloud resolver, the cloud→local resolver, and the re-use check
+    that decides whether a local checkpoint still sits on the Hub from an
+    earlier local→cloud resume.
+
+    Raises ValueError when the listing itself can't be read — an unverifiable
+    checkpoint is refused rather than assumed good (that assumption is MT4's
+    failure mode: the run dies inside the trainer instead of at the form).
+    """
+    try:
+        files = set(api.list_repo_files(repo_id, repo_type="model"))
+    except Exception as exc:
+        raise ValueError(
+            f"Could not read {repo_id!r} to verify its checkpoint at step {step_dir}: {exc}"
+        ) from exc
+    return f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" in files
+
+
+def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
+    """Return (repo_id, step_dir) identifying the Hub checkpoint a run continuing
+    a CLOUD parent resumes from (`step` = None ⇒ the latest available on the Hub).
+
+    Whoever runs the trainer downloads checkpoints/<step_dir>/ (both
+    pretrained_model/ and training_state/) from `repo_id` and hands lerobot the
+    reconstructed output-dir layout, so resume restores the optimizer and step
+    counter — true resume, not a weights-only re-init. That download happens
+    pod-side for a cloud→cloud continuation (the HF Jobs wrapper) and host-side
+    for a cloud→local one (download_hub_resume_checkpoint); this resolver only
+    NAMES the checkpoint, identically for both, which is why the cross-runner
+    direction needs no second resolver.
 
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
-    can't be resumed on the cloud: not a cloud run, no output repo, no
+    can't be resumed from the Hub: not a cloud run, no output repo, no
     checkpoints at all (the run died before its first save), an unknown step, or
     a checkpoint that is only partly on the Hub (missing weights or any of the
     training_state/ files — see missing_checkpoint_files).
@@ -1025,8 +1066,16 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
 
 
 def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
-    """Return the train_config.json path lerobot needs to resume `source` from
-    `step` (or its latest checkpoint if step is None).
+    """Return the train_config.json path lerobot needs to resume a LOCAL
+    `source` from `step` (or its latest checkpoint if step is None).
+
+    The path names a real directory on this machine, so it is what a local
+    continuation passes as --config_path. A CLOUD continuation of the same
+    local parent uses it differently: `<path>.parent.parent` is the
+    checkpoints/<step>/ directory whose bytes get uploaded to the Hub (see
+    JobRegistry._resolve_upload_resume), because the pod cannot see this disk.
+    Either way the validation below is the gate, which is why both directions
+    come through here.
 
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
     can't be resumed: not a local run, no checkpoints, unknown step, a
@@ -1035,9 +1084,16 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     save.
     """
     if source.runner != "local":
+        # Not a claim about lerobot — the pin resumes from a Hub repo id just
+        # fine (TrainPipelineConfig._resolve_resume_checkpoint downloads the
+        # LATEST checkpoint of `--config_path=<repo id>`). It's a claim about
+        # THIS function: a cloud parent's checkpoints are on the Hub, so it is
+        # _resolve_cloud_resume that names them, and the chosen step is
+        # materialized explicitly rather than left to lerobot's latest-only
+        # rule (which would silently ignore the step the user picked).
         raise ValueError(
-            "Only local training runs can be resumed — lerobot doesn't support "
-            "resuming from the Hub."
+            "This resume path is for local runs; a cloud run's checkpoints live "
+            "on the Hub and are resolved from there instead."
         )
     checkpoints = _list_local_checkpoints(source.output_dir)
     if not checkpoints:
@@ -1055,8 +1111,7 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     training_state = checkpoint_dir / "training_state"
     if not train_config.is_file():
         raise ValueError(
-            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, "
-            "so it can't be resumed."
+            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, so it can't be resumed."
         )
     # No training_state/ at all is the weights-only shape (an imported model),
     # which deserves its own wording; a training_state/ that exists but is
@@ -1115,9 +1170,7 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
         checkpoints = _list_hub_checkpoints(shared_hf_api(), source.hf_repo_id)
 
     if not checkpoints:
-        raise ValueError(
-            f"Source {source.id!r} has no usable checkpoint to fine-tune from."
-        )
+        raise ValueError(f"Source {source.id!r} has no usable checkpoint to fine-tune from.")
     if step is None:
         chosen = checkpoints[-1]  # step-sorted; take the latest
     else:
@@ -1468,7 +1521,7 @@ class _DownloadProgressLogger:
             self._emit(message)
 
 
-def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
+def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None, with_training_state: bool = False) -> str:
     """Download the model a hub checkpoint ref names; return its local dir.
 
     THE resolution rule for a hub ref, shared by every consumer so a ref means
@@ -1483,6 +1536,13 @@ def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
       * 'repo@root' → the whole repo IS the pretrained_model; ``checkpoints/**``
         and ``training_state/**`` are excluded because neither is needed to load
         the policy and both can be multi-GB.
+
+    ``with_training_state`` widens the step-ref case to the WHOLE
+    checkpoints/<step_dir>/ tree — the optimizer/rng/step state a RESUME needs
+    and a deploy or fine-tune never reads (hundreds of MB per step, so it stays
+    opt-in). The return value is unchanged (still the ``pretrained_model/``
+    dir); its parent is then the reconstructed checkpoint dir. See
+    download_hub_resume_checkpoint, the only caller that wants it.
 
     ``tqdm_class`` is forwarded to snapshot_download for byte-progress reporting
     (the inference page's download bar). This function itself has no session or
@@ -1504,10 +1564,11 @@ def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
     m = _HUB_CKPT_REF_RE.match(ref)
     if m:
         repo_id, step_dir = m.group("repo"), m.group("step_dir")
+        subtree = "" if with_training_state else f"/{_HUB_CKPT_SUBDIR}"
         local_root = snapshot_download(
             repo_id=repo_id,
             repo_type="model",
-            allow_patterns=[f"checkpoints/{step_dir}/{_HUB_CKPT_SUBDIR}/*"],
+            allow_patterns=[f"checkpoints/{step_dir}{subtree}/*"],
             **dl_kwargs,
         )
         return str(Path(local_root) / "checkpoints" / step_dir / _HUB_CKPT_SUBDIR)
@@ -1520,6 +1581,97 @@ def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
             **dl_kwargs,
         )
     raise ValueError(f"Unrecognised policy ref: {ref!r}")
+
+
+def download_hub_resume_checkpoint(ref: str, *, tqdm_class=None) -> str:
+    """Materialize a Hub checkpoint HERE so a local trainer can resume from it,
+    and return the --config_path lerobot wants (its train_config.json).
+
+    The host-side port of the HF Jobs wrapper's resume block (F7, cloud→local):
+    pull checkpoints/<step_dir>/ whole — pretrained_model/ AND training_state/ —
+    so lerobot finds the optimizer, scheduler, rng and step counter where its own
+    resume path looks for them. lerobot reads `config_path.parent.parent` as the
+    checkpoint dir, which the snapshot's own layout already satisfies, so unlike
+    the wrapper this does NOT copy the tree into the run's output dir:
+
+      * the trainer only READS the resumed checkpoint (lerobot_train's
+        load_training_state; update_last_checkpoint runs on the checkpoints it
+        WRITES, under --output_dir), so a shared-cache path is enough;
+      * the weights half then stays in the shared HF cache where a later deploy
+        of the same checkpoint reuses it instead of pulling it again;
+      * and the child's own checkpoints/ tree stays free of a step it did not
+        produce.
+
+    Refuses (ValueError → the job's error_message) a checkpoint that arrives
+    incomplete, rather than letting the trainer die on a missing training_state/
+    halfway through startup — MT4's failure mode. The Hub listing is checked
+    before this runs (hub_checkpoint_has_training_state); this second check is on
+    the bytes that actually landed.
+
+    Downloads GBs: never call it while holding a lock others need.
+    """
+    pretrained_dir = Path(download_hub_checkpoint_ref(ref, tqdm_class=tqdm_class, with_training_state=True))
+    checkpoint_dir = pretrained_dir.parent
+    train_config = pretrained_dir / _TRAIN_CONFIG_NAME
+    missing = [
+        name
+        for name, path in (
+            (_TRAIN_CONFIG_NAME, train_config),
+            (_HUB_TRAINING_STATE_FILE, checkpoint_dir / _HUB_TRAINING_STATE_FILE),
+        )
+        if not path.is_file()
+    ]
+    if missing:
+        raise ValueError(
+            f"The downloaded checkpoint {hub_ref_step_label(ref)} from "
+            f"{hub_ref_repo_id(ref)} is incomplete — missing {', '.join(missing)}. "
+            "Resume an earlier checkpoint, or fine-tune from its weights instead."
+        )
+    return str(train_config)
+
+
+def upload_local_checkpoint(checkpoint_dir: Path, repo_id: str, step_dir: str, *, api=None) -> None:
+    """Push one local checkpoints/<step_dir>/ tree to `repo_id` on the Hub.
+
+    F7's local→cloud direction: a pod cannot see this machine's disk, so the
+    parent's checkpoint has to exist on the Hub before the continuation is
+    submitted. The whole tree goes up (pretrained_model/ AND training_state/) —
+    a resume without the optimizer state is a fine-tune wearing a resume label.
+
+    PRIVATE at creation, deliberately and unlike the dataset uploader: this is a
+    by-product of clicking Continue, not a model the user chose to publish, and
+    `exist_ok` never downgrades an existing repo's visibility. The caller is
+    responsible for having asked first (see JobRegistry's consent gate) — this
+    function only moves the bytes.
+
+    Laid out to match what _list_hub_checkpoints/_resolve_cloud_resume expect to
+    find, so the uploaded step reads back as an ordinary Hub checkpoint.
+    """
+    api = api or shared_hf_api()
+    api.create_repo(repo_id=repo_id, repo_type="model", private=True, exist_ok=True)
+    api.upload_folder(
+        repo_id=repo_id,
+        repo_type="model",
+        folder_path=str(checkpoint_dir),
+        path_in_repo=f"checkpoints/{step_dir}",
+        commit_message=f"checkpoint {step_dir} (uploaded for a cloud continuation)",
+    )
+
+
+def checkpoints_staging_repo_id(username: str, job_id: str) -> str:
+    """The Hub repo a LOCAL run's checkpoints are staged in for a cloud resume.
+
+    Follows hf_cloud's own minting convention for a run's repo
+    (`f"{username}/{job_id}"`) plus a `_checkpoints` suffix, which keeps two
+    things true that matter:
+
+      * it can never collide with the output repo of a cloud run of the same
+        name, so a staging upload can't land in a repo full of someone else's
+        lineage; and
+      * the continuation it feeds pushes to its OWN output repo rather than back
+        into this one, so parent and child checkpoints stay distinguishable.
+    """
+    return f"{username}/{job_id}_checkpoints"
 
 
 def needs_local_materialization(pretrained_path: str) -> bool:
@@ -1540,7 +1692,7 @@ def hub_ref_step_label(ref: str) -> str:
 
 
 def hub_ref_repo_id(ref: str) -> str:
-    """The repo half of a hub ref, for log lines. The whole ref if unparseable."""
+    """The repo half of a hub ref, for log lines. The whole ref if unparsable."""
     m = _HUB_CKPT_REF_RE.match(ref) or _HUB_ROOT_REF_RE.match(ref)
     return m.group("repo") if m else ref
 
@@ -2317,9 +2469,7 @@ class JobRegistry:
             with self._lock:
                 source = self._records.get(config.finetune_from_job_id)
             if source is None:
-                raise ValueError(
-                    f"Fine-tune source {config.finetune_from_job_id!r} not found."
-                )
+                raise ValueError(f"Fine-tune source {config.finetune_from_job_id!r} not found.")
             # The requested policy type must be the source checkpoint's own
             # architecture — lerobot loads the weights non-strictly, so a
             # mismatch trains a fresh `policy_type` policy that only *looks*
@@ -2330,7 +2480,17 @@ class JobRegistry:
                 source, config.finetune_from_step
             )
 
+        # The three things that can still have to MOVE before a trainer starts,
+        # each resolved (and refused) synchronously below but carried out in the
+        # preparing thread because each is potentially GBs over the network:
+        #   * a local fine-tune's base checkpoint, downloaded here;
+        #   * a cloud parent's checkpoint, downloaded here for a local resume;
+        #   * a local parent's checkpoint, uploaded to the Hub for a cloud one.
+        # At most one is ever set: fine-tune and resume are mutually exclusive
+        # (refused above), and a resume moves bytes in one direction only.
         deferred_hub_ref: str | None = None
+        deferred_resume_ref: str | None = None
+        deferred_resume_upload: tuple[Path, str, str] | None = None
         if config.policy_pretrained_path and not config.resume:
             # Deliberately BEFORE the materialization: this reads only the
             # checkpoint's config.json (a few KB), so a contradicting pair is
@@ -2340,12 +2500,8 @@ class JobRegistry:
             # loads the weights non-strictly, so a checkpoint whose robot or
             # camera set contradicts the selected dataset would otherwise train
             # silently wrong (MT44).
-            _check_pretrained_feature_space(
-                config.policy_pretrained_path, config.dataset_repo_id
-            )
-            if target.runner == "local" and needs_local_materialization(
-                config.policy_pretrained_path
-            ):
+            _check_pretrained_feature_space(config.policy_pretrained_path, config.dataset_repo_id)
+            if target.runner == "local" and needs_local_materialization(config.policy_pretrained_path):
                 # A step-suffixed hub ref becomes the real directory the local
                 # trainer loads — but off-request, in _materialize_then_start,
                 # which rewrites policy_pretrained_path once the bytes are here.
@@ -2381,9 +2537,7 @@ class JobRegistry:
                 if config.resume_from_job_id:
                     source = self._records.get(config.resume_from_job_id)
                     if source is None:
-                        raise ValueError(
-                            f"Resume source {config.resume_from_job_id!r} not found."
-                        )
+                        raise ValueError(f"Resume source {config.resume_from_job_id!r} not found.")
                     # A completed run is not resumable — on ANY runner, and
                     # regardless of how the request got here (the UI hides the
                     # button; this catches a direct API call).
@@ -2405,41 +2559,69 @@ class JobRegistry:
                             "continuation would train at the schedule's floor. Fine-tune from "
                             "its final checkpoint instead."
                         )
-                    # A resume continues on the PARENT'S runner, full stop.
-                    # Neither cross direction works today (F7): cloud→local
-                    # points --config_path at a host directory that only ever
-                    # existed inside the pod, so the run dies at startup; and
-                    # local→cloud is worse — the pod has no access to the host
-                    # checkpoint, so it silently restarts from step 0 while the
-                    # record calls itself a resume. The form pins the Compute
-                    # control on a resume; this is the defense-in-depth half,
-                    # for a direct API call that flips it anyway.
+                    # A resume may continue on EITHER runner (F7). What changes
+                    # across the four combinations is only where the parent's
+                    # checkpoint has to end up before the trainer can read it —
+                    # the pod cannot see this disk, and this disk does not have
+                    # the pod's. Each branch below either points the trainer at
+                    # bytes that already exist where it runs, or records the one
+                    # move that has to happen first. What NEVER happens is a
+                    # launch that couldn't find the checkpoint: every branch
+                    # refuses (or fails the job) instead, because a resume that
+                    # quietly starts at step 0 while the record calls itself a
+                    # continuation is MT42, the worst outcome available here.
                     #
                     # Only local/hf_cloud parents reach here: an imported record
                     # is created with state="done", so the refusal above already
                     # took it (imported models are fine-tune sources, never
                     # resume sources).
-                    if source.runner != target.runner:
-                        raise ValueError(
-                            "Cross-runner resume isn't supported yet — this run continues on "
-                            f"{_RUNNER_LABELS.get(source.runner, source.runner)}. (F7)"
-                        )
                     if source.runner == "hf_cloud":
-                        # An HF Job is immutable once ended: resuming a cloud run
-                        # launches a NEW cloud job that continues from the parent's
-                        # Hub checkpoint. Record the source repo + step dir; the
-                        # HfCloudJobRunner turns them into an in-container download
-                        # + reconstruct + --config_path. The dataset-on-Hub guard
-                        # (target.runner == hf_cloud above) still applies, so a
-                        # run whose dataset vanished fails the same way a fresh
-                        # cloud run would.
+                        # The parent's checkpoints are on the Hub. Naming the
+                        # chosen one is the same job for both targets, and
+                        # _resolve_cloud_resume refuses an incomplete or absent
+                        # one here — synchronously, as a 400, before any record
+                        # or GPU exists.
                         repo_id, step_dir = _resolve_cloud_resume(source, config.resume_from_step)
-                        config.resume_from_hub_repo = repo_id
-                        config.resume_from_hub_step = step_dir
+                        if target.runner == "hf_cloud":
+                            # An HF Job is immutable once ended: resuming a cloud
+                            # run launches a NEW cloud job that continues from the
+                            # parent's Hub checkpoint. The HfCloudJobRunner turns
+                            # these two into an in-container download +
+                            # reconstruct + --config_path. The dataset-on-Hub
+                            # guard (target.runner == hf_cloud above) still
+                            # applies, so a run whose dataset vanished fails the
+                            # same way a fresh cloud run would.
+                            config.resume_from_hub_repo = repo_id
+                            config.resume_from_hub_step = step_dir
+                        else:
+                            # cloud → Local: the same download the wrapper does
+                            # pod-side, done here instead — but off-request (GBs),
+                            # so config_path is filled in by the preparing thread.
+                            # `resume_from_step` is pinned to the resolved step so
+                            # the record's progress is rebased from the inherited
+                            # step immediately, rather than reading 0 until the
+                            # download finishes and the first tqdm frame lands
+                            # (see _initial_metrics / _resume_start_step).
+                            deferred_resume_ref = f"{repo_id}@checkpoints/{step_dir}"
+                            config.resume_from_step = int(step_dir)
+                    elif target.runner == "local":
+                        config.config_path = _resolve_resume_config_path(source, config.resume_from_step)
                     else:
-                        config.config_path = _resolve_resume_config_path(
-                            source, config.resume_from_step
-                        )
+                        # local → Cloud: the parent's checkpoint exists only on
+                        # this machine, so it must reach the Hub before the pod
+                        # starts. Resolve + validate it here (the same gate a
+                        # local→local resume passes), then either reuse an
+                        # upload a previous continuation already made or defer a
+                        # fresh, consented one.
+                        (
+                            deferred_resume_upload,
+                            hub_repo,
+                            hub_step,
+                        ) = self._resolve_upload_resume(source, config)
+                        config.resume_from_hub_repo = hub_repo
+                        config.resume_from_hub_step = hub_step
+                        config.resume_from_uploaded_checkpoint = True
+                        config.resume_from_step = int(hub_step)
                 elif not config.config_path:
                     raise ValueError(
                         "Resume is on but no source checkpoint was selected. Use "
@@ -2476,13 +2658,17 @@ class JobRegistry:
 
             log_path = _job_log_path(self._output_root, job_id)
 
-            if deferred_hub_ref is not None:
-                # The base checkpoint still has to be downloaded (GBs, minutes).
-                # Hand the caller its job id NOW — the record exists, is
-                # "running", and has a log file — and do the download in a
-                # thread, which then starts the real trainer. The monitor opens
-                # immediately and tails the download instead of the request
-                # hanging with nothing on screen.
+            deferred = (
+                deferred_hub_ref is not None
+                or deferred_resume_ref is not None
+                or deferred_resume_upload is not None
+            )
+            if deferred:
+                # Something still has to move (GBs, minutes). Hand the caller its
+                # job id NOW — the record exists, is "running", and has a log
+                # file — and do the transfer in a thread, which then starts the
+                # real trainer. The monitor opens immediately and tails the
+                # transfer instead of the request hanging with nothing on screen.
                 #
                 # No new JobState for this window: the job is "running" from the
                 # user's point of view (they asked for a run and one is being
@@ -2493,14 +2679,33 @@ class JobRegistry:
                 # and Stop find a runner from the first request onwards.
                 prep = PreparingJobRunner(log_file_path=log_path)
                 self._runners[job_id] = prep
-                prep.emit(
-                    f"Preparing fine-tune: downloading base checkpoint "
-                    f"{hub_ref_step_label(deferred_hub_ref)} from "
-                    f"{hub_ref_repo_id(deferred_hub_ref)}…"
-                )
+                if deferred_hub_ref is not None:
+                    prep.emit(
+                        f"Preparing fine-tune: downloading base checkpoint "
+                        f"{hub_ref_step_label(deferred_hub_ref)} from "
+                        f"{hub_ref_repo_id(deferred_hub_ref)}…"
+                    )
+                    thread_target: Callable[..., None] = self._materialize_then_start
+                    thread_args: tuple = (job_id, deferred_hub_ref, lerobot_output_dir, prep)
+                elif deferred_resume_ref is not None:
+                    prep.emit(
+                        f"Preparing continuation: downloading checkpoint "
+                        f"{hub_ref_step_label(deferred_resume_ref)} from "
+                        f"{hub_ref_repo_id(deferred_resume_ref)} to this machine…"
+                    )
+                    thread_target = self._download_resume_then_start
+                    thread_args = (job_id, deferred_resume_ref, lerobot_output_dir, prep)
+                else:
+                    ckpt_dir, upload_repo, upload_step = deferred_resume_upload
+                    prep.emit(
+                        f"Preparing continuation: uploading checkpoint {upload_step} "
+                        f"to the private repo {upload_repo} so the cloud job can read it…"
+                    )
+                    thread_target = self._upload_resume_then_start
+                    thread_args = (job_id, ckpt_dir, upload_repo, upload_step, target, prep)
                 thread = threading.Thread(
-                    target=self._materialize_then_start,
-                    args=(job_id, deferred_hub_ref, lerobot_output_dir, prep),
+                    target=thread_target,
+                    args=thread_args,
                     name=f"job-{job_id}-prepare",
                     daemon=True,
                 )
@@ -2580,24 +2785,186 @@ class JobRegistry:
         """
         reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
         try:
-            local_path = localize_pretrained_path(
+            local_path = localize_pretrained_path(ref, tqdm_class=make_snapshot_progress_tqdm(reporter))
+        except Exception as exc:
+            logger.exception("Base-checkpoint download failed for job %s", job_id)
+            self._fail_prepare(job_id, prep, str(exc))
+            return
+
+        self._start_after_prepare(
+            job_id,
+            output_dir,
+            prep,
+            JobTarget(runner="local"),
+            lambda config: setattr(config, "policy_pretrained_path", local_path),
+            "Base checkpoint ready — starting the trainer.",
+        )
+
+    def _download_resume_then_start(
+        self,
+        job_id: str,
+        ref: str,
+        output_dir: str,
+        prep: PreparingJobRunner,
+    ) -> None:
+        """Bring a CLOUD parent's checkpoint to this machine, then resume locally.
+
+        F7's cloud→local direction, and the twin of _materialize_then_start: same
+        thread, same failure vocabulary, different cargo — the whole
+        checkpoints/<step>/ tree rather than weights alone, because a resume
+        needs the optimizer state (see download_hub_resume_checkpoint).
+
+        The step was already chosen and verified against the Hub's file listing
+        before the record existed, so an unresumable selection is still a
+        synchronous 400. What is left here can only fail on the transfer itself,
+        which belongs on the record: a failed or incomplete download finalises
+        the job `failed` with the message naming the checkpoint, and NO trainer
+        is spawned. That is the MT4 lesson — the old behaviour handed lerobot a
+        --config_path that never existed and let it die at startup.
+        """
+        reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
+        try:
+            config_path = download_hub_resume_checkpoint(
                 ref, tqdm_class=make_snapshot_progress_tqdm(reporter)
             )
         except Exception as exc:
-            logger.exception("Base-checkpoint download failed for job %s", job_id)
-            message = str(exc)
-            prep.emit(message)
-            self._finalize_prepare(job_id, "failed", message)
+            logger.exception("Resume-checkpoint download failed for job %s", job_id)
+            self._fail_prepare(
+                job_id,
+                prep,
+                f"Could not download the checkpoint {hub_ref_step_label(ref)} from "
+                f"{hub_ref_repo_id(ref)} to continue from: {exc}",
+            )
             return
+
+        self._start_after_prepare(
+            job_id,
+            output_dir,
+            prep,
+            JobTarget(runner="local"),
+            lambda config: setattr(config, "config_path", config_path),
+            "Checkpoint ready — starting the trainer.",
+        )
+
+    def _upload_resume_then_start(
+        self,
+        job_id: str,
+        checkpoint_dir: Path,
+        repo_id: str,
+        step_dir: str,
+        target: JobTarget,
+        prep: PreparingJobRunner,
+    ) -> None:
+        """Push a LOCAL parent's checkpoint to the Hub, then resume on the cloud.
+
+        F7's local→cloud direction. The pod downloads its resume checkpoint from
+        the Hub, so these bytes have to be there before the job is submitted —
+        and the request already carries the user's explicit consent for this
+        upload (see _resolve_upload_resume).
+
+        The upload is re-verified from the Hub's own file listing before anything
+        is submitted, and the job is finalised `failed` if it can't be confirmed.
+        That is the MT42 guarantee stated as code: a run recorded as a resume
+        either continues from the checkpoint it names or does not start at all —
+        it never becomes a fresh run that quietly begins at step 0 on rented
+        hardware.
+
+        On success the upload is recorded on the PARENT's record, so continuing
+        the same step again reuses it instead of pushing the same GBs twice.
+        """
+        try:
+            prep.emit(f"Uploading {step_dir} from {checkpoint_dir}…")
+            upload_local_checkpoint(checkpoint_dir, repo_id, step_dir)
+            if not hub_checkpoint_has_training_state(shared_hf_api(), repo_id, step_dir):
+                raise ValueError(
+                    f"the upload finished but {repo_id} is still missing {_HUB_TRAINING_STATE_FILE}"
+                )
+        except Exception as exc:
+            logger.exception("Resume-checkpoint upload failed for job %s", job_id)
+            self._fail_prepare(
+                job_id,
+                prep,
+                f"Could not upload the checkpoint at step {step_dir} to {repo_id}, "
+                f"so this continuation cannot run on the cloud: {exc}",
+            )
+            return
+
+        self._remember_uploaded_checkpoint(job_id, repo_id, step_dir)
+        self._start_after_prepare(
+            job_id,
+            # A cloud runner ignores the host output dir (its pod writes to a
+            # container path); pass it anyway so the callers stay identical.
+            str(_job_dir(self._output_root, job_id) / "run"),
+            prep,
+            target,
+            None,
+            f"Checkpoint {step_dir} is on the Hub — submitting the cloud job.",
+        )
+
+    def _remember_uploaded_checkpoint(self, job_id: str, repo_id: str, step_dir: str) -> None:
+        """Record on the PARENT run where its checkpoint was uploaded.
+
+        Keyed off the child's `resume_from_job_id` rather than passed in, so the
+        note always lands on the record whose bytes were actually pushed. A
+        missing parent (deleted mid-upload) is not an error: the upload still
+        happened and the child still runs; only the re-use shortcut is lost."""
+        with self._lock:
+            child = self._records.get(job_id)
+            parent_id = child.config.resume_from_job_id if child else None
+            parent = self._records.get(parent_id) if parent_id else None
+            if parent is None:
+                return
+            parent.checkpoints_hub_repo_id = repo_id
+            if step_dir not in parent.checkpoints_hub_steps:
+                parent.checkpoints_hub_steps = [*parent.checkpoints_hub_steps, step_dir]
+            self._persist(parent, force=True)
+
+    def _fail_prepare(self, job_id: str, prep: PreparingJobRunner, message: str) -> None:
+        """Finalise a preparing job whose transfer failed, with the message on
+        both the log and the record — the wording that used to reach the user as
+        an HTTP 400 back when the transfer happened inside the request."""
+        prep.emit(message)
+        self._finalize_prepare(job_id, "failed", message)
+
+    def _start_after_prepare(
+        self,
+        job_id: str,
+        output_dir: str,
+        prep: PreparingJobRunner,
+        target: JobTarget,
+        apply_to_config: Callable[[TrainingRequest], None] | None,
+        ready_message: str,
+    ) -> None:
+        """The locked handoff every deferred preparation ends with: apply what
+        the transfer produced to the job's config, spawn the real runner, and
+        replace the PreparingJobRunner with it.
+
+        Shared by all three preparations so the stop/delete/spawn-failure
+        semantics can't drift between them. `apply_to_config` is whatever the
+        slow step learned (a materialized path, a config_path) and is applied
+        under the lock, immediately before the runner reads the config; None when
+        the transfer taught the config nothing new (the upload path resolved its
+        repo + step up front, so the record described the run correctly from the
+        moment it was created).
+
+        A Stop pressed while bytes were moving takes effect HERE — neither a
+        huggingface_hub download nor an upload can be interrupted mid-flight, so
+        the cancel is read after the transfer returns and before anything is
+        spawned. The bytes are already moved (and cached for the next attempt);
+        what the user gets is a run that never starts training, which is what
+        they asked for. Reading `_stop_requested` under the same lock
+        JobRegistry.stop records it in — with the spawn and runner handoff in the
+        same critical section — is what keeps a stop from being missed (spawning
+        a trainer nobody will signal) or landing on an already-replaced runner.
+        """
+        from .runners.hf_cloud import HfCloudJobRunner  # lazy import to avoid circular import
 
         notify = False
         try:
             with self._lock:
                 if prep.cancelled():
                     prep.emit("Stopped before the trainer started.")
-                    self._finalize_prepare_locked(
-                        job_id, "interrupted", _PREPARE_STOPPED_MESSAGE
-                    )
+                    self._finalize_prepare_locked(job_id, "interrupted", _PREPARE_STOPPED_MESSAGE)
                     notify = True
                     return
                 record = self._records.get(job_id)
@@ -2606,28 +2973,100 @@ class JobRegistry:
                     # moved. Nothing to start, nothing to report.
                     self._runners.pop(job_id, None)
                     return
-                prep.emit("Base checkpoint ready — starting the trainer.")
-                record.config.policy_pretrained_path = local_path
-                runner = LocalJobRunner(
-                    record.metrics,
-                    log_file_path=_job_log_path(self._output_root, job_id),
-                )
+                prep.emit(ready_message)
+                if apply_to_config is not None:
+                    apply_to_config(record.config)
+                log_path = _job_log_path(self._output_root, job_id)
+                if target.runner == "local":
+                    runner = LocalJobRunner(record.metrics, log_file_path=log_path)
+                else:
+                    runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
                 try:
                     runner.start(job_id, record.config, output_dir)
                 except Exception as exc:
                     logger.exception("Failed to start runner for job %s", job_id)
-                    self._finalize_prepare_locked(
-                        job_id, "failed", f"Failed to start runner: {exc}"
-                    )
+                    self._finalize_prepare_locked(job_id, "failed", f"Failed to start runner: {exc}")
                     notify = True
                     return
-                record.process_pid = runner.pid()
+                if target.runner == "local":
+                    record.process_pid = runner.pid()
+                else:
+                    record.hf_job_id = runner.hf_job_id()
+                    record.hf_job_url = runner.hf_job_url()
+                    # config was mutated by HfCloudJobRunner.start to set
+                    # policy_repo_id; mirror it onto the record for the UI.
+                    record.hf_repo_id = record.config.policy_repo_id
                 self._runners[job_id] = runner
                 self._persist(record, force=True)
                 notify = True
         finally:
             if notify:
                 self._notify_change()
+
+    def _resolve_upload_resume(
+        self, source: JobRecord, config: TrainingRequest
+    ) -> tuple[tuple[Path, str, str] | None, str, str]:
+        """Plan the Hub side of a LOCAL parent → CLOUD continuation.
+
+        Returns (pending_upload, repo_id, step_dir): `pending_upload` is
+        (checkpoint dir, repo id, step dir) when bytes still have to be pushed,
+        or None when a previous continuation already pushed this exact step and
+        the Hub still has it — re-resuming a step must not re-upload GBs.
+
+        Called with the registry lock HELD (from the resume block in `start`),
+        like the cloud→cloud resolver beside it — both read the Hub, and both do
+        so before any record exists so a bad selection leaves nothing behind.
+
+        Every refusal below is a ValueError (→ HTTP 400) raised before a record
+        exists, because each one describes something the user has to change:
+          * the checkpoint isn't resumable at all (delegated wholesale to
+            _resolve_resume_config_path, so local→local and local→cloud can't
+            disagree about what "resumable" means);
+          * the upload wasn't consented to — an upload is a disclosure, so it is
+            never a silent side effect of clicking Continue;
+          * there is no Hub identity to upload as, or the server is offline.
+        """
+        # The same validation a local→local resume passes: complete checkpoint,
+        # known step, real training_state/. Its train_config.json is
+        # <dir>/checkpoints/<step>/pretrained_model/train_config.json, so the
+        # checkpoint dir to upload — and the step dir naming it — come straight
+        # back out of the path.
+        train_config = Path(_resolve_resume_config_path(source, config.resume_from_step))
+        checkpoint_dir = train_config.parent.parent
+        step_dir = checkpoint_dir.name
+
+        # Already on the Hub from an earlier continuation? Trust the record only
+        # as far as the Hub confirms it: a deleted repo (or a half-finished push)
+        # must produce a fresh upload, not a job that dies looking for bytes.
+        if source.checkpoints_hub_repo_id and step_dir in source.checkpoints_hub_steps:
+            with contextlib.suppress(Exception):
+                if hub_checkpoint_has_training_state(
+                    shared_hf_api(), source.checkpoints_hub_repo_id, step_dir
+                ):
+                    return None, source.checkpoints_hub_repo_id, step_dir
+
+        if not config.upload_resume_checkpoint:
+            raise ValueError(
+                f"Continuing this run on {_RUNNER_LABELS['hf_cloud']} needs its "
+                f"checkpoint at step {int(step_dir)} on the Hub, and it is only on "
+                "this machine. Confirm the upload in the training form (it goes to "
+                "a private repo), or continue the run locally instead."
+            )
+        if hf_hub_offline():
+            raise ValueError(
+                "Offline mode is on, so this run's checkpoint can't be uploaded to "
+                "the Hub — continue it locally, or switch offline mode off."
+            )
+        whoami = cached_whoami()
+        username = (whoami or {}).get("name")
+        if not username:
+            raise ValueError(
+                "Continuing a local run on the cloud uploads its checkpoint to your "
+                f"Hugging Face account, so you have to be signed in. Run '{LOGIN_COMMAND}' "
+                "or paste a token in the app, then try again."
+            )
+        repo_id = checkpoints_staging_repo_id(username, source.id)
+        return (checkpoint_dir, repo_id, step_dir), repo_id, step_dir
 
     def _finalize_prepare(self, job_id: str, state: JobState, error_message: str) -> None:
         """Lock-taking wrapper around _finalize_prepare_locked."""
@@ -3131,8 +3570,7 @@ class JobRegistry:
                         removed = True
                     else:
                         logger.info(
-                            "Duplicate imported model %s: leaving %s in place "
-                            "(contains more than job.json).",
+                            "Duplicate imported model %s: leaving %s in place (contains more than job.json).",
                             dup.id,
                             dup_dir,
                         )

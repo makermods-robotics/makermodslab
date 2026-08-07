@@ -57,9 +57,7 @@ def test_resume_request_emits_minimal_argv() -> None:
     # config_path MUST be the "--config_path=<path>" form: lerobot's own
     # pre-parser ignores the space-separated form.
     cfg_args = [a for a in cmd if a.startswith("--config_path=")]
-    assert cfg_args == [
-        "--config_path=/runs/abc/checkpoints/5000/pretrained_model/train_config.json"
-    ]
+    assert cfg_args == ["--config_path=/runs/abc/checkpoints/5000/pretrained_model/train_config.json"]
     assert "--config_path" not in cmd  # not the two-token form
     assert _arg_value(cmd, "--resume") == "true"
     assert _arg_value(cmd, "--output_dir") == "/tmp/new"
@@ -198,14 +196,10 @@ def test_explicit_device_passes_through() -> None:
     unchanged for backward compatibility."""
     from makermodslab.train import TrainingRequest, build_training_command
 
-    cmd = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="cuda"), "/tmp/out"
-    )
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="cuda"), "/tmp/out")
     assert _arg_value(cmd, "--policy.device") == "cuda"
 
-    cmd_cpu = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="cpu"), "/tmp/out"
-    )
+    cmd_cpu = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="cpu"), "/tmp/out")
     assert _arg_value(cmd_cpu, "--policy.device") == "cpu"
 
 
@@ -219,16 +213,12 @@ def test_auto_device_resolves_to_concrete_backend(monkeypatch) -> None:
     # No GPU available -> cpu.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
-    cmd = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
-    )
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out")
     assert _arg_value(cmd, "--policy.device") == "cpu"
 
     # CUDA available -> cuda.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    cmd_cuda = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
-    )
+    cmd_cuda = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out")
     assert _arg_value(cmd_cuda, "--policy.device") == "cuda"
 
 

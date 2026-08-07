@@ -189,10 +189,14 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
         follower_config="follower",
         dataset_repo_id="user/dataset",
         single_task="pick up the cube",
-        cameras={"wrist": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}},
     )
 
-    config = record.create_record_config(request)
+    # Cameras come from the robot record, resolved by the caller; passing them
+    # in explicitly is the same path handle_start_recording takes.
+    config = record.create_record_config(
+        request,
+        cameras={"wrist": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}},
+    )
     assert config.robot.cameras["wrist"].backend == Cv2Backends.DSHOW
 
 
@@ -231,7 +235,9 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
         single_task="pick up the cube",
     )
 
-    config = record.create_record_config(request)
+    # No cameras for this session — passed explicitly so the bimanual assembly
+    # is exercised without needing a "mybot" record on disk.
+    config = record.create_record_config(request, cameras={})
     assert isinstance(config.robot, BiSOFollowerConfig)
     assert isinstance(config.teleop, BiSOLeaderConfig)
     # BiSO id + calibration_dir come from the staging helper (base = robot name).
@@ -1063,7 +1069,7 @@ def test_record_start_clears_stale_release_state_from_previous_double_stop(
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
 
     # Fail fast AFTER the locked reset, before any hardware is touched.
-    def _boom(request):
+    def _boom(request, cameras=None):
         raise RuntimeError("stop before hardware")
 
     monkeypatch.setattr(record, "create_record_config", _boom)
@@ -1868,7 +1874,7 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
 
     # Fail fast AFTER the stamp point (create_record_config runs right after),
     # before any hardware is touched.
-    def _boom(request):
+    def _boom(request, cameras=None):
         raise RuntimeError("stop before hardware")
 
     monkeypatch.setattr(record, "create_record_config", _boom)
@@ -1997,6 +2003,139 @@ def test_start_recording_rejects_with_400_for_invalid_dataset_name(
 
 
 # ---------------------------------------------------------------------------
+# Session cameras come from the ROBOT RECORD named by the request, never from
+# the request itself. The resolution helpers are covered in
+# tests/test_utils_config.py; these are the start-path rejection branches.
+# ---------------------------------------------------------------------------
+
+
+def _idle_mutexes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+
+def test_start_recording_rejects_with_400_when_the_robot_record_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A named robot with no record on disk must 400 — recording camera-less
+    because the name was wrong throws away a whole session's video silently."""
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    _idle_mutexes(monkeypatch)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(tmp_lerobot_home / "robots"))
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name="ghost"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "ghost" in result["message"]
+    # The rejection happens BEFORE the active flag is claimed.
+    assert record.recording_active is False
+
+
+def test_start_recording_rejects_with_400_on_duplicate_camera_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Keying the session cameras by name would drop one of a duplicate pair —
+    a camera missing from every episode. Refuse the start instead."""
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    _idle_mutexes(monkeypatch)
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        "twins",
+        {
+            "cameras": [
+                {"name": "wrist", "type": "opencv", "camera_index": 0, "width": 640, "height": 480},
+                {"name": "wrist", "type": "opencv", "camera_index": 1, "width": 640, "height": 480},
+            ]
+        },
+        allow_create=True,
+    )
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name="twins"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "wrist" in result["message"]
+    assert record.recording_active is False
+
+
+def test_start_recording_ignores_a_stale_cameras_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """An older frontend still posts `cameras`. The field is gone from the
+    model, so pydantic drops it — the request must not carry it forward."""
+    import makermodslab.record as record
+
+    request = record.RecordingRequest(
+        leader_port="/dev/leader",
+        follower_port="/dev/follower",
+        leader_config="leader",
+        follower_config="follower",
+        dataset_repo_id="tester/ds",
+        single_task="pick",
+        cameras={"wrist": {"type": "opencv", "camera_index": 0}},
+    )
+
+    assert not hasattr(request, "cameras")
+
+
+def test_create_record_config_resolves_cameras_from_the_robot_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Called without an explicit set, the config builder reads the record —
+    the request has no camera payload to fall back on."""
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        "lab1",
+        {
+            "cameras": [
+                {
+                    "id": "camera_1",
+                    "name": "wrist",
+                    "type": "opencv",
+                    "camera_index": 0,
+                    "device_id": "browser-id",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                }
+            ]
+        },
+        allow_create=True,
+    )
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+
+    config = record.create_record_config(
+        _stub_recording_request(robot_name="lab1", dataset_repo_id="tester/ds")
+    )
+
+    assert list(config.robot.cameras) == ["wrist"]
+    assert config.robot.cameras["wrist"].width == 640
+
+
+# ---------------------------------------------------------------------------
 # Session error taxonomy — outcome / error / hint (in-process twin of the
 # rollout exited payload). The worker's catch site holds the actual exception,
 # so the error text is formatted from the object (no log forensics); the
@@ -2094,7 +2233,7 @@ def _start_session_with_fake_work(monkeypatch: pytest.MonkeyPatch, fake_work):
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
     monkeypatch.setattr(rollout, "inference_active", False)
-    monkeypatch.setattr(record, "create_record_config", lambda request: None)
+    monkeypatch.setattr(record, "create_record_config", lambda request, cameras=None: None)
     monkeypatch.setattr(record, "record_with_web_events", fake_work)
 
     result = record.handle_start_recording(

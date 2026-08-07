@@ -131,9 +131,7 @@ def test_endpoint_robot_opens_follower_dir(
     assert opened == [cfg.FOLLOWER_CONFIG_PATH]
 
 
-def test_endpoint_rejects_invalid_device_type(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_endpoint_rejects_invalid_device_type(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     opened = _patch_open(monkeypatch)
     res = client.post("/open-calibration-folder", json={"device_type": "leader"})
     assert res.status_code == 400

@@ -241,6 +241,18 @@ def test_localize_allows_cloud_resume_from_hub() -> None:
     assert config.policy_device == "cuda"
 
 
+def test_localize_rejects_a_resume_that_names_no_hub_checkpoint() -> None:
+    """MT42's invariant at the cloud submission boundary: `resume` with nothing
+    to resume FROM would fall through build_training_command's fresh-run branch
+    and start over at step 0 on rented hardware while every UI surface reported a
+    continuation. Refuse instead — silence is the failure mode here."""
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+
+    config = _request(resume=True)
+    with pytest.raises(ValueError, match="step 0"):
+        localize_config_for_cloud(config, "t4-small")
+
+
 def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
     from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
@@ -537,6 +549,56 @@ def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
     # Inherited from the checkpoint — never re-passed on resume.
     assert "--dataset.repo_id" not in cmd
     assert "--policy.type" not in cmd
+
+
+def _submitted_command(config, tmp_path, monkeypatch, job_id: str = "child_run"):
+    """Drive HfCloudJobRunner.start with the Hub stubbed out; return the argv it
+    submitted. No token, no network, no job — the run_job stand-in records and
+    the worker threads are stubbed off."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.get_token", lambda: "hf_fake")
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.cached_whoami", lambda: {"name": "alice"})
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "t4-small")
+    api = MagicMock()
+    api.run_job.return_value = MagicMock(id="hfjob-1", url="https://hf/jobs/1")
+    runner._api = api
+    monkeypatch.setattr(runner, "_ensure_dataset_on_hub", lambda repo_id: None)
+    monkeypatch.setattr(runner, "_start_worker_threads", lambda label: None)
+    runner.start(job_id, config, "/host/out")
+    return api.run_job.call_args.kwargs["command"]
+
+
+def test_cloud_resume_from_a_cloud_parent_publishes_into_the_parents_repo(tmp_path, monkeypatch) -> None:
+    """Unchanged behaviour, pinned: a cloud→cloud continuation keeps the whole
+    lineage in one repo."""
+    config = _request(resume=True, resume_from_hub_repo="user/parent-run", resume_from_hub_step="005000")
+    command = _submitted_command(config, tmp_path, monkeypatch)
+
+    assert config.policy_repo_id == "user/parent-run"
+    assert "--resume-from=user/parent-run@checkpoints/005000" in command
+
+
+def test_cloud_resume_from_an_uploaded_local_checkpoint_gets_its_own_repo(tmp_path, monkeypatch) -> None:
+    """F7, local→cloud: the source repo is a private STAGING repo holding the
+    local parent's uploaded checkpoint, not an output repo. Publishing into it
+    would put parent and child checkpoints in one tree again, so the run takes
+    its own repo — while still resuming from the staged step."""
+    config = _request(
+        resume=True,
+        resume_from_hub_repo="alice/src_checkpoints",
+        resume_from_hub_step="000100",
+        resume_from_uploaded_checkpoint=True,
+    )
+    command = _submitted_command(config, tmp_path, monkeypatch)
+
+    assert config.policy_repo_id == "alice/child_run"
+    assert "--resume-from=alice/src_checkpoints@checkpoints/000100" in command
+    assert "--policy.repo_id" in command
+    assert command[command.index("--policy.repo_id") + 1] == "alice/child_run"
 
 
 def test_wrapper_source_inlines_the_tested_install_plan() -> None:

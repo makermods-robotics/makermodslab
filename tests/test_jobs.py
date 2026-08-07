@@ -155,18 +155,27 @@ class _FakeHubApi:
         return self._files
 
 
-def _hub_checkpoint_files(step_dir: str, *, with_optimizer: bool = True) -> list[str]:
+def _hub_checkpoint_files(
+    step_dir: str, *, with_state: bool = True, with_optimizer: bool = True
+) -> list[str]:
     """The repo paths a COMPLETE cloud checkpoint publishes (or, without the
-    optimizer file, the partial tree a mid-save upload used to seal)."""
+    optimizer file, the partial tree a mid-save upload used to seal).
+
+    `with_state=False` is the weights-only shape — an interrupted upload, or a
+    staging repo that lost its training_state/ — which is exactly what every
+    resume path has to refuse."""
     files = [
         f"checkpoints/{step_dir}/pretrained_model/config.json",
         f"checkpoints/{step_dir}/pretrained_model/model.safetensors",
         f"checkpoints/{step_dir}/pretrained_model/train_config.json",
-        f"checkpoints/{step_dir}/training_state/training_step.json",
-        f"checkpoints/{step_dir}/training_state/rng_state.safetensors",
     ]
-    if with_optimizer:
-        files.append(f"checkpoints/{step_dir}/training_state/optimizer_state.safetensors")
+    if with_state:
+        files += [
+            f"checkpoints/{step_dir}/training_state/training_step.json",
+            f"checkpoints/{step_dir}/training_state/rng_state.safetensors",
+        ]
+        if with_optimizer:
+            files.append(f"checkpoints/{step_dir}/training_state/optimizer_state.safetensors")
     return files
 
 
@@ -521,9 +530,7 @@ def test_parse_metrics_into_rebases_resumed_tqdm_to_global_step() -> None:
     from makermodslab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
-    parse_metrics_into(
-        "Training:  55%|█████| 55/100 [00:30<01:00, 2.0s/step]", m, resume_total=200
-    )
+    parse_metrics_into("Training:  55%|█████| 55/100 [00:30<01:00, 2.0s/step]", m, resume_total=200)
     assert m.current_step == 155  # 200 - 100 + 55
     assert m.total_steps == 200
 
@@ -668,14 +675,20 @@ def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
     write_log("A", ["INFO step:50 loss:1.5 grdn:1 lr:0.001", "INFO step:100 loss:1.2 grdn:1 lr:0.001"])
     write_log("B", ["INFO step:150 loss:1.1 grdn:1 lr:5e-4", "INFO step:200 loss:1.0 grdn:1 lr:2e-4"])
     reg._records["A"] = JobRecord(
-        id="A", name="a", state="done",
+        id="A",
+        name="a",
+        state="done",
         config=TrainingRequest(dataset_repo_id="d"),
-        output_dir=str(root / "A" / "run"), started_at=0.0,
+        output_dir=str(root / "A" / "run"),
+        started_at=0.0,
     )
     reg._records["B"] = JobRecord(
-        id="B", name="b", state="done",
+        id="B",
+        name="b",
+        state="done",
         config=TrainingRequest(dataset_repo_id="d", resume=True, resume_from_job_id="A", steps=200),
-        output_dir=str(root / "B" / "run"), started_at=0.0,
+        output_dir=str(root / "B" / "run"),
+        started_at=0.0,
     )
 
     assert [p.step for p in reg.read_metrics_history("B")] == [50, 100, 150, 200]
@@ -1570,8 +1583,6 @@ def test_legacy_imported_name_is_re_derived_on_load(monkeypatch, tmp_path) -> No
     assert _json.loads((job_dir / "job.json").read_text())["name"] == "orange_box"
 
 
-
-
 def _typed_hub_reg(monkeypatch, tmp_path, policy_by_repo, root="root"):
     """`_hub_reg` plus a readable checkpoint config, so each import lands with a
     real `config.policy_type` — the field the card's Policy row renders, and the
@@ -1791,12 +1802,16 @@ def test_start_still_resumes_a_run_that_stopped_short(tmp_path, state) -> None:
     assert "checkpoints/100" in record.config.config_path
 
 
-# ── …and only on the runner it stopped on ────────────────────────────────────
-# Cross-runner resume isn't implemented (F7) and both directions fail badly:
-# cloud→local hands lerobot a --config_path that only ever existed inside the
-# pod (MT4), local→cloud silently restarts from step 0 while recording itself as
-# a resume (MT42). The form pins the Compute control; these cover the
-# defense-in-depth half, which catches a direct API call that flips it anyway.
+# ── …and on either runner, once the checkpoint can get there (F7) ───────────
+# A continuation may cross runners in both directions now. What each direction
+# has to do first is move the parent's checkpoint to wherever the trainer will
+# run: DOWN from the Hub for a cloud parent continued locally (MT4 — the old
+# code pointed --config_path at a pod path that never existed here), and UP to
+# the Hub for a local parent continued on the cloud (MT42 — the old code let the
+# pod start a fresh run at step 0 while the record called itself a resume).
+# Both transfers happen off-request in the preparing thread, so these join it
+# the way the fine-tune materialization tests do.
+#
 # Reuses the section's helpers above; a cloud parent is the same record with its
 # runner/repo flipped, exactly as the done-source pair does it.
 
@@ -1808,51 +1823,458 @@ def _cloud_parent(reg, *, job_id: str = "src"):
     return reg
 
 
-def test_start_refuses_a_local_parent_resumed_on_the_cloud(tmp_path, monkeypatch) -> None:
-    """local parent → Cloud target (MT42). The refusal must name the parent's
-    runner, and must leave no record behind."""
+def _fake_resume_snapshot(tmp_path, seen: dict, *, complete: bool = True):
+    """A snapshot_download stand-in that lays down a real checkpoint tree.
+
+    Mirrors what the Hub returns for `allow_patterns=['checkpoints/<step>/*']`:
+    a snapshot root holding the whole step directory, zero-padded the way the
+    Hub names it. `complete=False` is the interrupted-upload shape — weights but
+    no training_state/ — which a resume must refuse rather than hand to the
+    trainer."""
+
+    def _download(**kwargs):
+        seen.update(kwargs)
+        root = tmp_path / "snapshot"
+        ck = root / "checkpoints" / "000100"
+        pretrained = ck / "pretrained_model"
+        pretrained.mkdir(parents=True, exist_ok=True)
+        (pretrained / "config.json").write_text("{}")
+        (pretrained / "train_config.json").write_text("{}")
+        (ck / "training_state").mkdir(exist_ok=True)
+        if complete:
+            (ck / "training_state" / "training_step.json").write_text("{}")
+        return str(root)
+
+    return _download
+
+
+class _FakeUploadApi:
+    """HfApi stand-in for the upload path: records the calls, moves no bytes.
+
+    `list_repo_files` answers from whatever has been "uploaded" so far, so the
+    post-upload verification in _upload_resume_then_start exercises the real
+    completeness rule instead of a stub that always says yes."""
+
+    def __init__(self, files: list[str] | None = None) -> None:
+        self._files = list(files or [])
+        self.created: list[dict] = []
+        self.uploaded: list[dict] = []
+        self.upload_error: Exception | None = None
+
+    def create_repo(self, **kwargs):
+        self.created.append(kwargs)
+
+    def upload_folder(self, **kwargs):
+        if self.upload_error is not None:
+            raise self.upload_error
+        self.uploaded.append(kwargs)
+        step_dir = kwargs["path_in_repo"].rsplit("/", 1)[-1]
+        self._files.extend(_hub_checkpoint_files(step_dir))
+
+    def list_repo_files(self, repo_id, repo_type):
+        return self._files
+
+
+def _local_to_cloud_request(*, consent: bool = True, job_id: str = "src"):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_job_id=job_id,
+        upload_resume_checkpoint=consent,
+    )
+
+
+@pytest.fixture
+def cloud_preflight(monkeypatch):
+    """Keep the cloud dataset preflight off the network — it sits ahead of the
+    resume block, so without this it, not the code under test, is what fails."""
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+
+
+# ── cloud parent → Local ─────────────────────────────────────────────────────
+
+
+def test_cloud_parent_resumed_locally_downloads_the_chosen_step(tmp_path, monkeypatch) -> None:
+    """The parent's Hub checkpoint is materialized HERE — whole, including
+    training_state/ — and config_path points into it, exactly as a local→local
+    resume would. The step is the one the resolver chose, not lerobot's
+    latest-only Hub rule."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    seen: dict = {}
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, seen))
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+        _join_prepare(reg, record.id)
+
+    # The WHOLE step tree, not just pretrained_model/ — a resume without the
+    # optimizer state is a fine-tune wearing a resume label.
+    assert seen["allow_patterns"] == ["checkpoints/000100/*"]
+    record = reg._records[record.id]
+    assert record.config.config_path.endswith("checkpoints/000100/pretrained_model/train_config.json")
+    assert Path(record.config.config_path).is_file()
+    assert record.state == "running"
+    assert fake_runner.start.called
+
+
+def test_cloud_parent_resumed_locally_seeds_progress_from_the_inherited_step(tmp_path, monkeypatch) -> None:
+    """The record's metrics start at the checkpoint's step, not at 0 — and they
+    do so from the moment it is created, i.e. before the (minutes-long) download
+    finishes. A 0 there is what wipes the seeded loss chart."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}))
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()):
+        # `resume_from_step` left unset: "the latest checkpoint", which the
+        # resolver has to pin to a real step for the seeding to work at all.
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+        assert record.metrics.current_step == 100
+        assert record.metrics.total_steps == record.config.steps
+        assert record.config.resume_from_step == 100
+        _join_prepare(reg, record.id)
+
+
+def test_cloud_parent_resumed_locally_refuses_an_incomplete_hub_checkpoint(tmp_path, monkeypatch) -> None:
+    """Refused synchronously, from the repo's file listing, before a record or a
+    single byte exists — the completeness gate is the same one cloud→cloud uses."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100", with_state=False)),
+    )
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("an incomplete checkpoint must be refused before downloading")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="incomplete"),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert list(reg._records) == ["src"]
+    _assert_nothing_was_created(reg)
+
+
+def test_cloud_parent_resumed_locally_fails_the_job_on_an_incomplete_download(tmp_path, monkeypatch) -> None:
+    """MT4's failure mode, closed: if the bytes that land are short of a
+    resumable checkpoint, the job fails with a message naming it and NO trainer
+    is spawned — rather than lerobot dying on a missing optimizer file minutes
+    into startup."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    # The listing says complete; the bytes that arrive are not (the uploader
+    # race). Only the on-disk check can catch that.
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}, complete=False)
+    )
+    fake_runner = MagicMock()
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+        _join_prepare(reg, record.id)
+
+    failed = reg._records[record.id]
+    assert failed.state == "failed"
+    assert "training_state" in failed.error_message
+    assert not fake_runner.start.called
+
+
+# ── local parent → Cloud ─────────────────────────────────────────────────────
+
+
+def test_local_parent_resumed_on_the_cloud_uploads_then_submits(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """The checkpoint goes up first — whole tree, PRIVATE repo — and only then
+    is the cloud job submitted, pointed at what was just uploaded."""
     from unittest.mock import MagicMock, patch
 
     from makermodslab.jobs import JobTarget
 
     reg = _resumable_source(tmp_path, "interrupted")
-    # The cloud dataset preflight sits ahead of the resume block; keep it happy
-    # (and off the network) so the cross-runner refusal is what we observe.
-    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
-    with (
-        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
-        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
-    ):
-        reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "hfjob-1"
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
 
-    assert "Local" in str(excinfo.value)
-    assert [r.id for r in reg.list(limit=10)] == ["src"]
-    _assert_nothing_was_created(reg)
+    assert api.created == [
+        {"repo_id": "alice/src_checkpoints", "repo_type": "model", "private": True, "exist_ok": True}
+    ]
+    assert api.uploaded[0]["path_in_repo"] == "checkpoints/100"
+    assert api.uploaded[0]["folder_path"].endswith("checkpoints/100")
+    record = reg._records[record.id]
+    assert record.config.resume_from_hub_repo == "alice/src_checkpoints"
+    assert record.config.resume_from_hub_step == "100"
+    assert record.config.resume_from_uploaded_checkpoint is True
+    # Never a host path: that is what the pod cannot resolve.
+    assert record.config.config_path is None
+    assert record.metrics.current_step == 100
+    assert fake_runner.start.called
 
 
-def test_start_refuses_a_cloud_parent_resumed_locally(tmp_path, monkeypatch) -> None:
-    """cloud parent → Local target (MT4). Refused BEFORE _resolve_cloud_resume
-    would go to the Hub — the exploding api stand-in is the assertion that the
-    guard lands first."""
+def test_local_parent_resumed_on_the_cloud_records_the_upload_on_the_parent(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """Where the bytes went is remembered on the PARENT, and survives a reload —
+    that record is what stops the next continuation of the same step from
+    pushing the same GBs again."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()):
+        record = reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    parent = reg._records["src"]
+    assert parent.checkpoints_hub_repo_id == "alice/src_checkpoints"
+    assert parent.checkpoints_hub_steps == ["100"]
+    # The parent record is persisted, so a fresh registry over the same root
+    # reads the same answer.
+    reloaded = JobRegistry(reg._output_root)._records["src"]
+    assert reloaded.checkpoints_hub_repo_id == "alice/src_checkpoints"
+    assert reloaded.checkpoints_hub_steps == ["100"]
+
+
+def test_local_parent_resumed_on_the_cloud_reuses_an_earlier_upload(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """Second continuation of the same step: the checkpoint is already on the
+    Hub and confirmed there, so nothing is uploaded — and no consent is asked
+    for, because nothing new is disclosed."""
     from unittest.mock import MagicMock, patch
 
     from makermodslab.jobs import JobTarget
 
-    def _no_hub():
-        raise AssertionError("cross-runner resume reached the Hub")
+    reg = _resumable_source(tmp_path, "interrupted")
+    reg._records["src"].checkpoints_hub_repo_id = "alice/src_checkpoints"
+    reg._records["src"].checkpoints_hub_steps = ["100"]
+    api = _FakeUploadApi(_hub_checkpoint_files("100"))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(
+            _local_to_cloud_request(consent=False),
+            JobTarget(runner="hf_cloud", flavor="t4-small"),
+        )
 
-    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
-    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", _no_hub)
+    assert api.uploaded == []
+    assert record.config.resume_from_hub_repo == "alice/src_checkpoints"
+    assert record.config.resume_from_hub_step == "100"
+    # Nothing had to move, so the job went straight to the runner — no
+    # preparing thread at all.
+    assert record.id not in reg._prepare_threads
+    assert fake_runner.start.called
+
+
+def test_local_parent_resumed_on_the_cloud_re_uploads_when_the_hub_lost_it(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """The record is a hint, not the truth: a staging repo that has since been
+    deleted (or was half-pushed) produces a fresh upload rather than a job that
+    dies looking for bytes."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    reg._records["src"].checkpoints_hub_repo_id = "alice/src_checkpoints"
+    reg._records["src"].checkpoints_hub_steps = ["100"]
+    api = _FakeUploadApi(_hub_checkpoint_files("100", with_state=False))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()):
+        record = reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    assert [u["path_in_repo"] for u in api.uploaded] == ["checkpoints/100"]
+
+
+def test_local_parent_resumed_on_the_cloud_refuses_without_consent(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """An upload is a disclosure, so it never happens as a side effect of
+    Continue: without the form's explicit consent the launch is refused, nothing
+    is uploaded, and no record is left behind."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
     with (
-        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
-        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="only on this machine"),
     ):
-        reg.start(_resume_request(), JobTarget(runner="local"))
+        reg.start(
+            _local_to_cloud_request(consent=False),
+            JobTarget(runner="hf_cloud", flavor="t4-small"),
+        )
 
-    assert "Hugging Face Cloud" in str(excinfo.value)
-    # Read the registry directly: `list` counts a cloud record's checkpoints,
-    # which would itself call the stand-in above.
+    assert api.created == [] and api.uploaded == []
     assert list(reg._records) == ["src"]
+    _assert_nothing_was_created(reg)
+
+
+def test_local_parent_resumed_on_the_cloud_refuses_without_hf_auth(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """No Hub identity ⇒ no namespace to upload into. Refused with the login
+    instruction rather than failing later inside the runner."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: None)
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="signed in"),
+    ):
+        reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert api.uploaded == []
+    _assert_nothing_was_created(reg)
+
+
+def test_local_parent_resumed_on_the_cloud_refuses_when_offline(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """Offline mode disables every Hub write, so the upload this continuation
+    depends on is impossible — say so instead of trying."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeUploadApi())
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_offline", lambda: True)
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Offline mode"),
+    ):
+        reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    _assert_nothing_was_created(reg)
+
+
+def test_local_parent_resumed_on_the_cloud_never_starts_a_fresh_run(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """MT42, as an invariant: when the checkpoint cannot be put where the pod
+    will look for it, the job FAILS — it does not quietly become a fresh run at
+    step 0 on rented hardware while the record calls itself a continuation."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    api = _FakeUploadApi()
+    api.upload_error = RuntimeError("413 payload too large")
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    failed = reg._records[record.id]
+    assert failed.state == "failed"
+    assert "413 payload too large" in failed.error_message
+    # The one assertion that matters: no cloud job was ever submitted.
+    assert not fake_runner.start.called
+
+
+def test_local_parent_resumed_on_the_cloud_fails_when_the_upload_cannot_be_confirmed(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """An upload that reports success but leaves the repo short of a resumable
+    checkpoint is the same failure as one that raised — verified from the Hub's
+    own listing, before anything is submitted."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+
+    class _SilentlyPartialApi(_FakeUploadApi):
+        def upload_folder(self, **kwargs):
+            self.uploaded.append(kwargs)
+            self._files.extend(_hub_checkpoint_files("100", with_state=False))
+
+    api = _SilentlyPartialApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    failed = reg._records[record.id]
+    assert failed.state == "failed"
+    assert "training_step.json" in failed.error_message
+    assert not fake_runner.start.called
+    assert reg._records["src"].checkpoints_hub_steps == []
+
+
+def test_cross_runner_resume_still_refuses_a_completed_parent(tmp_path, monkeypatch, cloud_preflight) -> None:
+    """Only the runner-mismatch refusal went away. A parent that spent its LR
+    schedule is still unresumable — on either runner, in either direction."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="already reached its step target"),
+    ):
+        reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
     _assert_nothing_was_created(reg)
 
 
@@ -1940,6 +2362,50 @@ def test_download_hub_checkpoint_ref_rejects_a_non_ref() -> None:
 
     with pytest.raises(ValueError, match="Unrecognised policy ref"):
         download_hub_checkpoint_ref("just-a-repo-id")
+
+
+def test_download_hub_checkpoint_ref_widens_to_the_whole_step_for_a_resume(monkeypatch, tmp_path) -> None:
+    """`with_training_state` is the one difference between "load these weights"
+    and "continue this run": the optimizer state comes along. Opt-in because it
+    is hundreds of MB per step that a deploy or fine-tune never reads."""
+    from makermodslab.jobs import download_hub_checkpoint_ref
+
+    seen: dict = {}
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(tmp_path, seen))
+
+    out = download_hub_checkpoint_ref("user/repo@checkpoints/000500", with_training_state=True)
+
+    assert seen["allow_patterns"] == ["checkpoints/000500/*"]
+    # The return value is still the pretrained_model dir, so the two modes agree
+    # about what a ref resolves TO; its parent is the checkpoint dir.
+    assert out.endswith("/checkpoints/000500/pretrained_model")
+
+
+def test_download_hub_resume_checkpoint_returns_the_train_config(monkeypatch, tmp_path) -> None:
+    """The value lerobot's --config_path wants, inside a tree whose parent
+    directory is the checkpoint (which is how lerobot finds training_state/)."""
+    from makermodslab.jobs import download_hub_resume_checkpoint
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}))
+
+    out = Path(download_hub_resume_checkpoint("user/repo@checkpoints/000100"))
+
+    assert out.name == "train_config.json" and out.is_file()
+    assert (out.parent.parent / "training_state" / "training_step.json").is_file()
+
+
+def test_download_hub_resume_checkpoint_refuses_an_incomplete_download(monkeypatch, tmp_path) -> None:
+    """Checked on the bytes that actually landed, not just on the repo listing:
+    an interrupted upload passes the listing check and then dies inside the
+    trainer, which is precisely MT4."""
+    from makermodslab.jobs import download_hub_resume_checkpoint
+
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}, complete=False)
+    )
+
+    with pytest.raises(ValueError, match="training_state"):
+        download_hub_resume_checkpoint("user/repo@checkpoints/000100")
 
 
 def test_localize_pretrained_path_passes_through_non_step_values(monkeypatch, tmp_path) -> None:

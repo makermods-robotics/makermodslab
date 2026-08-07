@@ -12,6 +12,7 @@ import TrainingExtraGate from "@/components/training/TrainingExtraGate";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import HfAuthBanner from "@/components/landing/HfAuthBanner";
 import LocalDatasetCloudNotice from "@/components/training/config/LocalDatasetCloudNotice";
+import LocalCheckpointCloudNotice from "@/components/training/config/LocalCheckpointCloudNotice";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -43,12 +44,14 @@ export type ResumeSeed = {
   sourceSteps: number; // the source run's configured total, for a sane prefill
   logFreq?: number; // the source run's log cadence, to preserve on resume
   saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
-  // The parent run's runner + flavor. A resume ALWAYS continues on the parent's
-  // runner — the form pins Compute to this value and disables it (see F7) —
-  // so `runner` is the lock's source of truth, not just a cloud convenience.
-  // Omitted ⇒ treated as "local". When "hf_cloud", the launched run targets the
-  // same flavor and continues into the parent's Hub output repo; `flavor` stays
-  // editable, since which GPU the continuation rents is a real per-launch choice.
+  // The parent run's runner + flavor. A resume DEFAULTS to the parent's runner
+  // but may cross to the other one (F7), so `runner` is the form's starting
+  // point AND its record of where the parent actually ran — which is what tells
+  // the form that continuing on the cloud has to upload a local checkpoint
+  // first. Omitted ⇒ treated as "local". When "hf_cloud", the launched run
+  // targets the same flavor and continues into the parent's Hub output repo;
+  // `flavor` stays editable, since which GPU the continuation rents is a real
+  // per-launch choice.
   runner?: "local" | "hf_cloud";
   flavor?: string;
   // Cloud resume: the parent run's HF Jobs timeout. Omitting it let the form
@@ -105,7 +108,10 @@ interface TrainingConfiguratorProps {
   actionsContainer?: HTMLElement | null;
 }
 
-function configToRequest(c: TrainingConfig): TrainingRequest {
+function configToRequest(
+  c: TrainingConfig,
+  needsCheckpointUpload: boolean,
+): TrainingRequest {
   // The backend's TrainingRequest has more optional fields; the form covers
   // the user-meaningful subset.
   return {
@@ -123,6 +129,11 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
     resume: c.resume,
     resume_from_job_id: c.resume_from_job_id,
     resume_from_step: c.resume_from_step,
+    // Consent, not a mode: sent only for the one combination that has to push
+    // bytes to the Hub (a local parent continued on cloud compute), and the
+    // backend refuses that combination without it. Left undefined otherwise so
+    // no other launch carries an upload permission it has no use for.
+    upload_resume_checkpoint: needsCheckpointUpload ? true : undefined,
     finetune_from_job_id: c.finetune_from_job_id,
     finetune_from_step: c.finetune_from_step,
     wandb_enable: c.wandb_enable,
@@ -177,12 +188,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const { openJobMonitor } = useStudio();
 
   const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
-    // A resume inherits the parent run's runner — a cloud one so the
+    // A resume DEFAULTS to the parent run's runner — a cloud one so the
     // continuation runs on the same flavor and pushes into the same Hub repo, a
     // local one so it reads the parent's on-disk checkpoint. The Compute
-    // control is then pinned to it (`runnerLocked` below), because neither
-    // cross-runner direction works: see F7. Everything else defaults to a fresh
-    // local run.
+    // control stays editable: either cross-runner direction works now (F7), it
+    // just moves the checkpoint first — down from the Hub for a cloud→local
+    // continuation, up to it for a local→cloud one. Everything else defaults to
+    // a fresh local run.
     target:
       resumeSeed?.runner === "hf_cloud"
         ? { runner: "hf_cloud", flavor: resumeSeed.flavor }
@@ -349,6 +361,15 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const datasetLocalOnly = selectedDatasetItem?.source === "local";
   const needsUpload = isCloud && datasetLocalOnly;
 
+  // A resume whose parent ran locally, retargeted at cloud compute: the pod
+  // can't read this machine's disk, so the parent's checkpoint has to be
+  // uploaded to a private Hub repo before the job is submitted (F7). Derived
+  // from the seed's runner rather than from the config, because the config's
+  // `target` is now the user's live choice — the seed is the only record of
+  // where the parent actually ran.
+  const needsCheckpointUpload =
+    resumeSeed != null && resumeSeed.runner !== "hf_cloud" && isCloud;
+
   // Approximate on-disk size for the notice (cheap detail endpoint; local only).
   const [datasetSizeBytes, setDatasetSizeBytes] = useState<number | null>(null);
   useEffect(() => {
@@ -379,7 +400,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       const job = await startTrainingJob(
         baseUrl,
         fetchWithHeaders,
-        configToRequest(config),
+        configToRequest(config, needsCheckpointUpload),
       );
       toast({ title: "Training Started", description: job.name });
       onStarted?.(job.id);
@@ -406,6 +427,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     baseUrl,
     fetchWithHeaders,
     config,
+    needsCheckpointUpload,
     toast,
     navigate,
     location.pathname,
@@ -528,6 +550,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   // in offline mode, in which case uploads are impossible and Start is a hard
   // block. (needsUpload is already gated on isCloud.)
   const uploadBlockedOffline = needsUpload && offline;
+  // A local run continued on the cloud has to push its checkpoint to the Hub
+  // first, which offline mode makes impossible — a hard block, exactly like the
+  // dataset case above.
+  const checkpointUploadBlockedOffline = needsCheckpointUpload && offline;
   const startDisabled =
     isStarting ||
     uploading ||
@@ -536,6 +562,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
     uploadBlockedOffline ||
+    checkpointUploadBlockedOffline ||
     resumeStepError != null;
   const startTooltip = localBlocked
     ? "Another local training is already running"
@@ -545,7 +572,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         ? "Select a hardware flavor"
         : uploadBlockedOffline
           ? "Offline mode is on — the dataset can't be uploaded to the Hub"
-          : undefined;
+          : checkpointUploadBlockedOffline
+            ? "Offline mode is on — the checkpoint can't be uploaded to the Hub"
+            : undefined;
 
   return (
     <div className="w-full">
@@ -609,15 +638,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         // will discard. configToRequest still sends the form's values, keeping
         // the new JobRecord's persisted config truthful about what was asked.
         resumeLocked={resumeSeed != null}
-        // Compute is pinned to the parent's runner on a resume. Cross-runner
-        // resume isn't implemented (F7) and both directions fail badly —
-        // cloud→local dies at startup on a host path that never existed,
-        // local→cloud silently restarts from step 0 wearing a resume label —
-        // so the control is disabled rather than left to fail late. The
-        // backend refuses a mismatch too (JobRegistry.start). The cloud
-        // flavor and job timeout stay editable: those a continuation can
-        // genuinely change.
-        runnerLocked={resumeSeed != null}
       />
       {needsUpload ? (
         <div className="mt-6">
@@ -627,6 +647,19 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
             offline={offline}
             uploading={uploading}
             errorMessage={uploadError}
+          />
+        </div>
+      ) : null}
+      {/* Compute is editable on a resume now (F7), so the user can retarget a
+          local run's continuation at the cloud. That direction moves the
+          parent's checkpoint to the Hub first, which is a disclosure — hence a
+          notice before the click, and a Start button that says "Upload". */}
+      {needsCheckpointUpload && resumeSeed ? (
+        <div className="mt-6">
+          <LocalCheckpointCloudNotice
+            runName={resumeSeed.name}
+            step={resumeSeed.step}
+            offline={offline}
           />
         </div>
       ) : null}
@@ -664,7 +697,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
                       TrainPanel and Collect's / Run's Start buttons — these
                       used to flip to Title Case the moment the form opened. */}
                   {resumeSeed
-                    ? "Continue training"
+                    ? needsCheckpointUpload
+                      ? "Upload & continue training"
+                      : "Continue training"
                     : finetuneSeed
                       ? "Start fine-tuning"
                       : needsUpload

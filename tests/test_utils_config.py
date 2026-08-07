@@ -895,3 +895,227 @@ def test_prune_dismissed_hub_jobs_drops_ids_gone_from_listing(tmp_lerobot_home: 
     # Pruning against a listing that contains everything is a no-op.
     cfg.prune_dismissed_hub_jobs({"job-live"})
     assert cfg.get_dismissed_hub_jobs() == {"job-live"}
+
+
+# --- Session cameras resolved from the robot record -------------------------
+#
+# The robot record is the only source of a session's cameras — recording and
+# inference requests no longer carry camera configs. These cover the pure
+# shaping/lookup helpers; the 400 paths that consume them live in
+# tests/test_record.py and tests/test_rollout.py.
+
+
+def _camera_entry(name: str, **overrides) -> dict:
+    """A camera entry in the shape RobotConfigDialog saves."""
+    entry = {
+        "id": f"camera_{name}",
+        "name": name,
+        "type": "opencv",
+        "camera_index": 1,
+        "device_id": "browser-device-id",
+        "unique_id": "0x1400000005ac8600",
+        "width": 640,
+        "height": 480,
+        "fps": 30,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_session_camera_config_keeps_only_session_keys() -> None:
+    """`id`/`device_id`/`name` are record-keeping: forwarding them would reach
+    lerobot's OpenCVCameraConfig (via rollout's `--robot.cameras=`) as unknown
+    fields. Everything a session actually needs survives."""
+    config = cfg.session_camera_config(_camera_entry("wrist", fourcc="MJPG", backend="AVFOUNDATION"))
+
+    assert config == {
+        "type": "opencv",
+        "camera_index": 1,
+        "unique_id": "0x1400000005ac8600",
+        "width": 640,
+        "height": 480,
+        "fps": 30,
+        "fourcc": "MJPG",
+        "backend": "AVFOUNDATION",
+    }
+
+
+def test_session_camera_config_omits_absent_keys_and_defaults_type() -> None:
+    """Absent keys are dropped rather than sent as None, so the consumers' own
+    defaults (platform backend pin, MJPG fourcc) still apply. A record written
+    before `type` existed is an opencv camera."""
+    config = cfg.session_camera_config({"name": "top", "camera_index": 0})
+
+    assert config == {"type": "opencv", "camera_index": 0}
+
+
+def test_record_cameras_by_name_keys_on_the_camera_name() -> None:
+    cameras = cfg.record_cameras_by_name([_camera_entry("wrist"), _camera_entry("top", camera_index=2)])
+
+    assert sorted(cameras) == ["top", "wrist"]
+    assert cameras["top"]["camera_index"] == 2
+
+
+def test_record_cameras_by_name_rejects_duplicate_names() -> None:
+    """Two cameras under one name would silently collapse to one in the dict —
+    an entire camera missing from a recording. Refuse instead."""
+    with pytest.raises(cfg.CameraResolutionError) as exc:
+        cfg.record_cameras_by_name([_camera_entry("wrist"), _camera_entry("wrist", camera_index=2)])
+
+    assert "two cameras named 'wrist'" in str(exc.value)
+
+
+def test_record_cameras_by_name_rejects_unnamed_camera() -> None:
+    with pytest.raises(cfg.CameraResolutionError):
+        cfg.record_cameras_by_name([{**_camera_entry("wrist"), "name": "   "}])
+
+
+def test_record_cameras_by_name_skips_non_dict_entries() -> None:
+    """A hand-edited record shouldn't crash the start path on a stray value."""
+    assert cfg.record_cameras_by_name(["nonsense", None, _camera_entry("wrist")]).keys() == {"wrist"}
+
+
+def test_load_robot_cameras_reads_the_named_record(tmp_lerobot_home: Path) -> None:
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+
+    cameras = cfg.load_robot_cameras("lab1")
+
+    assert list(cameras) == ["wrist"]
+    assert cameras["wrist"]["camera_index"] == 1
+
+
+def test_load_robot_cameras_blank_name_is_a_camera_less_session(tmp_lerobot_home: Path) -> None:
+    assert cfg.load_robot_cameras("") == {}
+    assert cfg.load_robot_cameras("   ") == {}
+
+
+def test_load_robot_cameras_rejects_a_name_with_no_record(tmp_lerobot_home: Path) -> None:
+    """Recording camera-less because the robot name was wrong loses a whole
+    session's video silently — fail loudly instead."""
+    with pytest.raises(cfg.CameraResolutionError) as exc:
+        cfg.load_robot_cameras("ghost")
+
+    assert "ghost" in str(exc.value)
+
+
+def test_load_robot_cameras_rejects_a_path_traversal_name(tmp_lerobot_home: Path) -> None:
+    with pytest.raises(cfg.CameraResolutionError):
+        cfg.load_robot_cameras("../escape")
+
+
+def test_load_robot_cameras_empty_for_a_record_with_no_cameras(tmp_lerobot_home: Path) -> None:
+    cfg.save_robot_record("lab1", {"leader_port": "/dev/a"}, allow_create=True)
+
+    assert cfg.load_robot_cameras("lab1") == {}
+
+
+def test_bind_robot_cameras_keys_on_the_policy_name(tmp_lerobot_home: Path) -> None:
+    """The checkpoint's camera names rarely match the labels on the robot, so
+    the binding renames: settings come from the record, the key from the policy."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+
+    bound = cfg.bind_robot_cameras("lab1", {"observation.images.front": "wrist"})
+
+    assert list(bound) == ["observation.images.front"]
+    assert bound["observation.images.front"]["camera_index"] == 1
+
+
+def test_bind_robot_cameras_empty_bindings_need_no_robot(tmp_lerobot_home: Path) -> None:
+    """A camera-less policy binds nothing, so it must not require a record."""
+    assert cfg.bind_robot_cameras("", {}) == {}
+
+
+def test_bind_robot_cameras_rejects_bindings_without_a_robot(tmp_lerobot_home: Path) -> None:
+    with pytest.raises(cfg.CameraResolutionError) as exc:
+        cfg.bind_robot_cameras("", {"front": "wrist"})
+
+    assert "No robot selected" in str(exc.value)
+
+
+def test_bind_robot_cameras_rejects_an_unknown_camera_and_lists_the_options(
+    tmp_lerobot_home: Path,
+) -> None:
+    cfg.save_robot_record(
+        "lab1",
+        {"cameras": [_camera_entry("wrist"), _camera_entry("top", camera_index=2)]},
+        allow_create=True,
+    )
+
+    with pytest.raises(cfg.CameraResolutionError) as exc:
+        cfg.bind_robot_cameras("lab1", {"front": "gone"})
+
+    message = str(exc.value)
+    assert "'gone'" in message
+    assert "top, wrist" in message
+
+
+def test_bind_robot_cameras_overlays_checkpoint_capture_dims(tmp_lerobot_home: Path) -> None:
+    """lerobot's standard rollout does NOT resize frames to the policy's input
+    shape, so a camera must CAPTURE at the resolution the checkpoint was
+    trained on. The record still supplies identity and transport settings."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+
+    bound = cfg.bind_robot_cameras(
+        "lab1",
+        {"front": "wrist"},
+        dims={"front": {"width": 320, "height": 240}},
+    )
+
+    assert bound["front"]["width"] == 320
+    assert bound["front"]["height"] == 240
+    # Identity/transport are untouched — only the frame size is overridden.
+    assert bound["front"]["camera_index"] == 1
+    assert bound["front"]["unique_id"] == "0x1400000005ac8600"
+    assert bound["front"]["fps"] == 30
+
+
+def test_bind_robot_cameras_falls_back_to_record_dims_without_an_override(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A checkpoint that doesn't expose image dims (or an older client that
+    sends none) must still start — the record's own size stands."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+
+    assert cfg.bind_robot_cameras("lab1", {"front": "wrist"})["front"]["width"] == 640
+    assert cfg.bind_robot_cameras("lab1", {"front": "wrist"}, dims={})["front"]["width"] == 640
+    # An override for a DIFFERENT camera doesn't leak onto this one.
+    unrelated = cfg.bind_robot_cameras(
+        "lab1", {"front": "wrist"}, dims={"top": {"width": 320, "height": 240}}
+    )
+    assert unrelated["front"]["width"] == 640
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"width": 320},  # half an override
+        {"height": 240},
+        {"width": 0, "height": 240},  # nonsense sizes
+        {"width": -320, "height": -240},
+        {"width": True, "height": True},  # bool is an int subclass
+        {"width": "320", "height": "240"},
+        {},
+    ],
+)
+def test_bind_robot_cameras_ignores_unusable_dims(tmp_lerobot_home: Path, override: dict) -> None:
+    """Both dimensions or neither: a half-applied override would capture at a
+    mixed policy/record aspect, which is worse than either source alone."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+
+    bound = cfg.bind_robot_cameras("lab1", {"front": "wrist"}, dims={"front": override})
+
+    assert bound["front"]["width"] == 640
+    assert bound["front"]["height"] == 480
+
+
+def test_bind_robot_cameras_copies_so_callers_cant_alias_the_record(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Two policy names may bind the same physical camera; each must get its
+    own dict so a later mutation can't leak across roles."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+
+    bound = cfg.bind_robot_cameras("lab1", {"left": "wrist", "right": "wrist"})
+
+    assert bound["left"] is not bound["right"]
+    assert bound["left"] == bound["right"]

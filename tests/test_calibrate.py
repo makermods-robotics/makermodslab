@@ -192,7 +192,9 @@ def test_start_calibration_check_and_claim_is_atomic(
         assert release_stall.wait(timeout=5), "test setup: release never signalled"
         return None
 
-    monkeypatch.setattr("makermodslab.calibrate.calibration_dir_for_device", _stalling_calibration_dir_for_device)
+    monkeypatch.setattr(
+        "makermodslab.calibrate.calibration_dir_for_device", _stalling_calibration_dir_for_device
+    )
 
     request = CalibrationRequest(device_type="robot", port="/dev/null", config_file="race", overwrite=True)
     results: dict[str, dict] = {}

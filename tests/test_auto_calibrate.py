@@ -693,9 +693,7 @@ def test_graceful_stop_diagnoses_a_stalled_return(
     assert "ticks" in out
 
 
-def test_graceful_stop_diagnoses_a_missing_pose(
-    no_sleep: list[float], capsys: pytest.CaptureFixture
-) -> None:
+def test_graceful_stop_diagnoses_a_missing_pose(no_sleep: list[float], capsys: pytest.CaptureFixture) -> None:
     bus = _FakeScriptBus()
 
     acs._graceful_stop(bus, {})
@@ -1010,9 +1008,7 @@ def test_batch_threads_motor_power_into_torque_limit_arg(monkeypatch: pytest.Mon
 
     argvs.clear()
     mgr2 = auto_calibrate.AutoCalibrationBatchManager()
-    result2 = mgr2.start(
-        auto_calibrate.AutoCalibrationBatchRequest(arms=[_arm(port="/dev/c", name="arm_c")])
-    )
+    result2 = mgr2.start(auto_calibrate.AutoCalibrationBatchRequest(arms=[_arm(port="/dev/c", name="arm_c")]))
     assert result2["success"] is True
     _join_batch(mgr2)
     assert "--torque-limit" not in argvs[0]

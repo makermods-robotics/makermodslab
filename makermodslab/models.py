@@ -42,7 +42,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from huggingface_hub import metadata_update, snapshot_download
+from huggingface_hub import constants as hf_constants, metadata_update, snapshot_download
+from huggingface_hub.file_download import repo_folder_name
+from huggingface_hub.utils import filter_repo_objects
 
 from .datasets import (
     DownloadManager,
@@ -302,6 +304,53 @@ def _local_models_root() -> Path:
     return root
 
 
+# The weights file lerobot's loader actually opens, and the one alternative
+# layout it accepts. Derived from the PINNED lerobot (v0.6.0), not guessed:
+#
+#   * Standard policy — `PreTrainedPolicy.from_pretrained` on a LOCAL dir does
+#     exactly `os.path.join(model_id, SAFETENSORS_SINGLE_FILE)` and hands it
+#     straight to `_load_as_safetensor` (policies/pretrained.py:195-198).
+#     `SAFETENSORS_SINGLE_FILE` is huggingface_hub's "model.safetensors".
+#   * SHARDED weights are deliberately NOT accepted. That local-dir branch has no
+#     index-file handling at all, and the save side pins `max_shard_size` above
+#     the total size specifically "so the output stays a single
+#     `model.safetensors`" (pretrained.py:157-159). Treating
+#     `model-00001-of-...` as usable would recreate this very bug — a tree we
+#     call loadable that lerobot then fails to open.
+#   * ADAPTER (PEFT/LoRA) repos are accepted, because `make_policy` has a real
+#     branch for them: with `use_peft`, it reads `PeftConfig.from_pretrained(dir)`
+#     and calls `PeftModel.from_pretrained(policy, dir)` (policies/factory.py:
+#     616-638), loading the BASE weights from the adapter config's
+#     `base_model_name_or_path`. So an adapter dir is complete without
+#     `model.safetensors`; what it must have is PEFT's own pair.
+#
+# NOT sufficient, and the trap this exists to close: "some *.safetensors is
+# present". A policy checkpoint also ships pre/post-processor safetensors, so an
+# interrupted download can carry several .safetensors files and still have no
+# policy weights at all.
+_POLICY_WEIGHTS_FILE = "model.safetensors"
+_ADAPTER_WEIGHTS_FILES = ("adapter_config.json", "adapter_model.safetensors")
+
+
+def _has_loadable_weights(pretrained_dir: Path) -> bool:
+    """True when `pretrained_dir` holds weights lerobot can actually load.
+
+    A `config.json` alone proves only that a download STARTED. An interrupted
+    `local_dir` download leaves a tree that looks complete to a config-only check
+    — config.json, train_config.json, both processor safetensors — and then dies
+    with FileNotFoundError on `model.safetensors` the moment inference runs. That
+    happened live: a 68 KB store entry served by the F6 short-circuit turned a
+    silently-partial download into a hard crash, where the pre-F6 path would have
+    re-downloaded and worked.
+    """
+    try:
+        if (pretrained_dir / _POLICY_WEIGHTS_FILE).is_file():
+            return True
+        return all((pretrained_dir / name).is_file() for name in _ADAPTER_WEIGHTS_FILES)
+    except OSError:
+        return False
+
+
 def _resolve_pretrained_dir(path: Path) -> Path | None:
     """The pretrained_model dir inside a downloaded/imported checkpoint dir, or
     None when `path` isn't a usable policy checkpoint.
@@ -312,12 +361,31 @@ def _resolve_pretrained_dir(path: Path) -> Path | None:
     ``config.json`` (the shape ``upload_local_model`` pushes). The returned dir
     is EXACTLY what rollout._resolve_policy_path consumes verbatim for a local
     ref, so `path` rows built from it are directly usable for inference.
+
+    "Usable" requires the POLICY WEIGHTS, not just a config (see
+    `_has_loadable_weights`). This is the single definition every consumer shares
+    — the /models listing, `is_model_available_locally`, `_fetch_model_snapshot`'s
+    post-download validation, `_cleanup_partial_model`, `import_local_model` and
+    the F6 local-store short-circuit in rollout all ask this one question — so a
+    weights-less tree is uniformly invisible rather than usable-here-and-broken-
+    there. A partial download therefore drops out of the listing instead of being
+    offered and then crashing mid-run.
+
+    In the checkpoints layout the scan walks from the highest step DOWN and takes
+    the first checkpoint with weights: a checkpoint still being written by a live
+    training run must not hide the last complete one. The returned path names its
+    own step, so there is no risk of the UI labelling one step's weights as
+    another's.
     """
     try:
         checkpoints = _list_local_checkpoints(str(path))
+        for checkpoint in reversed(checkpoints):
+            candidate = Path(checkpoint.ref)
+            if _has_loadable_weights(candidate):
+                return candidate
         if checkpoints:
-            return Path(checkpoints[-1].ref)
-        if (path / "config.json").is_file():
+            return None
+        if (path / "config.json").is_file() and _has_loadable_weights(path):
             return path
     except OSError:
         return None
@@ -338,6 +406,41 @@ def _downloaded_model_dir(repo_id: str) -> Path | None:
     if not path.is_dir() or _resolve_pretrained_dir(path) is None:
         return None
     return path
+
+
+def _hub_cache_has_repo(repo_id: str) -> bool:
+    """True when the shared HF hub cache already holds a snapshot of `repo_id`.
+
+    The hub-cache twin of `_downloaded_model_dir` above: that one answers "is it
+    in OUR models store", this one "is it in the cache huggingface_hub itself
+    manages". Both callers of this are about not downloading the same bytes
+    twice — `_fetch_model_snapshot` below (serve a Models-page download from the
+    cache) and `rollout._local_store_policy_path` (the mirror image: serve
+    inference from our store when the cache is empty). It lives HERE, and
+    rollout imports it, so the two directions can never disagree about what
+    "already cached" means; models.py must not import from rollout (cycle).
+
+    huggingface_hub 1.21.0 has no public "is this repo cached at all?" call:
+    ``try_to_load_from_cache`` answers per FILE and per revision (so it says
+    "no" for a repo cached under a different revision), and ``scan_cache_dir``
+    walks the ENTIRE cache — every dataset too — to answer one question about
+    one repo. So probe the documented on-disk layout directly, which is exactly
+    the question we want: ``<HF_HUB_CACHE>/models--<user>--<repo>/snapshots/``.
+    A repo dir with no snapshot in it (an interrupted or wiped entry) counts as
+    absent. HF_HUB_CACHE is read off the module at call time, not bound at
+    import, so an env override (or a test) is honoured.
+
+    A malformed repo id answers "not cached" rather than raising: `policy_ref`
+    is user input and the hub-ref regex accepts any ``[^@]+``, so
+    `repo_folder_name`'s validation can reject it (HFValidationError is a
+    ValueError). Reporting False just routes it to snapshot_download, which
+    produces the canonical, already-handled error message for a bad repo id."""
+    try:
+        folder = Path(hf_constants.HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
+        snapshots = folder / "snapshots"
+        return snapshots.is_dir() and any(snapshots.iterdir())
+    except (OSError, ValueError):
+        return False
 
 
 def is_model_available_locally(repo_id: str) -> bool:
@@ -1281,6 +1384,98 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# Optimizer/scheduler state, excluded from everything the Models page pulls.
+# Two patterns because huggingface_hub filters with fnmatch, NOT path-aware
+# globbing: `training_state/**` catches the root one a flat push leaves, and
+# `*/training_state/**` catches the per-step ones (fnmatch's `*` spans `/`, so
+# it covers `checkpoints/<step>/training_state/...` at any depth).
+_TRAINING_STATE_IGNORE = ["training_state/**", "*/training_state/**"]
+
+
+def _copy_snapshot_into_store(snapshot: Path, target: Path) -> None:
+    """Copy a hub-cache snapshot dir into the local models store.
+
+    Two things this must NOT do naively:
+
+    * **Symlinks.** A cache snapshot is a farm of symlinks into the sibling
+      ``blobs/`` dir; copying them as links would leave the store pointing at
+      files `huggingface_hub` may garbage-collect (``delete_revisions``) or that
+      simply vanish if the user clears their hub cache. Every file is
+      dereferenced (``shutil.copyfile`` copies CONTENT through a symlink), so
+      the store stays the self-contained directory the rest of models.py
+      assumes. It also leaves dest mtimes at "now", which is what the listing's
+      `_dir_mtime_iso` should report for a just-downloaded model — a blob's own
+      mtime could be months old.
+    * **training_state.** A cache entry can predate this exclusion (inference's
+      @root fetch, or a plain `hf_hub_download`, may have populated it), so the
+      snapshot on disk can hold optimizer state even though we asked
+      snapshot_download to skip it. Filtering is delegated to huggingface_hub's
+      OWN `filter_repo_objects` — the same function snapshot_download filters
+      with — so the copied tree is byte-for-byte the tree the local_dir download
+      would have produced, rather than a hand-rolled guess at fnmatch semantics.
+
+    Copies IN PLACE into `target` rather than staging in a temp dir and swapping:
+    it matches what the local_dir download does (write over whatever is there),
+    keeps a re-download of an already-present model from ever having a window
+    where the model is missing, and a half-finished copy is handled the same way
+    a half-finished download is — the caller falls back to the network path,
+    which rewrites these very paths, and `_cleanup_partial_model` removes the
+    dir if the result still doesn't resolve."""
+    rel_paths = [p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*") if p.is_file()]
+    for rel in filter_repo_objects(rel_paths, ignore_patterns=_TRAINING_STATE_IGNORE):
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(snapshot / rel, dest)
+
+
+def _fetch_via_hub_cache(repo_id: str, target: Path) -> bool:
+    """Materialize `repo_id` into `target` from the shared hub cache, or return
+    False to say "not applicable — do the normal download".
+
+    Closes the second half of design-debt F6. `_fetch_model_snapshot` downloads
+    with ``local_dir=``, and huggingface_hub 1.21.0's local_dir mode neither
+    reads nor populates the shared cache (it is the deliberate "give me a plain
+    directory, no cache machinery" mode). So a repo inference had already pulled
+    into the cache was downloaded a SECOND time, in full, the moment the user
+    clicked Download on the Models page. (`rollout._local_store_policy_path`
+    covers the opposite order: Models page first, inference second.)
+
+    Deliberately routed through a cache-mode ``snapshot_download`` — no
+    ``local_dir`` — rather than copying the newest snapshot dir straight out of
+    the cache. That call dedupes against the cache and pulls only what is
+    missing or changed, which means:
+
+      * a PARTIAL cache entry (someone `hf_hub_download`-ed a single file, so
+        `_hub_cache_has_repo` says yes but the snapshot is one symlink) gets
+        COMPLETED rather than copied as a broken tree, and
+      * the result is revision-correct — we get `main` as it is now, not
+        whatever stale revision happens to sit in the cache.
+
+    It is an optimization and must never become a new failure mode, so ANY
+    failure (HF error, a cache entry mutated out from under us, a copy that runs
+    out of disk) returns False and lets the caller do the plain download. The
+    exception is logged, not swallowed silently — a cache path that always fails
+    would otherwise just look like "downloads are slow"."""
+    if not _hub_cache_has_repo(repo_id):
+        return False
+    try:
+        snapshot = snapshot_download(
+            repo_id,
+            repo_type="model",
+            ignore_patterns=_TRAINING_STATE_IGNORE,
+        )
+        _copy_snapshot_into_store(Path(snapshot), target)
+    except Exception as exc:  # noqa: BLE001 - optimization only; the caller re-downloads
+        logger.warning(
+            "Could not serve %s from the HF hub cache (%s) — falling back to a full download",
+            repo_id,
+            exc,
+        )
+        return False
+    logger.info("Served %s from the HF hub cache instead of re-downloading it", repo_id)
+    return True
+
+
 def _fetch_model_snapshot(repo_id: str) -> None:
     """Snapshot a Hub model repo into ``<local models root>/<repo_id>/``.
 
@@ -1288,9 +1483,31 @@ def _fetch_model_snapshot(repo_id: str) -> None:
     (_resolve_pretrained_dir) — a repo with no config.json / checkpoints tree is
     not a policy and is rejected (the manager's cleanup then removes it).
     Invalidates the /models listing cache so the source flips to "both"
-    immediately."""
+    immediately.
+
+    Optimizer/scheduler state is excluded. A training repo carries a
+    ``training_state/`` dir next to every ``pretrained_model/`` (and one at the
+    repo root for a flat push), which exists only to RESUME training — nothing
+    that reads a downloaded model here (inference, the checkpoint browser,
+    _resolve_pretrained_dir) ever opens it, and it is hundreds of MB per step.
+    Observed: a 5.6 GB local model dir of which ~3.5 GB was training_state.
+    ``rollout._resolve_policy_path``'s @root fetch already dropped exactly these
+    for exactly this reason; the two call sites now agree. The
+    ``checkpoints/<step>/pretrained_model`` trees are deliberately KEPT — the
+    checkpoint browser lists and inference selects individual steps from them.
+
+    When the shared hub cache ALREADY holds the repo, the bytes are taken from
+    there instead of off the network — see `_fetch_via_hub_cache`, which is a
+    pure optimization and falls back to the download below on any failure.
+    """
     target = _local_models_root() / repo_id
-    snapshot_download(repo_id, repo_type="model", local_dir=str(target))
+    if not _fetch_via_hub_cache(repo_id, target):
+        snapshot_download(
+            repo_id,
+            repo_type="model",
+            local_dir=str(target),
+            ignore_patterns=_TRAINING_STATE_IGNORE,
+        )
     if _resolve_pretrained_dir(target) is None:
         raise ModelError(
             400,

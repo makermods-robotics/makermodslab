@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -94,8 +95,12 @@ def _seed_run(
     pretrained = run_dir / "checkpoints" / str(steps) / "pretrained_model"
     if with_checkpoint:
         pretrained.mkdir(parents=True)
-        # _list_local_checkpoints requires pretrained_model/config.json.
+        # _list_local_checkpoints requires pretrained_model/config.json, and
+        # _resolve_pretrained_dir additionally requires the policy weights lerobot
+        # actually loads (model.safetensors) — a config-only tree is a partial
+        # download, not a checkpoint.
         (pretrained / "config.json").write_text(json.dumps({"type": policy_type}))
+        (pretrained / "model.safetensors").write_text("weights")
         (pretrained / "train_config.json").write_text(
             json.dumps(
                 {
@@ -1009,15 +1014,21 @@ def _make_model_checkpoint(
 ) -> Path:
     """Fabricate a checkpoint dir in one of the two recognized shapes: a root
     config.json ("root", what upload_local_model pushes) or a
-    checkpoints/<step>/pretrained_model tree ("tree")."""
+    checkpoints/<step>/pretrained_model tree ("tree").
+
+    Both shapes carry `model.safetensors`: `_resolve_pretrained_dir` requires the
+    weights lerobot actually loads, so a config-only tree is deliberately NOT a
+    usable checkpoint (it is what an interrupted download leaves behind)."""
     d = root / repo_id
     if shape == "root":
         d.mkdir(parents=True)
         (d / "config.json").write_text(json.dumps({"type": policy_type}))
+        (d / "model.safetensors").write_text("weights")
     else:
         p = d / "checkpoints" / str(step) / "pretrained_model"
         p.mkdir(parents=True)
         (p / "config.json").write_text(json.dumps({"type": policy_type}))
+        (p / "model.safetensors").write_text("weights")
     return d
 
 
@@ -1249,10 +1260,11 @@ def test_model_download_manager_completes_and_lands_locally(
 ) -> None:
     import makermodslab.models as m
 
-    def _fake_snapshot(repo_id, repo_type, local_dir):  # noqa: ARG001
+    def _fake_snapshot(repo_id, repo_type, local_dir, ignore_patterns=None):  # noqa: ARG001
         d = Path(local_dir)
         d.mkdir(parents=True)
         (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("weights")
 
     monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
 
@@ -1274,7 +1286,7 @@ def test_model_download_manager_rejects_non_policy_repo(
     not a policy — the fetch errors and the partial dir is cleaned up."""
     import makermodslab.models as m
 
-    def _fake_snapshot(repo_id, repo_type, local_dir):  # noqa: ARG001
+    def _fake_snapshot(repo_id, repo_type, local_dir, ignore_patterns=None):  # noqa: ARG001
         Path(local_dir).mkdir(parents=True)
         (Path(local_dir) / "README.md").write_text("not a model")
 
@@ -1288,6 +1300,314 @@ def test_model_download_manager_rejects_non_policy_repo(
     assert status["state"] == "error"
     assert "doesn't look like a policy checkpoint" in status["message"]
     assert not (tmp_lerobot_home / "makermodslab_models" / "user" / "notapolicy").exists()
+
+
+def test_model_download_skips_training_state_but_keeps_checkpoints(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Models-page download must not pull optimizer/scheduler state.
+
+    `training_state/` exists only to RESUME training — nothing that reads a
+    downloaded model here ever opens it, and it is hundreds of MB per checkpoint
+    step (a real 5.6 GB local model dir was ~3.5 GB of it). The
+    `checkpoints/<step>/pretrained_model` trees must survive: the checkpoint
+    browser lists them and inference selects individual steps from them.
+
+    The fake snapshot runs the captured ignore_patterns through huggingface_hub's
+    OWN filter, so this asserts the real matching semantics (fnmatch, not
+    path-aware globbing) rather than a hand-rolled guess — and it does it with no
+    network."""
+    from huggingface_hub.utils import filter_repo_objects
+
+    import makermodslab.models as m
+
+    repo_files = [
+        "README.md",
+        "config.json",
+        "model.safetensors",
+        "train_config.json",
+        "training_state/optimizer_state.safetensors",
+        "checkpoints/000050/pretrained_model/config.json",
+        "checkpoints/000050/pretrained_model/model.safetensors",
+        "checkpoints/000050/training_state/optimizer_state.safetensors",
+        "checkpoints/last/training_state/scheduler_state.json",
+    ]
+    seen: dict = {}
+
+    def _fake_snapshot(repo_id, repo_type, local_dir, ignore_patterns=None):  # noqa: ARG001
+        seen["ignore_patterns"] = ignore_patterns
+        for rel in filter_repo_objects(repo_files, ignore_patterns=ignore_patterns):
+            path = Path(local_dir) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"type": "act"}) if rel.endswith(".json") else "weights")
+
+    monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
+
+    mgr = _model_download_manager()
+    mgr.start("user/policy")
+    _join_download(mgr)
+    assert mgr.get_status()["state"] == "done"
+
+    assert seen["ignore_patterns"] == ["training_state/**", "*/training_state/**"]
+    target = tmp_lerobot_home / "makermodslab_models" / "user" / "policy"
+    # Both the root-level and the per-checkpoint optimizer state are gone...
+    assert not (target / "training_state").exists()
+    assert not (target / "checkpoints" / "000050" / "training_state").exists()
+    assert not (target / "checkpoints" / "last").exists()
+    # ...while everything a downloaded model is actually read for survives.
+    assert (target / "config.json").is_file()
+    assert (target / "model.safetensors").is_file()
+    assert (target / "checkpoints" / "000050" / "pretrained_model" / "model.safetensors").is_file()
+    # And the trimmed tree still resolves the way the listing/inference expect.
+    assert (
+        m._resolve_pretrained_dir(target)
+        == (target / "checkpoints" / "000050" / "pretrained_model").resolve()
+    )
+    assert m.is_model_available_locally("user/policy")
+
+
+# ---------------------------------------------------------------------------
+# Models-page download → served from the shared HF hub cache (design-debt F6,
+# the other direction).
+#
+# `_fetch_model_snapshot` downloads with local_dir=, and huggingface_hub 1.21.0's
+# local_dir mode neither reads nor populates the shared cache — so a repo
+# inference had already cached was pulled over the network a SECOND time. The
+# fetch now goes through the cache when it holds the repo. No network anywhere:
+# snapshot_download is monkeypatched, and the "cache" is a tmp dir built to the
+# real on-disk layout (blobs/ + a snapshots/<rev>/ symlink farm).
+# ---------------------------------------------------------------------------
+
+
+def _seed_hub_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    cached_repo: str | None = None,
+    with_snapshot: bool = True,
+) -> Path:
+    """Redirect HF_HUB_CACHE at a tmp dir, optionally holding one model repo.
+
+    Returns the cache root. Deliberately redirected in every test here rather
+    than relying on the developer's real cache being empty of the fake repo id."""
+    from huggingface_hub import constants as hf_constants
+    from huggingface_hub.file_download import repo_folder_name
+
+    cache = tmp_path / "hub"
+    cache.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(cache))
+    if cached_repo is not None:
+        snapshots = cache / repo_folder_name(repo_id=cached_repo, repo_type="model") / "snapshots"
+        snapshots.mkdir(parents=True)
+        if with_snapshot:
+            (snapshots / "deadbeef").mkdir()
+    return cache
+
+
+def _build_cache_snapshot(cache: Path, repo_id: str) -> Path:
+    """Write a realistic cache snapshot for `repo_id`: a blobs/ dir plus a
+    snapshots/<rev>/ tree whose entries are SYMLINKS into it, which is what
+    huggingface_hub actually leaves on disk. Includes a training_state file
+    (a cache entry can predate our exclusion) and a nested checkpoint tree."""
+    from huggingface_hub.file_download import repo_folder_name
+
+    repo_root = cache / repo_folder_name(repo_id=repo_id, repo_type="model")
+    blobs = repo_root / "blobs"
+    blobs.mkdir(parents=True, exist_ok=True)
+    snapshot = repo_root / "snapshots" / "deadbeef"
+    snapshot.mkdir(parents=True, exist_ok=True)
+
+    contents = {
+        "config.json": json.dumps({"type": "act"}),
+        "model.safetensors": "root-weights",
+        "training_state/optimizer_state.safetensors": "optimizer-junk",
+        "checkpoints/000050/pretrained_model/config.json": json.dumps({"type": "act"}),
+        "checkpoints/000050/pretrained_model/model.safetensors": "step-weights",
+        "checkpoints/000050/training_state/optimizer_state.safetensors": "optimizer-junk",
+    }
+    for i, (rel, text) in enumerate(contents.items()):
+        blob = blobs / f"blob{i}"
+        blob.write_text(text)
+        link = snapshot / rel
+        link.parent.mkdir(parents=True, exist_ok=True)
+        # Relative link, exactly as huggingface_hub writes them.
+        link.symlink_to(Path(os.path.relpath(blob, link.parent)))
+    return snapshot
+
+
+def test_model_download_serves_a_cached_repo_without_re_downloading(
+    tmp_lerobot_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repo is already in the shared hub cache, so the Models-page download
+    must NOT pull it over the network a second time (design-debt F6).
+
+    Asserts the whole contract of the cache path at once: no local_dir download
+    happens, the symlink farm lands DEREFERENCED (the store must not point into
+    blobs/, which huggingface_hub may garbage-collect), training_state is still
+    excluded even though the cache entry has it, and the download manager still
+    reaches "done" normally."""
+    import makermodslab.models as m
+
+    cache = _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/policy")
+    snapshot = _build_cache_snapshot(cache, "user/policy")
+    calls: list[dict] = []
+
+    def _fake_snapshot(repo_id, repo_type=None, local_dir=None, ignore_patterns=None):
+        calls.append({"repo_id": repo_id, "local_dir": local_dir, "ignore_patterns": ignore_patterns})
+        if local_dir is not None:
+            raise AssertionError("a cached repo must not be re-downloaded with local_dir=")
+        return str(snapshot)
+
+    monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
+
+    mgr = _model_download_manager()
+    mgr.start("user/policy")
+    _join_download(mgr)
+
+    assert mgr.get_status()["state"] == "done"
+    # Cache mode: no local_dir, and the exclusion is still requested so missing
+    # files aren't fetched as optimizer state.
+    assert len(calls) == 1
+    assert calls[0]["local_dir"] is None
+    assert calls[0]["ignore_patterns"] == ["training_state/**", "*/training_state/**"]
+
+    target = tmp_lerobot_home / "makermodslab_models" / "user" / "policy"
+    weights = target / "model.safetensors"
+    assert weights.is_file()
+    assert not weights.is_symlink()
+    assert weights.read_text() == "root-weights"
+    nested = target / "checkpoints" / "000050" / "pretrained_model" / "model.safetensors"
+    assert nested.is_file()
+    assert not nested.is_symlink()
+    assert nested.read_text() == "step-weights"
+    # A cache entry predating the exclusion still must not leak optimizer state.
+    assert not (target / "training_state").exists()
+    assert not (target / "checkpoints" / "000050" / "training_state").exists()
+    # And the copied tree passes the same validation the download path does.
+    assert (
+        m._resolve_pretrained_dir(target)
+        == (target / "checkpoints" / "000050" / "pretrained_model").resolve()
+    )
+    assert m.is_model_available_locally("user/policy")
+
+
+def test_model_download_uses_the_network_when_the_cache_is_empty(
+    tmp_lerobot_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing cached for the repo → the plain local_dir download, unchanged.
+    The cache path is an optimization, not a precondition."""
+    import makermodslab.models as m
+
+    _seed_hub_cache(monkeypatch, tmp_path)
+    calls: list[dict] = []
+
+    def _fake_snapshot(repo_id, repo_type=None, local_dir=None, ignore_patterns=None):
+        calls.append({"local_dir": local_dir})
+        assert local_dir is not None, "an uncached repo has nothing to serve from the cache"
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("weights")
+
+    monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
+
+    mgr = _model_download_manager()
+    mgr.start("user/policy")
+    _join_download(mgr)
+
+    assert mgr.get_status()["state"] == "done"
+    assert len(calls) == 1 and calls[0]["local_dir"] is not None
+    assert m.is_model_available_locally("user/policy")
+
+
+def test_hub_cache_has_repo_requires_an_actual_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both sides of the rule: a repo dir whose snapshots/ is empty (an
+    interrupted or wiped entry) has nothing to dedupe against and counts as
+    ABSENT, so the caller downloads instead of copying a broken tree."""
+    import makermodslab.models as m
+
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/policy")
+    assert m._hub_cache_has_repo("user/policy") is True
+    assert m._hub_cache_has_repo("user/other") is False
+
+    _seed_hub_cache(monkeypatch, tmp_path / "b", cached_repo="user/policy", with_snapshot=False)
+    assert m._hub_cache_has_repo("user/policy") is False
+    # A repo id the hub's own validation rejects answers "not cached" rather
+    # than raising — snapshot_download then produces the canonical error.
+    assert m._hub_cache_has_repo("../../etc") is False
+
+
+def test_model_download_falls_back_when_the_cache_fetch_errors(
+    tmp_lerobot_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cache path must never become a NEW failure mode: an HF error on the
+    cache-mode call falls back to the plain local_dir download and the download
+    still succeeds."""
+    import makermodslab.models as m
+
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/policy")
+    calls: list[dict] = []
+
+    def _fake_snapshot(repo_id, repo_type=None, local_dir=None, ignore_patterns=None):
+        calls.append({"local_dir": local_dir})
+        if local_dir is None:
+            raise OSError("cache entry vanished mid-fetch")
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("downloaded")
+
+    monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
+
+    mgr = _model_download_manager()
+    mgr.start("user/policy")
+    _join_download(mgr)
+
+    assert mgr.get_status()["state"] == "done"
+    # Tried the cache first, then fell back to the network.
+    assert [c["local_dir"] is None for c in calls] == [True, False]
+    target = tmp_lerobot_home / "makermodslab_models" / "user" / "policy"
+    assert (target / "model.safetensors").read_text() == "downloaded"
+    assert m.is_model_available_locally("user/policy")
+
+
+def test_model_download_falls_back_when_the_snapshot_copy_errors(
+    tmp_lerobot_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guarantee for the other half of the cache path — a copy that dies
+    (out of disk, a blob yanked out from under us) also falls back."""
+    import makermodslab.models as m
+
+    cache = _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/policy")
+    snapshot = _build_cache_snapshot(cache, "user/policy")
+    calls: list[dict] = []
+
+    def _fake_snapshot(repo_id, repo_type=None, local_dir=None, ignore_patterns=None):
+        calls.append({"local_dir": local_dir})
+        if local_dir is None:
+            return str(snapshot)
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("downloaded")
+
+    def _boom(_snapshot, _target):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
+    monkeypatch.setattr(m, "_copy_snapshot_into_store", _boom)
+
+    mgr = _model_download_manager()
+    mgr.start("user/policy")
+    _join_download(mgr)
+
+    assert mgr.get_status()["state"] == "done"
+    assert [c["local_dir"] is None for c in calls] == [True, False]
+    assert (
+        tmp_lerobot_home / "makermodslab_models" / "user" / "policy" / "model.safetensors"
+    ).read_text() == ("downloaded")
 
 
 def test_models_download_endpoint_rejects_bad_repo_id(client) -> None:
@@ -1819,3 +2139,61 @@ def test_delete_succeeds_when_inference_reads_other_path(
 
     result = delete_local_model("user/idle_policy")
     assert result["deleted"] is True
+
+
+def test_model_download_rejects_a_fetch_that_lands_without_weights(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A download that ends weights-less is a FAILURE, not a usable model.
+
+    Reproduces the live incident at the download boundary: the fetch lands
+    config.json, train_config.json and both processor safetensors but no
+    model.safetensors — the 68 KB interrupted-download shape. The post-download
+    validation must catch it so the partial is cleaned up and the user is told,
+    rather than the entry sitting in the library until inference dies on
+    FileNotFoundError deep inside lerobot.
+    """
+    import makermodslab.models as m
+
+    def _fake_snapshot(repo_id, repo_type, local_dir, ignore_patterns=None):  # noqa: ARG001
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "train_config.json").write_text(json.dumps({"type": "act"}))
+        # Present, and deliberately NOT policy weights.
+        (d / "preprocessor.safetensors").write_text("processor")
+        (d / "postprocessor.safetensors").write_text("processor")
+
+    monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
+
+    mgr = _model_download_manager()
+    mgr.start("user/partial")
+    _join_download(mgr)
+
+    status = mgr.get_status()
+    assert status["state"] == "error"
+    assert not m.is_model_available_locally("user/partial")
+    # The partial dir is cleaned up, so it can't be mistaken for a complete copy.
+    assert not (tmp_lerobot_home / "makermodslab_models" / "user" / "partial").exists()
+
+
+def test_resolve_pretrained_dir_skips_a_half_written_newest_checkpoint(tmp_lerobot_home: Path) -> None:
+    """A checkpoint still being written must not hide the last complete one.
+
+    Training writes checkpoints/<step>/pretrained_model incrementally, so the
+    highest step can exist with a config and no weights for a while. The scan
+    walks down to the newest COMPLETE checkpoint instead of reporting the run
+    unusable.
+    """
+    import makermodslab.models as m
+
+    root = tmp_lerobot_home / "makermodslab_models" / "user" / "run"
+    good = root / "checkpoints" / "000100" / "pretrained_model"
+    good.mkdir(parents=True)
+    (good / "config.json").write_text(json.dumps({"type": "act"}))
+    (good / "model.safetensors").write_text("weights")
+    partial = root / "checkpoints" / "000200" / "pretrained_model"
+    partial.mkdir(parents=True)
+    (partial / "config.json").write_text(json.dumps({"type": "act"}))
+
+    assert m._resolve_pretrained_dir(root) == good.resolve()

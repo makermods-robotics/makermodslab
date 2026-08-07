@@ -42,6 +42,12 @@ export interface TrainingRequest {
   // resume from. The backend resolves these into the checkpoint's config_path.
   resume_from_job_id?: string;
   resume_from_step?: number;
+  // Consent for the one resume shape that has to publish something: continuing
+  // a LOCAL run on cloud compute uploads its checkpoint to a private Hub repo
+  // first, because the pod can't read this machine's disk (F7). The backend
+  // refuses that combination unless this is true, so it can never be a silent
+  // side effect of Continue.
+  upload_resume_checkpoint?: boolean;
   // Set by the "Fine-tune" flow: start a fresh run whose weights are init'd
   // from an imported/existing checkpoint. The backend resolves these into
   // policy_pretrained_path (which it also accepts directly).

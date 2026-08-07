@@ -15,14 +15,13 @@
 on-disk log file) and recording-log (tail of the in-memory ring buffer).
 
 Both log SOURCES are mocked: the inference log is a temp file monkeypatched into
-the handler's meta / fallback dir, and the recording log is a seeded ring-buffer
+the handler's session state, and the recording log is a seeded ring-buffer
 handler. No real inference or recording is ever started (that would drive the
 arm) — we exercise the pure read paths only."""
 
 from __future__ import annotations
 
 import logging
-import os
 
 import pytest
 
@@ -38,17 +37,25 @@ def _reset_rollout_meta(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_inference_log_empty_when_no_run(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """No active meta and an empty logs dir → empty text, log_path None, no raise."""
+    """No session state → empty text, log_path None, belongs_to None, no raise.
+
+    Log files on disk are deliberately irrelevant here: the handler only serves a
+    log this process opened, so a populated inference_logs dir must not change
+    the answer (see the removal note below).
+    """
     from makermodslab import rollout
 
-    empty_dir = tmp_path / "inference_logs"
-    empty_dir.mkdir()
-    # Point the fallback glob at an empty dir by faking Path.home().
-    monkeypatch.setattr(rollout.Path, "home", staticmethod(lambda: tmp_path.parent))
-    # tmp_path.parent/.cache/... won't exist; the OSError/empty path both yield "".
+    logs_dir = tmp_path / ".cache" / "huggingface" / "lerobot" / "inference_logs"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "100.log").write_text("some earlier run\n")
+    monkeypatch.setattr(rollout.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
     result = rollout.handle_inference_log()
     assert result["logs"] == ""
     assert result["log_path"] is None
+    assert result["belongs_to"] is None
 
 
 def test_inference_log_tails_active_meta_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -57,11 +64,16 @@ def test_inference_log_tails_active_meta_file(monkeypatch: pytest.MonkeyPatch, t
 
     log_file = tmp_path / "run.log"
     log_file.write_text("line1\nline2\nline3\n")
+    # The meta branch serves the log only for a LIVE session — otherwise a
+    # lingering meta could get labelled "active" after the run ended, which is the
+    # mislabelling the belongs_to contract exists to prevent.
+    monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(rollout, "_inference_meta", {"log_path": str(log_file)})
 
     result = rollout.handle_inference_log()
     assert result["log_path"] == str(log_file)
     assert result["logs"] == "line1\nline2\nline3"
+    assert result["belongs_to"] == "active"
 
 
 def test_inference_log_bounded_to_max_lines(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -70,6 +82,7 @@ def test_inference_log_bounded_to_max_lines(monkeypatch: pytest.MonkeyPatch, tmp
 
     log_file = tmp_path / "run.log"
     log_file.write_text("\n".join(f"line{i}" for i in range(1000)) + "\n")
+    monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(rollout, "_inference_meta", {"log_path": str(log_file)})
 
     result = rollout.handle_inference_log(max_lines=10)
@@ -80,24 +93,21 @@ def test_inference_log_bounded_to_max_lines(monkeypatch: pytest.MonkeyPatch, tmp
     assert lines[-1] == "line999"
 
 
-def test_inference_log_falls_back_to_newest_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """With no active meta, the newest *.log under the logs dir is tailed."""
-    from makermodslab import rollout
-
-    logs_dir = tmp_path / ".cache" / "huggingface" / "lerobot" / "inference_logs"
-    logs_dir.mkdir(parents=True)
-    old = logs_dir / "100.log"
-    new = logs_dir / "200.log"
-    old.write_text("old-run\n")
-    new.write_text("new-run\n")
-    # Make `new` unambiguously newer regardless of write ordering.
-    os.utime(old, (1000, 1000))
-    os.utime(new, (2000, 2000))
-    monkeypatch.setattr(rollout.Path, "home", staticmethod(lambda: tmp_path))
-
-    result = rollout.handle_inference_log()
-    assert result["log_path"] == str(new)
-    assert result["logs"] == "new-run"
+# REMOVED: test_inference_log_falls_back_to_newest_file.
+#
+# It pinned the "no active meta -> tail the newest *.log in inference_logs"
+# fallback, which is now the DEFECT rather than the contract. A log file on disk
+# carries no evidence of which run wrote it, so during a new session's pre-spawn
+# phases — and after a run that failed before spawning — that glob served an
+# earlier run's output as though it were the current one. Observed live: a run
+# that failed on a calibration error produced no log at all, and the user was
+# shown a three-day-old RTC run's output and concluded their sync run was
+# executing RTC code.
+#
+# The replacement guarantees live in tests/test_rollout.py: the endpoint serves
+# only logs THIS process opened, labelled `belongs_to` ("active" / "last_run" /
+# null), and `test_inference_log_never_globs_the_directory` pins the absence of
+# this fallback directly.
 
 
 # --- Recording log ------------------------------------------------------------

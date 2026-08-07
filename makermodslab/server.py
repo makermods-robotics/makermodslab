@@ -99,7 +99,9 @@ from .rollout import (
     InferenceRequest,
     handle_inference_log,
     handle_inference_status,
+    handle_next_episode,
     handle_start_inference,
+    handle_stop_episode,
     handle_stop_inference,
 )
 
@@ -539,11 +541,42 @@ def start_inference(request: InferenceRequest):
 
 @app.post("/stop-inference")
 def stop_inference():
+    """Abort the whole session. In evaluation mode (eval_episodes > 1) this ends
+    the run wherever it is and reports the partial tally with NO accuracy — the
+    per-episode control is /inference-episode-stop."""
     result = handle_stop_inference()
     if not result.get("success"):
         raise HTTPException(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to stop inference"),
+        )
+    return result
+
+
+@app.post("/inference-episode-stop")
+def inference_episode_stop():
+    """Evaluation mode only: end the CURRENT episode early and score it a
+    SUCCESS ("the robot did the task"). The session stays up and moves into its
+    reset phase. 409 when no evaluation episode is running."""
+    result = handle_stop_episode()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to stop the episode"),
+        )
+    return result
+
+
+@app.post("/inference-next-episode")
+def inference_next_episode():
+    """Evaluation mode only: leave the reset phase and start the next episode.
+    The reset is user-ended (no auto-timer). 409 unless an evaluation is parked
+    waiting for a reset."""
+    result = handle_next_episode()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start the next episode"),
         )
     return result
 
@@ -557,8 +590,12 @@ def inference_status():
 def inference_log():
     """Tail of the active/most-recent rollout's log file (read-only, bounded).
 
-    Returns {logs, log_path}; empty logs (not an error) when no run has produced
-    output yet, so the frontend can poll unconditionally."""
+    Returns {logs, log_path, belongs_to}; empty logs (not an error) when no run
+    has produced output yet, so the frontend can poll unconditionally.
+
+    `belongs_to` is "active" (the running session's own log), "last_run" (the
+    most recent finished run of this server process) or null (nothing to show) —
+    the caller must not present a "last_run" log as the live session's output."""
     return handle_inference_log()
 
 

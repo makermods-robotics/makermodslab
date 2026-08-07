@@ -44,6 +44,8 @@ from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
+    CameraResolutionError,
+    load_robot_cameras,
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
@@ -340,9 +342,17 @@ class RecordingRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
-    # Robot record name — used only as the BiSO staging base id (bimanual). It
-    # decides the on-disk staging dir, not which calibration drives which arm.
-    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    # Robot record name. Two jobs:
+    #   1. The session's CAMERAS are resolved from this record, server-side
+    #      (utils/config.load_robot_cameras) — the request carries no camera
+    #      payload at all. Blank ⇒ a camera-less recording; a non-blank name
+    #      with no record on disk is a 400, never a silent camera-less run.
+    #   2. Bimanual only: the BiSO staging base id — it decides the on-disk
+    #      staging dir, not which calibration drives which arm. Blank/invalid
+    #      falls back to DEFAULT_BIMANUAL_BASE.
+    # A `cameras` dict used to live on this model. It was removed (the panel is
+    # read-only now); pydantic ignores unknown fields, so an older frontend's
+    # payload still parses and its stale camera set is correctly ignored.
     robot_name: str = ""
     dataset_repo_id: str
     single_task: str
@@ -356,7 +366,6 @@ class RecordingRequest(BaseModel):
     private: bool = False
     resume: bool = False
     streaming_encoding: bool = True
-    cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
     # Escape hatch for the arm-identity guard (see makermodslab/arm_identity.py):
     # when true, record even if the connected arms don't match their calibrations.
@@ -395,7 +404,10 @@ def _platform_backend():
 
 
 def _build_camera_configs(cameras: dict, default_backend) -> dict:
-    """Convert the frontend camera dict into OpenCVCameraConfig objects.
+    """Convert the session camera dict into OpenCVCameraConfig objects.
+
+    The dict is `{camera name: settings}` as resolved from the robot record by
+    utils/config.load_robot_cameras — it never comes from the request.
 
     `backend` (a Cv2Backends name) and `fourcc` (a 4-char code) are optional per
     camera; when omitted `backend` falls back to `default_backend` and `fourcc`
@@ -435,11 +447,19 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
-def create_record_config(request: RecordingRequest) -> RecordConfig:
-    """Create a RecordConfig from the recording request"""
-    # Convert the frontend camera dict into OpenCVCameraConfig objects. Backend
-    # defaults to the platform pin unless the request overrides it per camera.
-    camera_configs = _build_camera_configs(request.cameras, _platform_backend())
+def create_record_config(request: RecordingRequest, cameras: dict | None = None) -> RecordConfig:
+    """Create a RecordConfig from the recording request.
+
+    `cameras` is the session camera dict already resolved from the robot record
+    (handle_start_recording resolves it inside its lock so a bad robot name is a
+    400 before the session claims anything). Left None it is resolved here from
+    `request.robot_name`, so a direct caller gets the same record-driven set.
+    """
+    # Convert the session camera dict into OpenCVCameraConfig objects. Backend
+    # defaults to the platform pin unless the record pins one per camera.
+    if cameras is None:
+        cameras = load_robot_cameras(request.robot_name)
+    camera_configs = _build_camera_configs(cameras, _platform_backend())
 
     if request.mode == "bimanual":
         # Build a lerobot BiSO leader+follower pair (config assembly + calibration
@@ -599,6 +619,16 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 name_reason,
             )
             return {"success": False, "status_code": 400, "message": name_reason}
+        # Resolve the session's cameras from the robot record NAMED BY THE
+        # REQUEST — the request itself carries no camera payload. Done here,
+        # before the flag is claimed, so a wrong robot name or an ambiguous
+        # camera set is a plain 400 instead of a session that starts and
+        # silently records no video.
+        try:
+            session_cameras = load_robot_cameras(request.robot_name)
+        except CameraResolutionError as exc:
+            logger.warning("Rejected recording start: %s", exc)
+            return {"success": False, "status_code": 400, "message": str(exc)}
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later release grace short until the server
@@ -655,7 +685,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             "paused": False,  # Reset-phase pause/resume (mouse-only, no keyboard shortcut)
         }
 
-        record_config = create_record_config(request)
+        record_config = create_record_config(request, cameras=session_cameras)
 
         def recording_worker():
             global \
@@ -687,10 +717,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
                 # Give the frontend's camera streams time to release the
                 # underlying devices before lerobot tries to open them.
-                if request.cameras:
+                if session_cameras:
                     logger.info(
                         "Waiting for camera resources to be released (cameras: %s)",
-                        list(request.cameras.keys()),
+                        list(session_cameras.keys()),
                     )
                     time.sleep(2.0)
 
@@ -908,7 +938,10 @@ def handle_pause_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     if current_phase not in ("recording", "resetting"):
-        return {"success": False, "message": "Pause is only available while recording or during the reset gap"}
+        return {
+            "success": False,
+            "message": "Pause is only available while recording or during the reset gap",
+        }
     if recording_events.get("paused", False):
         return {"success": True, "message": "Already paused", "events_state": dict(recording_events)}
 
@@ -931,7 +964,10 @@ def handle_resume_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     if current_phase not in ("recording", "resetting"):
-        return {"success": False, "message": "Resume is only available while recording or during the reset gap"}
+        return {
+            "success": False,
+            "message": "Resume is only available while recording or during the reset gap",
+        }
     if not recording_events.get("paused", False):
         return {"success": True, "message": "Not paused", "events_state": dict(recording_events)}
 
@@ -953,9 +989,7 @@ def _reset_paused() -> bool:
     leak into a later phase's available_controls or status — see the
     loop-exit cleanup in record_with_web_events, which is defense in depth
     on top of this gate, not a substitute for it."""
-    return bool(
-        recording_events and current_phase == "resetting" and recording_events.get("paused", False)
-    )
+    return bool(recording_events and current_phase == "resetting" and recording_events.get("paused", False))
 
 
 def _pause_armed() -> bool:
@@ -1009,7 +1043,8 @@ def handle_recording_status() -> dict[str, Any]:
         "pause_armed": _pause_armed(),
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
-            "exit_early": recording_active and not _reset_paused(),  # Right arrow key replacement; disabled while paused
+            "exit_early": recording_active
+            and not _reset_paused(),  # Right arrow key replacement; disabled while paused
             "rerecord_episode": recording_active
             and current_phase == "recording",  # Only during recording phase
             "pause_recording": recording_active

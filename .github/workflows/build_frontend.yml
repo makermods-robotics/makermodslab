@@ -27,7 +27,10 @@ jobs:
         with:
           app-id: ${{ secrets.DIST_BOT_APP_ID }}
           private-key: ${{ secrets.DIST_BOT_PRIVATE_KEY }}
-      - uses: actions/checkout@v7.0.0
+      # Persisting the App credential is the whole mechanism here: the `git push`
+      # below reuses it on the origin remote. The token is minted per-run by the
+      # App and expires when the job ends, so it cannot outlive the workflow.
+      - uses: actions/checkout@v7.0.0  # zizmor: ignore[artipacked]
         with:
           lfs: true
           # Check out with the App token; persist-credentials defaults to true
@@ -47,9 +50,13 @@ jobs:
         working-directory: frontend
         run: npm run build
       - name: Commit dist if changed
+        # `app-slug` goes through env rather than being interpolated straight
+        # into the shell, so the run block holds no expansion sites.
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
-          git config user.name  "${{ steps.app-token.outputs.app-slug }}[bot]"
-          git config user.email "${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+          git config user.name  "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
           if [[ -n "$(git status --porcelain frontend/dist)" ]]; then
             git add frontend/dist
             git commit -m "ci: rebuild frontend/dist [skip ci]"

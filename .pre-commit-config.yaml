@@ -15,7 +15,10 @@
 default_language_version:
     python: python3.12
 
-exclude: '^frontend/dist/'
+# frontend/dist is generated (CI rebuilds and commits it); makermodslab/vendor is
+# third-party code kept byte-for-byte verbatim so it stays diffable against
+# upstream — ruff already excludes it, and the whitespace fixers must too.
+exclude: '^(frontend/dist/|makermodslab/vendor/)'
 
 repos:
   ##### Meta #####
