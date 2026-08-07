@@ -44,9 +44,10 @@ export function latestResumableStep(checkpoints: JobCheckpoint[]): number | null
  * optimizer). Steps, the log/save cadence, the worker count, hardware and the
  * timeout stay editable — those a continuation can really change.
  *
- * The runner is derived from the job, not passed in: a resume ALWAYS continues
- * on the parent's runner (cross-runner resume isn't implemented — see F7), and
- * both call sites already gate their buttons on `job.runner`, so a caller
+ * The runner is derived from the job, not passed in: it is where the parent
+ * RAN, which is both the form's default Compute and (since a continuation may
+ * now cross runners — F7) the fact that decides whether the parent's checkpoint
+ * has to be moved first. Both call sites already read `job.runner`, so a caller
  * supplying it could only ever disagree by mistake. `imported` records are not
  * resumable and never reach here; they map to "local" for exhaustiveness.
  */
