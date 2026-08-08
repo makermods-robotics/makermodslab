@@ -30,7 +30,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -119,6 +119,23 @@ class JobRecord(BaseModel):
     wandb_run_url: str | None = None
     # Step dirs known to be present under checkpoints/ in that repo.
     checkpoints_hub_steps: list[str] = []
+    # Resume lineage, derived at list/get time from the whole registry — same
+    # deal as checkpoint_count above (computed on read, meaningless on disk).
+    #
+    # `child_ids`: the runs that resumed THIS one, newest-first. Empty ⇒ this
+    # record is a LEAF, i.e. the live tip of its chain; the UI shows one row per
+    # leaf and reaches the rest of the chain through `ancestor_ids`. A job can
+    # have several children (nothing stops two resumes off one parent), so the
+    # lineage is a forest of trees, not a set of chains.
+    #
+    # `ancestor_ids`: the transitive resume ancestors, nearest parent first.
+    #
+    # Only `resume_from_job_id` is an edge here. A FINE-TUNE
+    # (`finetune_from_job_id`) is deliberately not: it starts a fresh optimizer
+    # and LR schedule from a checkpoint's weights, so it is a new model rather
+    # than a continuation, and its source must keep its own row.
+    child_ids: list[str] = []
+    ancestor_ids: list[str] = []
 
 
 class JobCheckpoint(BaseModel):
@@ -2360,6 +2377,62 @@ def _oom_failure_reason(log_path: Path, rc: int | None) -> str | None:
     return None
 
 
+def build_child_index(records: Iterable[JobRecord]) -> dict[str, list[str]]:
+    """Map job id -> the ids of the runs that resumed it, newest-first.
+
+    The one place the resume forest's edges are defined. An edge is
+    `config.resume_from_job_id` and nothing else — a fine-tune
+    (`finetune_from_job_id`) starts a fresh schedule from a checkpoint's
+    weights, so it is a new model whose source keeps its own identity, not a
+    continuation that supersedes it.
+
+    Built over EVERY record, never over a page: "does this run have a
+    successor?" must not change answer because the successor fell off the end
+    of a capped listing (which is exactly how the frontend's old client-side
+    approximation lost parents whose child sat past the 50-record page).
+
+    A record naming itself as its own source is skipped rather than indexed —
+    a one-node cycle is corrupt data, and dropping the edge keeps every walk
+    below terminating without a special case. Parent ids with no record are
+    still keyed here; nothing reads them, since lookups start from a record.
+    """
+    children: dict[str, list[str]] = {}
+    for record in sorted(records, key=lambda r: r.started_at, reverse=True):
+        parent_id = record.config.resume_from_job_id
+        if not parent_id or parent_id == record.id:
+            continue
+        children.setdefault(parent_id, []).append(record.id)
+    return children
+
+
+def ancestor_ids_of(records: Mapping[str, JobRecord], job_id: str) -> list[str]:
+    """The transitive resume ancestors of `job_id`, nearest parent first.
+
+    Same walk as `read_metrics_history`, and the same two terminations: a
+    MISSING ancestor (the source run was deleted) truncates the chain rather
+    than raising — the lineage just starts later — and an id already seen ends
+    it, so corrupt data that points a chain back at itself can't spin here.
+
+    Returns only ids the registry actually holds, which is what lets the
+    frontend fetch each one by id: an ancestor is absent from the client's
+    capped page, never from the server.
+    """
+    out: list[str] = []
+    seen = {job_id}
+    current = records.get(job_id)
+    while current is not None:
+        parent_id = current.config.resume_from_job_id
+        if not parent_id or parent_id in seen:
+            break
+        parent = records.get(parent_id)
+        if parent is None:
+            break
+        out.append(parent_id)
+        seen.add(parent_id)
+        current = parent
+    return out
+
+
 class JobAlreadyRunningError(Exception):
     """Raised when start() is called while another local job is running."""
 
@@ -2370,6 +2443,26 @@ class JobNotFoundError(Exception):
 
 class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
+
+
+class JobHasChildrenError(Exception):
+    """Raised when delete() is called on a run something else resumed from.
+
+    Deleting a node mid-chain used to silently orphan its whole subtree: the
+    children survive with a `resume_from_job_id` pointing at nothing, so their
+    lineage walk truncates and the run history they inherited (the loss curve
+    before the resume step, the checkpoints they can fall back to) is simply
+    gone — and for a LOCAL parent the deletion also wipes the on-disk
+    checkpoint directory the children resumed out of. Refuse instead, and name
+    the descendants so the user can delete from the tip inwards.
+
+    Carries the direct child ids; the HTTP layer turns them into the message.
+    """
+
+    def __init__(self, job_id: str, child_ids: builtins.list[str]) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+        self.child_ids = child_ids
 
 
 class DatasetNotOnHubError(Exception):
@@ -2556,21 +2649,42 @@ class JobRegistry:
             if r.state == "running" and r.runner == "local":
                 raise JobAlreadyRunningError(r.id)
 
+    def _annotate_lineage(
+        self,
+        record: JobRecord,
+        snapshot: Mapping[str, JobRecord],
+        children: Mapping[str, builtins.list[str]],
+    ) -> None:
+        """Stamp the derived resume-tree fields onto `record`, in place.
+
+        Derived on read for the same reason checkpoint_count is: the answer
+        depends on OTHER records (a run becomes a non-leaf the moment something
+        resumes it), so a value frozen into this record's job.json would be
+        wrong by the time anyone read it.
+        """
+        record.child_ids = list(children.get(record.id, ()))
+        record.ancestor_ids = ancestor_ids_of(snapshot, record.id)
+
     def list(self, limit: int = 10) -> builtins.list[JobRecord]:
         with self._lock:
-            records = list(self._records.values())
-        records.sort(key=lambda r: r.started_at, reverse=True)
-        records = records[:limit]
+            snapshot = dict(self._records)
+        records = sorted(snapshot.values(), key=lambda r: r.started_at, reverse=True)[:limit]
+        # Indexed over the whole snapshot, then applied to the page: a run's
+        # leaf-ness is a fact about the registry, not about what fits on a page.
+        children = build_child_index(snapshot.values())
         for r in records:
             r.checkpoint_count = self._count_checkpoints(r)
+            self._annotate_lineage(r, snapshot, children)
         return records
 
     def get(self, job_id: str) -> JobRecord:
         with self._lock:
-            record = self._records.get(job_id)
+            snapshot = dict(self._records)
+        record = snapshot.get(job_id)
         if record is None:
             raise JobNotFoundError(job_id)
         record.checkpoint_count = self._count_checkpoints(record)
+        self._annotate_lineage(record, snapshot, build_child_index(snapshot.values()))
         return record
 
     def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
@@ -3601,6 +3715,14 @@ class JobRegistry:
                 raise JobNotFoundError(job_id)
             if record.state == "running":
                 raise JobNotRunningError(job_id)
+            # Deleting a node with descendants is refused, not cascaded: a
+            # cascade would take runs the user never named (and, for local
+            # runs, their output dirs) on the strength of one click. Leaf
+            # deletes — every delete the UI actually offers, since the list is
+            # one row per leaf — are unaffected.
+            children = build_child_index(self._records.values()).get(job_id, [])
+            if children:
+                raise JobHasChildrenError(job_id, children)
             self._records.pop(job_id, None)
             self._runners.pop(job_id, None)
             self._last_persist_at.pop(job_id, None)
