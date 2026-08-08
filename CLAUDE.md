@@ -55,6 +55,27 @@ the entry once the change is committed or discarded — uncommitted
 pending-review diffs keep their claim. Full protocol: the global deploy-agent
 skill's "Cross-session fence protocol" section.
 
+## Park work on `wip/` branches: no session ends with a dirty worktree
+
+Scratchpad worktrees live under `/tmp` — a reboot deletes them, and nothing
+lists their uncommitted diffs. Work that exists only as dirty files in a
+worktree is invisible and one restart from gone (a ~900-line feature and a
+PR-critical fix were both found orphaned this way on 2026-08-08).
+
+- **NO-COMMIT review means "don't commit to the *target* branch" — never
+  "leave the work uncommitted."** Before a session (or deployed agent) ends,
+  park any pending-review diff as a single WIP commit on a `wip/<topic>`
+  branch. Review happens from the branch diff exactly as it would from the
+  dirty worktree.
+- **Name the parking branch** in the fence entry's `reason` and in the daily
+  log (`logs/daily/`), so the next session can find it.
+- **Anything uncommitted in a scratchpad worktree is disposable.** Once parked
+  work is on a branch, cleanup may remove dirty scratchpad worktrees without
+  forensic inspection.
+- Run `/git-audit` ([.claude/commands/git-audit.md](.claude/commands/git-audit.md))
+  periodically — it sweeps for dirty worktrees, unparked diffs, orphaned
+  branches, and PR/branch drift.
+
 ## Repository purpose
 
 MakerMods Lab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm (single or bimanual). It exposes teleoperation, dataset recording, calibration, training, inference, and replay as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows. It is a fork of Hugging Face's [leLab](https://github.com/huggingface/leLab), heavily extended by [makermods-robotics](https://github.com/makermods-robotics).
