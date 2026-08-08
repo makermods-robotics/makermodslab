@@ -31,6 +31,12 @@ export interface LineageCheckpoint {
  * repo, so every run in a cloud chain enumerates the same shared tree and each
  * inherited step would otherwise appear once per run.
  *
+ * The whole ancestor path is loaded even though only the leaf's OWN entries
+ * are resumable (see `resumableCheckpoints`): the card LISTS this list, and
+ * being able to look at what a chain saved — and to run inference on an
+ * inherited checkpoint — is not the same affordance as continuing training
+ * from it. Narrowing happens at the resume rule, not here.
+ *
  * KNOWN LIMIT, cloud only: because that Hub repo is shared by the WHOLE tree,
  * a checkpoint written by a FORKED SIBLING is in the listing too, and there is
  * nothing in it to attribute a step to the run that wrote it — so an ancestor
@@ -133,14 +139,36 @@ function cloudSiblingStepCap(leaf: JobRecord): number | null {
  * and the card's can no longer disagree about whether a run is resumable:
  *
  *  - the leaf must be in a resumable state (above);
+ *  - the checkpoint's OWNER must not be `done` — the backend refuses a
+ *    finished run as a resume source, so offering one only buys a 400;
+ *  - the checkpoint's OWNER must have no children — STICKS ONLY (user
+ *    decision 2026-08-07), see below;
  *  - the checkpoint must sit strictly below the leaf's step target, or the
  *    continuation would start at (or past) the finish line. A target of 0
  *    means "unset", so nothing is excluded;
  *  - on a CLOUD leaf, the checkpoint must also sit at or below the leaf's own
  *    furthest step — above that it provably belongs to a sibling sharing the
- *    Hub repo (see `cloudSiblingStepCap`);
- *  - the checkpoint's OWNER must not be `done` — the backend refuses a
- *    finished run as a resume source, so offering one only buys a 400.
+ *    Hub repo (see `cloudSiblingStepCap`).
+ *
+ * STICKS ONLY, and what it costs. A resume lineage is now a CHAIN: jobs.py
+ * refuses a resume whose source already has a child (`JobAlreadyContinuedError`
+ * -> 409), so continuing an ANCESTOR — which by construction already has a
+ * child, the run below it on the path — is a click that could only end in that
+ * refusal. Excluding an owner with children therefore leaves exactly the LEAF's
+ * own checkpoints resumable, and the UI stops offering what the backend would
+ * reject. It is the same rule stated at both ends, not a second policy.
+ *
+ * The list still SHOWS the whole lineage (`loadLineageCheckpoints` is
+ * unchanged, and the card's dropdown renders all of it) — inspection and
+ * inference on an inherited checkpoint are untouched. Only the Resume button
+ * narrows, which is the affordance the 409 governs.
+ *
+ * The cost, stated plainly because it is the thing a user will hit: a tip that
+ * died before saving anything now has NOTHING to resume, where it used to
+ * inherit its parent's checkpoints. That case is not a dead end — deleting the
+ * empty tip frees the parent to be resumed again — and `noResumeReason`
+ * returns "parent-continued" so the toast can say exactly that. Branching is
+ * deferred, not abolished; legacy forks keep rendering as they always did.
  *
  * What is deliberately NOT a rule: the owner sharing the leaf's runner. A
  * continuation may cross runners in EITHER direction (F7) — jobs.py
@@ -164,10 +192,45 @@ export function resumableCheckpoints(
     .filter(
       (entry) =>
         entry.job.state !== "done" &&
+        entry.job.child_ids.length === 0 &&
         (target === 0 || entry.ckpt.step < target) &&
         (cap === null || entry.ckpt.step <= cap),
     )
     .sort((a, b) => b.ckpt.step - a.ckpt.step);
+}
+
+/** The newest lineage checkpoint that only the sticks rule excludes — i.e. the
+ * one the user would be resuming if they first deleted the run in front of it.
+ *
+ * Exists so the empty-result toast can NAME the parent and the step instead of
+ * saying "delete something". Lives here rather than in the toast because it is
+ * the sticks rule read backwards, and a caller re-deriving it would be free to
+ * disagree with `resumableCheckpoints` about which entry that is — the exact
+ * drift the one-rule consolidation was for.
+ *
+ * Every other filter still applies: an entry a `done` owner or the step target
+ * would have dropped anyway is not "blocked by a continuation", and offering
+ * it as the delete-first payoff would be a lie. Returns null when there is no
+ * such entry, which is every case except the empty-handed tip.
+ */
+export function blockedByContinuedOwner(
+  leaf: JobRecord,
+  lineage: LineageCheckpoint[],
+): LineageCheckpoint | null {
+  if (!isResumableLeaf(leaf)) return null;
+  const target = leaf.config?.steps ?? 0;
+  const cap = cloudSiblingStepCap(leaf);
+  return (
+    lineage
+      .filter(
+        (entry) =>
+          entry.job.state !== "done" &&
+          entry.job.child_ids.length > 0 &&
+          (target === 0 || entry.ckpt.step < target) &&
+          (cap === null || entry.ckpt.step <= cap),
+      )
+      .sort((a, b) => b.ckpt.step - a.ckpt.step)[0] ?? null
+  );
 }
 
 /** Which rule above emptied the list — for the one caller that has to explain
@@ -183,6 +246,7 @@ export type NoResumeReason =
   | "not-resumable" // the leaf's own state — no run to continue
   | "no-checkpoints" // nothing saved anywhere in the lineage
   | "owner-done" // every candidate belongs to a finished run
+  | "parent-continued" // sticks: every candidate is owned by an already-continued run
   | "at-target" // every candidate is at or past the leaf's step target
   | "sibling-cap" // cloud: every candidate is above the leaf's own furthest step
   | "other";
@@ -195,8 +259,16 @@ export function noResumeReason(
   if (lineage.length === 0) return "no-checkpoints";
   const live = lineage.filter((entry) => entry.job.state !== "done");
   if (live.length === 0) return "owner-done";
+  // Sticks, and deliberately AFTER `owner-done`: both can be true of a legacy
+  // chain, and only one of them has a way out. Telling the user to delete this
+  // attempt so they can resume a parent that has itself finished would send
+  // them to a refusal ("its schedule is spent — fine-tune instead"), so the
+  // finished-owner answer wins where they overlap. jobs.py orders its two
+  // refusals the same way, for the same reason.
+  const ownedByLeaf = live.filter((entry) => entry.job.child_ids.length === 0);
+  if (ownedByLeaf.length === 0) return "parent-continued";
   const target = leaf.config?.steps ?? 0;
-  const belowTarget = live.filter(
+  const belowTarget = ownedByLeaf.filter(
     (entry) => target === 0 || entry.ckpt.step < target,
   );
   if (belowTarget.length === 0) return "at-target";

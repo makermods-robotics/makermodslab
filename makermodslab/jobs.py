@@ -124,9 +124,18 @@ class JobRecord(BaseModel):
     #
     # `child_ids`: the runs that resumed THIS one, newest-first. Empty ⇒ this
     # record is a LEAF, i.e. the live tip of its chain; the UI shows one row per
-    # leaf and reaches the rest of the chain through `ancestor_ids`. A job can
-    # have several children (nothing stops two resumes off one parent), so the
-    # lineage is a forest of trees, not a set of chains.
+    # leaf and reaches the rest of the chain through `ancestor_ids`.
+    #
+    # STICKS ONLY (user decision 2026-08-07). New lineages are CHAINS: `start`
+    # refuses a resume whose source already has a child
+    # (`JobAlreadyContinuedError`), so a run created from here on can gain at
+    # most one child and every fresh lineage is linear. The field stays a LIST,
+    # and every reader below stays forest-capable, because branching is deferred
+    # rather than abolished: registries written before this rule really do hold
+    # forks (the live example is two children off one parent), and they must
+    # keep loading, listing and rendering exactly as they did — one row per
+    # leaf, no migration, no refusal at read time. Treat "several children" as
+    # legacy-only data, not as an impossible state.
     #
     # `ancestor_ids`: the transitive resume ancestors, nearest parent first.
     #
@@ -2380,7 +2389,10 @@ def _oom_failure_reason(log_path: Path, rc: int | None) -> str | None:
 def build_child_index(records: Iterable[JobRecord]) -> dict[str, list[str]]:
     """Map job id -> the ids of the runs that resumed it, newest-first.
 
-    The one place the resume forest's edges are defined. An edge is
+    The one place a resume edge is defined, for every reader: the leaf/
+    superseded split, the mid-chain delete guard (`JobHasChildrenError`) and
+    the second-resume guard (`JobAlreadyContinuedError`) all ask this same
+    question, so "is this run continued?" cannot mean two things. An edge is
     `config.resume_from_job_id` and nothing else — a fine-tune
     (`finetune_from_job_id`) starts a fresh schedule from a checkpoint's
     weights, so it is a new model whose source keeps its own identity, not a
@@ -2457,6 +2469,34 @@ class JobHasChildrenError(Exception):
     the descendants so the user can delete from the tip inwards.
 
     Carries the direct child ids; the HTTP layer turns them into the message.
+    """
+
+    def __init__(self, job_id: str, child_ids: builtins.list[str]) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+        self.child_ids = child_ids
+
+
+class JobAlreadyContinuedError(Exception):
+    """Raised when start() is asked to resume a run that already has a child.
+
+    STICKS ONLY (user decision 2026-08-07): a resume lineage is a chain, so a
+    run may be continued ONCE. A second continuation would fork it, and a fork
+    is the shape every other part of this feature has to pay for — two rows
+    claiming the same history, a shared cloud output repo whose checkpoints
+    can't be attributed to the sibling that wrote them (see the frontend's
+    `cloudSiblingStepCap`), and a delete guard that can only say "not this one"
+    without saying which tip to start from. Refusing at CREATION time is the
+    cheap end of that trade: no new fork can appear, while the forks already on
+    disk keep working untouched (this is not a load-time or list-time check).
+
+    The intended path is in the message the HTTP layer builds from these ids:
+    delete the existing continuation, which frees its parent to be resumed
+    again. Branching is deferred, not ruled out for good.
+
+    Carries the source run's id and its direct child ids, same shape as
+    `JobHasChildrenError`, because the two are the same fact seen from the two
+    ends — one refuses removing the parent, the other refuses re-continuing it.
     """
 
     def __init__(self, job_id: str, child_ids: builtins.list[str]) -> None:
@@ -2839,6 +2879,26 @@ class JobRegistry:
                             "continuation would train at the schedule's floor. Fine-tune from "
                             "its final checkpoint instead."
                         )
+                    # STICKS ONLY (user decision 2026-08-07): one continuation
+                    # per run. A source that already has a child would FORK
+                    # here, so refuse and let the message name the delete-first
+                    # path (see JobAlreadyContinuedError for the why).
+                    #
+                    # Derived from the registry at start time, under the same
+                    # lock that inserts the record, so two concurrent resumes of
+                    # one parent can't both pass — and derived by
+                    # `build_child_index`, the same edge definition the delete
+                    # guard and the leaf/superseded split use, so the run the UI
+                    # calls "already continued" is exactly the run refused here.
+                    #
+                    # Deliberately AFTER the `done` refusal above: a finished
+                    # source is unresumable whether or not anything continued
+                    # it, and telling the user to delete a child to unlock a
+                    # resume that would then be refused for a different reason
+                    # is worse guidance than "fine-tune instead".
+                    already_continued = build_child_index(self._records.values()).get(source.id, [])
+                    if already_continued:
+                        raise JobAlreadyContinuedError(source.id, already_continued)
                     # A resume may continue on EITHER runner (F7). What changes
                     # across the four combinations is only where the parent's
                     # checkpoint has to end up before the trainer can read it —
@@ -2907,6 +2967,42 @@ class JobRegistry:
                         "Resume is on but no source checkpoint was selected. Use "
                         '"Continue" on a local run that stopped short of its step '
                         "target rather than toggling resume manually."
+                    )
+
+                # A continuation has to have somewhere to go: the target must be
+                # strictly ABOVE the step being resumed from. At or below it,
+                # lerobot's training range is empty (lerobot_train.py's
+                # `range(step, cfg.steps)`), so the run does no work, exits
+                # cleanly, and lands in the registry as a `done` phantom that
+                # claims a target it never trained toward — the worst shape
+                # available, because it also poisons the source: `done` is
+                # exactly what the refusal above reads to say "nothing to
+                # resume".
+                #
+                # Deliberately HERE, at the bottom of the resume block, not
+                # beside its siblings at the top: the step is only known once
+                # the branches above have RESOLVED it. The equivalent
+                # pre-flight in server.py's endpoint reads the request's
+                # `resume_from_step`, which is None whenever the user picked
+                # "latest" — so every latest-checkpoint resume walked past it.
+                # `_resume_start_step` is the same reading `_initial_metrics`
+                # seeds progress from, so the number refused here is the number
+                # the record would have started at.
+                #
+                # No "unset" escape for `steps == 0`, even though a stored
+                # `steps` of 0 does mean "unknown" elsewhere (the frontend's
+                # resumableCheckpoints reads a PARENT record's target that way).
+                # This is the incoming request's own target — a required field
+                # with a default — so 0 here is a request to train nothing, the
+                # very case this refuses, and the endpoint's pre-flight has
+                # always refused it too.
+                resumed_from = _resume_start_step(config)
+                if resumed_from is not None and config.steps <= resumed_from:
+                    raise ValueError(
+                        f"Resume target of {config.steps} steps is not beyond checkpoint "
+                        f"step {resumed_from} — the continuation would train nothing. "
+                        "Raise the step target above the checkpoint, or pick an earlier "
+                        "checkpoint."
                     )
 
             job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)
