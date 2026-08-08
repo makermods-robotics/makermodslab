@@ -1297,3 +1297,36 @@ def test_recording_resume_route_calls_handler(client: TestClient, monkeypatch: p
     assert response.status_code == 200
     assert response.json()["success"] is True
     assert called.get("hit") is True
+
+
+def test_format_accelerator_flattens_the_hub_object() -> None:
+    """huggingface_hub hands us a JobAccelerator OBJECT here, not a string.
+
+    Forwarding it raw put a nested dict on the wire under a field the frontend
+    types as `string`, so the hardware picker rendered "[object Object]" for
+    every GPU flavor.
+    """
+    from huggingface_hub._jobs_api import JobAccelerator
+
+    from makermodslab.server import _format_accelerator
+
+    single = JobAccelerator(type="gpu", model="T4", quantity="1", vram="16 GB", manufacturer="Nvidia")
+    assert _format_accelerator(single) == "Nvidia T4"
+
+    multi = JobAccelerator(type="gpu", model="A100", quantity="4", vram="320 GB", manufacturer="Nvidia")
+    assert _format_accelerator(multi) == "4× Nvidia A100"
+
+    # cpu-* flavors carry no accelerator; the caller falls back to `cpu`.
+    assert _format_accelerator(None) is None
+
+
+def test_format_accelerator_survives_a_renamed_hub_field() -> None:
+    """A future hub version could rename the fields out from under us. Any
+    string still beats a dict the UI would render as [object Object]."""
+    from makermodslab.server import _format_accelerator
+
+    class _Unknown:
+        def __str__(self) -> str:
+            return "some-future-accelerator"
+
+    assert _format_accelerator(_Unknown()) == "some-future-accelerator"
