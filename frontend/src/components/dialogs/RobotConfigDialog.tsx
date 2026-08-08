@@ -430,6 +430,18 @@ const RobotConfigWindow = ({
   // The manual step-by-step flow is untouched and stays available separately.
   const [batchAutoCalOpen, setBatchAutoCalOpen] = useState(false);
   const [batchAutoCalPromptOpen, setBatchAutoCalPromptOpen] = useState(false);
+  // "A finished run's results are still on screen." The status box used to
+  // render on (batchAutoCalOpen || batchAutoCal.active), which is fine for the
+  // multi-arm path — it leaves the picker open, so the box survives the run —
+  // but a row's single-arm "Auto-calibrate" deliberately closes the picker, so
+  // both terms went false in the same tick the run ended and the whole box
+  // unmounted: per-arm rows (the ONLY place a failure's error text surfaces,
+  // via their title tooltip), the completed/failed summary, and the logs all
+  // vanished, leaving nothing but a transient toast — worst exactly on
+  // failure. This flag is set the moment a run is (or becomes) active, so it's
+  // already true when `active` flips false, and the results stay up until the
+  // user dismisses them.
+  const [batchAutoCalResultsOpen, setBatchAutoCalResultsOpen] = useState(false);
   // Which arm slots are ticked. Each slot's port comes straight from its
   // assignment on the robot record; each slot's save name is the robot's own
   // default config for that slot (no per-arm name input).
@@ -982,6 +994,16 @@ const RobotConfigWindow = ({
       }
     })();
   }, [baseUrl, fetchWithHeaders]);
+
+  // Arm the "keep the results on screen" flag for the whole life of a run,
+  // from whichever path started it — a row's Auto-calibrate, the multi-arm
+  // picker, or the resume-on-mount effect above finding one already going.
+  // Keying it off `active` rather than setting it at each call site means the
+  // flag is guaranteed to be true BEFORE the poll flips `active` to false, so
+  // the box never blinks out between the two renders.
+  useEffect(() => {
+    if (batchAutoCal.active) setBatchAutoCalResultsOpen(true);
+  }, [batchAutoCal.active]);
 
   // Poll batch status + logs while a run is active.
   useEffect(() => {
@@ -1577,8 +1599,14 @@ const RobotConfigWindow = ({
           {/* Picker + live status. The checkbox list is the multi-arm path
               only (batchAutoCalOpen); a batch started from a row's own
               "Auto-calibrate" leaves it closed and this box shows nothing but
-              progress, per-arm rows, and logs — the stop button sits above. */}
-          {(batchAutoCalOpen || batchAutoCal.active) && (
+              progress, per-arm rows, and logs — the stop button sits above.
+              The third term keeps a FINISHED run's results up after `active`
+              goes false: on the row path the first two terms are both false by
+              then, which used to unmount the results (and the error tooltips)
+              the instant they became worth reading. Dismiss clears it. */}
+          {(batchAutoCalOpen ||
+            batchAutoCal.active ||
+            batchAutoCalResultsOpen) && (
             <div className="space-y-3 rounded-md border border-border bg-muted/30 p-3">
               <div className="flex items-center gap-2 text-sm font-medium text-foreground">
                 <Wand2 className="h-4 w-4" />
@@ -1658,7 +1686,13 @@ const RobotConfigWindow = ({
                       {selectedBatchSlots.length === 1 ? "" : "s"}
                     </Button>
                     <Button
-                      onClick={() => setBatchAutoCalOpen(false)}
+                      onClick={() => {
+                        setBatchAutoCalOpen(false);
+                        // Also drop any finished run's results, or the box
+                        // would stay up in results-only mode and Cancel
+                        // would look like it did nothing.
+                        setBatchAutoCalResultsOpen(false);
+                      }}
                       variant="outline"
                       className="shrink-0"
                     >
@@ -1724,6 +1758,23 @@ const RobotConfigWindow = ({
                   {batchAutoCal.logs.slice(-120).map((line, i) => (
                     <div key={i}>{line}</div>
                   ))}
+                </div>
+              )}
+
+              {/* Results-only view (run finished, picker closed — the row
+                  path): nothing else here can close the box, so this is the
+                  way out. The multi-arm finished view reopens the picker
+                  instead and uses its Cancel, which clears the same flag. */}
+              {!batchAutoCal.active && !batchAutoCalOpen && (
+                <div className="flex justify-end">
+                  <Button
+                    onClick={() => setBatchAutoCalResultsOpen(false)}
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                  >
+                    Dismiss
+                  </Button>
                 </div>
               )}
             </div>
