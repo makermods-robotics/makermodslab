@@ -1444,6 +1444,18 @@ def _hub_checkpoints_from_files(files, repo_id: str) -> list[JobCheckpoint]:
     return out
 
 
+def newest_checkpoint_step(checkpoints: Iterable[JobCheckpoint]) -> int | None:
+    """Highest step among `checkpoints`, or None when there are none.
+
+    Used to say what stopping a run actually keeps. For a cloud run the answer
+    is a FLOOR, not a final number: the pod goes on draining its upload
+    backlog after the stop request (see HfCloudJobRunner.stop), so the value
+    only ever moves up from here — which is exactly why it is safe to show.
+    """
+    steps = [c.step for c in checkpoints]
+    return max(steps) if steps else None
+
+
 def _list_imported_local(path: str) -> list[JobCheckpoint]:
     """Auto-detect the layout of an imported local directory.
 
@@ -4097,6 +4109,8 @@ class JobRegistry:
                 raise JobNotRunningError(job_id)
             self._stop_requested.add(job_id)
         runner.stop()
+        if record.runner == "hf_cloud":
+            self._note_checkpoints_kept(record)
         # The watchdog will finalise the record (state, ended_at, exit_code).
         # Wait briefly so the caller sees the new state in the response.
         for _ in range(20):
@@ -4105,6 +4119,31 @@ class JobRegistry:
                 if record.state != "running":
                     return record
         return record
+
+    def _note_checkpoints_kept(self, record: JobRecord) -> None:
+        """Record what a cloud stop has ALREADY preserved on the Hub, so the
+        stop response carries a real number instead of the 0 a running record
+        holds.
+
+        A floor, not a final count: the pod keeps draining its upload backlog
+        after `stop()` returns, and those steps show up in the job's checkpoint
+        listing as they land (30s TTL). Best-effort — a Hub hiccup here must
+        never turn a successful stop into an error.
+        """
+        try:
+            checkpoints = self._checkpoints_for(record)
+        except Exception as exc:  # pragma: no cover — listing already swallows its own
+            logger.info("Could not list checkpoints while stopping %s: %s", record.id, exc)
+            return
+        with self._lock:
+            record.checkpoint_count = len(checkpoints)
+        newest = newest_checkpoint_step(checkpoints)
+        logger.info(
+            "Stopping %s: newest checkpoint already safe on the Hub is step %s; "
+            "the pod continues uploading its backlog after this",
+            record.id,
+            "none" if newest is None else newest,
+        )
 
     def drain_logs(self, job_id: str) -> builtins.list[LogLine]:
         with self._lock:
@@ -4336,7 +4375,15 @@ class JobRegistry:
                         record.hf_flavor,
                         _resume_total_steps(record.config),
                     )
-                    runner.reattach(record.hf_job_id)
+                    # Repo + job id restore the cooperative stop channel that
+                    # start() sets up, so stopping a reattached cloud run can
+                    # still drain its checkpoint upload backlog instead of
+                    # only being able to kill the pod.
+                    runner.reattach(
+                        record.hf_job_id,
+                        hub_repo_id=record.hf_repo_id,
+                        job_id=record.id,
+                    )
                     self._runners[record.id] = runner
                 else:
                     # Malformed running record — mark interrupted.
@@ -4688,5 +4735,6 @@ __all__ = [
     "job_registry",
     "parse_metrics_into",
     "classify_terminal_state",
+    "newest_checkpoint_step",
     "STOPPED_BY_REQUEST_MESSAGE",
 ]

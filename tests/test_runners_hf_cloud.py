@@ -980,3 +980,329 @@ def test_tail_loop_does_not_reconnect_while_a_connection_is_still_talking(
     _run_tail_briefly(runner, monkeypatch, silence=0.3, seconds=1.0)
 
     assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Stopping a cloud run without losing the checkpoint upload backlog.
+#
+# The incident: a run stopped at step 80 (save_freq 10) had steps 10-80 on the
+# pod's ephemeral disk and only 10/20/30 on the Hub; cancelling the job deleted
+# the pod and the other five checkpoints with it, so the best resume point was
+# 30 for a run that had actually trained to 80. Three layers now cover it, and
+# these tests pin the parts that are pure or host-side — the pod-side halves
+# are pinned as source assertions against WRAPPER_SOURCE, the same way the
+# install plan and the readiness gate are.
+# ---------------------------------------------------------------------------
+
+
+def _steps(tmp_path, names, last=None):
+    """Build a checkpoints/ tree with these step dirs (plus lerobot's `last`)."""
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    for name in names:
+        (root / name).mkdir()
+    if last is not None:
+        (root / "last").symlink_to(last)
+    return root
+
+
+def test_pending_checkpoints_are_returned_oldest_first(tmp_path: Path) -> None:
+    """The ordering IS the feature. A drain that runs newest-first leaves a
+    gap below whatever it managed to upload, and a gap makes every step above
+    it useless as a resume point; oldest-first means any prefix of the backlog
+    that fits in the time available is still a resumable chain."""
+    from makermodslab.runners.hf_cloud import _pending_checkpoint_dirs
+
+    root = _steps(tmp_path, ["000040", "000010", "000030", "000020"])
+    assert [p.name for p in _pending_checkpoint_dirs(root, set())] == [
+        "000010",
+        "000020",
+        "000030",
+        "000040",
+    ]
+
+
+def test_pending_checkpoints_sort_numerically_not_lexicographically(tmp_path: Path) -> None:
+    """Name order only equals step order while every dir is padded to the same
+    width — lerobot's current habit, not a contract. Sorting on int() keeps
+    oldest-first true if that ever changes."""
+    from makermodslab.runners.hf_cloud import _pending_checkpoint_dirs
+
+    root = _steps(tmp_path, ["100", "20", "3"])
+    assert [p.name for p in _pending_checkpoint_dirs(root, set())] == ["3", "20", "100"]
+
+
+def test_pending_checkpoints_skip_uploaded_symlinks_and_non_step_dirs(tmp_path: Path) -> None:
+    """`seen` steps are already on the Hub; `last` is lerobot's symlink, not a
+    checkpoint; anything non-numeric is not a step dir at all."""
+    from makermodslab.runners.hf_cloud import _pending_checkpoint_dirs
+
+    root = _steps(tmp_path, ["000010", "000020", "scratch"], last="000020")
+    assert [p.name for p in _pending_checkpoint_dirs(root, {"000010"})] == ["000020"]
+
+
+def test_pending_checkpoints_tolerate_a_missing_checkpoints_dir(tmp_path: Path) -> None:
+    """Called in the final drain before the trainer has ever saved — must be
+    an empty answer, not a crash on the way out."""
+    from makermodslab.runners.hf_cloud import _pending_checkpoint_dirs
+
+    assert _pending_checkpoint_dirs(tmp_path / "checkpoints", set()) == []
+
+
+def test_wrapper_source_inlines_the_tested_pending_checkpoint_scan() -> None:
+    """Same contract as the install plan and the readiness gate: the drain
+    order running in the container is the function the tests above exercise,
+    inlined verbatim — not a paraphrase that can drift from it."""
+    import inspect
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _pending_checkpoint_dirs
+
+    compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")
+    assert inspect.getsource(_pending_checkpoint_dirs) in WRAPPER_SOURCE
+    assert "__PENDING_CHECKPOINTS_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
+    # Both the live watcher and the final drain go through it, so neither can
+    # quietly regain the old lexicographic iterdir order.
+    assert "for entry in _pending_checkpoint_dirs(root, seen):" in WRAPPER_SOURCE
+    assert '_pending_checkpoint_dirs(Path(output_dir) / "checkpoints", seen)' in WRAPPER_SOURCE
+
+
+def test_wrapper_source_traps_sigterm_into_the_shared_stop_path() -> None:
+    """Layer 1: if HF Jobs does send a signal (unmeasured), the wrapper kills
+    the trainer itself and falls into the existing `finally` drain instead of
+    dying with the backlog still on disk. It must also escalate to SIGKILL —
+    a trainer that ignores SIGTERM would park the main thread in proc.wait()
+    and the drain would never run at all."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")
+    assert "signal.signal(_sig, _on_signal)" in WRAPPER_SOURCE
+    assert "signal.SIGTERM" in WRAPPER_SOURCE
+    assert re.search(r"^import .*\bsignal\b", WRAPPER_SOURCE, re.MULTILINE)  # imported up top
+    assert "proc.terminate()" in WRAPPER_SOURCE
+    assert "proc.kill()" in WRAPPER_SOURCE
+
+
+def test_wrapper_source_polls_the_host_stop_sentinel_and_acks_it() -> None:
+    """Layer 2: the cooperative channel, for the case where the platform hard-
+    kills the pod (or sends nothing) and layer 1 never fires. The pod checks
+    the sentinel once per watcher poll and ACKS it — without the ack the host
+    cannot distinguish a cooperating pod from one running a pre-feature
+    wrapper, and would have to wait out the full drain window on every stop."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")
+    assert "--stop-sentinel=" in WRAPPER_SOURCE
+    assert 'api.file_exists(repo_id, stop_sentinel, repo_type="model")' in WRAPPER_SOURCE
+    assert 'path_in_repo=stop_sentinel + ".ack"' in WRAPPER_SOURCE
+    assert '_request_stop("host stop sentinel")' in WRAPPER_SOURCE
+
+
+def test_stop_sentinel_path_is_job_scoped_and_sanitised() -> None:
+    """Job-scoped because a cloud→cloud continuation publishes into its
+    PARENT's repo: one shared filename would leave the parent's sentinel where
+    the child polls, and the child would stop itself on its first watcher
+    poll."""
+    from makermodslab.runners.hf_cloud import stop_sentinel_path
+
+    a = stop_sentinel_path("act_ds_2026-08-06_22-30-11")
+    b = stop_sentinel_path("act_ds_2026-08-06_23-00-00")
+    assert a != b
+    assert a == ".makermodslab/stop/act_ds_2026-08-06_22-30-11"
+    # No path traversal or nesting from a hostile-looking id.
+    assert stop_sentinel_path("../../etc/passwd") == ".makermodslab/stop/.._.._etc_passwd"
+
+
+def test_stop_sentinel_is_invisible_to_every_checkpoint_lister() -> None:
+    """The sentinel lives in the run's own model repo, so a lister that
+    mistook it for a step would put a phantom checkpoint on the job card and
+    offer it as a resume point. Pinned against the real regex rather than by
+    eye, so a future loosening of either shows up here."""
+    from makermodslab.jobs import _CKPT_PATH_RE, _hub_checkpoints_from_files
+    from makermodslab.runners.hf_cloud import stop_sentinel_path
+
+    sentinel = stop_sentinel_path("run_1")
+    files = [
+        "checkpoints/000010/pretrained_model/config.json",
+        sentinel,
+        sentinel + ".ack",
+    ]
+    assert _CKPT_PATH_RE.match(sentinel) is None
+    assert _CKPT_PATH_RE.match(sentinel + ".ack") is None
+    assert [c.step for c in _hub_checkpoints_from_files(files, "alice/run")] == [10]
+    # ...and it must not trip the flat-repo fallback either (that one keys on a
+    # ROOT config.json, which a dot-directory path can never be).
+    assert sentinel != "config.json"
+
+
+def test_submitted_command_carries_the_stop_sentinel(tmp_path, monkeypatch) -> None:
+    """The pod can only poll what the host tells it to poll, and the host can
+    only write what it told the pod — one string, passed through, no second
+    convention to drift."""
+    from makermodslab.runners.hf_cloud import stop_sentinel_path
+
+    command = _submitted_command(_request(), tmp_path, monkeypatch, job_id="child_run")
+    assert f"--stop-sentinel={stop_sentinel_path('child_run')}" in command
+
+
+class _FakeCoopApi(_FakeJobsApi):
+    """_FakeJobsApi plus the two Hub calls the cooperative stop makes: writing
+    the sentinel, and looking for the pod's ack. `stages` is consumed one per
+    inspect_job call, repeating the last entry forever."""
+
+    def __init__(self, *, stages=("RUNNING",), acked=False, upload_raises=False, **kwargs):
+        super().__init__(**kwargs)
+        self._stages = list(stages)
+        self.acked = acked
+        self._upload_raises = upload_raises
+        self.uploaded = []
+        self.exists_checked = []
+
+    def inspect_job(self, job_id):
+        self.inspected.append(job_id)
+        return _FakeJobInfo(self._stages[min(len(self.inspected) - 1, len(self._stages) - 1)])
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message=None):
+        if self._upload_raises:
+            raise RuntimeError("404 repo does not exist yet")
+        self.uploaded.append((repo_id, path_in_repo))
+
+    def file_exists(self, repo_id, filename, *, repo_type=None):
+        self.exists_checked.append(filename)
+        return self.acked
+
+
+def _coop_runner(api, tmp_path, monkeypatch, *, ack_timeout=0.02, drain_timeout=0.5):
+    """A runner whose cooperative stop channel is wired up (as start() leaves
+    it), with the real wall-clock windows compressed so the drain wait can be
+    exercised without minutes of sleeping."""
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_STOP_DRAIN_POLL_INTERVAL_S", 0.005)
+    monkeypatch.setattr(hf_cloud, "_STOP_ACK_TIMEOUT_S", ack_timeout)
+    monkeypatch.setattr(hf_cloud, "_STOP_DRAIN_TIMEOUT_S", drain_timeout)
+    runner = _runner_with(api, tmp_path)
+    runner._hub_repo_id = "alice/run-1"
+    runner._stop_sentinel = hf_cloud.stop_sentinel_path("run_1")
+    return runner
+
+
+def _finish_drain(runner):
+    assert runner._drain_thread is not None
+    runner._drain_thread.join(timeout=10)
+    assert not runner._drain_thread.is_alive()
+
+
+def test_stop_asks_the_pod_first_and_never_cancels_a_run_that_drained(tmp_path, monkeypatch) -> None:
+    """The whole point: the sentinel goes out INSTEAD of the cancel, and once
+    the pod has finished uploading and exited on its own no cancel is issued
+    at all. Issuing one would 404 (the job is over) and the reconcile that
+    follows would adopt the pod's real ERROR stage — relabelling a deliberate
+    stop as a failed model, the exact bug CANCELED is pre-set to avoid."""
+    from makermodslab.runners.hf_cloud import stop_sentinel_path
+
+    api = _FakeCoopApi(stages=("COMPLETED",))
+    runner = _coop_runner(api, tmp_path, monkeypatch)
+
+    runner.stop()
+    _finish_drain(runner)
+
+    assert api.uploaded == [("alice/run-1", stop_sentinel_path("run_1"))]
+    assert api.cancelled == []
+    # Still `interrupted` to the registry, not `done`/`failed`.
+    assert runner.terminal_stage() == "CANCELED"
+    assert runner.is_running() is False
+
+
+def test_stop_falls_back_to_cancelling_when_the_pod_never_acknowledges(tmp_path, monkeypatch) -> None:
+    """Nothing is listening — a pod running a wrapper submitted before this
+    feature existed, or one whose watcher thread died. Cancel promptly rather
+    than burning the whole drain window on a pod that will never cooperate."""
+    api = _FakeCoopApi(stages=("RUNNING",), acked=False)
+    runner = _coop_runner(api, tmp_path, monkeypatch, ack_timeout=0.02, drain_timeout=5.0)
+
+    runner.stop()
+    _finish_drain(runner)
+
+    assert api.cancelled == ["job-1"]
+    assert api.exists_checked  # it did look for the ack
+    assert runner.terminal_stage() == "CANCELED"
+
+
+def test_stop_waits_past_the_ack_window_once_the_pod_acknowledges(tmp_path, monkeypatch) -> None:
+    """An acknowledged stop gets the full drain window, and is still cancelled
+    at the end of it — the hard cancel stays reachable, so a pod that
+    acknowledges and then wedges can never bill indefinitely."""
+    api = _FakeCoopApi(stages=("RUNNING",), acked=True)
+    runner = _coop_runner(api, tmp_path, monkeypatch, ack_timeout=0.001, drain_timeout=0.2)
+
+    runner.stop()
+    _finish_drain(runner)
+
+    assert api.cancelled == ["job-1"]
+    # Polled well past the ack deadline instead of giving up at it.
+    assert len(api.inspected) > 3
+
+
+def test_stop_cancels_outright_when_the_sentinel_cannot_be_written(tmp_path, monkeypatch) -> None:
+    """Usually a stop in the first minute, before the wrapper created the repo
+    — in which case there is no upload backlog to protect. Cancel synchronously
+    and start no drain thread."""
+    api = _FakeCoopApi(upload_raises=True)
+    runner = _coop_runner(api, tmp_path, monkeypatch)
+
+    runner.stop()
+
+    assert api.cancelled == ["job-1"]
+    assert runner._drain_thread is None
+
+
+def test_stop_cancels_outright_when_the_channel_was_never_wired_up(tmp_path) -> None:
+    """A runner with no repo/sentinel (reattached from a record predating the
+    field, or built in a test) must degrade to exactly today's behaviour rather
+    than waiting on a channel nobody is reading."""
+    api = _FakeCoopApi()
+    runner = _runner_with(api, tmp_path)  # no _hub_repo_id / _stop_sentinel
+
+    runner.stop()
+
+    assert api.cancelled == ["job-1"]
+    assert api.uploaded == []
+    assert runner._drain_thread is None
+
+
+def test_reattach_restores_the_cooperative_stop_channel(tmp_path) -> None:
+    """A restart must not silently downgrade every in-flight cloud run to the
+    lossy stop. The registry passes the record's repo id and job id back in."""
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner, stop_sentinel_path
+
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "a10g-small")
+    runner._start_worker_threads = lambda label: None  # type: ignore[method-assign]
+    runner.reattach("hfjob-9", hub_repo_id="alice/run-1", job_id="run_1")
+
+    assert runner._hub_repo_id == "alice/run-1"
+    assert runner._stop_sentinel == stop_sentinel_path("run_1")
+
+
+def test_reattach_without_a_recorded_repo_leaves_the_channel_closed(tmp_path) -> None:
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "a10g-small")
+    runner._start_worker_threads = lambda label: None  # type: ignore[method-assign]
+    runner.reattach("hfjob-9")
+
+    assert runner._hub_repo_id is None
+    assert runner._stop_sentinel is None
+
+
+def test_stop_timeouts_are_minutes_not_seconds_and_ordered() -> None:
+    """The drain window has to outlast a real multi-gigabyte upload backlog,
+    and the ack window has to outlast several 15s watcher polls. Pinned so a
+    later 'tidy-up' cannot quietly shrink either back to a value that makes the
+    cooperative path never actually complete."""
+    from makermodslab.runners import hf_cloud
+
+    assert hf_cloud._STOP_ACK_TIMEOUT_S >= 4 * 15  # four watcher polls
+    assert hf_cloud._STOP_DRAIN_TIMEOUT_S >= 300  # minutes, not seconds
+    assert hf_cloud._STOP_DRAIN_TIMEOUT_S > hf_cloud._STOP_ACK_TIMEOUT_S

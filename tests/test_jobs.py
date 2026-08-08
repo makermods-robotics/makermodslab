@@ -6342,3 +6342,66 @@ def test_settle_terminal_metrics_is_a_noop_on_a_healthy_finished_run() -> None:
 
     assert record.metrics.current_step == 10000
     assert record.metrics.current_loss == 0.04
+
+
+# -- what a stop keeps ------------------------------------------------------
+#
+# Stopping a cloud run used to destroy the pod immediately, taking every
+# checkpoint the sidecar had not yet uploaded with it (a run stopped at step 80
+# kept only step 30). The runner now asks the pod to drain first; the registry's
+# job here is just to report what is already safe, so the UI can say so.
+
+
+def test_newest_checkpoint_step_of_an_empty_list_is_none() -> None:
+    from makermodslab.jobs import newest_checkpoint_step
+
+    assert newest_checkpoint_step([]) is None
+
+
+def test_newest_checkpoint_step_is_the_highest_not_the_last() -> None:
+    """Callers hand it whatever order the lister produced; the answer is a
+    max, not a [-1]."""
+    from makermodslab.jobs import JobCheckpoint, newest_checkpoint_step
+
+    ckpts = [
+        JobCheckpoint(step=30, source="hub", ref="alice/run@checkpoints/000030"),
+        JobCheckpoint(step=80, source="hub", ref="alice/run@checkpoints/000080"),
+        JobCheckpoint(step=10, source="hub", ref="alice/run@checkpoints/000010"),
+    ]
+    assert newest_checkpoint_step(ckpts) == 80
+
+
+def test_cloud_stop_reports_the_checkpoints_already_safe_on_the_hub(tmp_path, monkeypatch) -> None:
+    """A running record carries checkpoint_count 0, so the stop response used
+    to say nothing about what the stop preserved. It is a floor, not a final
+    number — the pod goes on uploading its backlog afterwards — but a floor
+    that only moves up is safe to show."""
+    from makermodslab.jobs import JobCheckpoint, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeStagedRunner(on_stop_stage="CANCELED"))
+    record.runner = "hf_cloud"
+    monkeypatch.setattr(
+        reg,
+        "_checkpoints_for",
+        lambda r: [
+            JobCheckpoint(step=s, source="hub", ref=f"alice/run@checkpoints/{s:06d}") for s in (10, 20, 30)
+        ],
+    )
+
+    assert reg.stop(record.id).checkpoint_count == 3
+
+
+def test_local_stop_does_not_reach_for_a_hub_listing(tmp_path, monkeypatch) -> None:
+    """The floor above is a cloud-only concern; a local stop must not pay for
+    a network call (or fail) on its way out."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+
+    def _boom(r):
+        raise AssertionError("local stop must not list checkpoints")
+
+    monkeypatch.setattr(reg, "_checkpoints_for", _boom)
+    assert reg.stop(record.id).state in {"running", "interrupted"}

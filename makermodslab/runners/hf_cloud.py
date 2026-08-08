@@ -183,6 +183,79 @@ def _checkpoint_step_ready(step_dir):
     return target.isdigit() and step_dir.name.isdigit() and int(step_dir.name) <= int(target)
 
 
+def _pending_checkpoint_dirs(root, seen):
+    """Checkpoint step directories under `root` that have not been uploaded
+    yet, OLDEST FIRST.
+
+    Order is the entire point when a run is being stopped. A resume needs a
+    contiguous chain from the bottom: draining newest-first would land, say,
+    steps 80 and 70 and leave 40-60 missing, and a gap makes every step above
+    it worthless as a resume point. Oldest-first means whatever fraction of
+    the backlog fits in the time available is still a usable chain, and the
+    newest-safe step only ever moves forward.
+
+    Sorted numerically rather than by name: lexicographic order is only
+    equivalent while every step dir is zero-padded to the same width, which is
+    lerobot's current habit rather than a guarantee we should depend on for
+    the property above.
+
+    Readiness is deliberately NOT filtered here — the caller distinguishes
+    "not written out yet" (worth logging, see _checkpoint_step_ready) from
+    "nothing left to do", and only the latter ends the final drain.
+
+    Pure and self-contained (stdlib only) so its source can be inlined
+    verbatim into WRAPPER_SOURCE the same way _install_plan and
+    _checkpoint_step_ready are, keeping the in-container drain and the
+    unit-tested implementation identical.
+    """
+    import re
+
+    if not root.is_dir():
+        return []
+    out = []
+    # Snapshot before inspecting so deletions during the walk do not raise.
+    for entry in sorted(root.iterdir()):
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        if not re.fullmatch(r"\d+", entry.name):
+            continue
+        if entry.name in seen:
+            continue
+        out.append(entry)
+    out.sort(key=lambda p: int(p.name))
+    return out
+
+
+# Where the host drops the cooperative stop request inside the run's OWN Hub
+# output repo, and where the in-container wrapper polls for it.
+#
+# Two properties this path has to carry:
+#   * No checkpoint lister may mistake it for a step. jobs._CKPT_PATH_RE only
+#     matches `checkpoints/<digits>/pretrained_model/config.json`, and
+#     _list_hub_checkpoints' flat-repo fallback only looks at a root
+#     `config.json`, so a dot-directory at the repo root is invisible to both.
+#     Pinned by a test rather than left to inspection.
+#   * It must be JOB-scoped. A cloud→cloud continuation publishes into the
+#     PARENT's repo (see HfCloudJobRunner.start), so a single shared filename
+#     would leave the parent's sentinel sitting in the repo the child polls —
+#     the child would stop itself on its first watcher poll. Naming the file
+#     after the job id that is being stopped makes that impossible, which is
+#     also why the leftover file can simply be tolerated afterwards instead of
+#     needing a cleanup pass at the worst possible moment.
+_STOP_SENTINEL_DIR = ".makermodslab/stop"
+_STOP_SENTINEL_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def stop_sentinel_path(job_id: str) -> str:
+    """Path, inside the run's Hub output repo, of this job's stop sentinel.
+
+    Both halves of the cooperative stop read it from here: the host writes the
+    file, and passes this same string to the wrapper as `--stop-sentinel=` so
+    the pod polls exactly what the host wrote (no second convention to drift).
+    """
+    return f"{_STOP_SENTINEL_DIR}/{_STOP_SENTINEL_UNSAFE_RE.sub('_', job_id)}"
+
+
 def _cloud_device(flavor: str) -> str:
     """HF Jobs flavors are NVIDIA GPU boxes except the cpu-* tiers."""
     return "cpu" if flavor.startswith("cpu") else "cuda"
@@ -275,13 +348,15 @@ _CONTAINER_TRAIN_CONFIG_NAME = "train_config.json"
 # tests exercise.
 _WRAPPER_TEMPLATE = r'''
 import importlib.util
-import os, re, shlex, shutil, sys, threading, subprocess
+import os, re, shlex, shutil, signal, sys, threading, subprocess
 from pathlib import Path
 from huggingface_hub import HfApi
 
 __INSTALL_PLAN_SOURCE__
 
 __CHECKPOINT_READY_SOURCE__
+
+__PENDING_CHECKPOINTS_SOURCE__
 
 argv = sys.argv[1:]
 if "--" not in argv:
@@ -297,9 +372,12 @@ trainer_argv = argv[sep + 1:]
 # the trainer's own resume path finds it (config_path.parent.parent).
 lerobot_spec = next((a for a in wrapper_args if not a.startswith("--")), None)
 resume_from = None
+stop_sentinel = None
 for a in wrapper_args:
     if a.startswith("--resume-from="):
         resume_from = a.split("=", 1)[1]
+    if a.startswith("--stop-sentinel="):
+        stop_sentinel = a.split("=", 1)[1]
 
 
 def _arg(name):
@@ -461,56 +539,154 @@ if pretrained_ref:
             sys.exit(1)
 
 stop_event = threading.Event()
+# Set once this pod has decided to stop, by either route (a real SIGTERM, or
+# the host's cooperative stop sentinel). Distinct from stop_event, which only
+# ends the watcher thread.
+stopping = threading.Event()
+# Serialises the watcher's uploads against the final drain in the main thread,
+# so a stop landing mid-poll cannot start a second upload of the same folder.
+scan_lock = threading.Lock()
+# Bound to the trainer once it launches; read by the stop paths, which can
+# fire before that (a signal during the pip install).
+proc = None
 
 
 def _scan_and_upload():
-    root = Path(output_dir) / "checkpoints"
-    if not root.is_dir():
-        return
-    # Snapshot before iterating so deletions during the walk do not raise.
-    entries = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink())
-    for entry in entries:
-        if not re.fullmatch(r"\d+", entry.name):
-            continue
-        if entry.name in seen:
-            continue
-        # config.json can exist while the rest of the step is still being
-        # written. See _checkpoint_step_ready.
-        if not _checkpoint_step_ready(entry):
-            waits[entry.name] = waits.get(entry.name, 0) + 1
-            if waits[entry.name] in (1, 20, 80):  # ~15s, ~5min, ~20min at the 15s poll interval
-                try:
-                    last_target = os.readlink(root / "last")
-                except OSError:
-                    last_target = None
-                print(
-                    f"[wrapper] checkpoint {entry.name} not complete yet "
-                    f"(poll {waits[entry.name]}); checkpoints/last -> {last_target}",
-                    flush=True,
+    with scan_lock:
+        root = Path(output_dir) / "checkpoints"
+        # Oldest first: on a stop, the fraction of the backlog that fits in the
+        # time available has to be a contiguous chain to be resumable.
+        for entry in _pending_checkpoint_dirs(root, seen):
+            # config.json can exist while the rest of the step is still being
+            # written. See _checkpoint_step_ready.
+            if not _checkpoint_step_ready(entry):
+                waits[entry.name] = waits.get(entry.name, 0) + 1
+                if waits[entry.name] in (1, 20, 80):  # ~15s, ~5min, ~20min at the 15s poll interval
+                    try:
+                        last_target = os.readlink(root / "last")
+                    except OSError:
+                        last_target = None
+                    print(
+                        f"[wrapper] checkpoint {entry.name} not complete yet "
+                        f"(poll {waits[entry.name]}); checkpoints/last -> {last_target}",
+                        flush=True,
+                    )
+                continue
+            try:
+                api.upload_folder(
+                    folder_path=str(entry),
+                    repo_id=repo_id,
+                    path_in_repo=f"checkpoints/{entry.name}",
+                    commit_message=f"checkpoint {entry.name}",
+                    # safetensors writes through a .tmpXXXX file and renames; one
+                    # caught mid-rename has landed on the Hub before.
+                    ignore_patterns=[".tmp*", "**/.tmp*"],
                 )
-            continue
+                seen.add(entry.name)
+                waits.pop(entry.name, None)
+                print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
+            except Exception as exc:
+                # NOT added to `seen`: sealing a step whose upload failed (or only
+                # partly landed) is what made incomplete Hub checkpoints permanent.
+                print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
+                continue
+
+
+def _request_stop(reason):
+    """End the trainer, then let the drain in the `finally` below run.
+
+    Both stop routes funnel through here, because the pod cannot know which
+    one it will get: the SIGTERM trap (if the platform sends a signal and
+    gives us a grace window) and the host's stop sentinel (if it hard-kills
+    instead, or sends nothing at all). Idempotent — a second signal arriving
+    mid-drain must not restart the sequence or re-terminate a dead trainer.
+    """
+    if stopping.is_set():
+        print(f"[wrapper] stop already in progress; ignoring {reason}", flush=True)
+        return
+    stopping.set()
+    print(
+        f"[wrapper] stop requested ({reason}); ending the trainer, "
+        f"then draining pending checkpoint uploads oldest-first",
+        flush=True,
+    )
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+    except Exception as exc:
+        print(f"[wrapper] could not terminate the trainer: {exc}", flush=True)
+        return
+
+    def _escalate():
+        # A trainer that ignores SIGTERM would keep the main thread parked in
+        # proc.wait() and the drain would never run — which is the whole point
+        # of stopping this way. Give it a grace window, then SIGKILL.
         try:
-            api.upload_folder(
-                folder_path=str(entry),
-                repo_id=repo_id,
-                path_in_repo=f"checkpoints/{entry.name}",
-                commit_message=f"checkpoint {entry.name}",
-                # safetensors writes through a .tmpXXXX file and renames; one
-                # caught mid-rename has landed on the Hub before.
-                ignore_patterns=[".tmp*", "**/.tmp*"],
-            )
-            seen.add(entry.name)
-            waits.pop(entry.name, None)
-            print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
-        except Exception as exc:
-            # NOT added to `seen`: sealing a step whose upload failed (or only
-            # partly landed) is what made incomplete Hub checkpoints permanent.
-            print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
-            continue
+            proc.wait(timeout=30)
+        except Exception:
+            print("[wrapper] trainer did not exit on SIGTERM; killing it", flush=True)
+            try:
+                proc.kill()
+            except Exception as exc:
+                print(f"[wrapper] could not kill the trainer: {exc}", flush=True)
+
+    threading.Thread(target=_escalate, name="trainer-kill", daemon=True).start()
+
+
+def _on_signal(signum, frame):
+    _request_stop(f"signal {signum}")
+
+
+# Layer 1 of the stop design. Costs nothing if HF Jobs hard-kills the pod
+# instead of signalling it (we have not measured which); the sentinel poll in
+# _watch covers that case.
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_sig, _on_signal)
+    except Exception as exc:
+        print(f"[wrapper] could not trap signal {_sig}: {exc}", flush=True)
+
+
+def _stop_sentinel_present():
+    """One HEAD against this run's own output repo per watcher poll.
+
+    Layer 2: the host asks for a stop by writing this file, and we notice it
+    within one poll (~15s) whether or not any signal was delivered.
+    """
+    if not stop_sentinel:
+        return False
+    try:
+        return bool(api.file_exists(repo_id, stop_sentinel, repo_type="model"))
+    except Exception as exc:
+        print(f"[wrapper] stop-sentinel check failed: {exc}", flush=True)
+        return False
+
+
+def _ack_stop():
+    """Tell the host its sentinel was seen, so it waits for this drain instead
+    of cancelling the job out from under it. Without an ack the host cannot
+    tell a cooperating pod from one running a wrapper built before this
+    existed, and has to assume the latter."""
+    try:
+        api.upload_file(
+            path_or_fileobj=b"draining\n",
+            path_in_repo=stop_sentinel + ".ack",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message="stop acknowledged",
+        )
+    except Exception as exc:
+        print(f"[wrapper] stop ack upload failed: {exc}", flush=True)
 
 
 def _watch():
     while not stop_event.is_set():
+        # Checked before the scan so a stop shortens the trainer's remaining
+        # writes by a poll rather than lengthening them.
+        if not stopping.is_set() and _stop_sentinel_present():
+            _ack_stop()
+            _request_stop("host stop sentinel")
         try:
             _scan_and_upload()
         except Exception as exc:
@@ -525,6 +701,13 @@ watch_thread.start()
 if trainer_argv and trainer_argv[0] == "python":
     trainer_argv[0] = sys.executable
 
+if stopping.is_set():
+    # A stop that landed during the pinned-lerobot install. Nothing has been
+    # trained, so there is no backlog to drain.
+    print("[wrapper] stop requested before the trainer launched; exiting", flush=True)
+    stop_event.set()
+    sys.exit(143)
+
 # trainer_argv is passed to Popen as a LIST (never joined and re-split), so
 # values with spaces stay one argument; shlex.join is only for a faithful log.
 print(f"[wrapper] launching trainer: {shlex.join(trainer_argv)}", flush=True)
@@ -533,19 +716,36 @@ try:
     rc = proc.wait()
 finally:
     stop_event.set()
-    # One final pass picks up any checkpoint saved in the last 15s window.
-    try:
-        _scan_and_upload()
-    except Exception as exc:
-        print(f"[wrapper] final scan error: {exc}", flush=True)
+    # Drain whatever the trainer left behind. One pass uploads every ready
+    # checkpoint oldest-first; the extra passes exist so a step that completed
+    # while an earlier upload was in flight, or an upload that failed
+    # transiently, still gets a chance before the pod goes away. Bounded, not
+    # a while-loop: a step whose `last` link never advances is never going to
+    # become ready, and must not park the pod here.
+    for _pass in range(3):
+        if not _pending_checkpoint_dirs(Path(output_dir) / "checkpoints", seen):
+            break
+        if _pass:
+            print(f"[wrapper] draining remaining checkpoints (pass {_pass + 1})", flush=True)
+        try:
+            _scan_and_upload()
+        except Exception as exc:
+            print(f"[wrapper] final scan error: {exc}", flush=True)
+    left = [p.name for p in _pending_checkpoint_dirs(Path(output_dir) / "checkpoints", seen)]
+    if left:
+        print(f"[wrapper] checkpoints NOT uploaded: {', '.join(left)}", flush=True)
+    else:
+        print("[wrapper] all checkpoints uploaded", flush=True)
 
 print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
-WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
-    "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
-).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
+WRAPPER_SOURCE = (
+    _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+    .replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
+    .replace("__PENDING_CHECKPOINTS_SOURCE__", inspect.getsource(_pending_checkpoint_dirs))
+)
 
 # HF Jobs' platform default timeout has killed legitimate runs that pushed the
 # model successfully but were still uploading auxiliary files — that is why a
@@ -697,6 +897,39 @@ def handle_get_wandb_credentials() -> dict[str, Any]:
     }
 
 
+# --- cooperative stop (layer 3: host-side sequencing) ----------------------
+#
+# Cancelling the HF job kills the pod instantly, and the pod is where the
+# checkpoints live until the sidecar uploader gets them to the Hub. A real run
+# stopped at step 80 had steps 40-80 on the pod's ephemeral disk and only
+# 10/20/30 on the Hub; the cancel deleted the rest permanently. So the stop
+# path asks first and cancels second.
+
+# How long to wait for the pod to acknowledge the stop sentinel before giving
+# up on the cooperative path. The pod checks once per 15s watcher poll and
+# acks immediately, so four polls plus slack is generous for one that is going
+# to cooperate at all. A pod that CANNOT — one running a wrapper built before
+# this feature existed (reattached across an upgrade), or whose watcher thread
+# has died — costs at most this much extra GPU time before the hard cancel.
+_STOP_ACK_TIMEOUT_S = 75.0
+
+# Ceiling on the whole cooperative stop once the pod HAS acknowledged it, after
+# which we cancel regardless. Minutes, not seconds: the thing being waited on
+# is a multi-gigabyte upload backlog, and the pod→Hub throughput that decides
+# how long it takes has not been measured (see the one-job probe). Ten minutes
+# comfortably covers the few-GB backlog an ACT run accumulates; a larger one
+# (SmolVLA, many un-uploaded steps) gets drained partially and then cancelled,
+# which is still strictly better than today because the drain is oldest-first
+# — a partial drain is a usable contiguous chain, not a gap-riddled one. The
+# axis being traded is checkpoint recovery against paid GPU time on a pod that
+# may be making no progress at all; ten minutes of one GPU flavor is a
+# fraction of the cost of losing the steps.
+_STOP_DRAIN_TIMEOUT_S = 600.0
+
+# Cadence of the host's inspect_job / ack polling while it waits for the drain.
+_STOP_DRAIN_POLL_INTERVAL_S = 10.0
+
+
 class HfCloudJobRunner:
     """Run a training as an HF Jobs job. Single-shot — instantiate per job."""
 
@@ -746,6 +979,15 @@ class HfCloudJobRunner:
         # Scraped from the trainer's own stdout the first time lerobot prints
         # the W&B run URL. Both runners scrape; None is the ordinary answer.
         self._wandb_run_url: str | None = None
+        # The run's Hub output repo and this job's sentinel path within it —
+        # the channel stop() uses to ask the pod to drain its upload backlog
+        # before dying. Both are needed; either missing means the cooperative
+        # path is unavailable and stop() cancels outright (which is exactly
+        # what a runner constructed for a test, or one reattached without a
+        # recorded repo, should do).
+        self._hub_repo_id: str | None = None
+        self._stop_sentinel: str | None = None
+        self._drain_thread: threading.Thread | None = None
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # output_dir is the host-local path the registry pins for local jobs;
@@ -823,6 +1065,13 @@ class HfCloudJobRunner:
         else:
             config.policy_repo_id = f"{username}/{job_id}"
 
+        # Remember where this run publishes and which sentinel asks it to stop,
+        # so stop() can reach the pod cooperatively instead of only being able
+        # to kill it. Set after the repo branch above, because a cloud→cloud
+        # continuation publishes into the PARENT's repo.
+        self._hub_repo_id = config.policy_repo_id
+        self._stop_sentinel = stop_sentinel_path(job_id)
+
         trainer_argv = build_training_command(config, _CONTAINER_OUTPUT_DIR)
         # The wrapper expects `python -c WRAPPER_SOURCE <spec> [directives] -- <trainer argv>`.
         # `python -c` consumes the first non-option argument as the script,
@@ -832,6 +1081,7 @@ class HfCloudJobRunner:
         wrapper_side_args = [cloud_lerobot_spec(config.policy_type)]
         if resume_directive is not None:
             wrapper_side_args.append(resume_directive)
+        wrapper_side_args.append(f"--stop-sentinel={self._stop_sentinel}")
         wrapped_command = [
             "python",
             "-c",
@@ -872,15 +1122,34 @@ class HfCloudJobRunner:
 
         self._start_worker_threads(job_id)
 
-    def reattach(self, hf_job_id: str) -> None:
+    def reattach(
+        self,
+        hf_job_id: str,
+        *,
+        hub_repo_id: str | None = None,
+        job_id: str | None = None,
+    ) -> None:
         """Take over an existing HF job after a process restart.
 
         Skips submission; just opens the log file in append mode and starts
         the log-tailing + status-polling threads.
+
+        `hub_repo_id` / `job_id` come off the persisted JobRecord and restore
+        stop()'s cooperative channel, which start() would otherwise be the only
+        source of. Optional so a caller that has neither still gets today's
+        behaviour (cancel outright) rather than a signature error.
+
+        Note the one case this cannot detect: a job SUBMITTED before this
+        feature shipped runs a wrapper with no sentinel poll, so the file lands
+        in the repo and is never read. That is why stop() waits for an explicit
+        ack rather than assuming cooperation — an unacknowledged sentinel falls
+        back to the hard cancel after _STOP_ACK_TIMEOUT_S.
         """
         if self._hf_job_id is not None:
             raise RuntimeError("HfCloudJobRunner already started")
         self._hf_job_id = hf_job_id
+        self._hub_repo_id = hub_repo_id
+        self._stop_sentinel = stop_sentinel_path(job_id) if job_id else None
         self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file = self._log_file_path.open("a", buffering=1)
         self._start_worker_threads(f"{hf_job_id}-reattach")
@@ -1100,6 +1369,32 @@ class HfCloudJobRunner:
                 return
 
     def stop(self) -> None:
+        """Stop the job, preferring the path that keeps the checkpoints.
+
+        Cancelling an HF job destroys the pod, and every checkpoint the sidecar
+        uploader has not yet pushed dies with it — a stop at step 80 kept only
+        step 30 on a real run. So: ask the pod to stop itself and drain its
+        upload backlog first (layer 2/3), and cancel only when that is
+        unavailable, unacknowledged, or out of time. The hard cancel is never
+        unreachable; a stuck pod always ends within _STOP_DRAIN_TIMEOUT_S.
+
+        Returns immediately either way. The wait happens on a background
+        thread because this runs inside the Stop request's handler (via
+        JobRegistry.stop, which itself waits ~2s for the record to settle) —
+        blocking here for the drain would hang the HTTP call for minutes.
+
+        Two consequences of that, both deliberate:
+
+          * CANCELED is pre-set BEFORE the sentinel is written, exactly as
+            before, so the record finalises as `interrupted` at once (the
+            watchdog reads terminal_stage(), and _set_terminal is set-once, so
+            the pod's own nonzero exit — which HF reports as ERROR, since the
+            trainer really was killed — cannot later relabel a deliberate stop
+            as a crash). The UI stops showing the run as running immediately.
+          * The drained checkpoints therefore land AFTER the record is final.
+            They appear in the job's Hub checkpoint listing as they arrive
+            (30s TTL cache), which is what makes a stop's real yield visible.
+        """
         if self._hf_job_id is None:
             return
         # Pre-set CANCELED so the watchdog finalises as canceled regardless
@@ -1108,6 +1403,136 @@ class HfCloudJobRunner:
         # run that beat us to COMPLETED or ERROR — survives this and is what
         # the registry classifies on.)
         self._set_terminal("CANCELED")
+        if self._request_cooperative_stop():
+            return
+        self._hard_cancel()
+
+    def _request_cooperative_stop(self) -> bool:
+        """Ask the pod to stop itself by writing this job's stop sentinel into
+        its own Hub output repo. True if the request is out and the drain is
+        being waited on; False means fall back to cancelling.
+
+        Uses this runner's already-authenticated HfApi — the same object that
+        submitted the job — so no separate credential path exists to go stale.
+        """
+        if not (self._hub_repo_id and self._stop_sentinel):
+            return False
+        try:
+            self._api.upload_file(
+                path_or_fileobj=b"stop requested by MakerMods Lab\n",
+                path_in_repo=self._stop_sentinel,
+                repo_id=self._hub_repo_id,
+                repo_type="model",
+                commit_message="stop requested",
+            )
+        except Exception as exc:
+            # Most likely the repo does not exist yet (a stop in the first
+            # minute, before the wrapper created it) — in which case there is
+            # no upload backlog worth protecting anyway.
+            logger.info(
+                "Could not write the stop sentinel for %s (%s); cancelling outright",
+                self._hf_job_id,
+                exc,
+            )
+            return False
+        logger.info(
+            "Asked HF job %s to stop via %s/%s; waiting for it to drain checkpoint uploads",
+            self._hf_job_id,
+            self._hub_repo_id,
+            self._stop_sentinel,
+        )
+        self._drain_thread = threading.Thread(
+            target=self._await_drain_then_cancel,
+            name=f"hf-job-{self._hf_job_id}-drain",
+            daemon=True,
+        )
+        self._drain_thread.start()
+        return True
+
+    def _await_drain_then_cancel(self) -> None:
+        """Wait for the pod to finish uploading and exit on its own; cancel if
+        it does not.
+
+        Three exits, all bounded:
+          * the job reaches a terminal stage — the pod drained and left. No
+            cancel is issued: cancel_job on an already-ended job 404s, and the
+            reconcile that follows would adopt the pod's real ERROR stage and
+            relabel this deliberate stop as `failed`.
+          * no ack within _STOP_ACK_TIMEOUT_S — nothing is listening (older
+            wrapper, dead watcher). Cancel now rather than burn the full drain
+            window on a pod that will never cooperate.
+          * _STOP_DRAIN_TIMEOUT_S elapsed — it acknowledged but is not done.
+            Cancel anyway; whatever landed is a contiguous chain, because the
+            pod drains oldest-first.
+
+        Runs off the request thread and does NOT use _stop_event: that event is
+        already set (stop() pre-set the terminal stage), which is precisely
+        what stopped the status poller this loop replaces.
+        """
+        started = time.monotonic()
+        acked = False
+        while True:
+            if self._job_is_terminal():
+                logger.info(
+                    "HF job %s ended on its own after the stop request; upload backlog drained",
+                    self._hf_job_id,
+                )
+                return
+            elapsed = time.monotonic() - started
+            if not acked:
+                acked = self._stop_ack_present()
+                if acked:
+                    logger.info(
+                        "HF job %s acknowledged the stop; draining checkpoint uploads", self._hf_job_id
+                    )
+                elif elapsed >= _STOP_ACK_TIMEOUT_S:
+                    logger.info(
+                        "HF job %s did not acknowledge the stop within %.0fs; cancelling it",
+                        self._hf_job_id,
+                        _STOP_ACK_TIMEOUT_S,
+                    )
+                    break
+            if elapsed >= _STOP_DRAIN_TIMEOUT_S:
+                logger.info(
+                    "HF job %s is still draining after %.0fs; cancelling to bound the cost",
+                    self._hf_job_id,
+                    _STOP_DRAIN_TIMEOUT_S,
+                )
+                break
+            time.sleep(_STOP_DRAIN_POLL_INTERVAL_S)
+        self._hard_cancel()
+
+    def _job_is_terminal(self) -> bool:
+        """Has the pod ended? Read for liveness only — the terminal stage the
+        registry classifies on stays the CANCELED that stop() pre-set, because
+        a cooperatively stopped pod exits with the killed trainer's nonzero
+        code and HF reports that as ERROR."""
+        try:
+            info = self._api.inspect_job(job_id=self._hf_job_id)
+            status_obj = getattr(info, "status", None)
+            stage = getattr(status_obj, "stage", None) if status_obj is not None else None
+            return stage is not None and str(stage).upper() in _TERMINAL_STAGES
+        except Exception as exc:
+            logger.info("inspect_job during drain wait failed for %s: %s", self._hf_job_id, exc)
+            return False
+
+    def _stop_ack_present(self) -> bool:
+        """Did the pod confirm it saw the sentinel? Written by the wrapper
+        beside the sentinel as soon as its watcher notices it."""
+        if not (self._hub_repo_id and self._stop_sentinel):
+            return False
+        try:
+            return bool(
+                self._api.file_exists(self._hub_repo_id, f"{self._stop_sentinel}.ack", repo_type="model")
+            )
+        except Exception as exc:
+            logger.info("Stop-ack check failed for %s: %s", self._hf_job_id, exc)
+            return False
+
+    def _hard_cancel(self) -> None:
+        """Kill the job through the platform API. Always reachable: it is both
+        the fallback when the cooperative path is unavailable and the deadline
+        behind every wait above."""
         try:
             self._api.cancel_job(job_id=self._hf_job_id)
         except Exception as exc:
