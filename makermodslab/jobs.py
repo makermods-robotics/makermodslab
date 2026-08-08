@@ -2817,42 +2817,6 @@ class JobRegistry:
                 source, config.finetune_from_step
             )
 
-        # The three things that can still have to MOVE before a trainer starts,
-        # each resolved (and refused) synchronously below but carried out in the
-        # preparing thread because each is potentially GBs over the network:
-        #   * a local fine-tune's base checkpoint, downloaded here;
-        #   * a cloud parent's checkpoint, downloaded here for a local resume;
-        #   * a local parent's checkpoint, uploaded to the Hub for a cloud one.
-        # At most one is ever set: fine-tune and resume are mutually exclusive
-        # (refused above), and a resume moves bytes in one direction only.
-        deferred_hub_ref: str | None = None
-        deferred_resume_ref: str | None = None
-        deferred_resume_upload: tuple[Path, str, str] | None = None
-        if config.policy_pretrained_path and not config.resume:
-            # Deliberately BEFORE the materialization: this reads only the
-            # checkpoint's config.json (a few KB), so a contradicting pair is
-            # refused without first downloading the weights it names — and
-            # refused SYNCHRONOUSLY, as a 400, with no job record left behind.
-            # lerobot sizes the policy from the DATASET on this launch path and
-            # loads the weights non-strictly, so a checkpoint whose robot or
-            # camera set contradicts the selected dataset would otherwise train
-            # silently wrong (MT44).
-            _check_pretrained_feature_space(config.policy_pretrained_path, config.dataset_repo_id)
-            if target.runner == "local" and needs_local_materialization(config.policy_pretrained_path):
-                # A step-suffixed hub ref becomes the real directory the local
-                # trainer loads — but off-request, in _materialize_then_start,
-                # which rewrites policy_pretrained_path once the bytes are here.
-                # A cloud run keeps the ref: its container materializes the same
-                # ref pod-side (see the HF Jobs wrapper), because a host path is
-                # meaningless there.
-                deferred_hub_ref = config.policy_pretrained_path
-
-        with self._lock:
-            # Authoritative local-run mutex: re-checked here, under the lock
-            # that also inserts the record, so two concurrent starts can't both
-            # pass. (The pre-flight copy above is only a fail-fast.)
-            self._assert_no_running_local(target)
-
         # Whatever put a pretrained_path on this request — the fine-tune
         # resolution above, or a caller setting the public field directly —
         # its architecture must match --policy.type before we spend a GPU on
@@ -2861,6 +2825,7 @@ class JobRegistry:
         # carries the "model" placeholder. Skipped on resume: that path
         # passes --config_path instead and never emits pretrained_path (see
         # train.build_training_command), so there is no pair to contradict.
+
         # The three things that can still have to MOVE before a trainer starts,
         # each resolved (and refused) synchronously below but carried out in the
         # preparing thread because each is potentially GBs over the network:
