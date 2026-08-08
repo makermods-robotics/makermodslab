@@ -182,6 +182,23 @@ class TrainingRequest(BaseModel):
     # needs the checkpoint's train_config.json to reconstruct the run).
     resume_from_job_id: str | None = None
     resume_from_step: int | None = None
+    # CHAIN REWIND. `resume_from_job_id` is the LINEAGE EDGE — always the leaf
+    # the user clicked, so chains stay linear (parent -> leaf -> this run). This
+    # field is the PROVENANCE: which run's storage the chosen checkpoint bytes
+    # actually come from, when the user rewound to an ancestor's checkpoint
+    # rather than the leaf's own. None ⇒ the leaf owns it (every plain
+    # tip-resume, and every record written before rewind existed — so no
+    # migration).
+    #
+    # It cannot be derived from the step, which is why it is carried
+    # explicitly: rewind itself produces same-step-different-owner checkpoints
+    # on ONE linear path. Rewind a leaf to its trunk's step 2000, and the new
+    # run saves its own 4000 and 6000 alongside the trunk's 4000 and the old
+    # leaf's 6000 — all four on the new run's single ancestor path. Guessing
+    # the owner from the step would silently train from different weights than
+    # the user picked. JobRegistry.start refuses an owner that is not on the
+    # leaf's ancestor path or does not hold the named step.
+    resume_from_checkpoint_job_id: str | None = None
     # Set by the "Fine-tune" flow: start a FRESH run (fresh optimizer, step 0)
     # whose weights are initialized from an imported/existing checkpoint. Unlike
     # resume, this needs no optimizer/step state — weights-only is exactly the
@@ -212,6 +229,14 @@ class TrainingRequest(BaseModel):
     # other path — nothing is uploaded when the checkpoint is already on the Hub,
     # including a re-resume of a step a previous continuation already pushed.
     upload_resume_checkpoint: bool = False
+    # The fine-tune twin of the consent above: a fine-tune whose BASE checkpoint
+    # lives only on this machine, launched on cloud compute. The base's weights
+    # (pretrained_model/ only — a fine-tune never reads training_state/) are
+    # staged to the same private per-source Hub repo a cloud resume uses, and
+    # the registry refuses the launch without this consent. Ignored whenever the
+    # base is already on the Hub, including a re-fine-tune of a step an earlier
+    # launch already staged.
+    upload_finetune_checkpoint: bool = False
     # Set by the registry (never by a client) when `resume_from_hub_repo` is the
     # staging repo above rather than a cloud parent's own output repo. It tells
     # the cloud runner not to adopt the source repo as this run's OUTPUT repo:

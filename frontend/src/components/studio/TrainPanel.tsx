@@ -263,11 +263,16 @@ const TrainPanel: React.FC = () => {
           setFinetuneSeed(null);
           return;
         }
+        // Carry the chosen checkpoint's own storage side along with its step:
+        // a "local" one exists only on this machine, so fine-tuning it on the
+        // cloud has to upload it first and the form has to say so.
+        const chosen = cks.find((c) => c.step === latest);
         setFinetuneSeed({
           jobId,
           step: latest,
           name: name ?? jobId,
           policyType: policy ?? "act",
+          checkpointSource: chosen?.source,
         });
         if (policy) setPolicyType(policy);
       } catch (e) {

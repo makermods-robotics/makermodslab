@@ -16,7 +16,7 @@ import {
   jobDisplayName,
   renameJob,
 } from "@/lib/jobsApi";
-import { runTaskTitle } from "@/lib/modelNames";
+import { jobRunStamp, runTaskTitle } from "@/lib/modelNames";
 import {
   Square,
   Trash2,
@@ -41,8 +41,8 @@ import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import {
   LineageCheckpoint,
-  blockedByContinuedOwner,
   buildResumeSeed,
+  checkpointOwners,
   loadLineageCheckpoints,
   resumableCheckpoints,
 } from "./resumeSeed";
@@ -416,16 +416,15 @@ const JobCard: React.FC<Props> = ({
   // resume).
   //
   // The payload itself comes from the ONE shared builder (buildResumeSeed), so
-  // this and the library's row-level quick-resume can no longer drift. The
-  // runner is derived there from the OWNING run — the seed's record of where
-  // the parent actually ran, which the form reads both as its default Compute
-  // and as the fact that decides whether continuing elsewhere has to move the
-  // checkpoint first (F7).
+  // this and the library's row-level quick-resume can no longer drift. It is
+  // handed THIS card's run (the leaf being continued — the lineage edge) plus
+  // the selected entry, which carries its own owner; the builder keeps those
+  // two apart. Passing the owner as the run is precisely the fork bug chain
+  // rewind fixes. The runner still follows the owner there, since it says where
+  // the bytes live and therefore whether they must move first (F7).
   const goToResume = () => {
-    if (selectedStep == null) return;
-    openStudio("train", {
-      train: { resume: buildResumeSeed(selectedJob, selectedStep) },
-    });
+    if (selected == null) return;
+    openStudio("train", { train: { resume: buildResumeSeed(job, selected) } });
   };
 
   const handleResume = (e: React.MouseEvent) => {
@@ -508,28 +507,18 @@ const JobCard: React.FC<Props> = ({
   // when ModelsLibrary is rewired to render ModelCard — see the header note.)
   const showInferenceRow =
     lineageCheckpoints.length > 0 && selectedStep != null;
-  // The empty-handed tip: this run saved nothing of its own, and everything it
-  // inherited belongs to a run that has already been continued — so under the
-  // sticks rule nothing here is resumable, and the recovery is to delete THIS
-  // run and resume the one behind it. Without this the card just dropped its
-  // whole action row and said nothing, which is the one case where silence is
-  // worst: the checkpoints are visibly there, and the reason they can't be
-  // used is a rule the card never mentions.
+  // The previous commit's delete-first hint is gone with the rule that needed
+  // it: under chain rewind an empty-handed tip is simply resumable — it
+  // continues ITSELF from whatever its ancestors saved — so there is no longer
+  // a state where visible inherited checkpoints are unusable for a reason the
+  // card never says. What is left is a genuinely dead chain (nothing saved
+  // anywhere, or everything owned by finished runs), and the library row's
+  // toast explains that on click.
   //
-  // Keyed on `resumable.length === 0`, not on `canResume`: when this run does
-  // have resumable checkpoints of its own, a selection that lands on an
-  // inherited one is a choice the user just made (the default is the newest
-  // resumable), and the answer there is to pick another step, not to delete
-  // the run.
-  const continuedOwnerHint =
-    resumable.length === 0
-      ? blockedByContinuedOwner(job, lineageCheckpoints)
-      : null;
-
-  // (Upstream the row is gated on `resumable.length > 0 || continuedOwnerHint`,
-  // because there it carries Resume alone. Here it also carries Run /
-  // Fine-tune / Download, so `showInferenceRow` above — "there is a checkpoint
-  // at all" — is already the wider gate and covers the empty-handed tip.)
+  // (Upstream the row is gated on `resumable.length > 0`, because there it
+  // carries Resume alone. Here it also carries Run / Fine-tune / Download, so
+  // `showInferenceRow` above — "there is a checkpoint at all" — is the wider
+  // gate and stays.)
 
   // Unified metadata rows (same format as the dataset/model cards). Imported
   // models keep their source path in the subtitle; trainings surface what they
@@ -650,11 +639,27 @@ const JobCard: React.FC<Props> = ({
           </div>
         </div>
         <div>
-          <DisplayName
-            name={taskTitle}
-            full={displayName}
-            className="text-foreground font-semibold"
-          />
+          {/* The run NUMBER rides OUTSIDE the truncating title, so a long name
+              can never eat the one token that identifies the run — every run on
+              a resume chain shares this title, and the number is the same
+              handle the backend's refusals lead with (a 409 naming #46 points
+              at a row the user can find). Its hover carries the run stamp and
+              the full id. */}
+          <div className="flex min-w-0 items-baseline gap-1.5">
+            {job.job_number > 0 ? (
+              <span
+                className="shrink-0 font-mono text-muted-foreground"
+                title={`${jobRunStamp(job.id)} · ${job.id}`}
+              >
+                #{job.job_number}
+              </span>
+            ) : null}
+            <DisplayName
+              name={taskTitle}
+              full={displayName}
+              className="min-w-0 text-foreground font-semibold"
+            />
+          </div>
           {/* When aliased, keep the true identity visible: the run id for
               trainings (imported models already show their repo id / path in
               the subtitle below). */}
@@ -719,6 +724,12 @@ const JobCard: React.FC<Props> = ({
                   selectedRef={selectedRef}
                   onChange={(c) => setSelectedRef(c.ref)}
                   className="w-full min-w-0"
+                  // This list is a whole lineage, so two entries can both read
+                  // "step 2000" and belong to different runs — and the runs
+                  // share a display name, because a continuation continues the
+                  // same model. The dropdown renders this only when the list
+                  // really does span runs.
+                  owners={checkpointOwners(lineageCheckpoints)}
                 />
               </div>
             ) : null}
@@ -742,19 +753,6 @@ const JobCard: React.FC<Props> = ({
                 <FastForward className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">{resumeLabel}</span>
               </Button>
-            ) : continuedOwnerHint ? (
-              // Where the button would be, the two-step way to get it back.
-              // Names the run and the step so it can be acted on without
-              // opening anything else — same guidance, same numbers, as the
-              // library row's toast (both read the rule, not a re-derivation).
-              <div className="min-w-0 flex-1 text-[11px] leading-tight text-muted-foreground">
-                Saved no checkpoints of its own, and its parent was already
-                continued. Delete this run, then resume{" "}
-                <span className="text-foreground font-medium">
-                  {jobDisplayName(continuedOwnerHint.job)}
-                </span>{" "}
-                from step {continuedOwnerHint.ckpt.step.toLocaleString()}.
-              </div>
             ) : null}
             {canFinetune ? (
               <Button

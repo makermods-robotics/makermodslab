@@ -67,6 +67,24 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
     }
   };
 
+  // The step this continuation starts FROM, beside the name it continues.
+  // Requested here specifically: the name is what the user recognises the run
+  // by, and the starting step is the one number that says which attempt this
+  // is — the two belong together.
+  //
+  // Training steps (above) is the TARGET; this is the floor. A resume turns on
+  // the gap between them, so neither number means much alone.
+  //
+  // Step 0 is the whole-repo/single-model sentinel, not a real training step
+  // (see CheckpointDropdown) — it and a missing step both read as "latest",
+  // the same word the checkpoint picker uses for it.
+  const resumeStep = config.resume_from_step;
+  const resumedFrom = !resumeLocked
+    ? null
+    : resumeStep
+      ? `from step ${resumeStep.toLocaleString()}`
+      : "from latest checkpoint";
+
   return (
     <section className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
@@ -100,7 +118,14 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="job_name">Run name</Label>
+        <div className="flex items-baseline gap-2">
+          <Label htmlFor="job_name">Run name</Label>
+          {resumedFrom ? (
+            <span className="truncate text-xs font-normal text-muted-foreground">
+              {resumedFrom}
+            </span>
+          ) : null}
+        </div>
         <Input
           id="job_name"
           value={config.job_name || ""}
