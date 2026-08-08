@@ -501,6 +501,34 @@ def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
     return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
+def _settle_terminal_metrics(record: JobRecord) -> None:
+    """Reconcile a finished run's progress with the fact that it finished.
+
+    `metrics` only ever advances when a log line is parsed, so a run whose log
+    stream died mid-flight keeps the last frame it saw forever. That produced
+    the MT47 symptom: a `done` run rendering "3,650 / 10,000" beside a live
+    countdown ("00:53:05 remaining") while its step-10,000 checkpoint sat on the
+    Hub — three surfaces of one record disagreeing.
+
+    Two changes, both about not asserting what we no longer believe:
+
+      * `done` means the trainer reached its target, so progress is the target.
+        Only claimed when a target is actually known (`total_steps > 0`), and
+        only for `done` — a `failed`/`interrupted` run genuinely stopped where
+        the last frame said, and rounding that up to the target would invent
+        training that never happened.
+      * The ETA is cleared for EVERY terminal state. A finished run has no
+        remaining time, whatever the last frame extrapolated.
+
+    A mitigation, not the fix: the root cause is the log tail going silent
+    (MT47), and a repaired tail leaves this a no-op on a healthy run.
+    """
+    if record.metrics.eta_seconds is not None:
+        record.metrics.eta_seconds = None
+    if record.state == "done" and record.metrics.total_steps > 0:
+        record.metrics.current_step = record.metrics.total_steps
+
+
 def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
@@ -4340,6 +4368,14 @@ class JobRegistry:
                                 record.error_message = f"Subprocess exited with code {rc}"
                         if record.ended_at is None:
                             record.ended_at = time.time()
+                        # The watchdog's twin (MT47), for the restart route into
+                        # a terminal state. This record's `metrics` were last
+                        # written while it was live, so it carries whatever ETA
+                        # the parser had extrapolated — a countdown that would
+                        # otherwise render beside a run that has already ended.
+                        # Same rule as the watchdog: `done` snaps to target,
+                        # `interrupted`/`failed` only lose the stale ETA.
+                        _settle_terminal_metrics(record)
                         self._write_meta(record)
                 elif record.runner == "hf_cloud" and record.hf_job_id and record.hf_flavor:
                     # Always reattach; the status poller is the source of truth
@@ -4573,6 +4609,17 @@ class JobRegistry:
                 record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc
+                # Deliberately AFTER `record.state` is assigned and before
+                # anything reads the record again: it keys on the state, so one
+                # call here covers every outcome this block can produce —
+                # `done` snaps progress to the target, while `failed` and both
+                # flavours of `interrupted` (a stop we asked for, and the
+                # unconfirmed disappearance above) only get their stale ETA
+                # cleared. Never snapping without a CONFIRMED completion is the
+                # point: an unconfirmed run has no evidence it reached its
+                # target, and claiming it did would be the same lie MT10 exists
+                # to stop telling.
+                _settle_terminal_metrics(record)
                 if record.error_message is None:
                     if state == "interrupted":
                         # Never the synthetic exit-code text here: that message
