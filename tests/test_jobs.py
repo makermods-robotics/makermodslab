@@ -122,6 +122,15 @@ class _FakeHubApi:
         return self._files
 
 
+def _hub_pretrained_files(step_dir: str) -> list[str]:
+    """The repo paths a WEIGHTS-ONLY staging upload publishes — the fine-tune
+    base half of the tree above, with no training_state/ at all."""
+    return [
+        f"checkpoints/{step_dir}/pretrained_model/config.json",
+        f"checkpoints/{step_dir}/pretrained_model/model.safetensors",
+    ]
+
+
 def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
     from makermodslab.jobs import _resolve_cloud_resume
 
@@ -205,6 +214,68 @@ def test_extract_wandb_run_url_returns_none_when_absent() -> None:
 
     assert extract_wandb_run_url("nothing here") is None
     assert extract_wandb_run_url("https://example.com/runs/abc") is None
+
+
+# ── the weights-only completeness rule, for a fine-tune base (F7's fourth
+# quadrant) ─────────────────────────────────────────────────────────────────
+# A fine-tune reads pretrained_model/ and nothing else, so the staged copy of a
+# local base is weights-only and needs its own completeness rule. Judging it by
+# the resume rule would declare every staging upload broken.
+
+
+def _complete_names() -> set[str]:
+    """Every file a COMPLETE, resumable checkpoint tree holds."""
+    return {
+        "pretrained_model/config.json",
+        "pretrained_model/model.safetensors",
+        "pretrained_model/train_config.json",
+        "training_state/training_step.json",
+        "training_state/rng_state.safetensors",
+        "training_state/optimizer_state.safetensors",
+    }
+
+
+def test_missing_pretrained_files_accepts_the_weights_half_alone() -> None:
+    from makermodslab.jobs import missing_pretrained_files
+
+    names = {n for n in _complete_names() if n.startswith("pretrained_model/")}
+    assert missing_pretrained_files(names) == []
+
+
+def test_missing_pretrained_files_does_not_require_train_config() -> None:
+    """A flat Hub-imported base (laid out by push_to_hub, not by a checkpoint
+    save) legitimately has no train_config.json — requiring it would refuse the
+    canonical SmolVLA-style base."""
+    from makermodslab.jobs import missing_pretrained_files
+
+    assert (
+        missing_pretrained_files({"pretrained_model/config.json", "pretrained_model/model.safetensors"}) == []
+    )
+
+
+def test_missing_pretrained_files_flags_a_missing_config() -> None:
+    """config.json is what the in-container wrapper gates its download on."""
+    from makermodslab.jobs import missing_pretrained_files
+
+    assert missing_pretrained_files({"pretrained_model/model.safetensors"}) == [
+        "pretrained_model/config.json"
+    ]
+
+
+def test_missing_pretrained_files_flags_missing_weights() -> None:
+    from makermodslab.jobs import missing_pretrained_files
+
+    assert missing_pretrained_files({"pretrained_model/config.json"}) == ["pretrained_model/*.safetensors"]
+
+
+def test_missing_pretrained_files_ignores_a_missing_training_state() -> None:
+    """The whole point: the optimizer half is deliberately never staged, so its
+    absence must not read as an incomplete upload."""
+    from makermodslab.jobs import missing_pretrained_files
+
+    names = {n for n in _complete_names() if n.startswith("pretrained_model/")}
+    assert not any(n.startswith("training_state/") for n in names)
+    assert missing_pretrained_files(names) == []
 
 
 def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
@@ -1898,6 +1969,112 @@ def _child_of(reg, parent_id: str, *, job_id: str = "child", state: str = "inter
     return reg._records[job_id]
 
 
+# ── …and only when the request actually ASKS to resume ──────────────────────
+# A resume source with `resume` left false used to launch as an ordinary fresh
+# run: it skipped every guard below (they all sit under `if config.resume`) yet
+# still persisted resume_from_job_id, which build_child_index reads as a
+# lineage edge. That produced a run that trained from scratch while counting as
+# a continuation — superseding a parent it never continued, and blocking that
+# parent from being resumed for real.
+
+
+def test_start_refuses_a_resume_source_without_the_resume_flag(tmp_path) -> None:
+    """The combination the live repro produced: a spurious extra child of an
+    existing lineage, created by a request that never said 'resume'."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    request = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=False,  # the hole
+        resume_from_job_id="src",
+    )
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="resume_from_job_id was given but 'resume' is false"),
+    ):
+        reg.start(request, JobTarget(runner="local"))
+
+    # No record, so no phantom lineage edge either.
+    assert [r.id for r in reg.list(limit=10)] == ["src"]
+    assert reg.get("src").child_ids == []
+    _assert_nothing_was_created(reg)
+
+
+def test_start_refuses_a_resume_step_without_the_resume_flag(tmp_path) -> None:
+    """Same contract, named by the field actually supplied."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="resume_from_step was given but 'resume' is false"),
+    ):
+        reg.start(
+            TrainingRequest(
+                dataset_repo_id="user/ds",
+                policy_type="act",
+                resume=False,
+                resume_from_step=100,
+            ),
+            JobTarget(runner="local"),
+        )
+
+
+def test_start_still_allows_a_plain_fresh_run(tmp_path) -> None:
+    """The other direction: neither field set, so nothing is refused. Without
+    this the guard could pass by rejecting every fresh run ever launched."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+            JobTarget(runner="local"),
+        )
+
+    assert record.config.resume is False
+    assert record.config.resume_from_job_id is None
+    # ...and it is not anybody's child.
+    assert reg.get("src").child_ids == []
+
+
+def test_start_refuses_a_finetune_step_without_a_finetune_source(tmp_path) -> None:
+    """The analogous fine-tune inconsistency. There is no `finetune` boolean —
+    the id IS the mode — so the mismatch is a step with nothing to take it
+    from, which used to be dropped silently and trained from scratch."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="finetune_from_step was given without"),
+    ):
+        reg.start(
+            TrainingRequest(
+                dataset_repo_id="user/ds",
+                policy_type="act",
+                finetune_from_step=100,
+            ),
+            JobTarget(runner="local"),
+        )
+
+
 def test_start_refuses_to_resume_an_already_continued_run(tmp_path) -> None:
     """The sticks rule: one continuation per run. A second would fork the
     lineage, so it is refused — naming the child, which is what lets the HTTP
@@ -2073,7 +2250,10 @@ class _FakeUploadApi:
 
     `list_repo_files` answers from whatever has been "uploaded" so far, so the
     post-upload verification in _upload_resume_then_start exercises the real
-    completeness rule instead of a stub that always says yes."""
+    completeness rule instead of a stub that always says yes. A weights-only
+    push (the fine-tune staging path, whose path_in_repo ends in
+    /pretrained_model) publishes only that half, so its verification meets the
+    same tree the real one would — not a full checkpoint it never uploaded."""
 
     def __init__(self, files: list[str] | None = None) -> None:
         self._files = list(files or [])
@@ -2088,8 +2268,11 @@ class _FakeUploadApi:
         if self.upload_error is not None:
             raise self.upload_error
         self.uploaded.append(kwargs)
-        step_dir = kwargs["path_in_repo"].rsplit("/", 1)[-1]
-        self._files.extend(_hub_checkpoint_files(step_dir))
+        parts = kwargs["path_in_repo"].split("/")
+        if parts[-1] == "pretrained_model":
+            self._files.extend(_hub_pretrained_files(parts[-2]))
+        else:
+            self._files.extend(_hub_checkpoint_files(parts[-1]))
 
     def list_repo_files(self, repo_id, repo_type):
         return self._files
@@ -2520,6 +2703,303 @@ def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> 
     assert record.config.resume is True
     assert record.config.resume_from_hub_repo == "user/some-model"
     assert record.config.resume_from_hub_step == "000100"
+
+
+# ── local base → Cloud FINE-TUNE (F7's fourth quadrant) ──────────────────────
+# The same crossing as the resume above, for the other mode: a base checkpoint
+# that exists only on this machine, fine-tuned on rented hardware. What moves is
+# the WEIGHTS ONLY — a fine-tune starts a fresh optimizer at step 0 and never
+# reads training_state/, which is the bigger half — into the same private
+# per-source staging repo a cloud resume uses. The request is then rewritten to
+# the 'repo@checkpoints/<step>' ref the pod already knows how to materialize, so
+# the record describes the run that actually happens rather than a host path the
+# container could never resolve.
+
+
+def _local_finetune_request(*, consent: bool = True, job_id: str = "src", step: int | None = None):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        finetune_from_job_id=job_id,
+        finetune_from_step=step,
+        upload_finetune_checkpoint=consent,
+    )
+
+
+def test_local_base_finetuned_on_the_cloud_uploads_weights_then_submits(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """The base's weights go up first — pretrained_model/ only, PRIVATE repo —
+    and only then is the cloud job submitted, pointed at what was just staged."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")  # a finished local run IS a base
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "hfjob-1"
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_finetune_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    assert api.created == [
+        {"repo_id": "alice/src_checkpoints", "repo_type": "model", "private": True, "exist_ok": True}
+    ]
+    # ONE upload, and it is the weights subtree — never the whole checkpoint.
+    assert [u["path_in_repo"] for u in api.uploaded] == ["checkpoints/100/pretrained_model"]
+    assert api.uploaded[0]["folder_path"].endswith("checkpoints/100/pretrained_model")
+    record = reg._records[record.id]
+    assert record.config.policy_pretrained_path == "alice/src_checkpoints@checkpoints/100"
+    # A fine-tune stays a FRESH run: nothing about it is a continuation.
+    assert record.config.resume is False and record.config.resume_from_hub_repo is None
+    assert fake_runner.start.called
+
+
+def test_local_base_finetuned_on_the_cloud_records_the_ref_before_the_upload(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """The rewrite happens at record creation, not after the bytes land: the
+    record handed back from `start` — while the upload is still deferred —
+    already names the Hub ref the pod will read, so no persisted config ever
+    claims the run trains from a path only this machine has."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "hfjob-1"
+    fake_runner.hf_job_url.return_value = "https://hf.co/jobs/hfjob-1"
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_finetune_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        assert record.config.policy_pretrained_path == "alice/src_checkpoints@checkpoints/100"
+        _join_prepare(reg, record.id)
+
+    reloaded = JobRegistry(reg._output_root)._records[record.id]
+    assert reloaded.config.policy_pretrained_path == "alice/src_checkpoints@checkpoints/100"
+
+
+def test_local_base_finetuned_on_the_cloud_records_the_upload_on_the_source(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """Where the weights went is remembered on the SOURCE — keyed off the
+    child's finetune_from_job_id, since a fine-tune has no resume edge — and
+    survives a reload, so the next fine-tune of the same step reuses it."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()):
+        record = reg.start(_local_finetune_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    source = reg._records["src"]
+    assert source.checkpoints_hub_repo_id == "alice/src_checkpoints"
+    assert source.checkpoints_hub_steps == ["100"]
+    reloaded = JobRegistry(reg._output_root)._records["src"]
+    assert reloaded.checkpoints_hub_repo_id == "alice/src_checkpoints"
+    assert reloaded.checkpoints_hub_steps == ["100"]
+
+
+def test_local_base_finetuned_on_the_cloud_reuses_an_earlier_staging(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """Second fine-tune of the same base: the weights are already staged and
+    confirmed there, so nothing is uploaded — and no consent is asked for,
+    because nothing new is disclosed. The confirmation uses the WEIGHTS-ONLY
+    rule, so the training_state/ a staging upload never pushed doesn't read as
+    a broken repo."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    reg._records["src"].checkpoints_hub_repo_id = "alice/src_checkpoints"
+    reg._records["src"].checkpoints_hub_steps = ["100"]
+    api = _FakeUploadApi(_hub_pretrained_files("100"))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(
+            _local_finetune_request(consent=False),
+            JobTarget(runner="hf_cloud", flavor="t4-small"),
+        )
+
+    assert api.uploaded == []
+    assert record.config.policy_pretrained_path == "alice/src_checkpoints@checkpoints/100"
+    # Nothing had to move, so the job went straight to the runner.
+    assert record.id not in reg._prepare_threads
+    assert fake_runner.start.called
+
+
+def test_local_base_finetuned_on_the_cloud_refuses_without_consent(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """An upload is a disclosure, so it never happens as a side effect of
+    picking a base model: without the form's explicit consent the launch is
+    refused, nothing is uploaded, and no record is left behind."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Confirm the upload in the training form"),
+    ):
+        reg.start(
+            _local_finetune_request(consent=False),
+            JobTarget(runner="hf_cloud", flavor="t4-small"),
+        )
+
+    assert api.created == [] and api.uploaded == []
+    assert list(reg._records) == ["src"]
+    _assert_nothing_was_created(reg)
+
+
+def test_local_base_finetuned_on_the_cloud_refuses_when_offline(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """Offline mode disables every Hub write, so the staging this fine-tune
+    depends on is impossible — say so instead of trying."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeUploadApi())
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_offline", lambda: True)
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Offline mode"),
+    ):
+        reg.start(_local_finetune_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    _assert_nothing_was_created(reg)
+
+
+def test_local_base_finetuned_on_the_cloud_refuses_without_hf_auth(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """No Hub identity ⇒ no namespace to stage into. Refused with the login
+    instruction rather than failing later inside the runner."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: None)
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="signed in"),
+    ):
+        reg.start(_local_finetune_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert api.uploaded == []
+    _assert_nothing_was_created(reg)
+
+
+def test_local_base_finetuned_on_the_cloud_stages_a_flat_import_at_step_zero(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """The other local base shape: a flat imported directory that IS the
+    pretrained_model, with no checkpoints/<step>/ around it to read the step
+    from. Its listing offers exactly one checkpoint, at step 0, so the staged
+    step dir is the zero-padded 0 — and the ref names it, rather than the repo
+    root, so the pod materializes the weights that were actually uploaded."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    src = tmp_path / "flat_base"
+    src.mkdir()
+    (src / "config.json").write_text(_json.dumps({"type": "act"}))
+    (src / "model.safetensors").write_bytes(b"weights")
+
+    reg = JobRegistry(tmp_path / "root")
+    source = reg.register_imported(str(src))
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()):
+        record = reg.start(
+            _local_finetune_request(job_id=source.id),
+            JobTarget(runner="hf_cloud", flavor="t4-small"),
+        )
+        _join_prepare(reg, record.id)
+
+    assert [u["path_in_repo"] for u in api.uploaded] == ["checkpoints/000000/pretrained_model"]
+    assert api.uploaded[0]["folder_path"] == str(src.resolve())
+    assert (
+        reg._records[record.id].config.policy_pretrained_path
+        == f"alice/{source.id}_checkpoints@checkpoints/000000"
+    )
+
+
+def test_local_base_finetuned_on_the_cloud_never_starts_from_scratch(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """The fine-tune reading of MT42: when the weights can't be put where the
+    pod will look for them, the job FAILS — it does not quietly become a
+    from-scratch run on rented hardware while the record calls itself a
+    fine-tune of somebody's checkpoint."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    api = _FakeUploadApi()
+    api.upload_error = RuntimeError("413 payload too large")
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_finetune_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    failed = reg._records[record.id]
+    assert failed.state == "failed"
+    assert "413 payload too large" in failed.error_message
+    assert not fake_runner.start.called
+
+
+def test_local_base_finetuned_locally_stages_nothing(tmp_path, monkeypatch) -> None:
+    """The staging is a property of the CROSSING, not of the base: the same
+    local base fine-tuned on this machine keeps the host path and touches the
+    Hub not at all."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    api = _FakeUploadApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_finetune_request(consent=False), JobTarget(runner="local"))
+
+    assert api.created == [] and api.uploaded == []
+    assert record.config.policy_pretrained_path.endswith("checkpoints/100/pretrained_model")
+    assert fake_runner.start.called
 
 
 # ---------------------------------------------------------------------------
@@ -3887,3 +4367,664 @@ def test_endpoint_409_falls_back_to_the_id_when_a_run_is_gone(
 
     assert resp.status_code == 409
     assert "src" in resp.json()["detail"]
+
+
+# The 409's REMEDY is child-aware: "delete the continuation" is sound advice
+# only for the single-unfinished-child lineage the sticks rule creates. On a
+# legacy fork, or against a continuation that ran to completion, the same
+# sentence tells the user to throw away finished training.
+
+
+def _stub_children(monkeypatch, source_id: str, children: dict[str, str]):
+    """Raise JobAlreadyContinuedError(source_id, children) from start, and make
+    the registry resolve each child id to a record in the given state."""
+    import makermodslab.server as server_mod
+    from makermodslab.jobs import JobAlreadyContinuedError, JobNotFoundError, JobRecord
+    from makermodslab.train import TrainingRequest
+
+    states = {source_id: "interrupted", **children}
+
+    def _fake_get(job_id: str):
+        if job_id not in states:
+            raise JobNotFoundError(job_id)
+        return JobRecord(
+            id=job_id,
+            name=job_id,
+            state=states[job_id],
+            config=TrainingRequest(dataset_repo_id="user/ds"),
+            output_dir=f"/nonexistent/{job_id}",
+            started_at=0.0,
+        )
+
+    def _raise(config, target):
+        raise JobAlreadyContinuedError(source_id, list(children))
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _raise)
+    monkeypatch.setattr(server_mod.job_registry, "get", _fake_get)
+
+
+def test_endpoint_409_keeps_delete_first_for_one_unfinished_child(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The linear case — the only shape sticks can produce — still gets the
+    cheap, correct two-step remedy."""
+    _stub_children(monkeypatch, "src", {"kid": "interrupted"})
+
+    detail = _post_resume(client).json()["detail"]
+
+    assert "delete" in detail.lower()
+    assert "fine-tune" not in detail.lower()
+
+
+def test_endpoint_409_recommends_finetune_on_a_legacy_fork(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two children: freeing the parent means deleting BOTH, so deletion stops
+    being reasonable advice and fine-tune (unrestricted by sticks) takes over."""
+    _stub_children(monkeypatch, "src", {"kid": "interrupted", "other": "failed"})
+
+    detail = _post_resume(client).json()["detail"]
+
+    assert "fine-tune" in detail.lower()
+    assert "kid" in detail and "other" in detail
+
+
+def test_endpoint_409_will_not_advise_deleting_a_finished_run(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's actual case: a lone continuation that ran to completion. The
+    advice must not be "delete it" — that is the run holding the finished
+    training — and the message says which run it is protecting."""
+    _stub_children(monkeypatch, "src", {"kid": "done"})
+
+    detail = _post_resume(client).json()["detail"]
+
+    assert "fine-tune" in detail.lower()
+    assert "finished run" in detail
+    assert "kid" in detail
+
+
+def test_endpoint_409_survives_an_unresolvable_child(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The state lookup must not turn the refusal into a 500 when a child id no
+    longer resolves; it just can't claim the run is finished."""
+    import makermodslab.server as server_mod
+    from makermodslab.jobs import JobAlreadyContinuedError, JobNotFoundError
+
+    def _raise(config, target):
+        raise JobAlreadyContinuedError("src", ["kid"])
+
+    def _fake_get(job_id: str):
+        raise JobNotFoundError(job_id)
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _raise)
+    monkeypatch.setattr(server_mod.job_registry, "get", _fake_get)
+
+    resp = _post_resume(client)
+
+    assert resp.status_code == 409
+    assert "finished run" not in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Run numbers. A persisted, monotonic counter — the point is that a number is
+# never handed out twice, which is exactly what deriving max(existing)+1 at
+# render time cannot promise.
+
+
+def _numbered_registry(tmp_path):
+    from makermodslab.jobs import JobRegistry
+
+    return JobRegistry(tmp_path / "root")
+
+
+def test_start_numbers_runs_from_one_upward(tmp_path) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _numbered_registry(tmp_path)
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    numbers = []
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        for _ in range(3):
+            rec = reg.start(
+                TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+                JobTarget(runner="local"),
+            )
+            reg._records[rec.id].state = "done"  # free the one-local-run mutex
+            numbers.append(rec.job_number)
+
+    assert numbers == [1, 2, 3]
+
+
+def test_job_numbers_survive_a_registry_reload(tmp_path) -> None:
+    """The counter is on disk, so a restart continues the sequence instead of
+    starting over and colliding with the runs already numbered."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _numbered_registry(tmp_path)
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        first = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+            JobTarget(runner="local"),
+        )
+        reg._records[first.id].state = "done"
+        reg._persist(reg._records[first.id], force=True)
+
+    reopened = JobRegistry(tmp_path / "root")
+    assert reopened.get(first.id).job_number == first.job_number
+
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        second = reopened.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+            JobTarget(runner="local"),
+        )
+
+    assert second.job_number == first.job_number + 1
+
+
+def test_deleting_the_highest_numbered_run_does_not_free_its_number(tmp_path) -> None:
+    """THE reason the counter is persisted rather than derived. max(existing)+1
+    would reissue #1 here, so two different runs would have worn the same
+    number — across a restart too, since the counter file outlives the record."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _numbered_registry(tmp_path)
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        first = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+            JobTarget(runner="local"),
+        )
+    reg._records[first.id].state = "done"
+    reg._persist(reg._records[first.id], force=True)
+    assert first.job_number == 1
+
+    reg.delete(first.id)
+    # ...and the registry is empty, so a derived number would restart at 1.
+    assert reg._records == {}
+
+    reopened = JobRegistry(tmp_path / "root")
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        second = reopened.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+            JobTarget(runner="local"),
+        )
+
+    assert second.job_number == 2
+
+
+def test_backfill_numbers_legacy_records_oldest_first(tmp_path) -> None:
+    """Records written before the field existed get numbers in the order they
+    happened, so the sequence agrees with the history the user remembers."""
+    from makermodslab.jobs import JobRegistry
+
+    root = tmp_path / "root"
+    for job_id, started in (("late", 300.0), ("early", 100.0), ("middle", 200.0)):
+        rec = _lineage_record(job_id, started_at=started)
+        d = root / job_id
+        d.mkdir(parents=True)
+        # Written WITHOUT job_number, the shape a pre-existing registry holds.
+        data = rec.model_dump(mode="json")
+        data.pop("job_number")
+        (d / "job.json").write_text(_json.dumps(data))
+
+    reg = JobRegistry(root)
+
+    assert reg.get("early").job_number == 1
+    assert reg.get("middle").job_number == 2
+    assert reg.get("late").job_number == 3
+
+
+def test_backfill_breaks_started_at_ties_deterministically(tmp_path) -> None:
+    """Legacy timestamps are second-granular, so ties are real. Without a
+    tie-break two boots could order the same pair differently and silently
+    renumber history."""
+    from makermodslab.jobs import JobRegistry
+
+    root = tmp_path / "root"
+    for job_id in ("bbb", "aaa"):
+        rec = _lineage_record(job_id, started_at=100.0)
+        d = root / job_id
+        d.mkdir(parents=True)
+        data = rec.model_dump(mode="json")
+        data.pop("job_number")
+        (d / "job.json").write_text(_json.dumps(data))
+
+    reg = JobRegistry(root)
+
+    assert reg.get("aaa").job_number == 1
+    assert reg.get("bbb").job_number == 2
+
+
+def test_backfill_is_idempotent_across_restarts(tmp_path) -> None:
+    """A second boot must find everything numbered and change nothing — the
+    numbers are persisted back to each job.json, not recomputed per process."""
+    from makermodslab.jobs import JobRegistry
+
+    root = tmp_path / "root"
+    for job_id, started in (("a", 100.0), ("b", 200.0)):
+        rec = _lineage_record(job_id, started_at=started)
+        d = root / job_id
+        d.mkdir(parents=True)
+        data = rec.model_dump(mode="json")
+        data.pop("job_number")
+        (d / "job.json").write_text(_json.dumps(data))
+
+    first = {r.id: r.job_number for r in JobRegistry(root).list(limit=10)}
+    second = {r.id: r.job_number for r in JobRegistry(root).list(limit=10)}
+
+    assert first == {"a": 1, "b": 2}
+    assert first == second
+
+
+def test_a_lost_counter_file_still_will_not_reissue_a_live_number(tmp_path) -> None:
+    """Degraded case: the counter is gone but the records are not. The floor is
+    recomputed from the records, and persisted, so the next boot keeps it even
+    after the highest-numbered run is deleted."""
+    from makermodslab.jobs import JobRegistry, _job_counter_path
+
+    root = tmp_path / "root"
+    for job_id, number in (("a", 1), ("b", 7)):
+        rec = _lineage_record(job_id, started_at=float(number))
+        rec.job_number = number
+        d = root / job_id
+        d.mkdir(parents=True)
+        (d / "job.json").write_text(rec.model_dump_json())
+
+    reg = JobRegistry(root)
+    assert _job_counter_path(root).exists()
+    assert reg._next_job_number == 8
+
+    reg.delete("b")
+    assert JobRegistry(root)._next_job_number == 8
+
+
+def test_a_corrupt_counter_file_is_ignored_not_fatal(tmp_path) -> None:
+    """A half-written or hand-edited counter must not take the registry down,
+    and must not read as a number below the records in use."""
+    from makermodslab.jobs import JobRegistry, _job_counter_path
+
+    root = tmp_path / "root"
+    rec = _lineage_record("a", started_at=1.0)
+    rec.job_number = 4
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "job.json").write_text(rec.model_dump_json())
+    _job_counter_path(root).write_text("{not json")
+
+    assert JobRegistry(root)._next_job_number == 5
+
+
+def test_the_counter_file_is_not_mistaken_for_a_job(tmp_path) -> None:
+    """It lives in the registry root beside the job dirs, so the loader has to
+    keep ignoring it (it globs directories only)."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _numbered_registry(tmp_path)
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        rec = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+            JobTarget(runner="local"),
+        )
+    reg._records[rec.id].state = "done"
+    reg._persist(reg._records[rec.id], force=True)
+
+    assert [r.id for r in JobRegistry(tmp_path / "root").list(limit=10)] == [rec.id]
+
+
+def test_imported_records_take_a_number_from_the_same_sequence(tmp_path) -> None:
+    """Imports share the libraries with runs, so a library where some rows have
+    a number and some don't is the thing to avoid."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+
+    assert reg.register_imported(str(model)).job_number == 1
+
+
+def test_endpoint_409_label_leads_with_the_run_number(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The number is what the UI shows, so the API's refusals have to speak it
+    too — while keeping the id, which is what survives a rename."""
+    import makermodslab.server as server_mod
+    from makermodslab.jobs import JobAlreadyContinuedError, JobNotFoundError, JobRecord
+    from makermodslab.train import TrainingRequest
+
+    numbers = {"src": 46, "kid": 47}
+
+    def _fake_get(job_id: str):
+        if job_id not in numbers:
+            raise JobNotFoundError(job_id)
+        return JobRecord(
+            id=job_id,
+            job_number=numbers[job_id],
+            name="overnight act",
+            state="interrupted",
+            config=TrainingRequest(dataset_repo_id="user/ds"),
+            output_dir=f"/nonexistent/{job_id}",
+            started_at=0.0,
+        )
+
+    def _raise(config, target):
+        raise JobAlreadyContinuedError("src", ["kid"])
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _raise)
+    monkeypatch.setattr(server_mod.job_registry, "get", _fake_get)
+
+    detail = _post_resume(client).json()["detail"]
+
+    assert "#46" in detail and "#47" in detail
+    assert "src" in detail and "kid" in detail  # ids still present
+
+
+def test_endpoint_409_label_omits_the_number_when_unassigned(client, monkeypatch) -> None:
+    """A record that predates the field must not be labelled "#0"."""
+    import makermodslab.server as server_mod
+    from makermodslab.jobs import JobAlreadyContinuedError, JobRecord
+    from makermodslab.train import TrainingRequest
+
+    def _fake_get(job_id: str):
+        return JobRecord(
+            id=job_id,
+            name="overnight act",
+            state="interrupted",
+            config=TrainingRequest(dataset_repo_id="user/ds"),
+            output_dir=f"/nonexistent/{job_id}",
+            started_at=0.0,
+        )
+
+    def _raise(config, target):
+        raise JobAlreadyContinuedError("src", ["kid"])
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _raise)
+    monkeypatch.setattr(server_mod.job_registry, "get", _fake_get)
+
+    assert "#0" not in _post_resume(client).json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# CHAIN REWIND. A resume continues the LEAF from ANY checkpoint on its lineage:
+# the edge points at the leaf (so chains stay linear), while the bytes are read
+# from whichever ancestor owns the chosen checkpoint. The empty-handed tip — a
+# run that died before saving anything — is the case this exists for.
+
+
+def _rewind_chain(tmp_path):
+    """A two-run chain: `trunk` with real checkpoints at 100 and 200, and
+    `tip` continuing it with none of its own (it died before its first save)."""
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    trunk_dir = tmp_path / "trunk" / "run"
+    trunk_dir.mkdir(parents=True)
+    _make_checkpoint(trunk_dir, 100)
+    _make_checkpoint(trunk_dir, 200)
+    tip_dir = tmp_path / "tip" / "run"
+    tip_dir.mkdir(parents=True)
+
+    reg = JobRegistry(tmp_path / "root")
+    reg._records["trunk"] = JobRecord(
+        id="trunk",
+        name="run",
+        state="interrupted",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=1000),
+        output_dir=str(trunk_dir),
+        started_at=0.0,
+        runner="local",
+    )
+    reg._records["tip"] = JobRecord(
+        id="tip",
+        name="run",
+        state="interrupted",
+        config=TrainingRequest(
+            dataset_repo_id="user/ds",
+            policy_type="act",
+            steps=1000,
+            resume=True,
+            resume_from_job_id="trunk",
+            resume_from_step=200,
+        ),
+        output_dir=str(tip_dir),
+        started_at=1.0,
+        runner="local",
+    )
+    return reg
+
+
+def _rewind_request(*, leaf: str, owner: str | None, step: int | None, steps: int = 1000):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        steps=steps,
+        resume=True,
+        resume_from_job_id=leaf,
+        resume_from_step=step,
+        resume_from_checkpoint_job_id=owner,
+    )
+
+
+def test_rewind_resumes_an_empty_tip_from_its_ancestors_checkpoint(tmp_path) -> None:
+    """THE case the redirect exists for. The tip saved nothing, so before rewind
+    it was a dead row; now it continues itself from the trunk's checkpoint —
+    and the new run is a child of the TIP, so the chain stays linear."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _rewind_chain(tmp_path)
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        record = reg.start(
+            _rewind_request(leaf="tip", owner="trunk", step=200),
+            JobTarget(runner="local"),
+        )
+
+    # The EDGE names the tip...
+    assert record.config.resume_from_job_id == "tip"
+    assert reg.get("tip").child_ids == [record.id]
+    # ...and the trunk gains no second child, which is what keeps it linear.
+    assert reg.get("trunk").child_ids == ["tip"]
+    # The BYTES come from the trunk's checkpoint dir.
+    assert "trunk" in record.config.config_path
+    assert "checkpoints/200" in record.config.config_path
+
+
+def test_rewind_can_reach_an_older_checkpoint_of_the_ancestor(tmp_path) -> None:
+    """Any checkpoint on the lineage, not just the newest — rewinding past a
+    bad stretch is the point."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _rewind_chain(tmp_path)
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        record = reg.start(
+            _rewind_request(leaf="tip", owner="trunk", step=100),
+            JobTarget(runner="local"),
+        )
+
+    assert "checkpoints/100" in record.config.config_path
+    assert record.config.resume_from_job_id == "tip"
+
+
+def test_a_plain_tip_resume_still_needs_no_owner(tmp_path) -> None:
+    """Backward compatibility: omitting the owner means the leaf owns the
+    checkpoint, which is every request written before rewind existed."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")  # checkpoint at step 100
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        record = reg.start(
+            _rewind_request(leaf="src", owner=None, step=100, steps=200),
+            JobTarget(runner="local"),
+        )
+
+    assert record.config.resume_from_checkpoint_job_id is None
+    assert "checkpoints/100" in record.config.config_path
+
+
+def test_rewind_naming_the_leaf_as_its_own_owner_is_accepted(tmp_path) -> None:
+    """The explicit spelling of the same thing — the UI omits it, but a caller
+    that sends it must not be refused for agreeing with the default."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    fake = MagicMock()
+    fake.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake):
+        record = reg.start(
+            _rewind_request(leaf="src", owner="src", step=100, steps=200),
+            JobTarget(runner="local"),
+        )
+
+    assert "checkpoints/100" in record.config.config_path
+
+
+def test_rewind_refuses_an_owner_off_the_leaf_lineage(tmp_path) -> None:
+    """The wrong-weights guard. A run that is not an ancestor has no business
+    seeding this chain — its bytes would enter a history claiming continuity
+    with them."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRecord, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _rewind_chain(tmp_path)
+    stranger_dir = tmp_path / "stranger" / "run"
+    stranger_dir.mkdir(parents=True)
+    _make_checkpoint(stranger_dir, 100)
+    reg._records["stranger"] = JobRecord(
+        id="stranger",
+        name="unrelated",
+        state="interrupted",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=1000),
+        output_dir=str(stranger_dir),
+        started_at=2.0,
+        runner="local",
+    )
+
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="is not on 'tip''s lineage"),
+    ):
+        reg.start(
+            _rewind_request(leaf="tip", owner="stranger", step=100),
+            JobTarget(runner="local"),
+        )
+
+
+def test_rewind_refuses_an_owner_that_lacks_the_named_step(tmp_path) -> None:
+    """Naming a real ancestor is not enough — it must actually hold that
+    checkpoint, or the resolver's 'latest' fallback would silently substitute
+    different weights."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _rewind_chain(tmp_path)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="no checkpoint at step 999"),
+    ):
+        reg.start(
+            _rewind_request(leaf="tip", owner="trunk", step=999),
+            JobTarget(runner="local"),
+        )
+
+
+def test_rewind_refuses_an_unknown_owner(tmp_path) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _rewind_chain(tmp_path)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Resume checkpoint owner 'ghost' not found"),
+    ):
+        reg.start(
+            _rewind_request(leaf="tip", owner="ghost", step=100),
+            JobTarget(runner="local"),
+        )
+
+
+def test_rewind_requires_an_explicit_step(tmp_path) -> None:
+    """'Latest' has no meaning once an owner is named: a rewound lineage can
+    hold several checkpoints at one step, so the pair must be exact."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _rewind_chain(tmp_path)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="resume_from_step is required"),
+    ):
+        reg.start(
+            _rewind_request(leaf="tip", owner="trunk", step=None),
+            JobTarget(runner="local"),
+        )
+
+
+def test_rewind_still_refuses_a_second_continuation_of_the_leaf(tmp_path) -> None:
+    """The sticks 409 survives the redirect and is now pure API integrity: no
+    legitimate caller names a non-leaf as the edge, because the UI always seeds
+    the leaf. A leaf that already has a child is not a leaf."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobAlreadyContinuedError, JobTarget
+
+    reg = _rewind_chain(tmp_path)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(JobAlreadyContinuedError),
+    ):
+        # `trunk` is mid-chain — `tip` already continues it.
+        reg.start(
+            _rewind_request(leaf="trunk", owner="trunk", step=200),
+            JobTarget(runner="local"),
+        )
+
+
+def test_rewind_steps_guard_reads_the_chosen_checkpoint(tmp_path) -> None:
+    """The target must beat the step actually being resumed from, which after a
+    rewind is the ANCESTOR's step, not the leaf's progress."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _rewind_chain(tmp_path)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="would train nothing"),
+    ):
+        reg.start(
+            _rewind_request(leaf="tip", owner="trunk", step=200, steps=200),
+            JobTarget(runner="local"),
+        )

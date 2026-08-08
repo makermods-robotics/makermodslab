@@ -224,10 +224,19 @@ def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
     # form, which the wrapper materializes pod-side before launching the trainer
     # (the twin of the resume download above). What cannot work is a host path:
     # the container has no view of this machine's disk.
+    #
+    # Belt-and-braces since F7's fine-tune quadrant landed: a local base picked
+    # in the UI never arrives here as a path any more — JobRegistry.start stages
+    # its weights to a private Hub repo (with the user's consent) and rewrites
+    # the request to the resulting ref before the runner is reached. Only a
+    # request that bypasses the registry can still trip this, so the message
+    # names both ways out rather than claiming the case is unsupported.
     if config.policy_pretrained_path and Path(config.policy_pretrained_path).is_absolute():
         raise ValueError(
-            "Fine-tuning a cloud job from a local checkpoint isn't supported — "
-            "push the source model to the Hub and fine-tune from the Hub copy."
+            "A cloud job can't fine-tune from a checkpoint on this machine — the "
+            "container has no view of this disk. Launch it from the training form, "
+            "which offers to upload the base checkpoint to a private Hub repo first, "
+            "or push the source model to the Hub and fine-tune from the Hub copy."
         )
     # The container resolves the dataset from the Hub by repo_id; a host-local
     # dataset root doesn't exist there.

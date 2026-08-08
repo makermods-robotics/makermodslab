@@ -97,7 +97,13 @@ const metrics = (current: number, total: number, loss = 0.042) => ({
   eta_seconds: total > current ? (total - current) * 0.4 : null,
 });
 
+// Mirrors the backend's persisted counter closely enough for the mock to look
+// real: every job gets its own number, in declaration order, and none repeats.
+// Overridable per entry via the spread below.
+let mockJobNumber = 0;
+
 const job = (j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">): JobRecord => ({
+  job_number: ++mockJobNumber,
   display_name: null,
   state: "done",
   config: cfg(`${USER}/sock_2_only_merged`, "act", 10_000),

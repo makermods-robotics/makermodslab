@@ -1,4 +1,5 @@
 import { JobRecord, jobDisplayName } from "@/lib/jobsApi";
+import { jobRunStamp, middleEllipsis } from "@/lib/modelNames";
 import type { Fetcher } from "@/lib/apiClient";
 import {
   JobCheckpoint,
@@ -16,6 +17,39 @@ import type { ResumeSeed } from "@/components/training/TrainingConfigurator";
 export interface LineageCheckpoint {
   job: JobRecord;
   ckpt: JobCheckpoint;
+}
+
+/** Owner attribution for `CheckpointDropdown`, keyed by checkpoint `ref`.
+ *
+ * Shared by both cards that merge a lineage into one list (JobCard's resume
+ * row, ModelCard's history selector) so the two can't describe the same
+ * checkpoint differently. The name alone cannot do this job: a continuation
+ * continues the same model, so every run on a chain displays the same name.
+ *
+ * `number` is the visible distinguisher — short enough to sit in a dense row,
+ * and the same thing the backend's refusals now lead with. `detail` is the
+ * hover layer: the id's timestamp tail plus the full id, for when the user
+ * needs to match a row against a log line or an API message rather than just
+ * tell two rows apart.
+ *
+ * The name is middle-ellipsized because it shares a line inside a popover that
+ * sizes itself to its widest row. Middle rather than end for the usual reason —
+ * a name's tail is the half that identifies it. */
+export function checkpointOwners(
+  lineage: LineageCheckpoint[],
+): Record<string, { name: string; number: number; detail: string }> {
+  const owners: Record<
+    string,
+    { name: string; number: number; detail: string }
+  > = {};
+  for (const { job, ckpt } of lineage) {
+    owners[ckpt.ref] = {
+      name: middleEllipsis(jobDisplayName(job), 28),
+      number: job.job_number,
+      detail: `${jobRunStamp(job.id)} · ${job.id}`,
+    };
+  }
+  return owners;
 }
 
 /** Load the checkpoints reachable from `leaf`, walking its OWN ancestor path:
@@ -141,8 +175,6 @@ function cloudSiblingStepCap(leaf: JobRecord): number | null {
  *  - the leaf must be in a resumable state (above);
  *  - the checkpoint's OWNER must not be `done` — the backend refuses a
  *    finished run as a resume source, so offering one only buys a 400;
- *  - the checkpoint's OWNER must have no children — STICKS ONLY (user
- *    decision 2026-08-07), see below;
  *  - the checkpoint must sit strictly below the leaf's step target, or the
  *    continuation would start at (or past) the finish line. A target of 0
  *    means "unset", so nothing is excluded;
@@ -150,25 +182,22 @@ function cloudSiblingStepCap(leaf: JobRecord): number | null {
  *    furthest step — above that it provably belongs to a sibling sharing the
  *    Hub repo (see `cloudSiblingStepCap`).
  *
- * STICKS ONLY, and what it costs. A resume lineage is now a CHAIN: jobs.py
- * refuses a resume whose source already has a child (`JobAlreadyContinuedError`
- * -> 409), so continuing an ANCESTOR — which by construction already has a
- * child, the run below it on the path — is a click that could only end in that
- * refusal. Excluding an owner with children therefore leaves exactly the LEAF's
- * own checkpoints resumable, and the UI stops offering what the backend would
- * reject. It is the same rule stated at both ends, not a second policy.
+ * CHAIN REWIND (user decision 2026-08-08). The lineage is offered WHOLE: any
+ * checkpoint on the leaf's ancestor path can start a continuation, including
+ * one an ancestor saved. What makes that safe — and what the earlier
+ * sticks-only narrowing got wrong — is where the lineage EDGE points. A resume
+ * always continues the LEAF (`buildResumeSeed` seeds the leaf as the source
+ * run) and merely reads its bytes from whichever run owns the chosen
+ * checkpoint. So the chain grows parent -> leaf -> new run and stays linear no
+ * matter how far back the user reaches.
  *
- * The list still SHOWS the whole lineage (`loadLineageCheckpoints` is
- * unchanged, and the card's dropdown renders all of it) — inspection and
- * inference on an inherited checkpoint are untouched. Only the Resume button
- * narrows, which is the affordance the 409 governs.
- *
- * The cost, stated plainly because it is the thing a user will hit: a tip that
- * died before saving anything now has NOTHING to resume, where it used to
- * inherit its parent's checkpoints. That case is not a dead end — deleting the
- * empty tip frees the parent to be resumed again — and `noResumeReason`
- * returns "parent-continued" so the toast can say exactly that. Branching is
- * deferred, not abolished; legacy forks keep rendering as they always did.
+ * The old fork bug was the edge pointing at the checkpoint's OWNER, which made
+ * an ancestor grow a second child. Excluding continued owners was a fix aimed
+ * at the symptom: it kept the chain linear by removing the offering, at the
+ * cost of stranding the commonest case — a tip that died before saving
+ * anything, whose only checkpoints are inherited. That tip is now simply
+ * resumable, which is the invariant this rule exists to hold up: every row in
+ * the jobs library is either done or directly resumable.
  *
  * What is deliberately NOT a rule: the owner sharing the leaf's runner. A
  * continuation may cross runners in EITHER direction (F7) — jobs.py
@@ -192,45 +221,10 @@ export function resumableCheckpoints(
     .filter(
       (entry) =>
         entry.job.state !== "done" &&
-        entry.job.child_ids.length === 0 &&
         (target === 0 || entry.ckpt.step < target) &&
         (cap === null || entry.ckpt.step <= cap),
     )
     .sort((a, b) => b.ckpt.step - a.ckpt.step);
-}
-
-/** The newest lineage checkpoint that only the sticks rule excludes — i.e. the
- * one the user would be resuming if they first deleted the run in front of it.
- *
- * Exists so the empty-result toast can NAME the parent and the step instead of
- * saying "delete something". Lives here rather than in the toast because it is
- * the sticks rule read backwards, and a caller re-deriving it would be free to
- * disagree with `resumableCheckpoints` about which entry that is — the exact
- * drift the one-rule consolidation was for.
- *
- * Every other filter still applies: an entry a `done` owner or the step target
- * would have dropped anyway is not "blocked by a continuation", and offering
- * it as the delete-first payoff would be a lie. Returns null when there is no
- * such entry, which is every case except the empty-handed tip.
- */
-export function blockedByContinuedOwner(
-  leaf: JobRecord,
-  lineage: LineageCheckpoint[],
-): LineageCheckpoint | null {
-  if (!isResumableLeaf(leaf)) return null;
-  const target = leaf.config?.steps ?? 0;
-  const cap = cloudSiblingStepCap(leaf);
-  return (
-    lineage
-      .filter(
-        (entry) =>
-          entry.job.state !== "done" &&
-          entry.job.child_ids.length > 0 &&
-          (target === 0 || entry.ckpt.step < target) &&
-          (cap === null || entry.ckpt.step <= cap),
-      )
-      .sort((a, b) => b.ckpt.step - a.ckpt.step)[0] ?? null
-  );
 }
 
 /** Which rule above emptied the list — for the one caller that has to explain
@@ -246,7 +240,6 @@ export type NoResumeReason =
   | "not-resumable" // the leaf's own state — no run to continue
   | "no-checkpoints" // nothing saved anywhere in the lineage
   | "owner-done" // every candidate belongs to a finished run
-  | "parent-continued" // sticks: every candidate is owned by an already-continued run
   | "at-target" // every candidate is at or past the leaf's step target
   | "sibling-cap" // cloud: every candidate is above the leaf's own furthest step
   | "other";
@@ -259,16 +252,8 @@ export function noResumeReason(
   if (lineage.length === 0) return "no-checkpoints";
   const live = lineage.filter((entry) => entry.job.state !== "done");
   if (live.length === 0) return "owner-done";
-  // Sticks, and deliberately AFTER `owner-done`: both can be true of a legacy
-  // chain, and only one of them has a way out. Telling the user to delete this
-  // attempt so they can resume a parent that has itself finished would send
-  // them to a refusal ("its schedule is spent — fine-tune instead"), so the
-  // finished-owner answer wins where they overlap. jobs.py orders its two
-  // refusals the same way, for the same reason.
-  const ownedByLeaf = live.filter((entry) => entry.job.child_ids.length === 0);
-  if (ownedByLeaf.length === 0) return "parent-continued";
   const target = leaf.config?.steps ?? 0;
-  const belowTarget = ownedByLeaf.filter(
+  const belowTarget = live.filter(
     (entry) => target === 0 || entry.ckpt.step < target,
   );
   if (belowTarget.length === 0) return "at-target";
@@ -282,8 +267,31 @@ export function noResumeReason(
 }
 
 /**
- * Build the seed that puts the Train panel's configurator into resume mode for
- * `job` continuing from `step`.
+ * Build the seed that puts the Train panel's configurator into resume mode:
+ * `leaf` continues, from the checkpoint `entry` names.
+ *
+ * CHAIN REWIND (user decision 2026-08-08), and the whole point of taking an
+ * ENTRY rather than a bare (job, step) pair: the two records in a rewind answer
+ * different questions, and collapsing them is what produced the fork bug.
+ *
+ *   `leaf` is the run being continued — the row the user clicked. It becomes
+ *   `resume_from_job_id`, the lineage edge, so the chain grows
+ *   parent -> leaf -> new run and stays linear however far back the user
+ *   reached. Its config is what prefills the form, because the new run is the
+ *   next attempt at THIS run, not at its ancestor.
+ *
+ *   `entry.job` is the run that OWNS the chosen checkpoint, which on a rewind
+ *   is an ancestor. It travels as `checkpointJobId` — provenance only — so the
+ *   backend knows whose storage to read the bytes from. jobs.py refuses an
+ *   owner that is not on the leaf's ancestor path or does not hold the step.
+ *
+ * This used to be called with the OWNER as `job`, which made an ancestor's
+ * checkpoint start a continuation OF THE ANCESTOR — a second child, i.e. a
+ * fork. The list of offered checkpoints was never the problem; the edge was.
+ *
+ * The runner still follows the OWNER, not the leaf: it says where the bytes
+ * live, which is what decides whether they must be moved before a trainer can
+ * read them (F7) and what the form defaults Compute to.
  *
  * THE one place a resume seed is assembled. Both entry points call it — the
  * job card's step-selectable Resume and the jobs library's row-level
@@ -294,37 +302,39 @@ export function noResumeReason(
  * holds it as `job.config` (the persisted TrainingRequest), so this needs no
  * extra fetch and no reading of the checkpoint's train_config.json.
  *
- * The runner is derived from the job, not passed in. `ResumeSeed.runner` is
- * the runner the PARENT ran on — F7 lets the continuation cross to the other
- * one, and the form needs the parent's side to know whether continuing on the
- * cloud has to upload a local checkpoint first. That fact lives on the record,
- * and both call sites already gate their buttons on `job.runner`, so a caller
- * supplying it could only ever disagree by mistake; which runner the
- * continuation actually launches on stays the form's choice. `imported`
- * records are not resumable and never reach here; they map to "local" for
- * exhaustiveness.
+ * `imported` records are not resumable and never reach here; they map to
+ * "local" for exhaustiveness.
  *
  * Scope note: this fills exactly the fields `ResumeSeed` declares today —
  * identity, dataset, policy, the step budget and the log/save cadence, plus the
- * runner and its flavor. The parent's HF Jobs timeout and its hyperparameters
- * (batch size, seed, worker count, device/AMP, optimizer) are NOT carried,
- * because the seed type has nowhere to put them and the configurator has
- * nothing to read them from. Widening that is a training-side change, not a
- * presentation one — see the PR description's deferred list.
+ * runner and its flavor, and now the checkpoint's owner. The parent's HF Jobs
+ * timeout and its hyperparameters (batch size, seed, worker count, device/AMP,
+ * optimizer) are NOT carried, because the seed type has nowhere to put them and
+ * the configurator has nothing to read them from. Widening that is a
+ * training-side change and belongs to the resume-semantics PR, not here.
  */
-export function buildResumeSeed(job: JobRecord, step: number): ResumeSeed {
-  const parent = job.config;
-  const runner = job.runner === "hf_cloud" ? "hf_cloud" : "local";
+export function buildResumeSeed(
+  leaf: JobRecord,
+  entry: LineageCheckpoint,
+): ResumeSeed {
+  const owner = entry.job;
+  const step = entry.ckpt.step;
+  const parent = leaf.config;
+  const runner = owner.runner === "hf_cloud" ? "hf_cloud" : "local";
   return {
-    jobId: job.id,
+    jobId: leaf.id,
     step,
-    name: jobDisplayName(job),
+    // Provenance, omitted on a plain tip-resume so the request stays exactly
+    // the shape it was before rewind existed (the backend reads absent as
+    // "the leaf owns it").
+    checkpointJobId: owner.id === leaf.id ? undefined : owner.id,
+    name: jobDisplayName(leaf),
     datasetRepoId: parent.dataset_repo_id,
     policyType: parent.policy_type,
     sourceSteps: parent.steps,
     logFreq: parent.log_freq,
     saveFreq: parent.save_freq,
     runner,
-    flavor: runner === "hf_cloud" ? (job.hf_flavor ?? undefined) : undefined,
+    flavor: runner === "hf_cloud" ? (owner.hf_flavor ?? undefined) : undefined,
   };
 }

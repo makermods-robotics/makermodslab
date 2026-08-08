@@ -39,15 +39,17 @@ interface JobsDataValue {
   supersededIds: Set<string>;
   /** Resume lineage of a job, nearest parent first. */
   ancestorsOf: (job: JobRecord) => JobRecord[];
-  /** Running, or with a checkpoint anywhere in its chain — i.e. worth showing
-   * outside the libraries' UNTRACKED fold. Lives on the context rather than
-   * being a pure helper because the answer depends on the ancestor records
-   * only the provider holds.
+  /** Checkpoints reachable from a job: its own plus its loaded ancestors'.
    *
-   * (The chain-wide checkpoint count this reads used to be exported too, as
-   * the libraries' Resume gate. Under the sticks rule that gate is the leaf's
-   * own `checkpoint_count` — a plain field, no provider needed — so the count
-   * is now an implementation detail of this one answer.) */
+   * The libraries' Resume gate, because under CHAIN REWIND a run continues
+   * from anything on its lineage — so a tip that died before saving anything
+   * is resumable on its ancestors' checkpoints, and its own `checkpoint_count`
+   * of 0 would hide the button on the commonest resumable shape there is.
+   * Lives on the context because only the provider holds the ancestor records. */
+  chainCheckpointCount: (job: JobRecord) => number;
+  /** Running, or with a checkpoint anywhere in its chain — i.e. worth showing
+   * outside the libraries' UNTRACKED fold. Same chain-wide reading as the gate
+   * above, and now for the same reason. */
   isJobActive: (job: JobRecord) => boolean;
   hubAuthenticated: boolean;
   hubJobsPermission: boolean;
@@ -367,13 +369,11 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
 
   // Checkpoints reachable from a run: its own plus every LOADED ancestor's.
   //
-  // NOT the resume gate any more — under sticks only a leaf's own checkpoints
-  // can be continued from (see `resumableCheckpoints`), and the row gates on
-  // `job.checkpoint_count` directly. What this still answers is whether a row
-  // has anything BEHIND it at all, which is what `isJobActive` needs: a tip
-  // that saved nothing but inherited a chain is exactly the row a user has to
-  // reach in order to delete it and free its parent for a new continuation, so
-  // it must not be filed away as a leftover.
+  // THE resume gate, and the fold gate, on the same reading: chain rewind lets
+  // a run continue from anything on its lineage, so what decides both is what
+  // the CHAIN holds, not what this tip happened to save. The commonest
+  // resumable shape — a tip that died before its first checkpoint — has zero of
+  // its own and a full chain behind it.
   const chainCheckpointCount = useCallback(
     (job: JobRecord): number =>
       [job, ...ancestorsOf(job)].reduce((n, j) => n + j.checkpoint_count, 0),
@@ -424,6 +424,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       untrackedHubModels,
       supersededIds,
       ancestorsOf,
+      chainCheckpointCount,
       isJobActive,
       hubAuthenticated,
       hubJobsPermission,
@@ -443,6 +444,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       untrackedHubModels,
       supersededIds,
       ancestorsOf,
+      chainCheckpointCount,
       isJobActive,
       hubAuthenticated,
       hubJobsPermission,

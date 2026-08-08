@@ -80,6 +80,22 @@ class LogLine(BaseModel):
 
 class JobRecord(BaseModel):
     id: str
+    # Short, stable, human-facing run number ("#46"). The id is unique but not
+    # speakable, and a display NAME is shared by every run on a resume chain by
+    # design — so this is the thing a person can point at across the UI, the
+    # API's refusal messages, and a conversation about their own runs.
+    #
+    # Assigned once at creation from a PERSISTED registry counter (see
+    # `_take_job_number`), never derived from the records present. Deriving
+    # max(existing)+1 would hand a deleted run's number to the next one, so two
+    # runs a week apart could both have been "#46" — which is exactly the
+    # ambiguity this field exists to remove. The counter only moves forward.
+    #
+    # 0 means "not assigned yet": a record written before this field existed.
+    # `_assign_job_numbers` backfills those once at load, in started_at order,
+    # so 0 is not observable after a registry has been opened. Readers should
+    # still treat it as "no number" rather than printing "#0".
+    job_number: int = 0
     name: str
     # User-editable display alias set via JobRegistry.rename. Display-only:
     # the immutable identity (id / output_dir / hf_repo_id) never changes on
@@ -885,6 +901,45 @@ def hub_checkpoint_has_training_state(api, repo_id: str, step_dir: str) -> bool:
     return f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" in files
 
 
+def missing_pretrained_files(names):
+    """Which required WEIGHTS artifacts are absent from `names` (relative posix
+    paths inside one checkpoints/<step>/).
+
+    The fine-tune rule, as opposed to the resume one: a fine-tune reads
+    pretrained_model/ only, so training_state/ is not required — and neither is
+    train_config.json, which a Hub-imported base (a flat model repo laid out by
+    push_to_hub, not by a checkpoint save) legitimately lacks. config.json is
+    what the HF Jobs wrapper itself gates the pod-side download on; the weights
+    are matched by suffix rather than by name because PEFT adapters rename them.
+    """
+    missing = []
+    if "pretrained_model/config.json" not in names:
+        missing.append("pretrained_model/config.json")
+    if not any(n.startswith("pretrained_model/") and n.endswith(".safetensors") for n in names):
+        missing.append("pretrained_model/*.safetensors")
+    return missing
+
+
+def hub_pretrained_missing_files(api, repo_id: str, step_dir: str) -> list[str]:
+    """Which required WEIGHTS files of `repo_id`'s checkpoints/<step_dir>/ are
+    absent — hub_checkpoint_missing_files with the fine-tune rule
+    (missing_pretrained_files) instead of the resume one. Used by the staged
+    fine-tune-base reuse check, which must not demand the training_state/ that a
+    weights-only staging upload never pushed.
+
+    Raises ValueError when the listing itself can't be read, for the same
+    reason as its resume twin: an unverifiable base is refused, not assumed.
+    """
+    try:
+        files = set(api.list_repo_files(repo_id, repo_type="model"))
+    except Exception as exc:
+        raise ValueError(
+            f"Could not read {repo_id!r} to verify its checkpoint at step {step_dir}: {exc}"
+        ) from exc
+    prefix = f"checkpoints/{step_dir}/"
+    return missing_pretrained_files({f[len(prefix) :] for f in files if f.startswith(prefix)})
+
+
 def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
     """Return (repo_id, step_dir) identifying the Hub checkpoint a run continuing
     a CLOUD parent resumes from (`step` = None ⇒ the latest available on the Hub).
@@ -1396,6 +1451,40 @@ def upload_local_checkpoint(checkpoint_dir: Path, repo_id: str, step_dir: str, *
         folder_path=str(checkpoint_dir),
         path_in_repo=f"checkpoints/{step_dir}",
         commit_message=f"checkpoint {step_dir} (uploaded for a cloud continuation)",
+    )
+
+
+def upload_local_pretrained(pretrained_dir: Path, repo_id: str, step_dir: str, *, api=None) -> None:
+    """Push one local pretrained_model/ tree to `repo_id` as that repo's
+    checkpoints/<step_dir>/pretrained_model.
+
+    The WEIGHTS-ONLY sibling of upload_local_checkpoint, for F7's local→cloud
+    FINE-TUNE direction: the pod cannot see this machine's disk, so a base
+    checkpoint that lives only here has to exist on the Hub before the job is
+    submitted. A fine-tune never reads training_state/ — it starts a fresh
+    optimizer at step 0 — so the optimizer half (the bigger one) is deliberately
+    not staged. That is also why this is a separate function rather than a call
+    into its resume twin: that twin's contract is "the whole tree goes up", and
+    weakening it there would make a resume's guarantee unreadable.
+
+    PRIVATE at creation, for the same reason as the twin: a staging upload is a
+    by-product of launching a fine-tune, not a model the user chose to publish,
+    and `exist_ok` never downgrades an existing repo's visibility. The caller is
+    responsible for having asked first (see JobRegistry's consent gate) — this
+    function only moves the bytes.
+
+    The layout matches what the HF Jobs wrapper materializes for a
+    'repo@checkpoints/<step>' fine-tune ref (it downloads pretrained_model/*
+    only), so the staged step is usable by the pod exactly as uploaded.
+    """
+    api = api or shared_hf_api()
+    api.create_repo(repo_id=repo_id, repo_type="model", private=True, exist_ok=True)
+    api.upload_folder(
+        repo_id=repo_id,
+        repo_type="model",
+        folder_path=str(pretrained_dir),
+        path_in_repo=f"checkpoints/{step_dir}/pretrained_model",
+        commit_message=f"checkpoint {step_dir} weights (uploaded as a cloud fine-tune base)",
     )
 
 
@@ -1934,6 +2023,18 @@ def _job_meta_path(output_root: Path, job_id: str) -> Path:
     return _job_dir(output_root, job_id) / "job.json"
 
 
+# Registry-wide state, so it sits at the ROOT rather than in any job dir — a
+# counter living inside one run's directory would die with that run, which is
+# the one thing it must not do. A plain file is invisible to `_load_from_disk`,
+# which globs directories only, and no job id can collide with it (every
+# generated id carries a timestamp suffix).
+_JOB_COUNTER_FILE = "job_counter.json"
+
+
+def _job_counter_path(output_root: Path) -> Path:
+    return output_root / _JOB_COUNTER_FILE
+
+
 def build_child_index(records: Iterable[JobRecord]) -> dict[str, list[str]]:
     """Map job id -> the ids of the runs that resumed it, newest-first.
 
@@ -1991,6 +2092,21 @@ def ancestor_ids_of(records: Mapping[str, JobRecord], job_id: str) -> list[str]:
         seen.add(parent_id)
         current = parent
     return out
+
+
+def _owner_holds_step(owner: JobRecord, step: int) -> bool:
+    """Whether `owner` has a checkpoint at `step`, for the rewind guard.
+
+    LOCAL owners are checked here, off the filesystem, because it is free and
+    synchronous. A CLOUD owner reads as True: its checkpoints are a Hub listing,
+    and `_resolve_cloud_resume` — which runs moments later on the same owner and
+    step — already refuses an absent or incomplete one with a better message.
+    Re-checking here would just buy a second Hub round-trip to reach the same
+    verdict.
+    """
+    if owner.runner != "local":
+        return True
+    return any(c.step == step for c in _list_local_checkpoints(owner.output_dir))
 
 
 class JobAlreadyRunningError(Exception):
@@ -2089,6 +2205,10 @@ class JobRegistry:
         self._runners: dict[str, JobRunner] = {}
         self._last_persist_at: dict[str, float] = {}
 
+        # Next value `_take_job_number` will hand out. Loaded from disk below
+        # and only ever written forward; guarded by _lock, like _records.
+        self._next_job_number: int = 1
+
         # job_id -> the thread materializing that job's base checkpoint before
         # its trainer can start (see _materialize_then_start). Entries are left
         # behind once the thread finishes — a finished Thread object is inert
@@ -2114,6 +2234,10 @@ class JobRegistry:
         self._migrate_legacy_cwd_jobs()
         self._load_from_disk()
         self._dedupe_imported_records()
+        # After the dedupe, so a duplicate that is about to be collapsed never
+        # consumes a run number (it would leave a permanent gap naming a record
+        # the user never saw).
+        self._assign_job_numbers()
         # After the dedupe, so a collapsed duplicate can't be counted as a
         # colliding title and drag a suffix onto the card that survived it.
         self._resolve_imported_names()
@@ -2302,6 +2426,48 @@ class JobRegistry:
                 "from a checkpoint's weights."
             )
 
+        # The mirror of the refusal above, and of "Resume is on but no source
+        # checkpoint was selected" further down: a resume SOURCE without the
+        # resume FLAG. `resume` is what every guard downstream branches on — the
+        # sticks refusal, the completed-source refusal, the step-target guard,
+        # the checkpoint-completeness checks all live under `if config.resume`.
+        # So this combination was accepted as an ordinary fresh run that skipped
+        # every one of them, while still persisting `resume_from_job_id` into
+        # its record — which `build_child_index` reads as a lineage edge. The
+        # result was a run that trains from scratch but counts as a
+        # continuation: it supersedes the parent it never continued, hides that
+        # parent's row, and blocks the parent from being resumed for real. It
+        # cost the user a spurious third child of a two-child fork.
+        #
+        # REFUSED, not repaired-by-implying-`resume=true`: the two readings of
+        # the request contradict each other and the caller is the only one who
+        # knows which was meant. Silently upgrading a fresh run into a
+        # continuation would subject it to guards it never opted into and start
+        # it from a checkpoint nobody asked for; silently dropping the id would
+        # throw away the only clue the caller wanted a continuation. The UI
+        # cannot produce either combination — useTrainingConfig derives `resume`
+        # and `resume_from_job_id` from the same ResumeSeed, so they always move
+        # together — which is exactly why this is stated as a contract rather
+        # than accommodated.
+        if not config.resume and (config.resume_from_job_id or config.resume_from_step is not None):
+            named = "resume_from_job_id" if config.resume_from_job_id else "resume_from_step"
+            raise ValueError(
+                f"{named} was given but 'resume' is false, so this would launch a fresh "
+                "run that still records itself as a continuation. Set 'resume': true to "
+                f"continue that run, or drop {named} to train from scratch."
+            )
+
+        # Same shape on the fine-tune side, where the id IS the mode flag (there
+        # is no `finetune` boolean): a step with nothing to take it from was
+        # silently ignored, so a request naming a checkpoint step trained from
+        # scratch and said nothing about it.
+        if config.finetune_from_step is not None and not config.finetune_from_job_id:
+            raise ValueError(
+                "finetune_from_step was given without finetune_from_job_id, so there is "
+                "no source checkpoint to take those weights from. Name the source run, "
+                "or drop finetune_from_step to train from scratch."
+            )
+
         # Fail fast on the local-run mutex before any of the (possibly slow)
         # pretrained-path work below. Re-checked under the lock at record
         # creation — THAT is the authoritative check; this one only spares a
@@ -2324,6 +2490,10 @@ class JobRegistry:
         # materialization itself is deferred to a background thread that starts
         # after the record exists — see the `deferred_hub_ref` branch below.
         # ------------------------------------------------------------------
+        # Kept for the local-base → cloud staging decision further down, which
+        # needs the SOURCE record (its staging repo, its already-staged steps)
+        # long after this block has moved on. None on every other path.
+        finetune_source: JobRecord | None = None
         if config.finetune_from_job_id:
             # Fine-tune: turn the selected source run + step into the
             # pretrained_path lerobot loads weights from. A fresh run (resume
@@ -2332,6 +2502,7 @@ class JobRegistry:
                 source = self._records.get(config.finetune_from_job_id)
             if source is None:
                 raise ValueError(f"Fine-tune source {config.finetune_from_job_id!r} not found.")
+            finetune_source = source
             config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                 source, config.finetune_from_step
             )
@@ -2365,6 +2536,29 @@ class JobRegistry:
                 # ref pod-side (see the HF Jobs wrapper), because a host path is
                 # meaningless there.
                 deferred_hub_ref = config.policy_pretrained_path
+
+        # F7's fourth quadrant: a fine-tune whose BASE lives only on this
+        # machine, launched on cloud compute. The pod cannot read this disk, so
+        # the base's weights are staged to a private Hub repo and the request is
+        # rewritten to point at the ref the pod can materialize.
+        #
+        # Declared HERE, after the guard block above rather than beside its
+        # siblings inside it, deliberately: the guard reads the checkpoint's
+        # config.json off this disk from the LOCAL ABSOLUTE PATH, so the rewrite
+        # can only happen once it has. The rewrite lands on `config` itself,
+        # which is what gets persisted on the record and what the runner reads —
+        # so the history shows the ref that actually ran, not a host path that
+        # never could (and the runner's own host-path refusal becomes
+        # belt-and-braces, for requests that bypass the registry entirely).
+        deferred_finetune_upload: tuple[Path, str, str] | None = None
+        if (
+            target.runner == "hf_cloud"
+            and config.finetune_from_job_id
+            and config.policy_pretrained_path
+            and Path(config.policy_pretrained_path).is_absolute()
+        ):
+            deferred_finetune_upload, hub_ref = self._resolve_upload_finetune(finetune_source, config)
+            config.policy_pretrained_path = hub_ref
 
         with self._lock:
             # Authoritative local-run mutex: re-checked here, under the lock
@@ -2422,6 +2616,31 @@ class JobRegistry:
                     already_continued = build_child_index(self._records.values()).get(source.id, [])
                     if already_continued:
                         raise JobAlreadyContinuedError(source.id, already_continued)
+
+                    # CHAIN REWIND: from here on, TWO records matter and they
+                    # answer different questions.
+                    #
+                    #   `source` is the LEAF — the run the user clicked and the
+                    #   one this continuation attaches to. Every check above is
+                    #   its business: its state, its lineage, its step target.
+                    #   The edge stays leaf -> new run, so chains stay linear no
+                    #   matter which checkpoint was picked.
+                    #
+                    #   `owner` is where the BYTES live. On a plain tip-resume
+                    #   they are the same record. On a rewind the user reached
+                    #   back to an ancestor's checkpoint, and only the byte
+                    #   resolution below follows it there — which runner's
+                    #   storage to read, and whether the bytes have to move
+                    #   first (F7). Nothing is copied: the trainer is pointed at
+                    #   the ancestor's checkpoint while writing into this run's
+                    #   own output dir, exactly as a tip-resume already does.
+                    #
+                    # This split is what made the old behaviour a fork bug: the
+                    # edge used to point at the checkpoint's owner, so rewinding
+                    # to an ancestor made the ANCESTOR grow a second child.
+                    owner = source
+                    if config.resume_from_checkpoint_job_id:
+                        owner = self._resolve_checkpoint_owner(source, config)
                     # A resume may continue on EITHER runner (F7). What changes
                     # across the four combinations is only where the parent's
                     # checkpoint has to end up before the trainer can read it —
@@ -2434,17 +2653,25 @@ class JobRegistry:
                     # quietly starts at step 0 while the record calls itself a
                     # continuation is MT42, the worst outcome available here.
                     #
-                    # Only local/hf_cloud parents reach here: an imported record
-                    # is created with state="done", so the refusal above already
-                    # took it (imported models are fine-tune sources, never
-                    # resume sources).
-                    if source.runner == "hf_cloud":
-                        # The parent's checkpoints are on the Hub. Naming the
+                    # Keyed on the OWNER throughout, not the leaf: which storage
+                    # holds the chosen bytes is a fact about the run that wrote
+                    # them. A rewind can therefore cross runners twice over — a
+                    # local leaf whose cloud grandparent owns the checkpoint
+                    # takes the cloud→local branch — and the F7 machinery needs
+                    # no extension for it, because it was always keyed on "where
+                    # do these bytes live" rather than on the lineage.
+                    #
+                    # Only local/hf_cloud owners reach here: an imported record
+                    # is created with state="done", so it can never be a leaf
+                    # (refused above) and `_resolve_checkpoint_owner` only ever
+                    # returns a run on that leaf's ancestor path.
+                    if owner.runner == "hf_cloud":
+                        # The owner's checkpoints are on the Hub. Naming the
                         # chosen one is the same job for both targets, and
                         # _resolve_cloud_resume refuses an incomplete or absent
                         # one here — synchronously, as a 400, before any record
                         # or GPU exists.
-                        repo_id, step_dir = _resolve_cloud_resume(source, config.resume_from_step)
+                        repo_id, step_dir = _resolve_cloud_resume(owner, config.resume_from_step)
                         if target.runner == "hf_cloud":
                             # An HF Job is immutable once ended: resuming a cloud
                             # run launches a NEW cloud job that continues from the
@@ -2468,9 +2695,15 @@ class JobRegistry:
                             deferred_resume_ref = f"{repo_id}@checkpoints/{step_dir}"
                             config.resume_from_step = int(step_dir)
                     elif target.runner == "local":
-                        config.config_path = _resolve_resume_config_path(source, config.resume_from_step)
+                        # local → local, including a rewind: the trainer is
+                        # pointed at the OWNER's checkpoint directory and writes
+                        # into this run's own output dir (build_training_command
+                        # passes --config_path and --output_dir separately). So
+                        # a rewind copies nothing and needs no staging — only
+                        # the path being resolved changes.
+                        config.config_path = _resolve_resume_config_path(owner, config.resume_from_step)
                     else:
-                        # local → Cloud: the parent's checkpoint exists only on
+                        # local → Cloud: the owner's checkpoint exists only on
                         # this machine, so it must reach the Hub before the pod
                         # starts. Resolve + validate it here (the same gate a
                         # local→local resume passes), then either reuse an
@@ -2480,7 +2713,7 @@ class JobRegistry:
                             deferred_resume_upload,
                             hub_repo,
                             hub_step,
-                        ) = self._resolve_upload_resume(source, config)
+                        ) = self._resolve_upload_resume(owner, config)
                         config.resume_from_hub_repo = hub_repo
                         config.resume_from_hub_step = hub_step
                         config.resume_from_uploaded_checkpoint = True
@@ -2538,6 +2771,9 @@ class JobRegistry:
             )
             record = JobRecord(
                 id=job_id,
+                # Allocated here, inside the same lock that inserts the record,
+                # so two concurrent starts can't be handed the same number.
+                job_number=self._take_job_number(),
                 name=name,
                 state="running",
                 config=config,
@@ -2561,6 +2797,7 @@ class JobRegistry:
                 deferred_hub_ref is not None
                 or deferred_resume_ref is not None
                 or deferred_resume_upload is not None
+                or deferred_finetune_upload is not None
             )
             if deferred:
                 # Something still has to move (GBs, minutes). Hand the caller its
@@ -2594,7 +2831,7 @@ class JobRegistry:
                     )
                     thread_target = self._download_resume_then_start
                     thread_args = (job_id, deferred_resume_ref, lerobot_output_dir, prep)
-                else:
+                elif deferred_resume_upload is not None:
                     ckpt_dir, upload_repo, upload_step = deferred_resume_upload
                     prep.emit(
                         f"Preparing continuation: uploading checkpoint {upload_step} "
@@ -2602,6 +2839,14 @@ class JobRegistry:
                     )
                     thread_target = self._upload_resume_then_start
                     thread_args = (job_id, ckpt_dir, upload_repo, upload_step, target, prep)
+                else:
+                    pretrained_dir, upload_repo, upload_step = deferred_finetune_upload
+                    prep.emit(
+                        f"Preparing fine-tune: uploading checkpoint {upload_step} "
+                        f"to the private repo {upload_repo} so the cloud job can read it…"
+                    )
+                    thread_target = self._upload_finetune_then_start
+                    thread_args = (job_id, pretrained_dir, upload_repo, upload_step, target, prep)
                 thread = threading.Thread(
                     target=thread_target,
                     args=thread_args,
@@ -2795,16 +3040,85 @@ class JobRegistry:
             f"Checkpoint {step_dir} is on the Hub — submitting the cloud job.",
         )
 
-    def _remember_uploaded_checkpoint(self, job_id: str, repo_id: str, step_dir: str) -> None:
-        """Record on the PARENT run where its checkpoint was uploaded.
+    def _upload_finetune_then_start(
+        self,
+        job_id: str,
+        pretrained_dir: Path,
+        repo_id: str,
+        step_dir: str,
+        target: JobTarget,
+        prep: PreparingJobRunner,
+    ) -> None:
+        """Push a LOCAL base checkpoint's WEIGHTS to the Hub, then fine-tune on
+        the cloud.
 
-        Keyed off the child's `resume_from_job_id` rather than passed in, so the
-        note always lands on the record whose bytes were actually pushed. A
-        missing parent (deleted mid-upload) is not an error: the upload still
-        happened and the child still runs; only the re-use shortcut is lost."""
+        F7's remaining quadrant, and the weights-only twin of
+        _upload_resume_then_start. The pod materializes its base from the Hub,
+        so these bytes have to be there before the job is submitted — and the
+        request already carries the user's explicit consent for the upload (see
+        _resolve_upload_finetune). training_state/ is deliberately left behind:
+        a fine-tune starts a fresh optimizer at step 0 and never reads it, and
+        it is the bigger half of the checkpoint.
+
+        The upload is re-verified from the Hub's own file listing — under the
+        fine-tune completeness rule — before anything is submitted, and the job
+        is finalised `failed` if it can't be confirmed. A run recorded as a
+        fine-tune of a checkpoint either trains from that checkpoint or does not
+        start at all; it never becomes a from-scratch run on rented hardware
+        (the fine-tune reading of MT42).
+
+        On success the staging is recorded on the SOURCE's record, so fine-tuning
+        the same step again reuses it instead of pushing the same GBs twice.
+        """
+        try:
+            prep.emit(f"Uploading {step_dir} weights from {pretrained_dir}…")
+            upload_local_pretrained(pretrained_dir, repo_id, step_dir)
+            missing = hub_pretrained_missing_files(shared_hf_api(), repo_id, step_dir)
+            if missing:
+                raise ValueError(f"the upload finished but {repo_id} is still missing {', '.join(missing)}")
+        except Exception as exc:
+            logger.exception("Fine-tune base upload failed for job %s", job_id)
+            self._fail_prepare(
+                job_id,
+                prep,
+                f"Could not upload the base checkpoint at step {step_dir} to {repo_id}, "
+                f"so this fine-tune cannot run on the cloud: {exc}",
+            )
+            return
+
+        self._remember_uploaded_checkpoint(job_id, repo_id, step_dir)
+        self._start_after_prepare(
+            job_id,
+            # A cloud runner ignores the host output dir (its pod writes to a
+            # container path); pass it anyway so the callers stay identical.
+            str(_job_dir(self._output_root, job_id) / "run"),
+            prep,
+            target,
+            None,
+            f"Checkpoint {step_dir} is on the Hub — submitting the cloud job.",
+        )
+
+    def _remember_uploaded_checkpoint(self, job_id: str, repo_id: str, step_dir: str) -> None:
+        """Record on the SOURCE run where its checkpoint was staged.
+
+        Keyed off the child's `resume_from_job_id` / `finetune_from_job_id`
+        rather than passed in, so the note always lands on the record whose bytes
+        were actually pushed. A missing source (deleted mid-upload) is not an
+        error: the upload still happened and the child still runs; only the
+        re-use shortcut is lost.
+
+        One list for both directions even though a fine-tune stages WEIGHTS ONLY
+        while a resume stages the whole tree. That is safe because neither reuse
+        path trusts this list on its own: each re-reads the Hub listing and
+        applies its OWN completeness rule first. So a later RESUME of a step
+        that only a fine-tune staged finds training_state/ missing, falls
+        through to the consent gate, and uploads the full tree — upload_folder
+        then simply adds the half that wasn't there."""
         with self._lock:
             child = self._records.get(job_id)
-            parent_id = child.config.resume_from_job_id if child else None
+            parent_id = (
+                (child.config.resume_from_job_id or child.config.finetune_from_job_id) if child else None
+            )
             parent = self._records.get(parent_id) if parent_id else None
             if parent is None:
                 return
@@ -2897,6 +3211,55 @@ class JobRegistry:
             if notify:
                 self._notify_change()
 
+    def _resolve_checkpoint_owner(self, leaf: JobRecord, config: TrainingRequest) -> JobRecord:
+        """The run whose storage holds the checkpoint a REWIND picked.
+
+        Caller holds _lock. Two things are verified, and both exist to stop the
+        same failure — a continuation that quietly trains from weights the user
+        did not choose:
+
+        1. The named owner is the leaf itself or one of its own ANCESTORS.
+           Anything else is not a rewind: a sibling, an unrelated run, or a
+           descendant would put bytes from off this chain into a run whose
+           history claims to be continuous. `ancestor_ids_of` is the same walk
+           the UI offers checkpoints along, so the API accepts exactly what the
+           dropdown can produce and nothing more.
+        2. The owner actually holds the named step. Without this a caller could
+           name any ancestor with any step and get whatever
+           `_resolve_resume_config_path` happened to find — including its
+           "latest" fallback, which is the silent-wrong-weights case in its
+           purest form.
+
+        Step is required for a rewind for the same reason the owner is: on a
+        rewound chain one step number can name several different checkpoints
+        (see TrainingRequest.resume_from_checkpoint_job_id), so "latest" has no
+        meaning once an owner is named.
+        """
+        owner_id = config.resume_from_checkpoint_job_id
+        if owner_id == leaf.id:
+            return leaf
+        owner = self._records.get(owner_id or "")
+        if owner is None:
+            raise ValueError(f"Resume checkpoint owner {owner_id!r} not found.")
+        if owner_id not in ancestor_ids_of(self._records, leaf.id):
+            raise ValueError(
+                f"Run {owner_id!r} is not on {leaf.id!r}'s lineage, so its checkpoints "
+                f"cannot be resumed into {leaf.id!r}. A continuation may only rewind to a "
+                "checkpoint saved by the run itself or by one of the runs it continues."
+            )
+        if config.resume_from_step is None:
+            raise ValueError(
+                "resume_from_step is required when resume_from_checkpoint_job_id names "
+                "another run: one step number can refer to several checkpoints across a "
+                "rewound lineage, so there is no unambiguous 'latest' to pick."
+            )
+        if not _owner_holds_step(owner, config.resume_from_step):
+            raise ValueError(
+                f"Run {owner_id!r} has no checkpoint at step {config.resume_from_step}, so "
+                "there is nothing there to continue from."
+            )
+        return owner
+
     def _resolve_upload_resume(
         self, source: JobRecord, config: TrainingRequest
     ) -> tuple[tuple[Path, str, str] | None, str, str]:
@@ -2961,6 +3324,86 @@ class JobRegistry:
             )
         repo_id = checkpoints_staging_repo_id(username, source.id)
         return (checkpoint_dir, repo_id, step_dir), repo_id, step_dir
+
+    def _resolve_upload_finetune(
+        self, source: JobRecord, config: TrainingRequest
+    ) -> tuple[tuple[Path, str, str] | None, str]:
+        """Plan the Hub side of a LOCAL base → CLOUD fine-tune.
+
+        Returns (pending_upload, hub_ref): `pending_upload` is (pretrained_model
+        dir, repo id, step dir) when weights still have to be pushed, or None
+        when an earlier launch already staged this exact step and the Hub still
+        has it — fine-tuning the same base twice must not push the same GBs
+        twice. `hub_ref` is the 'repo@checkpoints/<step_dir>' the run actually
+        trains from, and replaces the host path on the request: the pod
+        materializes that ref itself (the HF Jobs wrapper), and a host path is
+        meaningless there.
+
+        The resume twin beside it stages the WHOLE checkpoint; this one stages
+        pretrained_model/ only, because a fine-tune starts a fresh optimizer at
+        step 0 and never reads training_state/ (see upload_local_pretrained).
+        Same private staging repo per source run, so the two directions share
+        one place per parent rather than inventing a second convention.
+
+        Called from `start` OUTSIDE the registry lock (the fine-tune resolution
+        is), before any record exists, so every refusal below is a ValueError
+        (→ HTTP 400) that leaves nothing behind — each describes something the
+        user has to change:
+          * the upload wasn't consented to — an upload is a disclosure, so it is
+            never a silent side effect of picking a base model;
+          * there is no Hub identity to upload as, or the server is offline.
+        """
+        # The caller only reaches here for an ABSOLUTE pretrained path, which is
+        # what a `local` checkpoint ref resolves to (see
+        # _resolve_finetune_pretrained_path) — the dir lerobot would have loaded
+        # from disk, and therefore the dir whose bytes have to go up.
+        pretrained_dir = Path(config.policy_pretrained_path)
+        if pretrained_dir.name == "pretrained_model" and pretrained_dir.parent.name.isdigit():
+            # The ordinary checkpoints/<step>/pretrained_model layout: the step
+            # is on the path, exactly as _resolve_upload_resume reads it.
+            step_dir = pretrained_dir.parent.name
+        else:
+            # A flat imported directory that IS the pretrained_model. Its
+            # listing (_list_imported_local) offers exactly one checkpoint, at
+            # step 0, so "latest" (finetune_from_step None) and an explicit 0
+            # name the same thing — which is why the step can be recovered from
+            # the request here without re-running the resolver.
+            step_dir = f"{int(config.finetune_from_step or 0):06d}"
+
+        # Already staged by an earlier fine-tune? Trust the record only as far
+        # as the Hub confirms it — a deleted repo (or a half-finished push) must
+        # produce a fresh upload, not a pod that dies looking for weights. The
+        # completeness rule is the weights-only one: a staging upload never
+        # pushed the training_state/ its resume twin would demand.
+        if source.checkpoints_hub_repo_id and step_dir in source.checkpoints_hub_steps:
+            with contextlib.suppress(Exception):
+                if not hub_pretrained_missing_files(
+                    shared_hf_api(), source.checkpoints_hub_repo_id, step_dir
+                ):
+                    return None, f"{source.checkpoints_hub_repo_id}@checkpoints/{step_dir}"
+
+        if not config.upload_finetune_checkpoint:
+            raise ValueError(
+                f"Fine-tuning this model on {_RUNNER_LABELS['hf_cloud']} needs its "
+                f"checkpoint at step {int(step_dir)} on the Hub, and it is only on "
+                "this machine. Confirm the upload in the training form (it goes to "
+                "a private repo), or run the fine-tune locally instead."
+            )
+        if hf_hub_offline():
+            raise ValueError(
+                "Offline mode is on, so this base checkpoint can't be uploaded to "
+                "the Hub — fine-tune it locally, or switch offline mode off."
+            )
+        whoami = cached_whoami()
+        username = (whoami or {}).get("name")
+        if not username:
+            raise ValueError(
+                "Fine-tuning a local model on the cloud uploads its weights to your "
+                f"Hugging Face account, so you have to be signed in. Run '{LOGIN_COMMAND}' "
+                "or paste a token in the app, then try again."
+            )
+        repo_id = checkpoints_staging_repo_id(username, source.id)
+        return (pretrained_dir, repo_id, step_dir), f"{repo_id}@checkpoints/{step_dir}"
 
     def _finalize_prepare(self, job_id: str, state: JobState, error_message: str) -> None:
         """Lock-taking wrapper around _finalize_prepare_locked."""
@@ -3077,6 +3520,10 @@ class JobRegistry:
             job_id = self._unique_job_id(policy_type, "imported")
             record = JobRecord(
                 id=job_id,
+                # An import is a record in the same list as the runs, so it
+                # carries a number from the same sequence — the alternative is
+                # a library where some rows have one and some don't.
+                job_number=self._take_job_number(),
                 # Identity only — no "Imported ·" prefix (the card's own
                 # provenance chip says that) and no namespace or policy token
                 # (the policy row says that). See derive_imported_title.
@@ -3652,6 +4099,92 @@ class JobRegistry:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(record.model_dump_json(indent=2))
         os.replace(tmp, path)
+
+    # ------------------------------------------------------------------
+    # Run numbers. The counter is the authority; the records are not.
+    # ------------------------------------------------------------------
+
+    def _read_job_counter(self) -> int:
+        """The persisted next-number, or 0 when there isn't a usable one.
+
+        Every failure reads as 0 — absent file (a registry predating this),
+        unparsable JSON, wrong type, a value below 1. 0 means "no opinion", and
+        the caller floors it against the numbers actually in use, so a lost or
+        corrupt counter costs a gap at worst and never a duplicate.
+        """
+        path = _job_counter_path(self._output_root)
+        try:
+            value = json.loads(path.read_text()).get("next_job_number")
+        except (OSError, ValueError, AttributeError):
+            return 0
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else 0
+
+    def _write_job_counter(self) -> None:
+        """Persist `_next_job_number`. Caller holds _lock.
+
+        Same tmp + os.replace as _write_meta, for the same reason and one more:
+        a half-written counter that failed to parse would read as 0 and hand out
+        numbers already on records.
+        """
+        path = _job_counter_path(self._output_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps({"next_job_number": self._next_job_number}, indent=2))
+        os.replace(tmp, path)
+
+    def _take_job_number(self) -> int:
+        """Allocate the next run number. CALLER MUST HOLD _lock.
+
+        Persisted before it is returned, so a crash between allocating and
+        writing the job.json burns the number rather than re-issuing it. A gap
+        in the sequence is a non-event; a repeat is the bug this field exists to
+        prevent.
+        """
+        number = self._next_job_number
+        self._next_job_number = number + 1
+        self._write_job_counter()
+        return number
+
+    def _assign_job_numbers(self) -> None:
+        """Give every loaded record a run number, once, at boot.
+
+        Runs single-threaded from __init__ (no lock needed, same as the dedupe
+        pass above). Two jobs:
+
+        1. Seed the counter. It is the MAX of the persisted value and one past
+           the highest number already on a record — so a counter that was lost
+           can't reissue a live number, and a counter that is ahead (because the
+           runs holding those numbers were deleted) keeps its lead.
+        2. Backfill records written before the field existed, oldest first, so
+           the numbers agree with the order the user saw them happen. `id` is
+           the tie-break: `started_at` has second granularity for legacy records
+           and ties are real, so without it two boots could order the same pair
+           differently and silently renumber history.
+
+        Idempotent: a second boot finds every record numbered, writes nothing,
+        and re-seeds the counter to the same value.
+        """
+        highest = max((r.job_number for r in self._records.values()), default=0)
+        persisted = self._read_job_counter()
+        self._next_job_number = max(persisted, highest + 1)
+        unnumbered = sorted(
+            (r for r in self._records.values() if r.job_number < 1),
+            key=lambda r: (r.started_at, r.id),
+        )
+        for record in unnumbered:
+            record.job_number = self._next_job_number
+            self._next_job_number += 1
+            self._write_meta(record)
+        # Written when we numbered something, and also when the counter file is
+        # missing or behind while numbered records exist — that is the degraded
+        # case where deleting the highest-numbered runs and restarting would
+        # otherwise recompute a floor that reissues their numbers. An EMPTY
+        # registry writes nothing: there is no history to protect, and a fresh
+        # root should stay untouched until it actually holds a run.
+        if unnumbered or (highest > 0 and persisted < self._next_job_number):
+            self._write_job_counter()
+        if unnumbered:
+            logger.info("Assigned run numbers to %d pre-existing job(s).", len(unnumbered))
 
 
 # Module-level singleton. Anchored to ~/.cache so history survives launches

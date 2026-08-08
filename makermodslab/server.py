@@ -1183,18 +1183,39 @@ def models_import(request: ModelImportRequest):
 
 
 def _job_label(job_id: str) -> str:
-    """A run named the way its row names it: alias (id), or the bare id.
+    """A run named the way its row names it: `#46 'alias' (id)`.
 
     For refusal messages that have to point at a *different* run than the one
     the user acted on — "delete X first" is only actionable if X is findable in
-    the list, and the list shows the display alias, not the id.
+    the list. All three parts earn their place: the NUMBER is what the UI shows
+    and what a person can repeat back; the NAME is shared by every run on a
+    resume chain, so it locates the lineage but not the run; the ID is the
+    unambiguous one and the only one that survives a rename.
+
+    Degrades a part at a time — an unnumbered record (pre-backfill) or an
+    unnamed one just drops that piece, and an id the registry no longer holds
+    falls back to the bare id.
     """
     try:
         record = job_registry.get(job_id)
     except JobNotFoundError:
         return repr(job_id)
     name = (record.display_name or record.name or "").strip()
-    return f"{name!r} ({job_id})" if name else repr(job_id)
+    label = f"{name!r} ({job_id})" if name else repr(job_id)
+    return f"#{record.job_number} {label}" if record.job_number > 0 else label
+
+
+def _is_finished_run(job_id: str) -> bool:
+    """True when the run reached its target — i.e. holds finished training.
+
+    Used to keep refusal messages from casually recommending its deletion. An
+    unresolvable id reads as False: the message degrades to the plainer advice
+    rather than inventing a reason to keep something that may not exist.
+    """
+    try:
+        return job_registry.get(job_id).state == "done"
+    except JobNotFoundError:
+        return False
 
 
 @app.post("/jobs/training", status_code=201)
@@ -1290,16 +1311,39 @@ async def create_training_job(req: Request):
         # this layer rather than baked into the exception.
         #
         # The message has to TEACH the way out, because the way out is not
-        # obvious from the refusal: the fork is unblocked by deleting the
-        # existing continuation, which is itself a leaf and therefore deletable.
+        # obvious from the refusal — but which way out is honest depends on what
+        # is standing in the way, and getting that wrong is worse than saying
+        # nothing. Two shapes:
+        #
+        #  - ONE unfinished continuation (every lineage the sticks rule can
+        #    create): deleting it is cheap and correct, so say so.
+        #  - a LEGACY FORK, or a continuation that ran to completion: "delete
+        #    the continuation(s) first" is advice to throw away work. On the
+        #    user's own registry this fired for a parent whose two children
+        #    included a finished 30k run — the single run in that lineage
+        #    nobody should delete. Recommend fine-tune instead: it starts a
+        #    fresh schedule from the same weights, is not restricted to one per
+        #    run, and needs nothing deleted.
         continued_by = ", ".join(_job_label(cid) for cid in exc.child_ids)
         source = _job_label(exc.job_id)
+        finished = [_job_label(cid) for cid in exc.child_ids if _is_finished_run(cid)]
+        if len(exc.child_ids) == 1 and not finished:
+            remedy = f"A run can be continued once, so delete {continued_by} first, then resume {source}."
+        else:
+            cost = (
+                f", including the finished {'runs' if len(finished) > 1 else 'run'} {', '.join(finished)}"
+                if finished
+                else ""
+            )
+            remedy = (
+                f"A run can be continued once, so resuming {source} would mean first "
+                f"deleting {continued_by}{cost}. Fine-tune from {source}'s checkpoint "
+                "instead — that starts a fresh schedule from the same weights, needs "
+                "nothing deleted, and is not limited to one per run."
+            )
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"{source} was already continued by {continued_by}. A run can be "
-                f"continued once, so delete {continued_by} first, then resume {source}."
-            ),
+            detail=f"{source} was already continued by {continued_by}. {remedy}",
         ) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
