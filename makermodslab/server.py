@@ -67,6 +67,7 @@ from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
+    JobAlreadyContinuedError,
     JobAlreadyRunningError,
     JobHasChildrenError,
     JobNotFoundError,
@@ -1181,6 +1182,21 @@ def models_import(request: ModelImportRequest):
 # ============================================================================
 
 
+def _job_label(job_id: str) -> str:
+    """A run named the way its row names it: alias (id), or the bare id.
+
+    For refusal messages that have to point at a *different* run than the one
+    the user acted on — "delete X first" is only actionable if X is findable in
+    the list, and the list shows the display alias, not the id.
+    """
+    try:
+        record = job_registry.get(job_id)
+    except JobNotFoundError:
+        return repr(job_id)
+    name = (record.display_name or record.name or "").strip()
+    return f"{name!r} ({job_id})" if name else repr(job_id)
+
+
 @app.post("/jobs/training", status_code=201)
 async def create_training_job(req: Request):
     raw = await req.json()
@@ -1206,6 +1222,13 @@ async def create_training_job(req: Request):
     # Hard block (not a warning): when resuming, the total step count must be
     # strictly above the checkpoint's step — lerobot requires --steps be raised
     # above the resumed checkpoint, and steps == checkpoint would train nothing.
+    #
+    # This is the FAST half only, and cannot be the whole guard: it reads the
+    # request's `resume_from_step`, which is None whenever the caller picked
+    # "latest checkpoint" and left the step for the registry to resolve. Those
+    # requests walk straight past this. JobRegistry.start re-asks the same
+    # question at the bottom of its resume block, once the step is a number;
+    # that one is the authority, and it raises ValueError -> the 400 below.
     if cfg.resume_from_step is not None and cfg.steps <= cfg.resume_from_step:
         logger.warning(
             "Rejecting resume: steps (%d) <= checkpoint step (%d).",
@@ -1259,6 +1282,25 @@ async def create_training_job(req: Request):
         # dataset first (the browser flow does this automatically before
         # submitting, so this fires for non-UI callers).
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except JobAlreadyContinuedError as exc:
+        # Sticks only: the source already has a continuation, so a second one
+        # would fork it. 409 for the same reason the mid-chain delete refusal
+        # is a 409 — a conflict with existing state, not a malformed request —
+        # and routed here the same way, with the ids turned into a message at
+        # this layer rather than baked into the exception.
+        #
+        # The message has to TEACH the way out, because the way out is not
+        # obvious from the refusal: the fork is unblocked by deleting the
+        # existing continuation, which is itself a leaf and therefore deletable.
+        continued_by = ", ".join(_job_label(cid) for cid in exc.child_ids)
+        source = _job_label(exc.job_id)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{source} was already continued by {continued_by}. A run can be "
+                f"continued once, so delete {continued_by} first, then resume {source}."
+            ),
+        ) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc

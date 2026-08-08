@@ -1770,6 +1770,258 @@ def test_start_still_resumes_a_run_that_stopped_short(tmp_path, state) -> None:
     assert "checkpoints/100" in record.config.config_path
 
 
+# ── …and only toward a target it can actually reach ─────────────────────────
+# lerobot trains `range(resumed_step, steps)`, so a target at or below the
+# checkpoint is an empty range: the run does nothing, exits 0, and the registry
+# gets a `done` phantom claiming a target it never trained toward. The endpoint
+# pre-flight in server.py catches the case where the REQUEST names its step;
+# these cover the registry's own guard, which runs after the step is resolved
+# and so also covers "latest checkpoint" (resume_from_step=None) requests.
+
+
+def _resume_request_at(steps: int, *, step: int | None = None):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_job_id="src",
+        resume_from_step=step,
+        steps=steps,
+    )
+
+
+@pytest.mark.parametrize("steps", [0, 50, 100])
+def test_start_refuses_a_resume_target_at_or_below_the_checkpoint(tmp_path, steps) -> None:
+    """The boundary is strict: equal to the checkpoint step trains nothing, and
+    so does anything below it. `steps=0` is refused with the rest — a request's
+    own target is a required field, so 0 means "train nothing", not "unset"."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")  # checkpoint at step 100
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="would train nothing"),
+    ):
+        reg.start(_resume_request_at(steps, step=100), JobTarget(runner="local"))
+
+    assert [r.id for r in reg.list(limit=10)] == ["src"]
+    _assert_nothing_was_created(reg)
+
+
+def test_start_allows_a_resume_target_one_step_above_the_checkpoint(tmp_path) -> None:
+    """Just past the boundary is a real (if short) continuation, and must not be
+    swept up by the guard."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request_at(101, step=100), JobTarget(runner="local"))
+
+    assert record.config.steps == 101
+
+
+def test_start_refuses_a_latest_checkpoint_resume_below_its_target(tmp_path) -> None:
+    """The hole the endpoint's pre-flight can't see: the request leaves the step
+    to the registry ("latest checkpoint"), so `resume_from_step` is None when
+    the endpoint looks. The registry re-checks once it has resolved step 100."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    request = _resume_request_at(100, step=None)
+    assert request.resume_from_step is None  # the pre-flight's blind spot
+
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="checkpoint step 100"),
+    ):
+        reg.start(request, JobTarget(runner="local"))
+
+    _assert_nothing_was_created(reg)
+
+
+def test_start_step_target_guard_leaves_fresh_runs_alone(tmp_path) -> None:
+    """It is a RESUME guard. A fresh run has no checkpoint step to be above, and
+    `_resume_start_step` returns None for it, so nothing is refused."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=100),
+            JobTarget(runner="local"),
+        )
+
+    assert record.config.resume is False
+
+
+# ── …and only ONCE: sticks, not forks ───────────────────────────────────────
+# User decision 2026-08-07. A run may be continued once, so a resume whose
+# source already has a child is refused at CREATION time. Legacy forks on disk
+# are untouched by this — nothing here runs at load or list time (the lineage
+# section at the end of this file covers that half).
+
+
+def _child_of(reg, parent_id: str, *, job_id: str = "child", state: str = "interrupted"):
+    """Register a run that continues `parent_id`, i.e. gives it a child."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    reg._records[job_id] = JobRecord(
+        id=job_id,
+        name="continuation",
+        state=state,
+        config=TrainingRequest(
+            dataset_repo_id="user/ds",
+            policy_type="act",
+            resume=True,
+            resume_from_job_id=parent_id,
+        ),
+        output_dir=f"/nonexistent/{job_id}",
+        started_at=1.0,
+        runner="local",
+    )
+    return reg._records[job_id]
+
+
+def test_start_refuses_to_resume_an_already_continued_run(tmp_path) -> None:
+    """The sticks rule: one continuation per run. A second would fork the
+    lineage, so it is refused — naming the child, which is what lets the HTTP
+    layer tell the user which run to delete first. No record created."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobAlreadyContinuedError, JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    _child_of(reg, "src")
+
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(JobAlreadyContinuedError) as excinfo,
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert excinfo.value.job_id == "src"
+    assert excinfo.value.child_ids == ["child"]
+    assert set(reg._records) == {"src", "child"}
+    _assert_nothing_was_created(reg)
+
+
+def test_start_refusal_ignores_a_finetune_child(tmp_path) -> None:
+    """A fine-tune is not a resume edge anywhere else (the child index, the
+    delete guard), and it isn't one here either: its source keeps its own
+    identity and stays continuable."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRecord, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    reg._records["ft"] = JobRecord(
+        id="ft",
+        name="finetune",
+        # `done`, not `running` — a live local run would trip the one-at-a-time
+        # mutex and mask the thing under test.
+        state="done",
+        config=TrainingRequest(
+            dataset_repo_id="user/ds",
+            policy_type="act",
+            finetune_from_job_id="src",
+        ),
+        output_dir="/nonexistent/ft",
+        started_at=1.0,
+        runner="local",
+    )
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert record.config.resume is True
+
+
+def test_start_refusal_defers_to_the_completed_source_refusal(tmp_path) -> None:
+    """Both refusals can be true of one legacy source. The `done` one wins, and
+    must: telling the user to delete a child to unlock a resume that would then
+    be refused for a spent LR schedule is worse guidance than "fine-tune"."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    _child_of(reg, "src")
+
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="already reached its step target"),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+
+def test_deleting_the_tip_frees_its_parent_to_be_resumed(tmp_path) -> None:
+    """The recovery the refusal's message promises, end to end at the registry
+    level: the fork is blocked, deleting the existing continuation makes its
+    parent a leaf again, and the same resume then succeeds."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobAlreadyContinuedError, JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    _child_of(reg, "src")
+
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(JobAlreadyContinuedError),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    reg.delete("child")
+
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert record.config.resume is True
+    assert "checkpoints/100" in record.config.config_path
+    # ...and the new continuation is now the one child `src` is allowed.
+    assert reg.get("src").child_ids == [record.id]
+
+
+def test_start_refuses_a_second_continuation_of_a_cloud_source(tmp_path) -> None:
+    """The refusal is on the LINEAGE, not the runner, so it lands before the
+    local/cloud branch that moves the checkpoint — same placement as the
+    completed-source refusal above."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobAlreadyContinuedError, JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    reg._records["src"].runner = "hf_cloud"
+    reg._records["src"].hf_repo_id = "user/some-model"
+    _child_of(reg, "src")
+
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(JobAlreadyContinuedError),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+
 # ── …and on either runner, once the checkpoint can get there (F7) ───────────
 # A continuation may cross runners in both directions now. What each direction
 # has to do first is move the parent's checkpoint to wherever the trainer will
@@ -3314,8 +3566,11 @@ def test_build_child_index_maps_parents_to_children_newest_first() -> None:
 
 
 def test_build_child_index_keeps_every_child_of_a_fork_newest_first() -> None:
-    """Nothing stops two runs resuming one parent, so the lineage is a forest,
-    not a set of chains — both forks must be indexed, newest first."""
+    """LEGACY DATA. `start` now refuses a second resume off one parent (sticks
+    only, user decision 2026-08-07), so no new fork can appear — but registries
+    written before that rule hold real ones, and the index they load through
+    stays forest-capable: both children indexed, newest first. Rolling this
+    back to "one child" would silently drop a leaf from the list."""
     from makermodslab.jobs import build_child_index
 
     index = build_child_index(
@@ -3367,6 +3622,9 @@ def test_ancestor_ids_walk_nearest_parent_first() -> None:
 
 
 def test_ancestor_ids_of_forked_siblings_share_the_trunk() -> None:
+    """LEGACY DATA, same as the fork index above: the walk is per-record and
+    upward, so a trunk with two leaves hanging off it reads correctly from
+    either leaf. Unchanged by the sticks rule, which only refuses new forks."""
     from makermodslab.jobs import ancestor_ids_of
 
     records = {
@@ -3431,6 +3689,31 @@ def test_list_annotates_lineage_and_marks_leaves(tmp_path) -> None:
     assert by_id["B"].child_ids == ["C"] and by_id["B"].ancestor_ids == ["A"]
     # The tip of the chain is the leaf: no children, whole trunk behind it.
     assert by_id["C"].child_ids == [] and by_id["C"].ancestor_ids == ["B", "A"]
+
+
+def test_list_annotates_a_legacy_fork_unchanged(tmp_path) -> None:
+    """A registry that already holds a fork keeps listing exactly as it did:
+    the trunk names BOTH children (so it is superseded and hidden), and each
+    leaf carries the shared trunk behind it, so the UI renders one row per leaf.
+
+    This is the half of the sticks decision that is deliberately NOT enforced.
+    The refusal lives at creation time only — there is no migration, and no
+    load- or list-time rejection of data that predates it."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path)
+    for rec in [
+        _lineage_record("trunk", started_at=1.0),
+        _lineage_record("older", parent="trunk", started_at=2.0),
+        _lineage_record("newer", parent="trunk", started_at=3.0),
+    ]:
+        reg._records[rec.id] = rec
+
+    by_id = {r.id: r for r in reg.list(limit=10)}
+
+    assert by_id["trunk"].child_ids == ["newer", "older"]
+    assert by_id["older"].child_ids == [] and by_id["older"].ancestor_ids == ["trunk"]
+    assert by_id["newer"].child_ids == [] and by_id["newer"].ancestor_ids == ["trunk"]
 
 
 def test_list_sees_a_child_that_fell_off_the_page(tmp_path) -> None:
@@ -3504,3 +3787,103 @@ def test_delete_is_unaffected_by_a_finetune_child(tmp_path) -> None:
     reg.delete("A")
 
     assert set(reg._records) == {"F"}
+
+
+# ---------------------------------------------------------------------------
+# The HTTP half of the second-resume refusal: POST /jobs/training turns
+# JobAlreadyContinuedError into a 409 whose message teaches the way out. The
+# registry is stubbed — what is under test is the routing and the wording, not
+# the rule (covered above).
+
+
+def _post_resume(client, source_id: str = "src"):
+    return client.post(
+        "/jobs/training",
+        json={
+            "dataset_repo_id": "user/ds",
+            "steps": 200,
+            "resume": True,
+            "resume_from_job_id": source_id,
+        },
+    )
+
+
+def test_endpoint_409s_a_second_continuation_and_names_the_way_out(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """409, not 400: a conflict with existing state, routed exactly like the
+    mid-chain delete refusal it is the mirror of. The message must name the run
+    to delete AND the run that frees up, because neither is guessable from
+    "resume refused"."""
+    import makermodslab.server as server_mod
+    from makermodslab.jobs import JobAlreadyContinuedError
+
+    def _raise(config, target):
+        raise JobAlreadyContinuedError("src", ["kid"])
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _raise)
+
+    resp = _post_resume(client)
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "src" in detail and "kid" in detail
+    assert "already continued" in detail
+    assert "delete" in detail.lower()
+
+
+def test_endpoint_409_labels_the_runs_by_their_display_name(client, monkeypatch) -> None:
+    """Telling the user to delete X is only actionable if X is findable in the
+    list, and the list shows the display alias — so the message resolves ids to
+    names when the registry still holds them."""
+    import makermodslab.server as server_mod
+    from makermodslab.jobs import JobAlreadyContinuedError, JobNotFoundError, JobRecord
+    from makermodslab.train import TrainingRequest
+
+    names = {"src": "overnight act", "kid": "overnight act v2"}
+
+    def _fake_get(job_id: str):
+        if job_id not in names:
+            raise JobNotFoundError(job_id)
+        return JobRecord(
+            id=job_id,
+            name="auto-generated",
+            display_name=names[job_id],
+            state="interrupted",
+            config=TrainingRequest(dataset_repo_id="user/ds"),
+            output_dir=f"/nonexistent/{job_id}",
+            started_at=0.0,
+        )
+
+    def _raise(config, target):
+        raise JobAlreadyContinuedError("src", ["kid"])
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _raise)
+    monkeypatch.setattr(server_mod.job_registry, "get", _fake_get)
+
+    detail = _post_resume(client).json()["detail"]
+
+    assert "overnight act" in detail and "overnight act v2" in detail
+
+
+def test_endpoint_409_falls_back_to_the_id_when_a_run_is_gone(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The label lookup must not turn a refusal into a 500 when the registry
+    can't resolve an id (a record deleted between the failure and the message)."""
+    import makermodslab.server as server_mod
+    from makermodslab.jobs import JobAlreadyContinuedError, JobNotFoundError
+
+    def _raise(config, target):
+        raise JobAlreadyContinuedError("src", ["kid"])
+
+    def _fake_get(job_id: str):
+        raise JobNotFoundError(job_id)
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _raise)
+    monkeypatch.setattr(server_mod.job_registry, "get", _fake_get)
+
+    resp = _post_resume(client)
+
+    assert resp.status_code == 409
+    assert "src" in resp.json()["detail"]

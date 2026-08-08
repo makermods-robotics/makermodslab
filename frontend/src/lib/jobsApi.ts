@@ -205,7 +205,22 @@ export async function startTrainingJob(
       action: "Start training",
     });
   } catch (e) {
-    if (e instanceof ApiError && e.status === 409) {
+    // The local-run mutex is the 409 this rewrite exists for: the backend's
+    // own text there is "Job already running: <repr>", which is not a sentence
+    // to show a user. It is NOT the only 409 this endpoint can return, and
+    // blanket-rewriting every one of them swallowed messages that were the
+    // whole point of the refusal — a cloud run on a local-only dataset
+    // (upload it first), and a second continuation of an already-continued run
+    // (delete the existing one first, naming it). Both of those tell the user
+    // what to do next; "another training is already running" tells them
+    // something that isn't true. So substitute only for the mutex, and pass
+    // every other refusal's `detail` through verbatim (apiRequest already puts
+    // it in the message).
+    if (
+      e instanceof ApiError &&
+      e.status === 409 &&
+      (e.detail ?? "").startsWith("Job already running")
+    ) {
       throw new Error("Another training is already running. Stop it first.");
     }
     throw e;

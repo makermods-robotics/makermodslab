@@ -45,16 +45,22 @@ export type JobsEntry =
       key: string;
       time: number;
       job: JobRecord;
-      /** Checkpoints reachable from this row's run — its own plus those of the
-       * runs it resumed from. A row is a whole CHAIN (the list shows one row
-       * per leaf), so the run's own `checkpoint_count` is the wrong number to
-       * gate the Resume button on: the most common resumable shape after the
-       * leaf collapse is a tip that died before saving anything, whose only
-       * checkpoints are inherited. Counted by JobsDataContext, which holds the
-       * ancestor records — and which files a chain whose ancestors are still
-       * being backfilled as active, so a row is never hidden away in the
-       * UNTRACKED fold on the strength of a count that hasn't settled. */
-      chainCheckpointCount: number;
+      /** Checkpoints this row's run saved ITSELF — the number the Resume gate
+       * wants under the sticks rule, where only a leaf's own checkpoints can
+       * be continued from and a row is always a leaf (the list shows one row
+       * per leaf). Inherited ones are still listed on the card and still
+       * usable for inference; they are simply not resume sources, because the
+       * run that owns them has already been continued and jobs.py refuses a
+       * second continuation (`JobAlreadyContinuedError`).
+       *
+       * This used to be a CHAIN-wide count, for the opposite reason: inherited
+       * checkpoints were resumable, so a tip that died before saving anything
+       * still had something to continue from and its own count under-reported.
+       * Under sticks that same tip has nothing to resume — the recovery is to
+       * delete it and resume its parent — so the chain-wide count would light
+       * a button the exact rule then refuses. Straight off the record now, so
+       * it also needs no ancestor backfill to be correct. */
+      ownCheckpointCount: number;
     }
   | { kind: "hub"; key: string; time: number; job: HubJob };
 
@@ -198,12 +204,18 @@ function describeEntry(entry: JobsEntry): Described {
   };
 }
 
-/** Resume is offered on a chain whose tip ended before its target with
- * something, anywhere in the chain, to resume from. The state half is the ONE
- * shared leaf rule (`isResumableLeaf`), so this row's button and the detail
- * card's Resume can't disagree; the checkpoint half is deliberately the
- * cheap chain-wide count, because the exact per-step answer needs a fetch. The
- * click resolves the real list and says so if it comes back empty.
+/** Resume is offered on a run that ended before its target with a checkpoint
+ * OF ITS OWN to continue from. The state half is the ONE shared leaf rule
+ * (`isResumableLeaf`), so this row's button and the detail card's Resume can't
+ * disagree; the checkpoint half is the run's own count, which under the sticks
+ * rule is the same set the exact rule works over — it just can't see the step
+ * target or the owner's state without a fetch, so the click still resolves the
+ * real list and says so if it comes back empty.
+ *
+ * A run with NO checkpoints of its own gets no button here at all, which is
+ * correct but silent — the explanation for that case (delete this run, resume
+ * its parent) lives on the run's card, where the inherited checkpoints it
+ * can't use are visible and the silence would otherwise be loudest.
  *
  * ONE verb across both levels of control: this row is the shortcut — same
  * action, same default (the newest resumable checkpoint) — and the detail
@@ -211,7 +223,7 @@ function describeEntry(entry: JobsEntry): Described {
 const canResumeEntry = (entry: JobsEntry): boolean =>
   entry.kind === "job" &&
   isResumableLeaf(entry.job) &&
-  entry.chainCheckpointCount > 0;
+  entry.ownCheckpointCount > 0;
 
 const COL_STATE = "w-[4.75rem] shrink-0";
 // The run's policy. Always occupies its column — a row whose record names no
