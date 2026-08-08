@@ -45,7 +45,22 @@ timer keeps the in-process snapshot live (hardware-verified 2026-08-07 via
 camera_runloop_experiment.py: a background-thread runloop does NOT refresh
 the cache; pumping the main thread's does).
 
-A live device list means indices genuinely renumber *at runtime*, so any
+A live device list is not a live capture, though, and that gap is the one
+this module cannot close. The pump refreshes what AVFoundation *reports*; it
+cannot retract a handle cv2 has already handed out. A ``cv2.VideoCapture``
+held open across a same-port replug stays bound to the dead device object —
+``isOpened()`` keeps returning True and its next ``cap.read()`` blocks
+forever (verified live 2026-08-07) — as does one opened in the window before
+the next pump tick drains the reconnect; and where the pump itself is a no-op
+(non-macOS, PyObjC missing, scheduled off the main thread) none of the
+healing above applies at all. Identity resolution cannot detect any of this:
+the uniqueID is present, the device behind that particular handle is just
+dead. Containment for such a wedged read — bounded lock acquisition, a
+first-frame deadline, and leaking the capture rather than releasing it under
+an in-flight read — therefore lives in camera_preview.py. Recovering that one
+camera still takes a process restart; the device list no longer does.
+
+A live device list also means indices genuinely renumber *at runtime*, so any
 per-camera state a caller caches must be keyed by identity, not by index: a
 handle opened for the device that was index 0 stays bound to that device after
 another camera sorts ahead of it and becomes index 0. Callers that cache

@@ -19,6 +19,9 @@ Everything runs against a fake cv2.VideoCapture: no real camera is ever opened
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -60,6 +63,29 @@ class FailingVideoCapture(FakeVideoCapture):
     def __init__(self, index: int, backend: int | None = None) -> None:
         super().__init__(index, backend)
         self.opened = False
+
+
+class BlockingVideoCapture(FakeVideoCapture):
+    """A capture whose read() blocks until told otherwise — models the stale
+    AVFoundation device after a same-port replug: open succeeds (isOpened()
+    True) but the first read never returns."""
+
+    def __init__(self, index: int, backend: int | None = None) -> None:
+        super().__init__(index, backend)
+        self.unblock = threading.Event()
+
+    def read(self):
+        self.unblock.wait()
+        return super().read()
+
+
+class RaisingVideoCapture(FakeVideoCapture):
+    """A capture whose read() raises. The opposite of BlockingVideoCapture: the
+    read FINISHES (badly), so nothing is in flight and the containment must
+    treat it as an ordinary failed read, not as a wedge."""
+
+    def read(self):
+        raise RuntimeError("cv2 read blew up")
 
 
 class OneFrameVideoCapture(FakeVideoCapture):
@@ -211,8 +237,131 @@ def test_stream_after_stop_all_reopens_the_camera(fake_captures: list[FakeVideoC
 
 
 # ---------------------------------------------------------------------------
-# GET /camera-preview/{index} — status codes and exclusivity
+# Wedged reads — a cap.read() that never returns (stale same-port replug)
+# must be contained (leaked, loudly), never allowed to hang stop_all or
+# stack later clients. See camera_preview.LOCK_ACQUIRE_TIMEOUT.
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fast_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the wedge-containment timeouts so tests don't wait seconds."""
+    monkeypatch.setattr(camera_preview, "LOCK_ACQUIRE_TIMEOUT", 0.05)
+    monkeypatch.setattr(camera_preview, "FIRST_FRAME_TIMEOUT", 0.05)
+
+
+def test_stop_all_leaks_instead_of_hanging_on_a_wedged_read(
+    fake_captures: list[FakeVideoCapture], fast_timeouts: None
+) -> None:
+    """stop_all sits on the recording/inference start paths, where a hang
+    would freeze Start; a reader wedged inside cap.read() (holding the entry
+    lock) must make it leak the capture and move on, not block forever."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    next(gen)
+    entry = manager._captures[0]
+    entry.lock.acquire()  # simulate a reader wedged inside cap.read()
+
+    started = time.monotonic()
+    manager.stop_all(timeout=0.05)
+
+    assert time.monotonic() - started < 1.0
+    # Leaked, not released: releasing under an in-flight read segfaults cv2.
+    assert not fake_captures[0].released
+    assert entry.wedged
+    # Deregistered anyway, so the index is not poisoned for future previews.
+    assert manager._captures == {}
+    gen2 = manager.open_stream(0)
+    assert b"--frame" in next(gen2)
+    assert len(fake_captures) == 2
+    gen2.close()
+    # Close the wedged generator while the shrunk timeout is still patched, so
+    # its _release times out in 0.05s here rather than 2s at GC time.
+    gen.close()
+
+
+def test_new_client_errors_fast_instead_of_stacking_behind_a_wedged_reader(
+    fake_captures: list[FakeVideoCapture], fast_timeouts: None
+) -> None:
+    """Before hardening, every later client for a wedged index blocked forever
+    on the entry lock (HTTP 200, zero bytes). Now the first one times out and
+    every subsequent one short-circuits on the wedged flag."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    next(gen)
+    entry = manager._captures[0]
+    entry.lock.acquire()  # simulate a reader wedged inside cap.read()
+
+    with pytest.raises(CameraOpenError):
+        manager.open_stream(0)
+    assert entry.wedged
+    with pytest.raises(CameraOpenError):  # fast path, no timeout wait
+        manager.open_stream(0)
+    # The wedged reader's refcount and capture were left alone.
+    assert entry.refcount == 1
+    assert not fake_captures[0].released
+    gen.close()  # _release times out on the held lock and leaks — no hang
+    assert not fake_captures[0].released
+
+
+def test_first_frame_deadline_ends_the_stream_instead_of_blank_forever(
+    monkeypatch: pytest.MonkeyPatch, fast_timeouts: None
+) -> None:
+    """A stale device opens fine but its first read() never returns. The
+    first-frame watchdog must end the generator (a visible stream error for
+    the client) and leak the capture rather than release it mid-read."""
+    instances: list[BlockingVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> BlockingVideoCapture:
+        cap = BlockingVideoCapture(index, backend)
+        instances.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen = manager.open_stream(0)
+    with pytest.raises(StopIteration):  # finite failure, not an eternal blank
+        next(gen)
+
+    assert not instances[0].released  # leaked: release mid-read segfaults cv2
+    assert manager._captures == {}  # torn down; a retry gets a fresh entry
+    instances[0].unblock.set()  # let the leaked watchdog thread finish
+
+
+def test_first_read_that_raises_is_a_fast_failure_not_a_wedge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first read() that RAISES finishes its watchdog thread, so nothing is
+    in flight: the stream must end immediately and the capture must be
+    released normally. Leaking is reserved for reads that never return —
+    treating an exception as a wedge would strand a capture (and its lock)
+    forever on an ordinary, recoverable failure.
+
+    Deliberately runs with the real FIRST_FRAME_TIMEOUT (no fast_timeouts): the
+    elapsed-time assertion is what proves the failure is reported at once
+    rather than after waiting the full first-frame deadline out.
+    """
+    instances: list[RaisingVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> RaisingVideoCapture:
+        cap = RaisingVideoCapture(index, backend)
+        instances.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen = manager.open_stream(0)
+    entry = manager._captures[0]
+    started = time.monotonic()
+    with pytest.raises(StopIteration):
+        next(gen)
+
+    assert time.monotonic() - started < camera_preview.FIRST_FRAME_TIMEOUT
+    assert not entry.wedged  # a finished read is not a wedge
+    assert instances[0].released  # released, not leaked: no read in flight
+    assert manager._captures == {}
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +432,30 @@ def test_identity_unavailable_falls_back_to_index_keying(
     gen_a.close()
     gen_b.close()
     assert fake_captures[0].released
+
+
+def test_wedge_does_not_fast_fail_a_different_camera_at_the_same_index(
+    fake_captures: list[FakeVideoCapture], fast_timeouts: None
+) -> None:
+    """A wedge belongs to the device that wedged, not to its slot. Keyed by
+    int, a wedged entry fast-failed whatever camera later landed on that index
+    while the genuinely dead device answered fresh under its new number."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0, "uid-B")
+    next(gen)
+    entry = manager._captures["uid-B"]
+    entry.lock.acquire()  # simulate a reader wedged inside cap.read()
+
+    with pytest.raises(CameraOpenError):
+        manager.open_stream(0, "uid-B")
+    assert entry.wedged
+
+    # A different physical camera that now sits at index 0 is unaffected.
+    gen_other = manager.open_stream(0, "uid-A")
+    assert b"--frame" in next(gen_other)
+    assert len(fake_captures) == 2
+    gen_other.close()
+    gen.close()  # _release times out on the held lock and leaks — no hang
 
 
 def test_camera_preview_endpoint_keys_by_identity(
