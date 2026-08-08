@@ -96,6 +96,17 @@ export interface JobRecord {
   hf_job_url: string | null;
   wandb_run_url: string | null;
   checkpoint_count: number;
+  // Resume lineage, derived server-side over the WHOLE registry (not just the
+  // page this request returned) — see JobRecord in makermodslab/jobs.py.
+  //
+  // `child_ids`: the runs that resumed this one, newest-first. Empty ⇒ this
+  // record is a LEAF, the live tip of its chain, and the one the libraries
+  // give a row to; anything with children is superseded and reached through
+  // its descendant instead. A fine-tune is NOT a child — it is a new model.
+  // `ancestor_ids`: transitive resume ancestors, nearest parent first, holding
+  // only ids the server still has (so each is fetchable by id).
+  child_ids: string[];
+  ancestor_ids: string[];
 }
 
 // Per-running-job snapshot pushed by the watchdog over WS at ~1Hz. Subset

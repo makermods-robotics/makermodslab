@@ -68,6 +68,7 @@ from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
     JobAlreadyRunningError,
+    JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
     JobTarget,
@@ -1776,6 +1777,17 @@ def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    except JobHasChildrenError as exc:
+        # Mid-chain delete: name the runs that continue from this one so the
+        # user can work inwards from the tip instead of guessing.
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} was continued by {continued_by}, which would be left "
+                "pointing at a deleted run. Delete the continuation(s) first."
+            ),
+        ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job
     # would resurface in /jobs/hub as an untracked card on the next poll (the
     # HF Jobs API has no delete). Mark it dismissed so the removal sticks.

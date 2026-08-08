@@ -114,6 +114,8 @@ const job = (j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">): JobRecord 
   hf_job_url: null,
   wandb_run_url: null,
   checkpoint_count: 0,
+  child_ids: [],
+  ancestor_ids: [],
   ...j,
 });
 
