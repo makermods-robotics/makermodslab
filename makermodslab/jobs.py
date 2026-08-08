@@ -216,9 +216,9 @@ def classify_terminal_state(
     "Subprocess exited with code N" — indistinguishable from a real failure,
     and read by at least one user as "the model is broken" when nothing was.
 
-    `stop_requested` is the registry's recorded intent, ANDed with the runner's
-    own account of whether it actually signalled anything (see
-    `JobRunner`'s optional `stop_signalled` hook).
+    `stop_requested` is the registry's recorded intent, combined by logical AND
+    with the runner's own account of whether it actually signalled anything
+    (see `JobRunner`'s optional `stop_signalled` hook).
 
     Precedence, and the reasoning for the ambiguous cases:
 
@@ -294,7 +294,7 @@ def _read_exit_status(path: Path | None) -> int | None:
 
     None means "no usable evidence" for every reason alike: no path, no file
     (the wrapper was killed before it could write, e.g. SIGKILL or a reboot),
-    or unparseable contents. Callers must not read None as a success or a
+    or unparsable contents. Callers must not read None as a success or a
     failure — see TailingJobRunner.returncode()."""
     if path is None:
         return None

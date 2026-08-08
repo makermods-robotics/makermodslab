@@ -124,7 +124,7 @@ def test_load_warnings_detects_lerobot_key_mismatch() -> None:
     """The log-side fingerprint: lerobot's log_model_loading_keys emits both
     lines when a cross-architecture checkpoint is dropped."""
     messages = [
-        "INFO 2026-07-29 10:00:00 ot_train.py:232 {'batch_size': 8,",
+        "INFO 2026-07-29 10:00:00 lerobot_train.py:232 {'batch_size': 8,",
         "WARNING 2026-07-29 10:00:01     utils.py:91 Missing key(s) when loading "
         "model: ['model.backbone.bn1.bias', 'model.action_head.weight']",
         "WARNING 2026-07-29 10:00:01     utils.py:93 Unexpected key(s) when loading "
@@ -137,7 +137,7 @@ def test_load_warnings_detects_lerobot_key_mismatch() -> None:
 
 
 def test_load_warnings_absent_on_a_clean_log() -> None:
-    warnings = audit_load_warnings(["INFO ot_train.py:232 {'batch_size': 8,", "INFO step:100 loss:0.1"])
+    warnings = audit_load_warnings(["INFO lerobot_train.py:232 {'batch_size': 8,", "INFO step:100 loss:0.1"])
     assert not warnings.any
 
 
