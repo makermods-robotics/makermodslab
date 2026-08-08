@@ -9,6 +9,10 @@ import { RunnerFlavor } from "@/lib/jobsApi";
 interface ConfigurationTabProps extends ConfigComponentProps {
   authenticated: boolean;
   flavors: RunnerFlavor[];
+  /** null while the W&B credential probe is in flight; false ⇒ no key is
+   * resolvable on the backend's host. Forwarded to AdvancedCard, which hosts
+   * the W&B group. */
+  wandbKeyAvailable?: boolean | null;
   hardwareLoading: boolean;
   /** True when a base skill (fine-tune) or resume seed fixes the policy —
    * the run must train the source checkpoint's architecture. */
@@ -23,6 +27,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
   hardwareLoading,
   policyLocked,
   resumeLocked,
+  wandbKeyAvailable,
 }) => {
   return (
     // Order matters: Policy answers "what am I training" and so belongs with
@@ -51,6 +56,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
         config={config}
         updateConfig={updateConfig}
         resumeLocked={resumeLocked}
+        wandbKeyAvailable={wandbKeyAvailable}
       />
     </div>
   );

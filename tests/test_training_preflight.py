@@ -142,6 +142,230 @@ def test_cloud_run_unaffected_by_offline_local_guard(
 
 
 # ---------------------------------------------------------------------------
+# W&B credentials: a cloud run that logs to W&B needs a key on THIS machine,
+# and must be refused before anything with a cost happens (MT40).
+# ---------------------------------------------------------------------------
+
+
+def test_cloud_wandb_without_a_key_rejects_before_the_dataset_is_touched(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is forwarded to the pod as a job secret, so a missing one makes
+    the run impossible. Refuse at the endpoint — before job_registry.start, and
+    therefore long before HfCloudJobRunner._ensure_dataset_on_hub could push a
+    local-only dataset to the Hub for a job that will never run."""
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", lambda: None)
+
+    def _fail_if_called(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("job_registry.start must not be reached when the key is missing")
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _fail_if_called)
+
+    resp = client.post(
+        "/jobs/training",
+        json={
+            "config": {"dataset_repo_id": DATASET_ID, "steps": 100, "wandb_enable": True},
+            "target": {"runner": "hf_cloud", "flavor": "a10g-small"},
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "API key" in resp.json()["detail"]
+
+
+def test_cloud_wandb_with_a_key_is_not_blocked(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard is about the key, not about W&B: with one resolvable the
+    request proceeds into job_registry.start (stubbed)."""
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", lambda: "a-key")
+
+    started = {"called": False}
+
+    def _fake_start(config, target):
+        started["called"] = True
+        return {"id": "job-123", "name": "ACT", "state": "running"}
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _fake_start)
+
+    resp = client.post(
+        "/jobs/training",
+        json={
+            "config": {"dataset_repo_id": DATASET_ID, "steps": 100, "wandb_enable": True},
+            "target": {"runner": "hf_cloud", "flavor": "a10g-small"},
+        },
+    )
+
+    assert started["called"] is True
+    assert resp.status_code == 201
+
+
+def test_local_wandb_without_a_key_is_rejected_too(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W&B runs locally as well as on the cloud, and the guard applies to both.
+    A local trainer is a non-tty subprocess: `wandb.init` cannot prompt for a
+    login, so it fails after the record already says `running` — the same
+    useless failure as the cloud case, just on cheaper hardware."""
+    monkeypatch.setattr(server_mod, "hf_hub_offline", lambda: False)
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", lambda: None)
+
+    def _fail_if_called(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("job_registry.start must not be reached when the key is missing")
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _fail_if_called)
+
+    resp = client.post(
+        "/jobs/training",
+        json={"dataset_repo_id": DATASET_ID, "steps": 100, "wandb_enable": True},
+    )
+
+    assert resp.status_code == 400
+    assert "API key" in resp.json()["detail"]
+
+
+def test_a_run_with_wandb_off_never_probes_for_a_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard keys on W&B, not on the runner: an ordinary run that isn't
+    logging must not be made to depend on a credential it will never use."""
+    monkeypatch.setattr(server_mod, "hf_hub_offline", lambda: False)
+
+    def _fail_if_checked():  # pragma: no cover - must not run
+        raise AssertionError("the W&B key must not be probed when W&B is off")
+
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", _fail_if_checked)
+    monkeypatch.setattr(
+        server_mod.job_registry,
+        "start",
+        lambda config, target: {"id": "job-1", "name": "ACT", "state": "running"},
+    )
+
+    resp = _post_local_training(client)
+    assert resp.status_code == 201
+
+
+def test_deferred_local_to_cloud_resume_refuses_before_spawning_the_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The F7 local→cloud path returns 201 and does the upload on a thread, so a
+    credential problem discovered later would surface as a FAILED JOB rather
+    than as a message on the button the user just pressed. The check therefore
+    has to fire before that thread exists.
+
+    Driven through the real JobRegistry (not the endpoint) because the
+    endpoint's own guard deliberately skips resumes — on a resume the W&B state
+    is inherited from the parent, which only the registry can read.
+
+    A first-class path, not an edge case: W&B is supported locally, so a
+    W&B-enabled LOCAL parent is an ordinary run, and continuing it on cloud
+    compute is the case where its inherited W&B state meets an upload that
+    costs real bytes.
+    """
+    from unittest.mock import patch
+
+    from makermodslab.jobs import JobRecord, JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    reg._records["P"] = JobRecord(
+        id="P",
+        name="local-wandb-parent",
+        state="interrupted",
+        config=TrainingRequest(
+            dataset_repo_id="user/on_hub",
+            policy_type="act",
+            steps=10000,
+            wandb_enable=True,
+            wandb_project="local-proj",
+        ),
+        output_dir=str(reg._output_root / "P" / "run"),
+        started_at=0.0,
+        runner="local",
+    )
+
+    def _upload_must_not_run(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("the checkpoint upload thread must not be spawned")
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/on_hub",
+        policy_type="act",
+        resume=True,
+        resume_from_job_id="P",
+        resume_from_step=4000,
+        steps=15000,
+        upload_resume_checkpoint=True,
+    )
+
+    with (
+        # Stands in for the real checkpoint resolution + upload planning; the
+        # ordering under test is "refusal before the thread", not the plan.
+        patch.object(
+            JobRegistry,
+            "_resolve_upload_resume",
+            lambda self, source, config: ((Path("/ckpt/004000"), "user/staging", "004000")),
+        ),
+        patch.object(JobRegistry, "_upload_resume_then_start", _upload_must_not_run),
+        patch("makermodslab.runners.hf_cloud.resolve_wandb_api_key", return_value=None),
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        pytest.raises(ValueError, match="Weights & Biases API key"),
+    ):
+        reg.start(cfg, JobTarget(runner="hf_cloud", flavor="a10g-small"))
+
+    # No record, and no preparing thread: the refusal left nothing behind.
+    assert list(reg._records) == ["P"]
+    assert reg._prepare_threads == {}
+
+
+def test_cloud_run_forwards_the_wandb_key_as_a_job_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one place the key is read for its VALUE rather than its presence.
+
+    It must ride `secrets` (like HF_TOKEN), never `env`: HF Jobs redacts
+    secrets from the job's environment inspection and logs, and a W&B key in
+    `env` would be readable by anyone who can see the job.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+    from makermodslab.train import TrainingRequest
+
+    api = MagicMock()
+    api.run_job.return_value = MagicMock(id="job-1", url="https://hf.co/jobs/1")
+
+    # The runner grabs its HfApi in __init__, so the patch has to precede it.
+    with patch("makermodslab.runners.hf_cloud.shared_hf_api", return_value=api):
+        runner = HfCloudJobRunner(MagicMock(), tmp_path / "log.jsonl", "a10g-small", None)
+    cfg = TrainingRequest(
+        dataset_repo_id="user/on_hub",
+        policy_type="act",
+        steps=100,
+        wandb_enable=True,
+        wandb_project="proj",
+    )
+
+    with (
+        patch("makermodslab.runners.hf_cloud.get_token", return_value="hf-token"),
+        patch(
+            "makermodslab.runners.hf_cloud.cached_whoami",
+            return_value={"name": "alice"},
+        ),
+        patch("makermodslab.runners.hf_cloud.resolve_wandb_api_key", return_value="wandb-key"),
+        patch.object(HfCloudJobRunner, "_ensure_dataset_on_hub", lambda self, repo: None),
+        patch.object(HfCloudJobRunner, "_start_worker_threads", lambda self, label: None),
+    ):
+        runner.start("job-1", cfg, "/unused")
+
+    kwargs = api.run_job.call_args.kwargs
+    assert kwargs["secrets"]["WANDB_API_KEY"] == "wandb-key"
+    assert kwargs["secrets"]["HF_TOKEN"] == "hf-token"
+    # Never in `env` — that channel is not redacted.
+    assert "WANDB_API_KEY" not in (kwargs.get("env") or {})
+
+
+# ---------------------------------------------------------------------------
 # The availability helper's two-layout logic (datasets.py).
 # ---------------------------------------------------------------------------
 

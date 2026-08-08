@@ -242,6 +242,33 @@ class TrainingRequest(BaseModel):
     # configs persisted before F7 — all of them cloud→cloud — keep their meaning.
     resume_from_uploaded_checkpoint: bool = False
 
+    # Weights & Biases. Supported on BOTH runners. Where the trainer executes
+    # changes only how the API key reaches it — forwarded into the pod as an HF
+    # Jobs secret for cloud, inherited through `os.environ` (or read from
+    # ~/.netrc by wandb itself) for a local subprocess — and neither is a
+    # property of the request. `build_training_command` therefore needs no
+    # runner argument: the same flags are correct wherever the run lands.
+    #
+    # What IS enforced before the trainer starts, on both runners, is that a
+    # key resolves at all (JobRegistry.start): wandb cannot prompt for a login
+    # from a pod or from a non-tty subprocess, so a missing key is a launch-time
+    # refusal rather than a run that dies once the record says `running`.
+    #
+    # There is deliberately NO `wandb_run_id` field. lerobot's WandBLogger
+    # resumes with `wandb.init(resume="must")` using the run id carried in the
+    # CHECKPOINT's train_config.json (wandb_utils.py), so the id is inherited
+    # state, never a per-launch choice — exposing it could only let a user
+    # point a continuation at somebody else's run.
+    wandb_enable: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
+    wandb_notes: str | None = None
+    wandb_mode: str | None = "online"
+    # Defaults TRUE: wandb's per-checkpoint model artifact uploads are opt-IN.
+    # Left on, a long run quietly pushes every checkpoint to W&B as well as the
+    # Hub — bytes and quota nobody asked for.
+    wandb_disable_artifact: bool = True
+
     # Environment / evaluation
     env_type: str | None = None
     env_task: str | None = None
@@ -379,6 +406,26 @@ def build_training_command(
             cmd.extend(["--policy.private", "false"])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
+        # W&B, and ONLY the enable flag. Stated explicitly rather than left to
+        # the checkpoint's train_config.json, which is otherwise the authority
+        # on this branch: `wandb.enable` decides whether the container tries to
+        # reach W&B at all, and the parent's value getting a silent vote is
+        # exactly the MT40 defect — a wandb-enabled parent resumed into a pod
+        # with no WANDB_API_KEY, failing inside a billed GPU job rather than at
+        # submit time.
+        #
+        # The registry has already copied the parent's wandb settings onto this
+        # config (JobRegistry.start), so the value emitted here IS the parent's
+        # — inherited server-side, not chosen in the form. Nothing else in the
+        # group is emitted: lerobot re-inits the SAME W&B run
+        # (`wandb.init(resume="must")` with the checkpoint's run id), so
+        # project/entity/notes/mode are properties of a run that already
+        # exists and cannot be changed by a continuation.
+        #
+        # Safe on this branch's raw-string decode path (see the --policy.tags
+        # note above): a bool decodes fine from "true"/"false"; only list[str]
+        # fields have the draccus hazard.
+        cmd.extend(["--wandb.enable", "true" if request.wandb_enable else "false"])
         return cmd
 
     # Dataset
@@ -432,9 +479,23 @@ def build_training_command(
     if request.job_name:
         cmd.extend(["--job_name", request.job_name])
 
-    # W&B support is removed for now. Force it off explicitly so a preset or a
-    # resumed train_config.json that had wandb enabled can't turn it back on.
-    cmd.extend(["--wandb.enable", "false"])
+    # W&B. Always stated, so a policy preset can't turn logging on behind the
+    # user's back. The rest of the group rides only when it is actually on.
+    #
+    # Runner-blind by construction: these are the flags lerobot's trainer takes,
+    # and they mean the same thing in a container and in a local subprocess.
+    # Nothing about where the run executes belongs in this argv.
+    cmd.extend(["--wandb.enable", "true" if request.wandb_enable else "false"])
+    if request.wandb_enable:
+        if request.wandb_project:
+            cmd.extend(["--wandb.project", request.wandb_project])
+        if request.wandb_entity:
+            cmd.extend(["--wandb.entity", request.wandb_entity])
+        if request.wandb_notes:
+            cmd.extend(["--wandb.notes", request.wandb_notes])
+        if request.wandb_mode:
+            cmd.extend(["--wandb.mode", request.wandb_mode])
+        cmd.extend(["--wandb.disable_artifact", "true" if request.wandb_disable_artifact else "false"])
 
     # Env
     if request.env_type:

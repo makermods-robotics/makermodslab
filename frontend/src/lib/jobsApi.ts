@@ -63,6 +63,19 @@ export interface TrainingRequest {
   finetune_from_job_id?: string;
   finetune_from_step?: number;
   policy_pretrained_path?: string;
+  // Weights & Biases, supported on BOTH runners. The backend 400s any run that
+  // enables it with no API key resolvable on its host, and on a RESUME it
+  // overwrites all three of enable/project/entity from the parent run's record
+  // (lerobot re-opens the parent's W&B run rather than starting a new one).
+  // There is no `wandb_run_id` field — the id lives in the checkpoint, not in
+  // a request.
+  wandb_enable: boolean;
+  wandb_project?: string;
+  wandb_entity?: string;
+  wandb_notes?: string;
+  wandb_mode?: string;
+  // True ⇒ do NOT upload each checkpoint to W&B as an artifact. Defaults true.
+  wandb_disable_artifact: boolean;
   policy_device?: string;
   policy_use_amp: boolean;
   optimizer_type?: string;
@@ -106,6 +119,10 @@ export interface JobRecord {
   hf_flavor: string | null;
   hf_repo_id: string | null;
   hf_job_url: string | null;
+  // The W&B run this job logged to, scraped from the trainer's own output.
+  // Null is the ordinary case — W&B off, or a run whose URL never appeared —
+  // so treat it as "no link to show", never as an error.
+  wandb_run_url: string | null;
   checkpoint_count: number;
   // Resume lineage, derived server-side over the WHOLE registry (not just the
   // page this request returned) — see JobRecord in makermodslab/jobs.py.
@@ -126,6 +143,9 @@ export interface JobProgressSnapshot {
   id: string;
   state: JobState;
   metrics: TrainingMetrics;
+  // Carried on the ~1Hz snapshot so the link appears as soon as the trainer
+  // prints it, without refetching /jobs. Null until (or unless) it does.
+  wandb_run_url: string | null;
   checkpoint_count: number;
 }
 

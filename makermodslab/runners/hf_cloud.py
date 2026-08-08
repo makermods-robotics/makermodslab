@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import logging
+import netrc
 import os
 import re
 import shlex
@@ -36,12 +37,13 @@ import tomllib
 from importlib.metadata import requires
 from pathlib import Path
 from queue import Empty, Queue
+from typing import Any
 
 from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
-from ..jobs import LogLine, TrainingMetrics, parse_metrics_into
+from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makermodslab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
@@ -603,6 +605,82 @@ _TAIL_CLEAN_END_WAIT_S = 15.0
 _TAIL_RECONNECT_BACKOFF_S = 5.0
 
 
+
+def resolve_wandb_api_key() -> str | None:
+    """Look up the host's wandb API key. Used by BOTH runners.
+
+    Checks WANDB_API_KEY first, then falls back to ~/.netrc (where
+    `wandb login` writes the key under machine api.wandb.ai). Returns None
+    if neither source has it; the caller decides how to surface that.
+
+    The two runners need it for different reasons, which is why this is a
+    plain host-credential lookup and not a cloud helper despite living beside
+    the cloud runner:
+
+      * CLOUD needs the key's VALUE, to forward into the HF Jobs `secrets`
+        dict — the pod has neither this machine's environment nor its ~/.netrc.
+      * LOCAL needs only the boolean. The training subprocess inherits
+        `os.environ` and can read ~/.netrc itself, so wandb finds the key
+        without help; what the registry is checking is that it WILL find one,
+        because `wandb.init` in a non-tty subprocess cannot prompt and dies
+        uselessly after the record already says `running`.
+
+    So callers must treat the result as a boolean fact everywhere except the
+    single line that builds the HF Jobs `secrets` dict — the key itself is
+    never logged, persisted on a JobRecord, or sent to a client.
+    `/system/wandb-credentials` reports only whether this returned something.
+    """
+    key = os.environ.get("WANDB_API_KEY")
+    if key:
+        return key
+    try:
+        rc = netrc.netrc()
+    except (FileNotFoundError, netrc.NetrcParseError, OSError):
+        return None
+    auth = rc.authenticators("api.wandb.ai")
+    if auth is None:
+        return None
+    _login, _account, password = auth
+    return password or None
+
+
+# The message every W&B credential refusal uses — the endpoint's fast half, the
+# registry's authoritative check, and the cloud runner's belt-and-braces repeat
+# — so they can't drift into telling the user three things about one condition.
+# Runner-neutral wording: the condition and the remedy are identical for a local
+# run and a cloud one.
+WANDB_KEY_MISSING_MESSAGE = (
+    "W&B logging is on for this run, but no Weights & Biases API key was found "
+    "on this machine. Run `wandb login` (or export WANDB_API_KEY) and try again, "
+    "or turn W&B logging off."
+)
+
+
+def handle_get_wandb_credentials() -> dict[str, Any]:
+    """Whether a W&B API key is resolvable on this host — for the UI preflight.
+
+    Reports the BOOLEAN only. The key itself never leaves this process: it is
+    read for its value in exactly one place (the HF Jobs `secrets` dict in
+    HfCloudJobRunner.start), and nothing here logs, caches or returns it.
+
+    Answers for BOTH runners — W&B works locally and on the cloud, and a
+    missing key blocks either.
+
+    This deliberately replaces the old `/system/wandb-extra` install gate,
+    which probed whether the `wandb` PACKAGE was importable. That gate was dead
+    code by the time it was removed: wandb is a hard transitive dependency of
+    the pinned lerobot's `training` extra, so the answer was always yes, while
+    the question that actually blocks a run — is there a key? — went unasked
+    until the job was already submitted. Probed live per request (no caching):
+    a user who runs `wandb login` in another terminal gets a truthful answer on
+    the next poll without restarting the server.
+    """
+    return {
+        "available": resolve_wandb_api_key() is not None,
+        "login_hint": "wandb login",
+    }
+
+
 class HfCloudJobRunner:
     """Run a training as an HF Jobs job. Single-shot — instantiate per job."""
 
@@ -646,6 +724,9 @@ class HfCloudJobRunner:
         # Count of log lines processed across (possibly multiple) SSE
         # connections, so reconnects skip the replayed prefix.
         self._lines_processed: int = 0
+        # Scraped from the trainer's own stdout the first time lerobot prints
+        # the W&B run URL. Both runners scrape; None is the ordinary answer.
+        self._wandb_run_url: str | None = None
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # output_dir is the host-local path the registry pins for local jobs;
@@ -668,6 +749,17 @@ class HfCloudJobRunner:
         # root, host checkpoint paths) BEFORE the potentially-slow dataset
         # upload, so invalid requests fail fast with a 400.
         localize_config_for_cloud(config, self._flavor)
+
+        # W&B credentials, belt-and-braces. JobRegistry.start already refused
+        # this combination before creating a record (and server.py before
+        # that), so reaching here means a caller went straight to the runner.
+        # Deliberately ABOVE _ensure_dataset_on_hub rather than beside the
+        # `secrets` dict where it used to live: the old placement fired only
+        # after a local-only dataset had already been pushed to the Hub, so a
+        # missing key left a published dataset behind for a job that never
+        # ran. ValueError so server.py maps it to a 400 with this detail.
+        if config.wandb_enable and not resolve_wandb_api_key():
+            raise ValueError(WANDB_KEY_MISSING_MESSAGE)
 
         # Open the log file early so dataset-upload progress is recorded
         # before the cloud job is submitted.
@@ -737,8 +829,17 @@ class HfCloudJobRunner:
         )
 
         # HF_TOKEN goes via `secrets` (not `env`) so it doesn't show up in
-        # the job's environment variable inspection / logs.
+        # the job's environment variable inspection / logs. WANDB_API_KEY rides
+        # the same channel for the same reason — it is the one place the key is
+        # read for its VALUE rather than its presence (resolved again here, not
+        # carried down from the guard above, so the key never sits in a local
+        # for the length of a dataset upload).
         secrets = {"HF_TOKEN": token}
+        if config.wandb_enable:
+            wandb_key = resolve_wandb_api_key()
+            if not wandb_key:
+                raise ValueError(WANDB_KEY_MISSING_MESSAGE)
+            secrets["WANDB_API_KEY"] = wandb_key
 
         job = self._api.run_job(
             image=LEROBOT_IMAGE,
@@ -856,6 +957,10 @@ class HfCloudJobRunner:
                         if not stripped:
                             continue
                         parse_metrics_into(stripped, self._metrics, self._resume_total)
+                        if self._wandb_run_url is None:
+                            url = extract_wandb_run_url(stripped)
+                            if url is not None:
+                                self._wandb_run_url = url
                         log_line = LogLine(timestamp=time.time(), message=stripped)
                         if self._log_file is not None:
                             try:
@@ -981,6 +1086,15 @@ class HfCloudJobRunner:
 
     def hf_job_url(self) -> str | None:
         return self._hf_job_url
+
+    def wandb_run_url(self) -> str | None:
+        """The W&B run URL scraped from the trainer's stdout, or None.
+
+        None is the NORMAL answer for most runs — W&B off, offline/disabled
+        mode, or a self-hosted W&B whose URL isn't on wandb.ai. The watchdog
+        treats it as "nothing to link yet", never as an error.
+        """
+        return self._wandb_run_url
 
     def terminal_stage(self) -> str | None:
         """The platform's terminal stage, or None while the job is live.

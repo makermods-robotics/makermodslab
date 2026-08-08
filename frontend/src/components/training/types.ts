@@ -35,6 +35,24 @@ export interface TrainingConfig {
   finetune_from_job_id?: string;
   finetune_from_step?: number;
 
+  // Weights & Biases. Available on BOTH runners; the runner changes only how
+  // the API key reaches the trainer. What the backend DOES refuse, on either
+  // runner, is enabling W&B with no key resolvable on its host — surfaced as a
+  // disabled Start button rather than a failed launch.
+  //
+  // On a RESUME these are inherited SERVER-side from the parent run — lerobot
+  // re-opens the parent's W&B run rather than starting a new one — so the form
+  // shows them read-only and what it sends is not what decides. There is no
+  // run-id field for the same reason.
+  wandb_enable: boolean;
+  wandb_project?: string;
+  wandb_entity?: string;
+  wandb_notes?: string;
+  wandb_mode?: string;
+  // Defaults TRUE (artifacts OFF): per-checkpoint model uploads to W&B are
+  // opt-in, not a side effect of turning logging on.
+  wandb_disable_artifact: boolean;
+
   // Policy-specific parameters
   policy_device?: string;
   policy_use_amp: boolean;

@@ -86,6 +86,26 @@ export type ResumeSeed = {
   optimizerLr?: number;
   optimizerWeightDecay?: number;
   optimizerGradClipNorm?: number;
+  // The parent's W&B settings, carried forward for DISPLAY ONLY — the whole
+  // group, because a resume genuinely uses all of it.
+  //
+  // enable/project/entity are re-read server-side from the parent record
+  // (JobRegistry.start), so what the form sends is ignored. The other three
+  // are not sent at all: the resume branch emits no `--wandb.mode/notes/
+  // disable_artifact`, and it doesn't need to — lerobot rebuilds them from the
+  // checkpoint's train_config.json, which carries the parent's values
+  // (verified against lerobot v0.6.0: reloading a real checkpoint config with
+  // only `--wandb.enable` on the CLI yields the parent's mode, notes and
+  // disable_artifact, all distinct from the class defaults).
+  //
+  // So these are what the resumed run will ACTUALLY use, which is why the
+  // group renders read-only rather than hidden.
+  wandbEnable?: boolean;
+  wandbProject?: string;
+  wandbEntity?: string;
+  wandbNotes?: string;
+  wandbMode?: string;
+  wandbDisableArtifact?: boolean;
 };
 
 // Passed by the "Fine-tune" button on an imported model. A fine-tune is a
@@ -170,6 +190,16 @@ function configToRequest(
       checkpointUploadKind === "finetune" ? true : undefined,
     finetune_from_job_id: c.finetune_from_job_id,
     finetune_from_step: c.finetune_from_step,
+    // W&B works on BOTH runners, so nothing here is gated on the target —
+    // unlike `hf_job_timeout` below, which is genuinely cloud-only. Switching
+    // Compute changes only how the API key reaches the trainer, which is the
+    // backend's business, not the payload's.
+    wandb_enable: c.wandb_enable,
+    wandb_project: c.wandb_project?.trim() || undefined,
+    wandb_entity: c.wandb_entity?.trim() || undefined,
+    wandb_notes: c.wandb_notes?.trim() || undefined,
+    wandb_mode: c.wandb_mode,
+    wandb_disable_artifact: c.wandb_disable_artifact,
     policy_device: c.policy_device,
     policy_use_amp: c.policy_use_amp,
     optimizer_type: c.optimizer_type,
@@ -272,6 +302,23 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     resume_from_checkpoint_job_id: resumeSeed?.checkpointJobId,
     finetune_from_job_id: finetuneSeed?.jobId,
     finetune_from_step: finetuneSeed?.step ?? undefined,
+    // W&B. Off here, and switched on for a FRESH run once the credential probe
+    // confirms a key exists (see the effect below) — an initial value can't
+    // wait on an async answer. A RESUME is prefilled from the parent instead
+    // and never defaulted: its W&B state is inherited, not chosen.
+    //
+    // The whole group is seeded, not just enable/project/entity: lerobot
+    // rebuilds mode/notes/disable_artifact from the checkpoint's
+    // train_config.json, so the parent's values are what a continuation really
+    // runs with and the read-only display of them is accurate.
+    // `wandb_disable_artifact` still defaults TRUE for a fresh run —
+    // per-checkpoint uploads to W&B are opt-in.
+    wandb_enable: resumeSeed?.wandbEnable ?? false,
+    wandb_project: resumeSeed?.wandbProject,
+    wandb_entity: resumeSeed?.wandbEntity,
+    wandb_notes: resumeSeed?.wandbNotes,
+    wandb_mode: resumeSeed?.wandbMode ?? "online",
+    wandb_disable_artifact: resumeSeed?.wandbDisableArtifact ?? true,
     policy_device: resumeSeed?.policyDevice ?? "auto",
     policy_use_amp: resumeSeed?.policyUseAmp ?? false,
     optimizer_type: resumeSeed?.optimizerType ?? "adam",
@@ -320,6 +367,30 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const [hardwareLoading, setHardwareLoading] = useState(true);
   // HF_HUB_OFFLINE on the backend: Hub writes (incl. dataset upload) disabled.
   const [offline, setOffline] = useState<boolean>(false);
+  // Whether a W&B API key is resolvable on the BACKEND's host (env or
+  // ~/.netrc). null while the probe is in flight, and also when it failed — an
+  // unreachable probe must not block a launch, so callers gate only on an
+  // explicit `false`. There is no install flow behind this: the wandb package
+  // ships with the pinned lerobot, so the credential is the only thing that can
+  // be missing.
+  const [wandbKeyAvailable, setWandbKeyAvailable] = useState<boolean | null>(
+    null,
+  );
+
+  useEffect(() => {
+    // Cheap and unconditional: the answer is needed before the user has
+    // necessarily chosen cloud, and re-probing on every runner toggle would
+    // make the Start button flicker between "blocked" and "ready".
+    fetchWithHeaders(`${baseUrl}/system/wandb-credentials`)
+      .then((r) => r.json())
+      .then((data: { available: boolean }) =>
+        setWandbKeyAvailable(!!data.available),
+      )
+      // Stays null on failure (older backend / transport blip) so the missing
+      // key can't be *asserted* from a probe that never answered — the backend
+      // preflight is the belt-and-braces catch for that case.
+      .catch(() => setWandbKeyAvailable(null));
+  }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     fetchWithHeaders(`${baseUrl}/system/training-extra`)
@@ -367,11 +438,19 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   // someone typed. A ref, not state: nothing renders from it.
   const nameEdited = useRef(false);
 
+  // Same idea for the W&B toggle, and for the same reason: the credential
+  // probe answers ASYNCHRONOUSLY, so a user can plausibly switch logging off
+  // before it returns. Without this, a late "yes, there's a key" would flip it
+  // back on under them — the form silently overriding a decision they made.
+  const wandbEnableTouched = useRef(false);
+  const wandbDefaultApplied = useRef(false);
+
   const updateConfig = <T extends keyof TrainingConfig>(
     key: T,
     value: TrainingConfig[T],
   ) => {
     if (key === "job_name") nameEdited.current = true;
+    if (key === "wandb_enable") wandbEnableTouched.current = true;
     // policy_type is controlled by the caller; route edits (EssentialsCard's
     // dropdown) back up. dataset_repo_id is controlled + display-only, but
     // guard it too so a stray write can't desync.
@@ -402,6 +481,31 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       prev.job_name === proposed ? prev : { ...prev, job_name: proposed },
     );
   }, [controlledDatasetRepoId, finetuneSourceName, resumeSeed]);
+
+  // Default W&B logging ON for a FRESH run once the backend confirms it can
+  // resolve an API key. A UI-level default only: the backend's
+  // `TrainingRequest.wandb_enable` still defaults false, so non-UI callers keep
+  // opt-in semantics and the submit-time preflight still protects them.
+  //
+  // Three guards, each earning its place:
+  //   * `resumeSeed` — a continuation's W&B state is inherited from its parent,
+  //     never defaulted; enabling it here could only contradict the server.
+  //   * `wandbDefaultApplied` — fires at most once per mounted form, so a
+  //     re-render or a re-answered probe can't re-assert the default after the
+  //     user has moved on.
+  //   * `wandbEnableTouched` — an explicit decision always wins, including one
+  //     made while the probe was still in flight.
+  // `wandbKeyAvailable !== true` covers both "still loading" and "probe
+  // failed": neither is evidence a key exists, so neither turns logging on.
+  useEffect(() => {
+    if (resumeSeed || wandbDefaultApplied.current) return;
+    if (wandbKeyAvailable !== true) return;
+    wandbDefaultApplied.current = true;
+    if (wandbEnableTouched.current) return;
+    setTrainingConfig((prev) =>
+      prev.wandb_enable ? prev : { ...prev, wandb_enable: true },
+    );
+  }, [wandbKeyAvailable, resumeSeed]);
 
   // Cloud training runs from the Hub, so a dataset that only exists in this
   // machine's local cache must be uploaded first. We read the chosen dataset's
@@ -643,6 +747,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   // first, which offline mode makes impossible — a hard block, exactly like the
   // dataset case above.
   const checkpointUploadBlockedOffline = needsCheckpointUpload && offline;
+  // W&B on and no API key on the backend's host: the launch would be a 400 on
+  // EITHER runner (the key is forwarded to the pod as a job secret for cloud,
+  // and a local trainer is a non-tty subprocess that can't sign in), so block
+  // here and name the reason instead. Gated on an explicit `false` — a probe
+  // that hasn't answered, or couldn't, must not invent a missing key.
+  const wandbKeyMissing = config.wandb_enable && wandbKeyAvailable === false;
+
   const startDisabled =
     isStarting ||
     uploading ||
@@ -653,6 +764,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     targetMissingFlavor ||
     uploadBlockedOffline ||
     checkpointUploadBlockedOffline ||
+    wandbKeyMissing ||
     resumeStepError != null;
   const blockedTooltip = localBlocked
     ? "Another local training is already running"
@@ -664,7 +776,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           ? "Offline mode is on — the dataset can't be uploaded to the Hub"
           : checkpointUploadBlockedOffline
             ? "Offline mode is on — the checkpoint can't be uploaded to the Hub"
-            : undefined;
+            : wandbKeyMissing
+              ? "No W&B API key on this machine — run `wandb login`, or turn W&B logging off"
+              : undefined;
   // The name field can sit far above a portaled Start button (the studio panel
   // pins it at the panel's foot), so its reason travels with the button — and
   // it takes precedence: an unnamed run can't start whatever else is true.
@@ -743,6 +857,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         // will discard. configToRequest still sends the form's values, keeping
         // the new JobRecord's persisted config truthful about what was asked.
         resumeLocked={resumeSeed != null}
+        wandbKeyAvailable={wandbKeyAvailable}
       />
       {needsUpload ? (
         <div className="mt-6">

@@ -349,5 +349,21 @@ export function buildResumeSeed(
     optimizerLr: parent.optimizer_lr,
     optimizerWeightDecay: parent.optimizer_weight_decay,
     optimizerGradClipNorm: parent.optimizer_grad_clip_norm,
+    // Display only — see the ResumeSeed comments. enable/project/entity are
+    // re-read server-side from this same record; mode/notes/disable_artifact
+    // come back from the checkpoint's own train_config.json. Either way these
+    // are the values the continuation really runs with, so the read-only group
+    // showing them is accurate rather than decorative.
+    //
+    // A parent predating the W&B fields simply has `wandb_enable` false (the
+    // field is absent, so pydantic's default applies), and the group renders
+    // "Not logging to W&B" with the other five hidden — so nothing is
+    // fabricated for a legacy record.
+    wandbEnable: parent.wandb_enable,
+    wandbProject: parent.wandb_project,
+    wandbEntity: parent.wandb_entity,
+    wandbNotes: parent.wandb_notes,
+    wandbMode: parent.wandb_mode,
+    wandbDisableArtifact: parent.wandb_disable_artifact,
   };
 }

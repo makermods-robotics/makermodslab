@@ -119,6 +119,10 @@ class JobRecord(BaseModel):
     hf_flavor: str | None = None
     hf_repo_id: str | None = None
     hf_job_url: str | None = None
+    # Captured from training stdout the first time lerobot prints the W&B run
+    # URL. Both runners scrape it. None is the ordinary answer (W&B off, or a
+    # mode/host whose URL never appears) and never an error signal.
+    wandb_run_url: str | None = None
     # Number of checkpoints currently visible (local: filesystem; cloud:
     # Hub repo). Filled in by JobRegistry.list/get; persisted as zero.
     checkpoint_count: int = 0
@@ -222,6 +226,12 @@ class JobRunner(Protocol):
     def is_running(self) -> bool: ...
     def returncode(self) -> int | None: ...
     def stream_log_lines(self) -> list[LogLine]: ...
+    # Required of EVERY runner: the watchdog asks each running job's runner for
+    # one on every tick, and an optional method would make "no such hook" and
+    # "no URL yet" indistinguishable. Every real runner scrapes it from the
+    # trainer's output; only PreparingJobRunner answers a constant None,
+    # because no trainer has run yet.
+    def wandb_run_url(self) -> str | None: ...
 
 
 # Written to `error_message` when a run ends because we asked it to. The field
@@ -312,6 +322,30 @@ def _runner_hook(runner: object, name: str):
 
 # tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
 _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:]+)<([\d:]+)")
+
+# The W&B run URL, as LEROBOT prints it — not as wandb does. lerobot's
+# WandBLogger sets WANDB_SILENT=True before importing wandb (wandb_utils.py),
+# which suppresses wandb's own "wandb: 🚀 View run at …" banner entirely, so
+# the only line carrying the URL is lerobot's own:
+#
+#   logging.info(f"Track this run --> {colored(wandb.run.get_url(), 'yellow', attrs=['bold'])}")
+#
+# `colored` wraps the URL in ANSI SGR codes when the stream looks colourable
+# ("Track this run --> \x1b[33m\x1b[1mhttps://…\x1b[0m") and leaves it bare
+# otherwise, so this matches the URL SHAPE anywhere in the line rather than the
+# sentence around it: the escape prefix sits before "https" and the reset is
+# excluded by the run-id character class, so one pattern covers both forms.
+#
+# wandb.ai only, deliberately. A self-hosted W&B prints a URL on some other
+# host and simply yields no link — which is the same "no URL" outcome as
+# offline/disabled mode, and is never treated as an error.
+_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9_-]+")
+
+
+def extract_wandb_run_url(line: str) -> str | None:
+    match = _WANDB_URL_RE.search(line)
+    return match.group(0) if match else None
+
 
 def _parse_duration(s: str) -> float | None:
     """Parse tqdm's HH:MM:SS or MM:SS into seconds. Returns None on '?'."""
@@ -457,9 +491,8 @@ def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
     return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
-def _read_log_metrics(
-    path: Path, resume_total: int | None
-) -> builtins.list[MetricsHistoryPoint]:
+
+def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
     Feed every line through ONE accumulator rather than a fresh one per line.
@@ -522,6 +555,7 @@ class LocalJobRunner:
         self._stop_event = threading.Event()
         self._log_file_path = log_file_path
         self._log_file = None  # type: ignore[assignment]
+        self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
         # True only once we have actually signalled a LIVE process. Lets the
         # registry tell "we killed this" from "it had already died", which the
@@ -620,6 +654,9 @@ class LocalJobRunner:
             pass
         return out
 
+    def wandb_run_url(self) -> str | None:
+        return self._wandb_run_url
+
     # -- internals --
 
     def _pump_stdout(self) -> None:
@@ -632,6 +669,10 @@ class LocalJobRunner:
                 if not stripped:
                     continue
                 parse_metrics_into(stripped, self._metrics, self._resume_total)
+                if self._wandb_run_url is None:
+                    url = extract_wandb_run_url(stripped)
+                    if url is not None:
+                        self._wandb_run_url = url
                 log_line = LogLine(timestamp=time.time(), message=stripped)
                 if self._log_file is not None:
                     try:
@@ -678,6 +719,7 @@ class TailingJobRunner:
         # Replay everything that's already on disk so the parser catches up
         # on metrics, then tail from the current EOF.
         self._tail_offset = 0
+        self._wandb_run_url: str | None = None
         # See stop() / returncode(): we have no Popen to reap, so this flag is
         # the only record that the pid's disappearance was our doing.
         self._stop_signalled = False
@@ -741,6 +783,13 @@ class TailingJobRunner:
     def pid(self) -> int | None:
         return self._pid
 
+    def wandb_run_url(self) -> str | None:
+        # Re-derived by replaying the log from offset 0 on attach, not carried
+        # across the restart: the URL is printed once, near the start, so a
+        # runner that only tailed from EOF would permanently lose it for any
+        # run that survived a `--reload`.
+        return self._wandb_run_url
+
     # -- internals --
 
     def _tail_loop(self) -> None:
@@ -767,9 +816,11 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(
-                            log_line.message, self._metrics, self._resume_total
-                        )
+                        parse_metrics_into(log_line.message, self._metrics, self._resume_total)
+                        if self._wandb_run_url is None:
+                            url = extract_wandb_run_url(log_line.message)
+                            if url is not None:
+                                self._wandb_run_url = url
                         if self._log_queue.qsize() >= 1000:
                             with contextlib.suppress(Empty):
                                 self._log_queue.get_nowait()
@@ -858,6 +909,11 @@ class PreparingJobRunner:
         except Empty:
             pass
         return out
+
+    def wandb_run_url(self) -> str | None:
+        # No trainer has run yet, so there is no run URL to capture. Present
+        # only because the watchdog asks every runner for one.
+        return None
 
 
 _PERSIST_THROTTLE_SECONDS = 1.0
@@ -1663,9 +1719,7 @@ def download_hub_resume_checkpoint(ref: str, *, tqdm_class=None) -> str:
     return str(pretrained_dir / _TRAIN_CONFIG_NAME)
 
 
-def upload_local_checkpoint(
-    checkpoint_dir: Path, repo_id: str, step_dir: str, *, api=None
-) -> None:
+def upload_local_checkpoint(checkpoint_dir: Path, repo_id: str, step_dir: str, *, api=None) -> None:
     """Push one local checkpoints/<step_dir>/ tree to `repo_id` on the Hub.
 
     F7's local→cloud direction: a pod cannot see this machine's disk, so the
@@ -2524,7 +2578,7 @@ class JobRegistry:
         self._on_change: Callable[[], None] | None = None
 
         # Fired from the watchdog at ~1Hz with a compact snapshot of every
-        # running job (id, state, metrics, checkpoint count) so
+        # running job (id, state, metrics, wandb url, checkpoint count) so
         # the dashboard keeps the progress bar live without refetching /jobs.
         self._on_progress: Callable[[builtins.list[dict]], None] | None = None
 
@@ -2690,7 +2744,13 @@ class JobRegistry:
         return record
 
     def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
-        from .runners.hf_cloud import HfCloudJobRunner  # lazy import to avoid circular import
+        # Lazy, and the ONE import site in this method: runners.hf_cloud imports
+        # from this module, so a module-level import would close the cycle.
+        from .runners.hf_cloud import (  # lazy import to avoid circular import
+            WANDB_KEY_MISSING_MESSAGE,
+            HfCloudJobRunner,
+            resolve_wandb_api_key,
+        )
 
         target = target or JobTarget()
         if target.runner == "hf_cloud" and not target.flavor:
@@ -2964,6 +3024,42 @@ class JobRegistry:
                     owner = source
                     if config.resume_from_checkpoint_job_id:
                         owner = self._resolve_checkpoint_owner(source, config)
+
+                    # W&B state is INHERITED, never form-decided. lerobot
+                    # resumes with `wandb.init(resume="must")` using the run id
+                    # in the checkpoint's train_config.json (wandb_utils.py),
+                    # so a continuation always re-opens the W&B run that wrote
+                    # the checkpoint: turning W&B on for a resume of a non-W&B
+                    # checkpoint is not a thing lerobot can do, and turning it
+                    # off is the only other lever. Copying those settings here —
+                    # under the lock, before the record exists — makes the
+                    # persisted config describe the run's real shape and gives
+                    # the credential preflight below the true value to check.
+                    #
+                    # From `owner`, NOT `source`, and that distinction is
+                    # load-bearing on a rewind: the W&B run rides the CHECKPOINT
+                    # (its run_id is inside that checkpoint's train_config.json),
+                    # so it belongs to whichever record wrote the chosen
+                    # checkpoint. Reading the leaf instead would be wrong in
+                    # both directions — inheriting `enable: true` from a leaf
+                    # whose rewound-to ancestor checkpoint carries no run_id
+                    # sends lerobot down `get_wandb_run_id_from_filesystem`,
+                    # which globs THIS run's empty output dir and raises; and
+                    # inheriting the leaf's project/entity would describe the
+                    # record with a W&B run the trainer never opens. On a plain
+                    # tip-resume `owner is source`, so this is unchanged there.
+                    #
+                    # Runner-blind either way: a continuation that crosses
+                    # runners (F7) keeps logging to the same W&B run, because
+                    # that run is identified by the checkpoint, not by where the
+                    # trainer happens to execute.
+                    #
+                    # The form carries these forward too (buildResumeSeed), but
+                    # only to DISPLAY them read-only; the server does not trust
+                    # what comes back.
+                    config.wandb_enable = owner.config.wandb_enable
+                    config.wandb_project = owner.config.wandb_project
+                    config.wandb_entity = owner.config.wandb_entity
                     # A resume may continue on EITHER runner (F7). What changes
                     # across the four combinations is only where the parent's
                     # checkpoint has to end up before the trainer can read it —
@@ -3083,6 +3179,34 @@ class JobRegistry:
                         "Raise the step target above the checkpoint, or pick an earlier "
                         "checkpoint."
                     )
+
+            # W&B credentials, THE authoritative preflight (MT40). Applies to
+            # BOTH runners: W&B needs a key wherever it runs, and neither runner
+            # can ask for one once it has started.
+            #
+            #   * cloud — the key is forwarded into the pod as a job secret;
+            #     without it the trainer dies inside a billed GPU container.
+            #   * local — the trainer is a subprocess with no tty, so
+            #     `wandb.init` cannot prompt for a login and simply fails,
+            #     AFTER the record already says `running`. Same useless
+            #     failure, cheaper hardware.
+            #
+            # Deliberately here: after the resume block, so it reads the
+            # INHERITED `wandb_enable` rather than whatever the form sent, and
+            # before the first line below that has a side effect — no job
+            # record, no output directory, no dataset push
+            # (HfCloudJobRunner._ensure_dataset_on_hub runs later still), no
+            # local subprocess, and crucially none of the deferred threads
+            # (_upload_resume_then_start / _download_resume_then_start /
+            # _materialize_then_start), which return 201 and would turn this
+            # refusal into a FAILED JOB the user has to go read logs for
+            # instead of a message on the button they just pressed.
+            #
+            # The original MT40 defect was exactly this check being absent on
+            # the resume path: a W&B-enabled parent resumed on the cloud with no
+            # key, and died inside a billed GPU container.
+            if config.wandb_enable and not resolve_wandb_api_key():
+                raise ValueError(WANDB_KEY_MISSING_MESSAGE)
 
             job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id, job_name=job_stem)
             job_dir = _job_dir(self._output_root, job_id)
@@ -4340,6 +4464,16 @@ class JobRegistry:
             if runner is None or record is None:
                 continue
             if runner.is_running():
+                # Pull the W&B run URL once it appears in stdout. Asked only
+                # until one is found, and a None answer is simply "not yet"
+                # (or "never", for every W&B-off run) — it is not retried
+                # against, not logged, and not an error.
+                if record.wandb_run_url is None:
+                    url = runner.wandb_run_url()
+                    if url is not None:
+                        with self._lock:
+                            record.wandb_run_url = url
+                        self._persist(record, force=True)
                 # Persist metric snapshot at most once per second.
                 self._persist(record, force=False)
                 progress_snapshots.append(
@@ -4347,6 +4481,7 @@ class JobRegistry:
                         "id": record.id,
                         "state": record.state,
                         "metrics": record.metrics.model_dump(),
+                        "wandb_run_url": record.wandb_run_url,
                         "checkpoint_count": self._count_checkpoints(record),
                     }
                 )
@@ -4367,6 +4502,11 @@ class JobRegistry:
                 terminal_stage=_runner_hook(runner, "terminal_stage"),
             )
             with self._lock:
+                # Last chance at the URL: a short run can print it and exit
+                # between two ticks, so the running-branch pull above never
+                # sees it.
+                if record.wandb_run_url is None:
+                    record.wandb_run_url = runner.wandb_run_url()
                 record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc

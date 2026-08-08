@@ -3,12 +3,20 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { AdvancedSection } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
 import {
   ConfigComponentProps,
   POLICY_TYPE_OPTIONS,
   RESUME_INHERITED_NOTE,
+  RESUME_INHERITED_SHORT,
 } from "../types";
 import { useApi } from "@/contexts/ApiContext";
 import { isValidTimeout } from "@/lib/jobTimeout";
@@ -80,6 +88,14 @@ const DEFAULT_OPTIMIZER_KNOBS: readonly OptimizerKnob[] = ["lr"];
 const policyShortLabel = (value: string): string =>
   POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.label || value;
 
+interface AdvancedCardProps extends ConfigComponentProps {
+  /** Whether a W&B API key is resolvable on the BACKEND's host. null while the
+   * credential probe is in flight (and if it failed) — the warning below is
+   * gated on an explicit `false`, so an unanswered probe never claims a key is
+   * missing. */
+  wandbKeyAvailable?: boolean | null;
+}
+
 /** Advanced-parameters section of the training form. Uses the shared
  * AdvancedSection, so its trigger is the same eyebrow-level control as the
  * Collect form's "Advanced parameters" instead of a heavier heading that
@@ -96,10 +112,11 @@ const policyShortLabel = (value: string): string =>
  * at all. Worker count sits outside the inherited block on purpose — it is a
  * host-capacity knob (like the cloud flavor), not part of the experiment, and a
  * continuation can land on different hardware than the parent run. */
-const AdvancedCard: React.FC<ConfigComponentProps> = ({
+const AdvancedCard: React.FC<AdvancedCardProps> = ({
   config,
   updateConfig,
   resumeLocked,
+  wandbKeyAvailable = null,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -158,7 +175,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
     <AdvancedSection
       open={expanded}
       onOpenChange={setExpanded}
-      summary="Optimizer, learning rate, log frequency, checkpoints, and more"
+      summary="Optimizer, learning rate, log frequency, checkpoints, W&B, and more"
     >
       <div className="space-y-6">
         {/* Policy preset + Training + Optimizer. On a resume these are one
@@ -350,6 +367,153 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
               )}
             </div>
           </div>
+        </section>
+
+        {/* Weights & Biases — sited here, directly after the log/save cadence,
+            because W&B answers the same question those fields do: how loudly
+            this run reports. It is NOT part of Compute — W&B works on both
+            runners, and the only thing the runner changes is how the API key
+            reaches the trainer, which is not the form's business.
+
+            PLACEMENT (user decision, 2026-08-08): the upstream commit put this
+            group inline and argued against a disclosure, on the grounds that
+            whether a run is tracked should be visible without opening
+            anything. That argument was written about the compressed panel's
+            pane structure, where run settings sit behind no disclosure at all.
+            It does not transfer here: on this panel EVERY run-reporting
+            control — seed, cadence, AMP — lives inside Advanced, so placing
+            W&B outside it would make it the anomaly rather than the peer of
+            the AMP switch it was designed to be. Advanced is where the old
+            panel's reporting controls live, so this is where W&B goes. */}
+        <section className="space-y-3">
+          <SectionHeading>Weights &amp; Biases</SectionHeading>
+          <div className="flex items-center gap-3">
+            <Switch
+              id="wandb_enable"
+              checked={config.wandb_enable}
+              onCheckedChange={(checked) =>
+                updateConfig("wandb_enable", checked)
+              }
+              disabled={resumeLocked}
+              className="data-[state=checked]:bg-primary"
+            />
+            <Label htmlFor="wandb_enable">Log to Weights &amp; Biases</Label>
+          </div>
+
+          {config.wandb_enable && (
+            <div className="space-y-4">
+              {resumeLocked && (
+                <p className="text-xs text-muted-foreground">
+                  {RESUME_INHERITED_SHORT} A continuation re-opens the parent
+                  run's W&amp;B run, so it can't log somewhere else.
+                </p>
+              )}
+
+              {/* The one blocking condition, stated where it is caused. Start
+                  is disabled on this too (TrainingConfigurator), so this is the
+                  explanation rather than the enforcement. */}
+              {wandbKeyAvailable === false && (
+                <p className="text-xs text-warn">
+                  ⚠ No W&amp;B API key found on this machine. Run{" "}
+                  <code className="px-1 py-0.5 rounded bg-muted text-info">
+                    wandb login
+                  </code>{" "}
+                  (or set WANDB_API_KEY) — W&amp;B can't sign in on its own from
+                  a training job, so the run can't start without it.
+                </p>
+              )}
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="wandb_project">Project</Label>
+                  <Input
+                    id="wandb_project"
+                    value={config.wandb_project || ""}
+                    onChange={(e) =>
+                      updateConfig("wandb_project", e.target.value || undefined)
+                    }
+                    placeholder="lerobot (default)"
+                    disabled={resumeLocked}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="wandb_entity">Entity</Label>
+                  <Input
+                    id="wandb_entity"
+                    value={config.wandb_entity || ""}
+                    onChange={(e) =>
+                      updateConfig("wandb_entity", e.target.value || undefined)
+                    }
+                    placeholder="your-username or team"
+                    disabled={resumeLocked}
+                  />
+                  {/* The 403 trap, stated as what the field IS rather than as a
+                      warning: W&B rejects a run aimed at an entity you aren't a
+                      member of, and it rejects it at run start, long after Start
+                      was clicked. Naming "a team you belong to" is what stops
+                      someone typing a placeholder word into it. */}
+                  <p className="text-xs text-muted-foreground">
+                    Your W&amp;B username or a team you belong to. Blank = your
+                    personal account.
+                  </p>
+                </div>
+              </div>
+
+              {/* Shown on a resume too, read-only. These are NOT sent — the
+                  resume branch emits no --wandb.mode/notes/disable_artifact —
+                  but lerobot rebuilds them from the checkpoint's
+                  train_config.json, which carries the parent's values. So they
+                  are what the continuation actually runs with, and displaying
+                  them is honest rather than decorative. (Verified against
+                  lerobot v0.6.0.) */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="wandb_notes">W&amp;B notes (optional)</Label>
+                  <Input
+                    id="wandb_notes"
+                    value={config.wandb_notes || ""}
+                    onChange={(e) =>
+                      updateConfig("wandb_notes", e.target.value || undefined)
+                    }
+                    placeholder="Training run notes..."
+                    disabled={resumeLocked}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="wandb_mode">W&amp;B mode</Label>
+                  <Select
+                    value={config.wandb_mode || "online"}
+                    onValueChange={(value) => updateConfig("wandb_mode", value)}
+                    disabled={resumeLocked}
+                  >
+                    <SelectTrigger id="wandb_mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="online">Online</SelectItem>
+                      <SelectItem value="offline">Offline</SelectItem>
+                      <SelectItem value="disabled">Disabled</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="wandb_disable_artifact"
+                  checked={config.wandb_disable_artifact}
+                  onCheckedChange={(checked) =>
+                    updateConfig("wandb_disable_artifact", checked)
+                  }
+                  disabled={resumeLocked}
+                  className="data-[state=checked]:bg-primary"
+                />
+                <Label htmlFor="wandb_disable_artifact">
+                  Don't upload checkpoints to W&amp;B
+                </Label>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Cloud (HF Jobs) */}

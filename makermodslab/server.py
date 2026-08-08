@@ -106,6 +106,13 @@ from .rollout import (
     handle_stop_inference,
 )
 
+# Training is now job-based; see app/jobs.py.
+from .runners.hf_cloud import (
+    WANDB_KEY_MISSING_MESSAGE,
+    handle_get_wandb_credentials,
+    resolve_wandb_api_key,
+)
+
 # Import our custom teleoperation functionality
 from .teleoperate import (
     TeleoperateRequest,
@@ -114,8 +121,6 @@ from .teleoperate import (
     handle_teleoperation_status,
     stop_and_wait as stop_teleoperation_and_wait,
 )
-
-# Training is now job-based; see app/jobs.py.
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
@@ -1259,6 +1264,22 @@ async def create_training_job(req: Request):
                 f"step ({cfg.resume_from_step}) to continue training."
             ),
         )
+    # W&B credentials, the FAST half (MT40). Any run that asks for W&B needs an
+    # API key on THIS machine, on either runner: a cloud job gets it forwarded
+    # as a job secret, and a local job's trainer is a non-tty subprocess that
+    # can't prompt for a login. Refuse here, before anything is uploaded,
+    # submitted or spawned.
+    #
+    # Fast half only, and for the same reason as the resume-steps guard above:
+    # it reads the REQUEST's `wandb_enable`, which on a resume is not the
+    # authority — JobRegistry.start overwrites it with the parent run's value
+    # (a continuation always re-opens the parent's W&B run). So resumes are
+    # skipped here and re-asked there, once the inherited value is known; that
+    # check is the authority and raises ValueError -> the 400 below.
+    if cfg.wandb_enable and not cfg.resume and not resolve_wandb_api_key():
+        logger.warning("Rejecting run: W&B enabled but no API key resolvable on this host.")
+        raise HTTPException(status_code=400, detail=WANDB_KEY_MISSING_MESSAGE)
+
     # Local preflight (belt-and-braces), the mirror of the cloud
     # DatasetNotOnHubError guard: a LOCAL run with no --dataset.root makes
     # lerobot auto-download the dataset from the Hub at start. When the Hub is
@@ -1945,6 +1966,21 @@ def install_training_extra():
 def install_training_extra_status():
     """Return current install state plus any pending log lines (drained on read)."""
     return handle_install_training_extra_status()
+
+
+@app.get("/system/wandb-credentials")
+def get_wandb_credentials():
+    """Whether a Weights & Biases API key is resolvable on this host.
+
+    Powers the training form's W&B preflight: the Start button is disabled with
+    a named reason BEFORE the click, rather than the launch 400ing on it. There
+    is deliberately no install endpoint beside this one — wandb the package is a
+    transitive dependency of the pinned lerobot, so the only thing that can
+    actually be missing is the credential.
+
+    Returns `{"available": bool, "login_hint": str}` and never the key itself.
+    """
+    return handle_get_wandb_credentials()
 
 
 @app.get("/system/policy-extra/{policy_type}")

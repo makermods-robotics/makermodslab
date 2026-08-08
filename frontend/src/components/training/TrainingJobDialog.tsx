@@ -367,6 +367,21 @@ const TrainingJobDialog: React.FC<{
                           View on Hub ↗
                         </a>
                       )}
+                    {/* No state gate, unlike the Hub link above: the W&B run
+                        exists from the moment the trainer prints its URL, so
+                        the link is useful WHILE the run is live — that is most
+                        of what W&B is for. Absent whenever there's no URL,
+                        which is the ordinary case. */}
+                    {job.wandb_run_url && (
+                      <a
+                        href={job.wandb_run_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-primary hover:underline"
+                      >
+                        View on W&B ↗
+                      </a>
+                    )}
                   </div>
                   {/* When aliased, keep the immutable run id visible as subtext. */}
                   {job.display_name ? (

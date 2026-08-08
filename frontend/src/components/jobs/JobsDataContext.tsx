@@ -187,6 +187,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
             ...j,
             state: s.state,
             metrics: s.metrics,
+            wandb_run_url: s.wandb_run_url,
             checkpoint_count: s.checkpoint_count,
           };
         });
