@@ -191,6 +191,16 @@ class JobRunner(Protocol):
 # `exit_code` for anyone debugging.
 STOPPED_BY_REQUEST_MESSAGE = "Stopped at your request, not by a training error."
 
+# Written to `error_message` for a run that ended while we weren't watching and
+# left no evidence of how: no exit status from the wrapper (see
+# _EXIT_STATUS_FILENAME), no platform stage, and no stop of ours. The run is
+# filed as `interrupted` rather than done/failed, so this text has to say that
+# the outcome is unknown WITHOUT implying the weights are.
+UNCONFIRMED_OUTCOME_MESSAGE = (
+    "MakerMods Lab restarted while this run was training; its outcome could not "
+    "be confirmed. Any checkpoints on disk are intact."
+)
+
 
 def classify_terminal_state(
     *,
@@ -272,6 +282,26 @@ def _runner_hook(runner: object, name: str):
 
 # tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
 _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:]+)<([\d:]+)")
+
+# Name of the file LocalJobRunner's subprocess wrapper writes the trainer's
+# real exit status to, relative to the run's output_dir. TailingJobRunner
+# reads it after a reattach — see both classes' start()/returncode().
+_EXIT_STATUS_FILENAME = "exit_status"
+
+
+def _read_exit_status(path: Path | None) -> int | None:
+    """The trainer's real exit code from the wrapper's status file, or None.
+
+    None means "no usable evidence" for every reason alike: no path, no file
+    (the wrapper was killed before it could write, e.g. SIGKILL or a reboot),
+    or unparseable contents. Callers must not read None as a success or a
+    failure — see TailingJobRunner.returncode()."""
+    if path is None:
+        return None
+    try:
+        return int(path.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
 
 
 def _parse_duration(s: str) -> float | None:
@@ -491,11 +521,13 @@ class LocalJobRunner:
         self._stop_event = threading.Event()
         self._log_file_path = log_file_path
         self._log_file = None  # type: ignore[assignment]
+        self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
         # True only once we have actually signalled a LIVE process. Lets the
         # registry tell "we killed this" from "it had already died", which the
         # exit code alone cannot express.
         self._stop_signalled = False
+        self._status_path: Path | None = None
 
     def start(
         self,
@@ -525,13 +557,38 @@ class LocalJobRunner:
         child_env = os.environ.copy()
         child_env["PYTHONUNBUFFERED"] = "1"
 
-        # start_new_session=True puts the child in its own session/process
-        # group. Without it, signals sent to the uvicorn worker (e.g. when
-        # --reload restarts it on a .py file change) cascade to the child
-        # and kill the training. With it, the child survives reloads; the
-        # next worker re-attaches via TailingJobRunner using job.json's pid.
+        # output_dir is fresh per job (LocalJobRunner is single-shot), so a
+        # leftover exit_status here would only ever come from a stray manual
+        # re-run into the same dir — cheap to guard anyway.
+        self._status_path = Path(output_dir) / _EXIT_STATUS_FILENAME
+        with contextlib.suppress(FileNotFoundError):
+            self._status_path.unlink()
+
+        # Wrap the trainer in a shell that records its own exit status to
+        # disk. This is the only way to learn the real outcome of a job that
+        # outlives this process (uvicorn --reload, or a full restart) — see
+        # TailingJobRunner.returncode(). `trap "" HUP` keeps the wrapper alive
+        # through a reload's HUP long enough to write the status; passing the
+        # status path as $0 and the real command as "$@" (rather than two
+        # separate -c scripts) is what lets sh -c carry both through one
+        # positional-arg list.
+        wrapped_cmd = [
+            "/bin/sh",
+            "-c",
+            'trap "" HUP; "$@"; s=$?; printf %s "$s" > "$0.tmp" && mv "$0.tmp" "$0"; exit $s',
+            str(self._status_path),
+            *cmd,
+        ]
+
+        # start_new_session=True puts the wrapper (and the trainer it forks)
+        # in their own session/process group. Without it, signals sent to the
+        # uvicorn worker (e.g. when --reload restarts it on a .py file change)
+        # cascade to the child and kill the training. With it, the child
+        # survives reloads; the next worker re-attaches via TailingJobRunner
+        # using job.json's pid — see stop()'s use of killpg for the other side
+        # of this: the tracked pid is the wrapper's, not the trainer's.
         self._process = subprocess.Popen(
-            cmd,
+            wrapped_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
@@ -557,12 +614,18 @@ class LocalJobRunner:
         self._stop_event.set()
         self._stop_signalled = True
         try:
-            self._process.terminate()
+            # self._process is the /bin/sh wrapper from start(); the trainer
+            # is its child in the same process group (start_new_session made
+            # the wrapper's pid its own pgid too), so signalling the wrapper
+            # alone would leave the trainer running. Signal the whole group.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self._process.pid, signal.SIGTERM)
             try:
                 self._process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 logger.warning("Subprocess did not terminate in 10s, killing")
-                self._process.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self._process.pid, signal.SIGKILL)
                 self._process.wait()
         except Exception as exc:
             logger.exception("Error stopping subprocess: %s", exc)
@@ -577,6 +640,10 @@ class LocalJobRunner:
     def returncode(self) -> int | None:
         if self._process is None:
             return None
+        # The wrapper shell in start() `exit $s`s with the trainer's own exit
+        # status, so poll() already reports the real code — no need to read
+        # the status file here (that's for TailingJobRunner, which can't poll
+        # across a process restart).
         return self._process.poll()
 
     def stream_log_lines(self) -> list[LogLine]:
@@ -642,11 +709,13 @@ class TailingJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         pid: int,
+        status_path: Path,
         resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._pid = pid
+        self._status_path = status_path
         self._resume_total = resume_total
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
@@ -655,8 +724,9 @@ class TailingJobRunner:
         # on metrics, then tail from the current EOF.
         self._tail_offset = 0
         self._wandb_run_url: str | None = None
-        # See stop() / returncode(): we have no Popen to reap, so this flag is
-        # the only record that the pid's disappearance was our doing.
+        # Set only when stop() actually got a SIGTERM into a LIVE process
+        # group. We have no Popen to reap, so this flag is the only record
+        # that the pid's disappearance was our doing — see stop_signalled().
         self._stop_signalled = False
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
@@ -673,11 +743,17 @@ class TailingJobRunner:
         self._tail_thread.start()
 
     def stop(self) -> None:
+        # self._pid is the /bin/sh wrapper LocalJobRunner.start() launched
+        # (start_new_session made it its own pgid too); the trainer is its
+        # child in the same group, so signal the whole group rather than just
+        # the wrapper.
         try:
-            os.kill(self._pid, signal.SIGTERM)
+            os.killpg(self._pid, signal.SIGTERM)
         except ProcessLookupError:
-            # Already gone — we signalled nothing, so its disappearance is not
-            # ours to claim and returncode() keeps its optimistic default.
+            # The group was already gone, so whatever ended this run, it
+            # wasn't us — leave _stop_signalled clear so it can't claim credit
+            # for a crash that beat the user's click, and so returncode()
+            # keeps reporting "unconfirmed" rather than a synthesised signal.
             pass
         else:
             self._stop_signalled = True
@@ -687,24 +763,42 @@ class TailingJobRunner:
         return _pid_alive(self._pid)
 
     def stop_signalled(self) -> bool:
-        """Whether stop() actually delivered SIGTERM to a live pid."""
+        """True once stop() verifiably delivered a SIGTERM to a live process
+        group.
+
+        Deliberately not just "stop() was called". A run that crashed (or died
+        to a restart) before the user clicked Stop reaches killpg with nothing
+        left to signal; reporting intent alone there would tell the user we
+        stopped a run that had already ended on its own."""
         return self._stop_signalled
 
     def returncode(self) -> int | None:
-        # We can't reap a process from another session, so we never learn the
-        # real exit code and have to synthesise one.
+        # We can't reap a process from another session, so is_running() going
+        # False doesn't hand us an exit code the way Popen.poll() would. Three
+        # sources of truth, in decreasing order of how much they actually know:
         #
-        # Default is 0 once the pid is gone — the watchdog finalises as "done"
-        # rather than "failed", the better default for a detached training that
-        # completed normally.
-        #
-        # After a stop we actually delivered, report SIGTERM instead. A plain 0
-        # there would classify a run the user deliberately ended as "done",
-        # which is a worse lie than naming the signal we know we sent to a pid
-        # that was alive at the time and is now gone.
+        # 1. The exit-status file. The wrapper LocalJobRunner.start() launched
+        #    writes the trainer's REAL exit status there before exiting, and it
+        #    survives both a reload and a full server restart. Always preferred.
+        # 2. A stop we verifiably delivered. The group TERM in stop() kills the
+        #    wrapper before it can write step 1's file, so a deliberate stop
+        #    leaves no status behind; synthesising SIGTERM here is what lets
+        #    classify_terminal_state file it as `interrupted` (a user-requested
+        #    stop) rather than as an unexplained disappearance.
+        # 3. Otherwise: genuinely unconfirmed (the wrapper itself was SIGKILLed,
+        #    or the machine rebooted). None means "no evidence either way" —
+        #    JobRegistry._tick() finalises 'interrupted' rather than asserting a
+        #    "done" or "failed" we can't back up. Notably NOT the optimistic 0
+        #    it used to return: that reported an unconfirmed disappearance as a
+        #    successful run.
         if _pid_alive(self._pid):
             return None
-        return -signal.SIGTERM if self._stop_signalled else 0
+        rc = _read_exit_status(self._status_path)
+        if rc is not None:
+            return rc
+        if self._stop_signalled:
+            return -signal.SIGTERM
+        return None
 
     def stream_log_lines(self) -> list[LogLine]:
         out: list[LogLine] = []
@@ -3491,12 +3585,33 @@ class JobRegistry:
                             record.metrics,
                             _job_log_path(self._output_root, record.id),
                             pid,
+                            Path(record.output_dir) / _EXIT_STATUS_FILENAME,
                             _resume_total_steps(record.config),
                         )
                         runner.start_tailing()
                         self._runners[record.id] = runner
                     else:
-                        record.state = "interrupted"
+                        # The pid is gone, but that alone doesn't mean the
+                        # outcome is unconfirmed: the wrapper LocalJobRunner.start()
+                        # launched writes the trainer's real exit status to
+                        # <output_dir>/exit_status before it exits, and that
+                        # file survives a full server restart same as it
+                        # survives the reattach case above (see
+                        # TailingJobRunner.returncode()). Read it before
+                        # falling back to 'interrupted', so a run that
+                        # finished (or crashed) while the server was down
+                        # isn't reported as merely unconfirmed when the
+                        # evidence is sitting right there on disk.
+                        rc = _read_exit_status(Path(record.output_dir) / _EXIT_STATUS_FILENAME)
+                        if rc is None:
+                            record.state = "interrupted"
+                            if record.error_message is None:
+                                record.error_message = UNCONFIRMED_OUTCOME_MESSAGE
+                        else:
+                            record.state = "done" if rc == 0 else "failed"
+                            record.exit_code = rc
+                            if rc != 0 and record.error_message is None:
+                                record.error_message = f"Subprocess exited with code {rc}"
                         if record.ended_at is None:
                             record.ended_at = time.time()
                         self._write_meta(record)
@@ -3703,11 +3818,26 @@ class JobRegistry:
                 asked_to_stop = jid in self._stop_requested
             signalled = _runner_hook(runner, "stop_signalled")
             stop_requested = asked_to_stop and signalled is not False
-            state = classify_terminal_state(
-                returncode=rc,
-                stop_requested=stop_requested,
-                terminal_stage=_runner_hook(runner, "terminal_stage"),
-            )
+            terminal_stage = _runner_hook(runner, "terminal_stage")
+            if rc is None and terminal_stage is None:
+                # is_running() already said the process is gone, but nothing
+                # here knows HOW it ended: no exit status on disk, no platform
+                # stage, and no stop we can prove we delivered (that case
+                # synthesises SIGTERM in TailingJobRunner.returncode() and so
+                # never reaches this branch). Deliberately NOT routed through
+                # classify_terminal_state, whose fallthrough is `failed`:
+                # asserting a "done" or "failed" we can't back up is exactly
+                # what MT10 removed. Reuse the honest 'interrupted' state a
+                # dead pid at boot already gets — models.py lists such a run's
+                # checkpoints, since the state is a claim about how we found
+                # out, not about whether the weights exist.
+                state: JobState = "interrupted"
+            else:
+                state = classify_terminal_state(
+                    returncode=rc,
+                    stop_requested=stop_requested,
+                    terminal_stage=terminal_stage,
+                )
             with self._lock:
                 if record.wandb_run_url is None:
                     record.wandb_run_url = runner.wandb_run_url()
@@ -3718,8 +3848,13 @@ class JobRegistry:
                     if state == "interrupted":
                         # Never the synthetic exit-code text here: that message
                         # on a run the user stopped themselves is what made a
-                        # deliberate pause look like a broken model.
-                        record.error_message = STOPPED_BY_REQUEST_MESSAGE
+                        # deliberate pause look like a broken model. The
+                        # classifier only reaches `interrupted` when we asked,
+                        # so the unconfirmed wording belongs to the branch
+                        # above — a disappearance nobody asked for.
+                        record.error_message = (
+                            STOPPED_BY_REQUEST_MESSAGE if stop_requested else UNCONFIRMED_OUTCOME_MESSAGE
+                        )
                     elif state == "failed":
                         # Prefer a runner-supplied reason (e.g. HF Jobs'
                         # 'Job timeout') over the synthetic exit-code message.
@@ -3779,4 +3914,5 @@ __all__ = [
     "parse_metrics_into",
     "classify_terminal_state",
     "STOPPED_BY_REQUEST_MESSAGE",
+    "UNCONFIRMED_OUTCOME_MESSAGE",
 ]
