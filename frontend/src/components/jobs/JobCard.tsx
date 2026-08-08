@@ -16,7 +16,7 @@ import {
   jobDisplayName,
   renameJob,
 } from "@/lib/jobsApi";
-import { runTaskTitle } from "@/lib/modelNames";
+import { jobRunStamp, runTaskTitle } from "@/lib/modelNames";
 import {
   Square,
   Trash2,
@@ -40,11 +40,12 @@ import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import {
-  JobCheckpoint,
-  dedupeCheckpointEntries,
-  listJobCheckpoints,
-} from "@/lib/checkpointsApi";
-import { buildResumeSeed } from "./resumeSeed";
+  LineageCheckpoint,
+  buildResumeSeed,
+  checkpointOwners,
+  loadLineageCheckpoints,
+  resumableCheckpoints,
+} from "./resumeSeed";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
@@ -94,6 +95,23 @@ const statePresentation: Record<
   },
 };
 
+/**
+ * Card for the jobs history: what a training is doing (state, progress, logs)
+ * and the run-shaped actions — stop, Resume, rename, delete.
+ *
+ * Resume is the one this change owns, and it is now a SINGLE verb decided by
+ * the shared rule in resumeSeed (`resumableCheckpoints`), so this card and the
+ * library row's one-click resume cannot disagree.
+ *
+ * The model-shaped actions (Run, Fine-tune, Download) are still rendered here.
+ * They act on the WEIGHTS a run produced rather than on the run, and upstream
+ * they move to ModelCard in the model library — but that rewiring (ModelsLibrary
+ * collapsing runs to one card per Hub repo, ModelCard actually being rendered)
+ * is deliberately not on this stack yet, and ModelsLibrary still mounts THIS
+ * card with `onPlay` for imported and uploaded models. Removing them here would
+ * make Run/Fine-tune/Download unreachable, so they stay until the card swap
+ * lands.
+ */
 const JobCard: React.FC<Props> = ({
   job,
   onStop,
@@ -148,7 +166,7 @@ const JobCard: React.FC<Props> = ({
   // right run. Sorted newest-step-first so the current run sits above inherited
   // source checkpoints in the dropdown.
   const [lineageCheckpoints, setLineageCheckpoints] = useState<
-    { job: JobRecord; ckpt: JobCheckpoint }[]
+    LineageCheckpoint[]
   >([]);
   // Selection is keyed on the checkpoint `ref` (its unique identity), not the
   // step — a lineage can hold two distinct checkpoints with the same step.
@@ -212,37 +230,31 @@ const JobCard: React.FC<Props> = ({
     .join("|");
 
   useEffect(() => {
-    const lineage = [job, ...ancestors].filter((j) => j.checkpoint_count > 0);
-    if (lineage.length === 0) {
-      setLineageCheckpoints([]);
-      setSelectedRef(null);
-      return;
-    }
     let cancelled = false;
-    Promise.all(
-      lineage.map((j) =>
-        listJobCheckpoints(baseUrl, fetchWithHeaders, j.id)
-          .then((cks) => cks.map((ckpt) => ({ job: j, ckpt })))
-          .catch(() => [] as { job: JobRecord; ckpt: JobCheckpoint }[]),
-      ),
-    ).then((results) => {
-      if (cancelled) return;
-      // Flat-merge, then collapse duplicates: a cloud resume reuses its
-      // parent's output repo, so parent and child both enumerate the same Hub
-      // checkpoint tree and every inherited step would otherwise appear
-      // twice. Lineage order puts this run's list before its ancestors' and
-      // the sort is stable for equal steps, so the surviving entry of a
-      // duplicate pair is tagged with the nearest (child) run.
-      const combined = dedupeCheckpointEntries(
-        results.flat().sort((a, b) => b.ckpt.step - a.ckpt.step),
-      );
-      setLineageCheckpoints(combined);
-      setSelectedRef((prev) =>
-        prev != null && combined.some((c) => c.ckpt.ref === prev)
-          ? prev
-          : (combined[0]?.ckpt.ref ?? null),
-      );
-    });
+    // The shared loader — this card and the library row's one-click resume
+    // read the SAME ancestor-path list, so they can't offer different
+    // checkpoints for the same run.
+    loadLineageCheckpoints(baseUrl, fetchWithHeaders, job, ancestors).then(
+      (combined) => {
+        if (cancelled) return;
+        setLineageCheckpoints(combined);
+        // Default to the newest RESUMABLE checkpoint, not the newest one in
+        // the lineage. They differ exactly when the newest is excluded by the
+        // rule — most often an ancestor checkpoint saved past this run's step
+        // target — and defaulting to it opened the card with the Resume button
+        // hidden and no hint that picking an older step would bring it back.
+        // The dropdown still lists the whole lineage; only the starting
+        // selection is narrowed. Falls back to the newest checkpoint when
+        // nothing is resumable, so the row still reads as a checkpoint list.
+        setSelectedRef((prev) =>
+          prev != null && combined.some((c) => c.ckpt.ref === prev)
+            ? prev
+            : (resumableCheckpoints(job, combined)[0]?.ckpt.ref ??
+              combined[0]?.ckpt.ref ??
+              null),
+        );
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -340,42 +352,56 @@ const JobCard: React.FC<Props> = ({
     onPlay(selectedJob, selectedStep);
   };
 
-  // Resume — local Continue and cloud Resume alike — is for a run that stopped
-  // SHORT of what it was configured to do: failed, interrupted or cancelled,
-  // with a saved checkpoint below the step target.
+  // Resume — one verb, whichever runner owns the checkpoint — is decided by
+  // the ONE shared rule (resumableCheckpoints), so this card and the library
+  // row's one-click resume can't disagree about whether a run can continue.
   //
-  // A `done` run is deliberately excluded. Resuming restores the optimizer AND
-  // the LR schedule's position, and a completed run's schedule is spent: the
-  // SmolVLA preset cosine-decays to a 2.5e-6 floor over a fixed 30k-step
-  // horizon, so continuing past a reached target trains at floor LR — the loss
-  // curve flattens and reads as convergence while the run is barely learning.
-  // Fine-tuning from the final checkpoint is the intended way to build on a
-  // completed run: it starts a FRESH schedule from those weights. Blanket rule,
-  // no per-policy exceptions.
-  const endedBeforeTarget =
-    (selectedJob.state === "failed" || selectedJob.state === "interrupted") &&
-    (selectedJob.config.steps === 0 ||
-      selectedStep == null ||
-      selectedStep < selectedJob.config.steps);
-
-  // Continue (local resume) additionally needs the optimizer/step state to be
-  // on THIS machine — i.e. a local run's own checkpoint dir.
-  const canContinue =
-    selectedJob.runner === "local" &&
+  // The question is asked of the LEAF, not of each lineage entry: this card
+  // always renders the tip of a chain (the libraries give a row to leaves
+  // only), and it is the tip's state and step target that say whether the
+  // TRAINING is unfinished. The rule then picks which checkpoints along the
+  // leaf's ancestor path may serve as the source, and each one carries its
+  // owning run so the seed resumes from the run that actually holds it.
+  //
+  // Behaviour change worth naming: a `done` leaf no longer offers Resume for
+  // a checkpoint inherited from an ancestor that stopped short. That chain
+  // reached its target — the way to build on it is Fine-tune, which starts a
+  // fresh LR schedule instead of restoring a spent one.
+  //
+  // Sticks (user decision 2026-08-07), the second and larger narrowing: an
+  // INHERITED checkpoint is no longer a resume source at all. Its owner has a
+  // child by construction — the run below it on this card's own path — and
+  // jobs.py refuses a second continuation of a run that already has one, so
+  // the button would only buy a 409. The dropdown still lists the whole
+  // lineage, and an inherited checkpoint remains selectable for inference; it
+  // is Resume alone that dims, via the existing `selectedIsResumable` gate.
+  // The empty-handed case (this tip saved nothing, so no selection lights the
+  // button) is recoverable by deleting this run and resuming its parent —
+  // which the library row's toast spells out.
+  const resumable = resumableCheckpoints(job, lineageCheckpoints);
+  const selectedIsResumable =
     !isRunning &&
-    lineageCheckpoints.length > 0 &&
-    selectedStep != null &&
-    endedBeforeTarget;
+    selected != null &&
+    resumable.some((c) => c.ckpt.ref === selected.ckpt.ref);
 
-  // Resume (cloud): an HF Job is immutable once ended, so this launches a NEW
-  // cloud job that continues from the parent's Hub checkpoint (restoring
-  // optimizer + step, unlike Fine-tune).
-  const canResumeCloud =
-    selectedJob.runner === "hf_cloud" &&
-    !isRunning &&
-    lineageCheckpoints.length > 0 &&
-    selectedStep != null &&
-    endedBeforeTarget;
+  // ONE verb. This used to fork into "Continue" (a local-owned checkpoint) and
+  // "Resume" (a cloud-owned one) — two buttons that differed only in wording,
+  // because pre-F7 the owner's runner really was a constraint on where the
+  // continuation could run. It no longer is: jobs.py continues on EITHER
+  // runner, moving the checkpoint as needed, and the Train form merely opens
+  // with Compute DEFAULTED to where the owner ran, toggle live. So the
+  // distinction had become dead information at the button level — it named the
+  // form's default, which the form itself already shows and lets you change.
+  // Asking a novice to tell two verbs apart for one action is the cost; there
+  // is no benefit left to pay it with.
+  const canResume = selectedIsResumable;
+
+  // Step 0 is the whole-repo/single-model sentinel (see CheckpointDropdown),
+  // which has no meaningful number to name — matching its "latest" label.
+  const resumeLabel =
+    selectedStep == null || selectedStep === 0
+      ? "Resume from latest"
+      : `Resume from step ${selectedStep.toLocaleString()}`;
 
   // No dialog and no route jump: continuing opens the Train panel's
   // "Start a new training" form in resume mode, seeded from this run and the
@@ -390,25 +416,18 @@ const JobCard: React.FC<Props> = ({
   // resume).
   //
   // The payload itself comes from the ONE shared builder (buildResumeSeed), so
-  // this and the library's row-level quick-resume can no longer drift. The
-  // parent's runner is derived there from the job rather than passed in: local
-  // Continue is gated on canContinue and cloud Resume on canResumeCloud, both
-  // of which already require selectedJob.runner to match, so a caller-supplied
-  // runner could only ever disagree by mistake. Where the continuation RUNS is
-  // then the form's choice, not this call site's.
+  // this and the library's row-level quick-resume can no longer drift. It is
+  // handed THIS card's run (the leaf being continued — the lineage edge) plus
+  // the selected entry, which carries its own owner; the builder keeps those
+  // two apart. Passing the owner as the run is precisely the fork bug chain
+  // rewind fixes. The runner still follows the owner there, since it says where
+  // the bytes live and therefore whether they must move first (F7).
   const goToResume = () => {
-    if (selectedStep == null) return;
-    openStudio("train", {
-      train: { resume: buildResumeSeed(selectedJob, selectedStep) },
-    });
+    if (selected == null) return;
+    openStudio("train", { train: { resume: buildResumeSeed(job, selected) } });
   };
 
-  const handleContinue = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    goToResume();
-  };
-
-  const handleResumeCloud = (e: React.MouseEvent) => {
+  const handleResume = (e: React.MouseEvent) => {
     e.stopPropagation();
     goToResume();
   };
@@ -481,8 +500,25 @@ const JobCard: React.FC<Props> = ({
   };
 
   const showProgressBar = isRunning;
+  // The action row carries Run / Resume / Fine-tune / Download, so it is gated
+  // on having a checkpoint at all rather than on Resume's own rule. (Upstream
+  // of this branch the row exists to serve Resume alone and narrows to
+  // `resumable.length > 0`; the model-shaped actions only move off this card
+  // when ModelsLibrary is rewired to render ModelCard — see the header note.)
   const showInferenceRow =
     lineageCheckpoints.length > 0 && selectedStep != null;
+  // The previous commit's delete-first hint is gone with the rule that needed
+  // it: under chain rewind an empty-handed tip is simply resumable — it
+  // continues ITSELF from whatever its ancestors saved — so there is no longer
+  // a state where visible inherited checkpoints are unusable for a reason the
+  // card never says. What is left is a genuinely dead chain (nothing saved
+  // anywhere, or everything owned by finished runs), and the library row's
+  // toast explains that on click.
+  //
+  // (Upstream the row is gated on `resumable.length > 0`, because there it
+  // carries Resume alone. Here it also carries Run / Fine-tune / Download, so
+  // `showInferenceRow` above — "there is a checkpoint at all" — is the wider
+  // gate and stays.)
 
   // Unified metadata rows (same format as the dataset/model cards). Imported
   // models keep their source path in the subtitle; trainings surface what they
@@ -603,11 +639,27 @@ const JobCard: React.FC<Props> = ({
           </div>
         </div>
         <div>
-          <DisplayName
-            name={taskTitle}
-            full={displayName}
-            className="text-foreground font-semibold"
-          />
+          {/* The run NUMBER rides OUTSIDE the truncating title, so a long name
+              can never eat the one token that identifies the run — every run on
+              a resume chain shares this title, and the number is the same
+              handle the backend's refusals lead with (a 409 naming #46 points
+              at a row the user can find). Its hover carries the run stamp and
+              the full id. */}
+          <div className="flex min-w-0 items-baseline gap-1.5">
+            {job.job_number > 0 ? (
+              <span
+                className="shrink-0 font-mono text-muted-foreground"
+                title={`${jobRunStamp(job.id)} · ${job.id}`}
+              >
+                #{job.job_number}
+              </span>
+            ) : null}
+            <DisplayName
+              name={taskTitle}
+              full={displayName}
+              className="min-w-0 text-foreground font-semibold"
+            />
+          </div>
           {/* When aliased, keep the true identity visible: the run id for
               trainings (imported models already show their repo id / path in
               the subtitle below). */}
@@ -644,8 +696,11 @@ const JobCard: React.FC<Props> = ({
         ) : null}
         {showInferenceRow ? (
           // Single-line action row: the checkpoint dropdown flexes and the
-          // buttons never wrap. Secondary actions (Continue / Resume /
-          // Download) are icon-only so the row fits a narrow grid card.
+          // buttons never wrap. Resume now carries its step in the label — one
+          // verb, so the row says what it will do without a hover — and takes
+          // the width it needs; the dropdown yields, which fits now that there
+          // is one resume button here instead of two. Download stays icon-only
+          // so the row still fits a narrow grid card.
           <div className="mt-auto flex items-center gap-1.5 pt-1">
             {/* A single checkpoint offers no choice — skip the dropdown and
                 free the row for the buttons (imported models are the common
@@ -657,6 +712,12 @@ const JobCard: React.FC<Props> = ({
                   selectedRef={selectedRef}
                   onChange={(c) => setSelectedRef(c.ref)}
                   className="w-full min-w-0"
+                  // This list is a whole lineage, so two entries can both read
+                  // "step 2000" and belong to different runs — and the runs
+                  // share a display name, because a continuation continues the
+                  // same model. The dropdown renders this only when the list
+                  // really does span runs.
+                  owners={checkpointOwners(lineageCheckpoints)}
                 />
               </div>
             ) : null}
@@ -668,28 +729,17 @@ const JobCard: React.FC<Props> = ({
             >
               <Play className="w-3.5 h-3.5" /> Run
             </Button>
-            {canContinue ? (
+            {canResume ? (
               <Button
                 size="sm"
                 variant="outline"
-                onClick={handleContinue}
-                className="h-8 w-8 shrink-0 p-0 border-info/50 text-info hover:bg-info/10"
-                aria-label="Continue training from this checkpoint"
-                title="Continue training from this checkpoint"
+                onClick={handleResume}
+                className="h-8 shrink-0 gap-1.5 px-2.5 border-info/50 text-info hover:bg-info/10"
+                aria-label={resumeLabel}
+                title="Opens the training form to continue from this checkpoint. Compute defaults to where this checkpoint's run executed, and can be retargeted before you start."
               >
-                <FastForward className="w-3.5 h-3.5" />
-              </Button>
-            ) : null}
-            {canResumeCloud ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleResumeCloud}
-                className="h-8 w-8 shrink-0 p-0 border-info/50 text-info hover:bg-info/10"
-                aria-label="Resume this cloud run from its last checkpoint"
-                title="Resume: launch a new cloud job continuing from this checkpoint"
-              >
-                <FastForward className="w-3.5 h-3.5" />
+                <FastForward className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{resumeLabel}</span>
               </Button>
             ) : null}
             {canFinetune ? (

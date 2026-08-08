@@ -67,7 +67,9 @@ from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
+    JobAlreadyContinuedError,
     JobAlreadyRunningError,
+    JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
     JobTarget,
@@ -1180,6 +1182,42 @@ def models_import(request: ModelImportRequest):
 # ============================================================================
 
 
+def _job_label(job_id: str) -> str:
+    """A run named the way its row names it: `#46 'alias' (id)`.
+
+    For refusal messages that have to point at a *different* run than the one
+    the user acted on — "delete X first" is only actionable if X is findable in
+    the list. All three parts earn their place: the NUMBER is what the UI shows
+    and what a person can repeat back; the NAME is shared by every run on a
+    resume chain, so it locates the lineage but not the run; the ID is the
+    unambiguous one and the only one that survives a rename.
+
+    Degrades a part at a time — an unnumbered record (pre-backfill) or an
+    unnamed one just drops that piece, and an id the registry no longer holds
+    falls back to the bare id.
+    """
+    try:
+        record = job_registry.get(job_id)
+    except JobNotFoundError:
+        return repr(job_id)
+    name = (record.display_name or record.name or "").strip()
+    label = f"{name!r} ({job_id})" if name else repr(job_id)
+    return f"#{record.job_number} {label}" if record.job_number > 0 else label
+
+
+def _is_finished_run(job_id: str) -> bool:
+    """True when the run reached its target — i.e. holds finished training.
+
+    Used to keep refusal messages from casually recommending its deletion. An
+    unresolvable id reads as False: the message degrades to the plainer advice
+    rather than inventing a reason to keep something that may not exist.
+    """
+    try:
+        return job_registry.get(job_id).state == "done"
+    except JobNotFoundError:
+        return False
+
+
 @app.post("/jobs/training", status_code=201)
 async def create_training_job(req: Request):
     raw = await req.json()
@@ -1205,6 +1243,13 @@ async def create_training_job(req: Request):
     # Hard block (not a warning): when resuming, the total step count must be
     # strictly above the checkpoint's step — lerobot requires --steps be raised
     # above the resumed checkpoint, and steps == checkpoint would train nothing.
+    #
+    # This is the FAST half only, and cannot be the whole guard: it reads the
+    # request's `resume_from_step`, which is None whenever the caller picked
+    # "latest checkpoint" and left the step for the registry to resolve. Those
+    # requests walk straight past this. JobRegistry.start re-asks the same
+    # question at the bottom of its resume block, once the step is a number;
+    # that one is the authority, and it raises ValueError -> the 400 below.
     if cfg.resume_from_step is not None and cfg.steps <= cfg.resume_from_step:
         logger.warning(
             "Rejecting resume: steps (%d) <= checkpoint step (%d).",
@@ -1258,6 +1303,48 @@ async def create_training_job(req: Request):
         # dataset first (the browser flow does this automatically before
         # submitting, so this fires for non-UI callers).
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except JobAlreadyContinuedError as exc:
+        # Sticks only: the source already has a continuation, so a second one
+        # would fork it. 409 for the same reason the mid-chain delete refusal
+        # is a 409 — a conflict with existing state, not a malformed request —
+        # and routed here the same way, with the ids turned into a message at
+        # this layer rather than baked into the exception.
+        #
+        # The message has to TEACH the way out, because the way out is not
+        # obvious from the refusal — but which way out is honest depends on what
+        # is standing in the way, and getting that wrong is worse than saying
+        # nothing. Two shapes:
+        #
+        #  - ONE unfinished continuation (every lineage the sticks rule can
+        #    create): deleting it is cheap and correct, so say so.
+        #  - a LEGACY FORK, or a continuation that ran to completion: "delete
+        #    the continuation(s) first" is advice to throw away work. On the
+        #    user's own registry this fired for a parent whose two children
+        #    included a finished 30k run — the single run in that lineage
+        #    nobody should delete. Recommend fine-tune instead: it starts a
+        #    fresh schedule from the same weights, is not restricted to one per
+        #    run, and needs nothing deleted.
+        continued_by = ", ".join(_job_label(cid) for cid in exc.child_ids)
+        source = _job_label(exc.job_id)
+        finished = [_job_label(cid) for cid in exc.child_ids if _is_finished_run(cid)]
+        if len(exc.child_ids) == 1 and not finished:
+            remedy = f"A run can be continued once, so delete {continued_by} first, then resume {source}."
+        else:
+            cost = (
+                f", including the finished {'runs' if len(finished) > 1 else 'run'} {', '.join(finished)}"
+                if finished
+                else ""
+            )
+            remedy = (
+                f"A run can be continued once, so resuming {source} would mean first "
+                f"deleting {continued_by}{cost}. Fine-tune from {source}'s checkpoint "
+                "instead — that starts a fresh schedule from the same weights, needs "
+                "nothing deleted, and is not limited to one per run."
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=f"{source} was already continued by {continued_by}. {remedy}",
+        ) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1776,6 +1863,17 @@ def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    except JobHasChildrenError as exc:
+        # Mid-chain delete: name the runs that continue from this one so the
+        # user can work inwards from the tip instead of guessing.
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} was continued by {continued_by}, which would be left "
+                "pointing at a deleted run. Delete the continuation(s) first."
+            ),
+        ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job
     # would resurface in /jobs/hub as an untracked card on the next poll (the
     # HF Jobs API has no delete). Mark it dismissed so the removal sticks.

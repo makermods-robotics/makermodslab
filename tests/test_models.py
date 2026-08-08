@@ -992,6 +992,42 @@ def test_delete_local_model_409_when_running(registry) -> None:
     assert (registry._output_root / "live_run").exists()
 
 
+def test_delete_local_model_409_when_resumed_by_another_run(registry) -> None:
+    """A MID-CHAIN delete reached from the model library is refused the same way
+    the /jobs route refuses it: 409, naming the continuation. Without its own
+    handler JobHasChildrenError fell into delete_local_model's catch-all and
+    surfaced as a 502 "Failed to delete model", which reads as a bug in the
+    app rather than as the deliberate guard it is."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
+
+    _seed_run(registry, "parent_run", state="interrupted")
+    registry._records["child_run"] = JobRecord(
+        id="child_run",
+        name="child of parent_run",
+        state="done",
+        config=TrainingRequest(
+            dataset_repo_id="user/pick",
+            resume=True,
+            resume_from_job_id="parent_run",
+        ),
+        output_dir=str(registry._output_root / "child_run" / "run"),
+        started_at=2.0,
+        ended_at=3.0,
+        runner="local",
+    )
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("parent_run")
+    assert ei.value.status == 409
+    assert "child_run" in ei.value.message
+    # The parent's dir — including the checkpoint the child resumed out of —
+    # must survive the refusal.
+    assert (registry._output_root / "parent_run").exists()
+    assert "parent_run" in registry._records
+
+
 def test_delete_local_model_refuses_path_outside_output_root(registry) -> None:
     """A record whose id resolves OUTSIDE outputs/train (traversal) is refused;
     no rmtree runs, so nothing outside the sandbox is touched."""

@@ -36,8 +36,15 @@ import { getDatasetInfo } from "@/lib/replayApi";
 // Passed by the "Continue" button on a completed local job, or the "Resume"
 // button on a cloud run that ended before its step target.
 export type ResumeSeed = {
+  // The run being CONTINUED — the lineage edge. Always the leaf the user
+  // clicked, never the checkpoint's owner, so chains stay linear (see
+  // buildResumeSeed).
   jobId: string;
   step: number | null; // null ⇒ resume from the latest checkpoint
+  // CHAIN REWIND provenance: the ancestor whose storage holds the chosen
+  // checkpoint, when it isn't the leaf's own. Undefined ⇒ the leaf owns it.
+  // Never the edge — only where the bytes are read from.
+  checkpointJobId?: string;
   name: string;
   datasetRepoId: string;
   policyType: string;
@@ -64,7 +71,21 @@ export type FinetuneSeed = {
   step: number | null; // null ⇒ latest checkpoint of the source
   name: string;
   policyType: string;
+  // Where the CHOSEN checkpoint's bytes live — the checkpoint's own `source`
+  // field, straight from the job's checkpoint listing. It is exactly the fact
+  // the backend keys on: a "local" checkpoint resolves to an absolute path on
+  // this machine, which a pod cannot read, so fine-tuning it on the cloud has
+  // to stage its weights to the Hub first (and asks for that consent).
+  // Undefined ⇒ unknown (a stale deep-link seed built before this field), which
+  // shows no notice and leaves the backend's 400 as the backstop.
+  checkpointSource?: "local" | "hub";
 };
+
+/** Which local→cloud transfer a launch needs, if any. "resume" moves the whole
+ * checkpoint of the run being continued (weights AND optimizer state);
+ * "finetune" moves only the base checkpoint's weights, since a fine-tune starts
+ * a fresh optimizer and never reads the rest. */
+export type CheckpointUploadKind = "resume" | "finetune" | null;
 
 interface TrainingConfiguratorProps {
   /** Controlled policy type (chosen upstream — the panel policy grid or the
@@ -91,7 +112,7 @@ interface TrainingConfiguratorProps {
 
 function configToRequest(
   c: TrainingConfig,
-  needsCheckpointUpload: boolean,
+  checkpointUploadKind: CheckpointUploadKind,
 ): TrainingRequest {
   // The backend's TrainingRequest has more optional fields; the form covers
   // the user-meaningful subset.
@@ -110,11 +131,18 @@ function configToRequest(
     resume: c.resume,
     resume_from_job_id: c.resume_from_job_id,
     resume_from_step: c.resume_from_step,
-    // Consent, not a mode: sent only for the one combination that has to push
-    // bytes to the Hub (a local parent continued on cloud compute), and the
-    // backend refuses that combination without it. Left undefined otherwise so
-    // no other launch carries an upload permission it has no use for.
-    upload_resume_checkpoint: needsCheckpointUpload ? true : undefined,
+    resume_from_checkpoint_job_id: c.resume_from_checkpoint_job_id,
+    // Consent, not a mode: sent only for the combinations that have to push
+    // bytes to the Hub (a checkpoint only this machine has, needed by a run on
+    // cloud compute), and the backend refuses those without it. Left undefined
+    // otherwise so no other launch carries an upload permission it has no use
+    // for. One field per MODE rather than one shared flag, because they consent
+    // to different disclosures: the whole checkpoint of the run being continued,
+    // versus the base model's weights.
+    upload_resume_checkpoint:
+      checkpointUploadKind === "resume" ? true : undefined,
+    upload_finetune_checkpoint:
+      checkpointUploadKind === "finetune" ? true : undefined,
     finetune_from_job_id: c.finetune_from_job_id,
     finetune_from_step: c.finetune_from_step,
     wandb_enable: c.wandb_enable,
@@ -201,6 +229,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     resume: !!resumeSeed,
     resume_from_job_id: resumeSeed?.jobId,
     resume_from_step: resumeSeed?.step ?? undefined,
+    resume_from_checkpoint_job_id: resumeSeed?.checkpointJobId,
     finetune_from_job_id: finetuneSeed?.jobId,
     finetune_from_step: finetuneSeed?.step ?? undefined,
     wandb_enable: false,
@@ -313,14 +342,26 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const datasetLocalOnly = selectedDatasetItem?.source === "local";
   const needsUpload = isCloud && datasetLocalOnly;
 
-  // A resume whose parent ran locally, retargeted at cloud compute: the pod
-  // can't read this machine's disk, so the parent's checkpoint has to be
-  // uploaded to a private Hub repo before the job is submitted (F7). Derived
-  // from the seed's runner rather than from the config, because the config's
-  // `target` is now the user's live choice — the seed is the only record of
-  // where the parent actually ran.
-  const needsCheckpointUpload =
-    resumeSeed != null && resumeSeed.runner !== "hf_cloud" && isCloud;
+  // A checkpoint this machine alone holds, needed by a run that will happen on
+  // a pod that can't read this disk — so it has to be uploaded to a private Hub
+  // repo before the job is submitted (F7). Two ways in, and which one it is
+  // decides what moves and which consent field carries it:
+  //
+  //   * "resume" — the parent ran locally and the continuation was retargeted
+  //     at the cloud. Derived from the SEED's runner rather than the config,
+  //     because the config's `target` is the user's live choice while the seed
+  //     is the only record of where the parent actually ran.
+  //   * "finetune" — the chosen base checkpoint is a local one. Read off the
+  //     seed's `checkpointSource`, which is the checkpoint's own `source` field
+  //     — exactly what the backend keys on. Undefined (a stale deep-link seed)
+  //     is treated as no-notice; the backend's 400 is the backstop.
+  const checkpointUploadKind: CheckpointUploadKind =
+    resumeSeed != null && resumeSeed.runner !== "hf_cloud" && isCloud
+      ? "resume"
+      : finetuneSeed?.checkpointSource === "local" && isCloud
+        ? "finetune"
+        : null;
+  const needsCheckpointUpload = checkpointUploadKind != null;
 
   // Approximate on-disk size for the notice (cheap detail endpoint; local only).
   const [datasetSizeBytes, setDatasetSizeBytes] = useState<number | null>(null);
@@ -352,7 +393,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       const job = await startTrainingJob(
         baseUrl,
         fetchWithHeaders,
-        configToRequest(config, needsCheckpointUpload),
+        configToRequest(config, checkpointUploadKind),
       );
       toast({ title: "Training Started", description: job.name });
       onStarted?.(job.id);
@@ -379,7 +420,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     baseUrl,
     fetchWithHeaders,
     config,
-    needsCheckpointUpload,
+    checkpointUploadKind,
     toast,
     navigate,
     location.pathname,
@@ -592,11 +633,21 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           local run's continuation at the cloud. That direction moves the
           parent's checkpoint to the Hub first, which is a disclosure — hence a
           notice before the click, and a Start button that says "Upload". */}
-      {needsCheckpointUpload && resumeSeed ? (
+      {checkpointUploadKind === "resume" && resumeSeed ? (
         <div className="mt-6">
           <LocalCheckpointCloudNotice
+            mode="resume"
             runName={resumeSeed.name}
             step={resumeSeed.step}
+            offline={offline}
+          />
+        </div>
+      ) : checkpointUploadKind === "finetune" && finetuneSeed ? (
+        <div className="mt-6">
+          <LocalCheckpointCloudNotice
+            mode="finetune"
+            runName={finetuneSeed.name}
+            step={finetuneSeed.step}
             offline={offline}
           />
         </div>
@@ -644,7 +695,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
                       ? "Upload & continue training"
                       : "Continue training"
                     : finetuneSeed
-                      ? "Start fine-tuning"
+                      ? // A local base fine-tuned on the cloud has to push its
+                        // weights first, so the button says what the click
+                        // actually does — the same promise the resume branch
+                        // above makes.
+                        needsCheckpointUpload
+                        ? "Upload & start training"
+                        : "Start fine-tuning"
                       : needsUpload
                         ? "Upload & start training"
                         : "Start training"}

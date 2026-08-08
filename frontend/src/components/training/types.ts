@@ -24,8 +24,12 @@ export interface TrainingConfig {
   // Output configuration
   resume: boolean;
   // Set by the "Continue training" flow (source run + checkpoint step).
+  // `resume_from_job_id` is the LEAF being continued — the lineage edge.
   resume_from_job_id?: string;
   resume_from_step?: number;
+  // Chain rewind: the ancestor whose storage holds that checkpoint, when it is
+  // not the leaf's own. Provenance, not the edge.
+  resume_from_checkpoint_job_id?: string;
   // Set by the "Fine-tune" flow: fresh run initialized from a source
   // checkpoint's weights (resume stays false).
   finetune_from_job_id?: string;

@@ -25,9 +25,6 @@ import {
 
 const LIMIT = 10;
 
-export const isJobActive = (j: JobRecord) =>
-  j.state === "running" || j.checkpoint_count > 0;
-
 interface JobsDataValue {
   /** Local job registry page (trainings, cloud mirrors, imports). */
   jobs: JobRecord[];
@@ -42,6 +39,18 @@ interface JobsDataValue {
   supersededIds: Set<string>;
   /** Resume lineage of a job, nearest parent first. */
   ancestorsOf: (job: JobRecord) => JobRecord[];
+  /** Checkpoints reachable from a job: its own plus its loaded ancestors'.
+   *
+   * The libraries' Resume gate, because under CHAIN REWIND a run continues
+   * from anything on its lineage — so a tip that died before saving anything
+   * is resumable on its ancestors' checkpoints, and its own `checkpoint_count`
+   * of 0 would hide the button on the commonest resumable shape there is.
+   * Lives on the context because only the provider holds the ancestor records. */
+  chainCheckpointCount: (job: JobRecord) => number;
+  /** Running, or with a checkpoint anywhere in its chain — i.e. worth showing
+   * outside the libraries' UNTRACKED fold. Same chain-wide reading as the gate
+   * above, and now for the same reason. */
+  isJobActive: (job: JobRecord) => boolean;
   hubAuthenticated: boolean;
   hubJobsPermission: boolean;
   error: string | null;
@@ -181,43 +190,36 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
 
   useJobsChangedSignal(refresh, applyProgress);
 
-  // Fetch the transitive closure of resume ancestors that aren't in the loaded
-  // page (or already cached), so nesting works regardless of how old the source
-  // run is. Idempotent: only unseen ids are fetched, so the frequent list
-  // refreshes during a run don't re-fetch. Missing/deleted ancestors are
-  // skipped, ending the chain.
+  // Backfill the resume ancestors that aren't in the loaded page (or already
+  // cached), so a chain nests regardless of how old its source runs are.
+  //
+  // The server hands each record its whole `ancestor_ids` closure, so this is
+  // one parallel fan-out over known-missing ids — not the old hop-by-hop walk,
+  // which had to fetch a parent before it could learn about a grandparent and
+  // so paid one serial round-trip per generation. Idempotent: only unseen ids
+  // are fetched, so the frequent list refreshes during a run don't re-fetch.
+  // A fetch that fails (the run was deleted between the list and this call) is
+  // dropped, and that chain simply stops there.
   useEffect(() => {
     let cancelled = false;
     const loaded = new Set(jobs.map((j) => j.id));
-    const queue = jobs
-      .map((j) => j.config?.resume_from_job_id)
-      .filter(
-        (id): id is string => !!id && !loaded.has(id) && !ancestorCache[id],
-      );
-    if (queue.length === 0) return;
+    const missing = [
+      ...new Set(jobs.flatMap((j) => j.ancestor_ids ?? [])),
+    ].filter((id) => !loaded.has(id) && !ancestorCache[id]);
+    if (missing.length === 0) return;
     (async () => {
-      const fetched: Record<string, JobRecord> = {};
-      const seen = new Set(queue);
-      while (queue.length > 0) {
-        const id = queue.shift() as string;
-        try {
-          const rec = await getJob(baseUrl, fetchWithHeaders, id);
-          fetched[id] = rec;
-          const parent = rec.config?.resume_from_job_id;
-          if (
-            parent &&
-            !loaded.has(parent) &&
-            !ancestorCache[parent] &&
-            !seen.has(parent)
-          ) {
-            seen.add(parent);
-            queue.push(parent);
-          }
-        } catch {
-          // Ancestor deleted or unreachable — skip; the chain just stops here.
-        }
-      }
-      if (!cancelled && Object.keys(fetched).length > 0) {
+      const settled = await Promise.all(
+        missing.map((id) =>
+          getJob(baseUrl, fetchWithHeaders, id)
+            .then((rec) => [id, rec] as const)
+            .catch(() => null),
+        ),
+      );
+      if (cancelled) return;
+      const fetched = Object.fromEntries(
+        settled.filter((e): e is [string, JobRecord] => e !== null),
+      );
+      if (Object.keys(fetched).length > 0) {
         setAncestorCache((prev) => ({ ...prev, ...fetched }));
       }
     })();
@@ -326,9 +328,16 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     [hubModels, trackedRepoIds],
   );
 
-  // Resume lineage: job B stores config.resume_from_job_id = A. Hide A (the
-  // superseded run) from the top level and nest it under B, so a resumed chain
-  // reads as one entry. Lineage is linear — each job resumes from one parent.
+  // Resume lineage, as the server computed it: a run with children has been
+  // resumed, so it is hidden from the top level and reached through the
+  // descendant that continued it — one row per LEAF, one row per chain.
+  //
+  // New lineages are CHAINS: jobs.py refuses a resume whose source already has
+  // a child (sticks only, user decision 2026-08-07), so a run created from here
+  // on can gain at most one. `child_ids` stays a LIST and everything below
+  // stays fork-tolerant anyway, because registries written before that rule
+  // hold real forks and must keep rendering exactly as they did — several
+  // leaves off one trunk, each with its own row, no migration.
   const byId = useMemo(() => {
     const m = new Map(jobs.map((j) => [j.id, j]));
     // Cached ancestors fill in parents paged out of the list (never overriding
@@ -338,30 +347,71 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     }
     return m;
   }, [jobs, ancestorCache]);
-  const supersededIds = useMemo(() => {
-    const s = new Set<string>();
-    for (const j of jobs) {
-      const parent = j.config?.resume_from_job_id;
-      // Only a real successor (running or with its own checkpoints) supersedes
-      // its parent — a failed continuation shouldn't hide the source run.
-      const legit = j.state === "running" || j.checkpoint_count > 0;
-      if (parent && byId.has(parent) && legit) s.add(parent);
-    }
-    return s;
-  }, [jobs, byId]);
+  // Superseded is now a plain reading of the record: the server knows every
+  // child, this page might not. That closes two holes in the client-side
+  // approximation this replaces — a child sitting past the page limit failed
+  // to hide its parent, and a child that died before its first checkpoint was
+  // ruled "not legit" and left the chain rendering as two rows. A dead tip
+  // still represents its chain; the row says so by being dead.
+  const supersededIds = useMemo(
+    () => new Set(jobs.filter((j) => j.child_ids.length > 0).map((j) => j.id)),
+    [jobs],
+  );
+  // Nearest parent first, straight from the server's walk; ids it lists but
+  // this client hasn't loaded yet are skipped until the backfill above lands.
   const ancestorsOf = useCallback(
-    (job: JobRecord): JobRecord[] => {
-      const chain: JobRecord[] = [];
-      const seen = new Set<string>([job.id]);
-      let cur = byId.get(job.config?.resume_from_job_id ?? "");
-      while (cur && !seen.has(cur.id)) {
-        chain.push(cur);
-        seen.add(cur.id);
-        cur = byId.get(cur.config?.resume_from_job_id ?? "");
-      }
-      return chain;
-    },
+    (job: JobRecord): JobRecord[] =>
+      (job.ancestor_ids ?? [])
+        .map((id) => byId.get(id))
+        .filter((rec): rec is JobRecord => rec !== undefined),
     [byId],
+  );
+
+  // Checkpoints reachable from a run: its own plus every LOADED ancestor's.
+  //
+  // THE resume gate, and the fold gate, on the same reading: chain rewind lets
+  // a run continue from anything on its lineage, so what decides both is what
+  // the CHAIN holds, not what this tip happened to save. The commonest
+  // resumable shape — a tip that died before its first checkpoint — has zero of
+  // its own and a full chain behind it.
+  const chainCheckpointCount = useCallback(
+    (job: JobRecord): number =>
+      [job, ...ancestorsOf(job)].reduce((n, j) => n + j.checkpoint_count, 0),
+    [ancestorsOf],
+  );
+
+  // True while the server named an ancestor this client hasn't fetched yet, so
+  // the count above is a known UNDERCOUNT rather than an answer. The backfill
+  // effect above resolves these one render later; until it does, a chain whose
+  // checkpoints all live in an unloaded ancestor would otherwise read as
+  // having none.
+  const ancestorsPending = useCallback(
+    (job: JobRecord): boolean =>
+      (job.ancestor_ids ?? []).some((id) => !byId.has(id)),
+    [byId],
+  );
+
+  // Active = still running, or the CHAIN has a checkpoint. Everything else
+  // folds under UNTRACKED in the libraries, so this decides whether a run is
+  // reachable without opening the fold.
+  //
+  // Deliberately still chain-aware, where the resume gate no longer is: this
+  // asks "is there anything here worth looking at", not "can this be
+  // continued". A tip that died before its first save inherits a whole chain's
+  // history and checkpoints — it charts, it can serve inference from an
+  // inherited checkpoint, and deleting it is the move that frees its parent to
+  // be resumed. Folding it away would hide the only handle on that.
+  //
+  // While the ancestor backfill is in flight the answer is INDETERMINATE, and
+  // indeterminate resolves to active: a chain that flickered into the fold on
+  // mount and back out a moment later would move rows under the user's cursor
+  // for the sake of a value the client simply hasn't received yet.
+  const isJobActive = useCallback(
+    (job: JobRecord): boolean =>
+      job.state === "running" ||
+      chainCheckpointCount(job) > 0 ||
+      ancestorsPending(job),
+    [chainCheckpointCount, ancestorsPending],
   );
 
   const value = useMemo(
@@ -374,6 +424,8 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       untrackedHubModels,
       supersededIds,
       ancestorsOf,
+      chainCheckpointCount,
+      isJobActive,
       hubAuthenticated,
       hubJobsPermission,
       error,
@@ -392,6 +444,8 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       untrackedHubModels,
       supersededIds,
       ancestorsOf,
+      chainCheckpointCount,
+      isJobActive,
       hubAuthenticated,
       hubJobsPermission,
       error,
