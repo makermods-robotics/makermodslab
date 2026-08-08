@@ -811,3 +811,172 @@ def test_stop_is_a_noop_before_submission(tmp_path) -> None:
 
     assert api.cancelled == []
     assert runner.terminal_stage() is None
+
+
+# ---------------------------------------------------------------------------
+# MT47: the log tail must not go permanently silent mid-run.
+# ---------------------------------------------------------------------------
+
+
+def test_is_replayed_skips_a_repeated_line_but_not_a_new_one(tmp_path) -> None:
+    """The replay de-dupe, as a pure function. Content-based, so it is correct
+    whether a reconnect replays the whole log, part of it, or none of it — the
+    three cases the old positional counter could not tell apart."""
+    runner = _runner_with(_FakeJobsApi(), tmp_path)
+
+    assert runner._is_replayed("first") is False
+    assert runner._is_replayed("second") is False
+    # The reconnect replays both, then delivers something genuinely new.
+    assert runner._is_replayed("first") is True
+    assert runner._is_replayed("second") is True
+    assert runner._is_replayed("third") is False
+
+
+def test_is_replayed_window_is_bounded_and_forgets_the_oldest(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Memory is bounded, and a line that falls out of the window is re-emitted
+    rather than suppressed. That direction is deliberate: a duplicated log line
+    is cosmetic, whereas the scheme this replaced failed the other way and went
+    mute for the rest of the run."""
+    from collections import deque
+
+    runner = _runner_with(_FakeJobsApi(), tmp_path)
+    runner._recent_lines = deque(maxlen=3)
+    runner._recent_line_set = set()
+
+    for line in ("a", "b", "c"):
+        assert runner._is_replayed(line) is False
+    assert runner._is_replayed("a") is True  # still inside the window
+
+    runner._is_replayed("d")  # evicts "a"
+    assert len(runner._recent_lines) == 3
+    assert runner._recent_line_set == set(runner._recent_lines)
+    assert runner._is_replayed("a") is False  # aged out ⇒ re-emitted, not dropped
+
+
+def _drain(runner) -> list[str]:
+    from queue import Empty as _Empty
+
+    out = []
+    while True:
+        try:
+            out.append(runner._log_queue.get_nowait().message)
+        except _Empty:
+            return out
+
+
+def _run_tail_briefly(runner, monkeypatch, *, silence=30.0, seconds=1.0) -> list[str]:
+    """Drive _tail_loop on a thread, then stop it from THIS thread.
+
+    The stop always comes from the test, never from inside the fake stream:
+    the loop consumes its reader through a queue, so a fake that set the event
+    mid-yield would race the consumer and make the assertion meaningless.
+    """
+    import threading
+    import time
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", silence)
+
+    thread = threading.Thread(target=runner._tail_loop, daemon=True)
+    thread.start()
+    time.sleep(seconds)
+    lines = _drain(runner)
+    runner._stop_event.set()
+    thread.join(timeout=5)
+    return lines
+
+
+def test_tail_loop_keeps_delivering_after_a_reconnect_replays_less_than_it_had(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MT47, the exact regression. A reconnect that replays FEWER lines than
+    were already processed used to leave a per-connection counter permanently
+    behind a cross-connection total, so every later line was skipped — the job
+    ran to completion while progress and charts froze at the drop.
+    """
+    import time
+
+    calls = {"n": 0}
+    api = _FakeJobsApi()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield from [f"L{i}" for i in range(1, 7)]
+            raise RuntimeError("SSE dropped mid-run")
+        # HF replays only a short tail, then the run continues.
+        yield from ["L5", "L6", "L7", "L8", "L9"]
+        while True:
+            time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch)
+
+    assert calls["n"] == 2, "expected exactly one reconnect"
+    # The new lines arrive...
+    assert [x for x in lines if x in ("L7", "L8", "L9")] == ["L7", "L8", "L9"]
+    # ...and the replayed prefix is not teed a second time.
+    assert lines == ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"]
+
+
+def test_tail_loop_reconnects_when_a_connection_stops_yielding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of MT47. `fetch_job_logs(follow=True)` can block inside a
+    single read forever — no line, no StopIteration, no exception — and a plain
+    `for` over it cannot even observe _stop_event, because the loop body never
+    runs again. The silence timeout is what notices."""
+    import time
+
+    calls = {"n": 0}
+    api = _FakeJobsApi()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield "L1"
+            while True:  # half-open socket
+                time.sleep(0.02)
+        else:
+            yield "L2"  # the reconnect recovers the stream
+            while True:
+                time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch, silence=0.3, seconds=2.0)
+
+    assert calls["n"] >= 2, "a silent connection must be abandoned and retried"
+    assert lines == ["L1", "L2"]
+
+
+def test_tail_loop_does_not_reconnect_while_a_connection_is_still_talking(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The silence timer must measure silence, not connection age — otherwise a
+    long run would be torn down and re-replayed on a fixed cadence."""
+    import time
+
+    calls = {"n": 0}
+    api = _FakeJobsApi()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        for i in range(40):
+            yield f"L{i}"
+            time.sleep(0.05)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    _run_tail_briefly(runner, monkeypatch, silence=0.3, seconds=1.0)
+
+    assert calls["n"] == 1

@@ -34,6 +34,7 @@ import shlex
 import threading
 import time
 import tomllib
+from collections import deque
 from importlib.metadata import requires
 from pathlib import Path
 from queue import Empty, Queue
@@ -604,6 +605,21 @@ _TAIL_CLEAN_END_WAIT_S = 15.0
 # (transient network blip during a long training).
 _TAIL_RECONNECT_BACKOFF_S = 5.0
 
+# How long a single connection may deliver NOTHING before we abandon it and
+# reconnect (MT47). `fetch_job_logs(follow=True)` can block inside one read
+# forever — no line, no StopIteration, no exception — and a plain `for` over it
+# has no way to notice. Generous on purpose: a job still QUEUED/BUILDING is
+# legitimately silent for minutes, and a needless reconnect is cheap now that
+# the replay is deduped by content rather than by position.
+_TAIL_SILENCE_TIMEOUT_S = 600.0
+
+# How many recently-emitted lines are remembered for replay de-duplication on
+# reconnect (MT47). Bounds memory while covering a realistic replay window: a
+# 2.5-hour cloud run's log.jsonl held ~275 lines. If a replay ever exceeds this,
+# the oldest lines fall out of the window and are re-emitted — duplicated log
+# lines, which is the DELIBERATE failure direction: the previous positional
+# scheme failed the other way and went permanently silent.
+_TAIL_DEDUPE_WINDOW = 1000
 
 
 def resolve_wandb_api_key() -> str | None:
@@ -721,9 +737,12 @@ class HfCloudJobRunner:
         # Status.message at the terminal tick (e.g. "Job timeout"), so the
         # registry can surface it to the UI instead of a synthetic exit code.
         self._terminal_message: str | None = None
-        # Count of log lines processed across (possibly multiple) SSE
-        # connections, so reconnects skip the replayed prefix.
-        self._lines_processed: int = 0
+        # The most recently emitted log lines, for de-duplicating the prefix an
+        # SSE reconnect replays (MT47). Content, not position: `seen`-vs-total
+        # counting assumed every reconnect replays the whole log from line 1,
+        # and silently dropped every subsequent line whenever it didn't.
+        self._recent_lines: deque[str] = deque(maxlen=_TAIL_DEDUPE_WINDOW)
+        self._recent_line_set: set[str] = set()
         # Scraped from the trainer's own stdout the first time lerobot prints
         # the W&B run URL. Both runners scrape; None is the ordinary answer.
         self._wandb_run_url: str | None = None
@@ -932,29 +951,100 @@ class HfCloudJobRunner:
             raise RuntimeError(msg) from exc
         self._log_line(f"[upload] dataset {repo_id} uploaded.")
 
+    def _is_replayed(self, stripped: str) -> bool:
+        """Whether this line was already emitted, so a reconnect's replayed
+        prefix isn't teed to disk and the UI twice (MT47).
+
+        Content-based and bounded, deliberately replacing the positional
+        `seen <= _lines_processed` scheme this used to use. That scheme was only
+        correct if EVERY reconnect replayed the whole log from line 1; when a
+        reconnect replayed less than that (or nothing at all, following from
+        "now"), the per-connection counter never caught up with the
+        cross-connection total and every subsequent line was skipped — silently,
+        forever, while the job ran happily to completion.
+
+        The tradeoff runs the other way now: a line repeated legitimately within
+        the window is dropped, and a replay longer than the window is re-emitted.
+        Both are cosmetic. Going mute is not.
+        """
+        if stripped in self._recent_line_set:
+            return True
+        evicted = self._recent_lines[0] if len(self._recent_lines) == self._recent_lines.maxlen else None
+        self._recent_lines.append(stripped)
+        # deque(maxlen=…) drops the oldest on append; mirror that in the set,
+        # but only if the evicted text isn't still present later in the window.
+        if evicted is not None and evicted not in self._recent_lines:
+            self._recent_line_set.discard(evicted)
+        self._recent_line_set.add(stripped)
+        return False
+
+    def _iter_job_logs(self):
+        """Yield raw log lines, abandoning a connection that goes silent (MT47).
+
+        `fetch_job_logs(follow=True)` can block inside a single read
+        indefinitely — no line, no StopIteration, no exception — when the SSE
+        connection is half-open (NAT eviction, laptop sleep, proxy idle
+        timeout). A plain `for` over that iterator has no way to notice: it
+        cannot even observe `_stop_event`, because the loop body never runs.
+
+        So the blocking iteration happens on a reader thread and is consumed
+        through a queue with a timeout. On silence we raise, which the caller
+        already handles as "reconnect". The reader thread is abandoned rather
+        than joined — it is stuck in exactly the read we gave up on — but it is
+        a daemon and dies with the process. That is not a new leak: before this,
+        a stalled read stranded the whole tail loop the same way, and stranded
+        it permanently.
+        """
+        assert self._hf_job_id is not None
+        queue: Queue = Queue()
+        done = object()
+
+        def _reader() -> None:
+            try:
+                for raw in self._api.fetch_job_logs(job_id=self._hf_job_id, follow=True):
+                    queue.put(raw)
+                    if self._stop_event.is_set():
+                        break
+            except Exception as exc:  # surfaced on the consuming thread
+                queue.put(exc)
+            finally:
+                queue.put(done)
+
+        threading.Thread(target=_reader, name=f"hf-job-{self._hf_job_id}-sse", daemon=True).start()
+
+        while True:
+            try:
+                item = queue.get(timeout=_TAIL_SILENCE_TIMEOUT_S)
+            except Empty as exc:
+                raise TimeoutError(f"no log output for {_TAIL_SILENCE_TIMEOUT_S:.0f}s; reconnecting") from exc
+            if item is done:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the
-        in-memory queue. Reconnects on stream end or transient error while
-        the status poller still says the job is alive — SSE death is no
-        longer fatal. Exits when _stop_event is set (status poller saw a
-        terminal stage, or stop() was called).
+        in-memory queue. Reconnects on stream end, transient error, or a
+        silent connection while the status poller still says the job is alive
+        — SSE death is no longer fatal. Exits when _stop_event is set (status
+        poller saw a terminal stage, or stop() was called).
         """
         assert self._hf_job_id is not None
         try:
             while not self._stop_event.is_set():
                 clean_end = False
                 try:
-                    seen = 0
-                    for raw in self._api.fetch_job_logs(job_id=self._hf_job_id, follow=True):
+                    for raw in self._iter_job_logs():
                         if self._stop_event.is_set():
                             return
-                        seen += 1
-                        # Skip the replayed prefix from a reconnect.
-                        if seen <= self._lines_processed:
-                            continue
-                        self._lines_processed = seen
                         stripped = raw.rstrip()
                         if not stripped:
+                            continue
+                        # Drop the prefix a reconnect replayed. Deliberately
+                        # AFTER the blank-line skip and on the stripped text, so
+                        # the window holds exactly what was emitted.
+                        if self._is_replayed(stripped):
                             continue
                         parse_metrics_into(stripped, self._metrics, self._resume_total)
                         if self._wandb_run_url is None:

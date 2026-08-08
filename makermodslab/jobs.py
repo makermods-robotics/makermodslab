@@ -491,6 +491,33 @@ def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
     return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
+def _settle_terminal_metrics(record: JobRecord) -> None:
+    """Reconcile a finished run's progress with the fact that it finished.
+
+    `metrics` only ever advances when a log line is parsed, so a run whose log
+    stream died mid-flight keeps the last frame it saw forever. That produced
+    the MT47 symptom: a `done` run rendering "3,650 / 10,000" beside a live
+    countdown ("00:53:05 remaining") while its step-10,000 checkpoint sat on the
+    Hub — three surfaces of one record disagreeing.
+
+    Two changes, both about not asserting what we no longer believe:
+
+      * `done` means the trainer reached its target, so progress is the target.
+        Only claimed when a target is actually known (`total_steps > 0`), and
+        only for `done` — a `failed`/`interrupted` run genuinely stopped where
+        the last frame said, and rounding that up to the target would invent
+        training that never happened.
+      * The ETA is cleared for EVERY terminal state. A finished run has no
+        remaining time, whatever the last frame extrapolated.
+
+    A mitigation, not the fix: the root cause is the log tail going silent
+    (MT47), and a repaired tail leaves this a no-op on a healthy run.
+    """
+    if record.metrics.eta_seconds is not None:
+        record.metrics.eta_seconds = None
+    if record.state == "done" and record.metrics.total_steps > 0:
+        record.metrics.current_step = record.metrics.total_steps
+
 
 def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
@@ -4510,6 +4537,7 @@ class JobRegistry:
                 record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc
+                _settle_terminal_metrics(record)
                 if record.error_message is None:
                     if state == "interrupted":
                         # Never the synthetic exit-code text here: that message

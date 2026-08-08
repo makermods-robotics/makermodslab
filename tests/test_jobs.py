@@ -6266,3 +6266,79 @@ def test_rewind_steps_guard_reads_the_chosen_checkpoint(tmp_path) -> None:
             _rewind_request(leaf="tip", owner="trunk", step=200, steps=200),
             JobTarget(runner="local"),
         )
+# ---------------------------------------------------------------------------
+# MT47 mitigation: a terminal record must not advertise progress it no longer
+# believes, nor a countdown for a run that has already stopped.
+# ---------------------------------------------------------------------------
+
+
+def _record_with_metrics(state, **metrics):
+    from makermodslab.jobs import JobRecord, TrainingMetrics
+    from makermodslab.train import TrainingRequest
+
+    return JobRecord(
+        id="J",
+        name="j",
+        state=state,
+        config=TrainingRequest(dataset_repo_id="d", steps=10000),
+        output_dir="/tmp/j",
+        started_at=0.0,
+        metrics=TrainingMetrics(**metrics),
+    )
+
+
+def test_settle_terminal_metrics_snaps_a_done_run_to_its_target() -> None:
+    """The live symptom: a `done` cloud run whose log stream died at step 3,650
+    kept rendering "3,650 / 10,000" beside a step-10,000 checkpoint. `done`
+    means the target was reached, so progress is the target."""
+    from makermodslab.jobs import _settle_terminal_metrics
+
+    record = _record_with_metrics("done", current_step=3650, total_steps=10000, eta_seconds=3185.0)
+
+    _settle_terminal_metrics(record)
+
+    assert record.metrics.current_step == 10000
+    assert record.metrics.eta_seconds is None
+
+
+def test_settle_terminal_metrics_never_invents_progress_for_a_failed_run() -> None:
+    """A failed or interrupted run genuinely stopped where the last frame said.
+    Rounding that up to the target would claim training that never happened —
+    and would poison the resume flow, which reads the step to decide what is
+    left to do."""
+    from makermodslab.jobs import _settle_terminal_metrics
+
+    for state in ("failed", "interrupted"):
+        record = _record_with_metrics(state, current_step=3650, total_steps=10000, eta_seconds=3185.0)
+
+        _settle_terminal_metrics(record)
+
+        assert record.metrics.current_step == 3650, state
+        # The ETA still goes: nothing terminal has time remaining.
+        assert record.metrics.eta_seconds is None, state
+
+
+def test_settle_terminal_metrics_leaves_an_unknown_target_alone() -> None:
+    """total_steps == 0 means tqdm never spoke, which the UI reads as
+    "Training starting…". Snapping to it would assert 0/0 as a finished run."""
+    from makermodslab.jobs import _settle_terminal_metrics
+
+    record = _record_with_metrics("done", current_step=0, total_steps=0)
+
+    _settle_terminal_metrics(record)
+
+    assert record.metrics.current_step == 0
+    assert record.metrics.total_steps == 0
+
+
+def test_settle_terminal_metrics_is_a_noop_on_a_healthy_finished_run() -> None:
+    """With the log tail repaired this is the normal case, and it must not
+    change anything — the mitigation exists for the broken-stream case only."""
+    from makermodslab.jobs import _settle_terminal_metrics
+
+    record = _record_with_metrics("done", current_step=10000, total_steps=10000, current_loss=0.04)
+
+    _settle_terminal_metrics(record)
+
+    assert record.metrics.current_step == 10000
+    assert record.metrics.current_loss == 0.04
