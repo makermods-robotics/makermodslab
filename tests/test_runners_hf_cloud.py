@@ -616,6 +616,107 @@ def test_wrapper_source_inlines_the_tested_install_plan() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint uploader hardening. The readiness GATE is covered above (it is
+# _checkpoint_step_ready, exercised directly); what follows covers the two
+# things the upload call itself must get right, by exec'ing the wrapper's own
+# _scan_and_upload against fakes rather than a host-side paraphrase.
+# ---------------------------------------------------------------------------
+
+
+class _FakeUploadApi:
+    """Records upload_folder calls; optionally fails the first `fail_times`."""
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.calls: list[dict] = []
+        self._fail_times = fail_times
+
+    def upload_folder(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise RuntimeError("hub is having a day")
+
+
+def _wrapper_scanner(output_dir: Path, api: _FakeUploadApi):
+    """Exec the wrapper's own `_scan_and_upload` and return (call, seen).
+
+    The function is sliced out of WRAPPER_SOURCE by name and given the globals
+    the wrapper would have around it, so a drift between the template and this
+    test surfaces as a KeyError/NameError rather than passing silently.
+    """
+    import os
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _checkpoint_step_ready
+
+    match = re.search(r"^def _scan_and_upload\(.*?(?=^\S)", WRAPPER_SOURCE, re.MULTILINE | re.DOTALL)
+    assert match, "_scan_and_upload not found in WRAPPER_SOURCE"
+    namespace: dict = {
+        "Path": Path,
+        "os": os,
+        "re": re,
+        "api": api,
+        "output_dir": str(output_dir),
+        "repo_id": "user/run",
+        "seen": set(),
+        "waits": {},
+        "_checkpoint_step_ready": _checkpoint_step_ready,
+        "print": lambda *a, **k: None,  # keep the wrapper's logging out of pytest
+    }
+    exec(compile(match.group(0), "<hf-jobs-wrapper>", "exec"), namespace)  # noqa: S102
+    return namespace["_scan_and_upload"], namespace["seen"]
+
+
+def _write_checkpoint(output_dir: Path, step_dir: str) -> Path:
+    """A complete lerobot checkpoint tree, with `checkpoints/last` advanced to
+    it — the signal _checkpoint_step_ready reads to call the save finished."""
+    import os
+
+    ck = output_dir / "checkpoints" / step_dir
+    pm = ck / "pretrained_model"
+    pm.mkdir(parents=True, exist_ok=True)
+    (pm / "config.json").write_text("{}")
+    (pm / "model.safetensors").write_bytes(b"weights")
+    (pm / "train_config.json").write_text("{}")
+    ts = ck / "training_state"
+    ts.mkdir(exist_ok=True)
+    (ts / "training_step.json").write_text("{}")
+    (ts / "rng_state.safetensors").write_bytes(b"rng")
+    (ts / "optimizer_state.safetensors").write_bytes(b"optim")
+    last = output_dir / "checkpoints" / "last"
+    if last.is_symlink() or last.exists():
+        last.unlink()
+    os.symlink(step_dir, last)
+    return ck
+
+
+def test_wrapper_does_not_seal_a_checkpoint_whose_upload_failed(tmp_path: Path) -> None:
+    """`seen.add` runs only after upload_folder returns, so a partial or failed
+    commit must leave the step retryable instead of retiring it forever."""
+    api = _FakeUploadApi(fail_times=1)
+    scan, seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "002000")
+    scan()  # attempts the upload, which raises
+    assert len(api.calls) == 1
+    assert seen == set()  # not retired
+
+    scan()  # retried on the next tick, and this time it lands
+    assert len(api.calls) == 2
+    assert seen == {"002000"}
+
+
+def test_wrapper_upload_excludes_safetensors_temp_files(tmp_path: Path) -> None:
+    """A .tmp* file caught mid-rename has landed on the Hub before; keep it out
+    of the commit even when the rest of the tree is complete."""
+    api = _FakeUploadApi()
+    scan, _seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "003000")
+    scan()
+    assert api.calls[0]["ignore_patterns"] == [".tmp*", "**/.tmp*"]
+
+
+# ---------------------------------------------------------------------------
 # Job-timeout precedence: request value wins (normalised to seconds), else the
 # HF_JOB_TIMEOUT fallback constant.
 # ---------------------------------------------------------------------------
@@ -627,7 +728,23 @@ def test_resolve_job_timeout_falls_back_to_constant_when_unset() -> None:
 
     config = TrainingRequest(dataset_repo_id="x")
     assert config.hf_job_timeout is None
-    assert resolve_job_timeout(config) == HF_JOB_TIMEOUT  # "2h" string passthrough
+    assert resolve_job_timeout(config) == HF_JOB_TIMEOUT  # string passthrough, not seconds
+
+
+def test_hf_job_timeout_constant_is_single_unit_and_covers_measured_runs() -> None:
+    """The fallback is handed to run_job as a raw string, and run_job's parser is
+    only `float(timeout[:-1]) * factor[timeout[-1]]` — a single unit suffix. A
+    compound "improvement" like "1d12h" would not survive that, so pin the shape
+    as well as the budget: it must clear the longest run we have measured
+    (SmolVLA 15k steps at 2.24 s/step on a10g-small ≈ 8.8h)."""
+    from makermodslab.runners.hf_cloud import HF_JOB_TIMEOUT
+
+    assert isinstance(HF_JOB_TIMEOUT, str)
+    factors = {"s": 1, "m": 60, "h": 3600, "d": 3600 * 24}  # run_job's own table
+    assert HF_JOB_TIMEOUT[-1] in factors
+    seconds = float(HF_JOB_TIMEOUT[:-1]) * factors[HF_JOB_TIMEOUT[-1]]  # no ValueError
+    assert seconds == 24 * 3600
+    assert seconds > 8.8 * 3600
 
 
 def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
@@ -640,3 +757,137 @@ def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="2h")) == 7200
+
+
+# --- stop(): distinguishing a cancel from a crash ---------------------------
+#
+# returncode() collapses every non-COMPLETED stage to 1, so the registry
+# classifies cloud runs on terminal_stage() instead. These cover stop()'s own
+# decisions only — no submission, no threads, no network — because the stage
+# stop() leaves behind is what decides whether a stopped run reads as
+# `interrupted` or as a failed model.
+
+
+class _FakeStatus:
+    def __init__(self, stage, message=None):
+        self.stage = stage
+        self.message = message
+
+
+class _FakeJobInfo:
+    def __init__(self, stage, message=None):
+        self.status = _FakeStatus(stage, message)
+
+
+class _FakeJobsApi:
+    """Just the two calls stop() makes."""
+
+    def __init__(self, *, cancel_raises=False, inspect=None, inspect_raises=False):
+        self._cancel_raises = cancel_raises
+        self._inspect = inspect
+        self._inspect_raises = inspect_raises
+        self.cancelled = []
+        self.inspected = []
+
+    def cancel_job(self, job_id):
+        self.cancelled.append(job_id)
+        if self._cancel_raises:
+            raise RuntimeError("404 job already ended")
+
+    def inspect_job(self, job_id):
+        self.inspected.append(job_id)
+        if self._inspect_raises:
+            raise RuntimeError("network down")
+        return self._inspect
+
+
+def _runner_with(api, tmp_path, *, stage=None):
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "a10g-small")
+    runner._api = api
+    runner._hf_job_id = "job-1"
+    runner._terminal_status = stage
+    return runner
+
+
+def test_stop_records_canceled_stage(tmp_path) -> None:
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert api.cancelled == ["job-1"]
+    assert runner.terminal_stage() == "CANCELED"
+    assert runner.is_running() is False
+    # No corrective lookup needed when the cancel was accepted.
+    assert api.inspected == []
+
+
+def test_stop_does_not_overwrite_a_stage_the_poller_already_saw(tmp_path) -> None:
+    """_set_terminal is idempotent, and that is what keeps a run which
+    finished before the stop landed reported as COMPLETED."""
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path, stage="COMPLETED")
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "COMPLETED"
+    assert runner.returncode() == 0
+
+
+def test_stop_adopts_the_real_stage_when_cancel_is_refused(tmp_path) -> None:
+    """cancel_job refusing usually means the job had ALREADY ended, so the
+    pre-set CANCELED describes a run that finished on its own. Re-read it."""
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("COMPLETED"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert api.inspected == ["job-1"]
+    assert runner.terminal_stage() == "COMPLETED"
+    assert runner.returncode() == 0
+
+
+def test_stop_adopts_an_error_stage_and_its_message(tmp_path) -> None:
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("ERROR", "Job timeout"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "ERROR"
+    assert runner.terminal_message() == "Job timeout"
+
+
+def test_stop_keeps_canceled_when_the_stage_cannot_be_re_read(tmp_path) -> None:
+    """An unreachable Hub leaves CANCELED standing: our cancel is already out,
+    so it's the best available account of the run."""
+    api = _FakeJobsApi(cancel_raises=True, inspect_raises=True)
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "CANCELED"
+
+
+def test_stop_keeps_canceled_when_the_job_is_still_running(tmp_path) -> None:
+    """cancel_job can also fail transiently. A non-terminal stage is no
+    evidence that the run ended on its own, so don't adopt it."""
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("RUNNING"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "CANCELED"
+
+
+def test_stop_is_a_noop_before_submission(tmp_path) -> None:
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path)
+    runner._hf_job_id = None
+
+    runner.stop()
+
+    assert api.cancelled == []
+    assert runner.terminal_stage() is None

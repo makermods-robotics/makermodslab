@@ -484,12 +484,18 @@ def _scan_and_upload():
                 repo_id=repo_id,
                 path_in_repo=f"checkpoints/{entry.name}",
                 commit_message=f"checkpoint {entry.name}",
+                # safetensors writes through a .tmpXXXX file and renames; one
+                # caught mid-rename has landed on the Hub before.
+                ignore_patterns=[".tmp*", "**/.tmp*"],
             )
             seen.add(entry.name)
             waits.pop(entry.name, None)
             print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
         except Exception as exc:
+            # NOT added to `seen`: sealing a step whose upload failed (or only
+            # partly landed) is what made incomplete Hub checkpoints permanent.
             print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
+            continue
 
 
 def _watch():
@@ -530,11 +536,25 @@ WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
     "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
 ).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
 
-# HF Jobs' platform default timeout has killed legitimate runs that pushed
-# the model successfully but were still uploading auxiliary files. 2h covers
-# our typical ACT/SmolVLA runs on t4-small with comfortable headroom. This is
-# the FALLBACK: used only when the request carries no explicit hf_job_timeout.
-HF_JOB_TIMEOUT = "2h"
+# HF Jobs' platform default timeout has killed legitimate runs that pushed the
+# model successfully but were still uploading auxiliary files — that is why a
+# generous fallback exists at all. 24h is calibrated on measured a10g-small
+# throughput from real completed runs: SmolVLA at batch 64 is 2.24 s/step
+# (n=12,890), so 15k steps ≈ 8.8h; ACT at batch 8 is 0.162 s/step (n=2,873),
+# so 100k steps ≈ 4.5h (per-step cost is near-linear in batch size — batch 16
+# measured 0.299 s/step). That leaves ~2.7x headroom on the longest run we have
+# actually observed. The previous 2h sat below *every* real run and silently
+# truncated paid GPU time mid-training.
+#
+# This is the FALLBACK: used only when the request carries no explicit
+# hf_job_timeout (that path goes through parse_hf_duration instead). The axis
+# you trade when changing this is coverage vs runaway-billing exposure — a
+# larger value protects longer legitimate runs but also raises the ceiling on
+# what a HUNG job can bill before the platform reaps it, which is why this is
+# 24h (one day) rather than 2d. Keep it a SINGLE-unit string: run_job parses it
+# as float(timeout[:-1]) * factor[timeout[-1]], so a compound form like "1d12h"
+# does not survive the trip.
+HF_JOB_TIMEOUT = "24h"
 
 
 def resolve_job_timeout(config: TrainingRequest) -> int | str:
@@ -604,10 +624,18 @@ class HfCloudJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         flavor: str,
+        resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._flavor = flavor
+        # Full step target for a resumed run, so the log parser can rebase the
+        # remaining-window tqdm bar onto the global step (see
+        # jobs.parse_metrics_into / jobs._resume_total_steps). Passed in rather
+        # than derived from `config` because reattach() has no config; both
+        # construction sites in jobs.py must supply it or a resumed cloud run
+        # reports resume-relative steps (e.g. 4251/11000 instead of 8251/15000).
+        self._resume_total = resume_total
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -851,7 +879,7 @@ class HfCloudJobRunner:
                         stripped = raw.rstrip()
                         if not stripped:
                             continue
-                        parse_metrics_into(stripped, self._metrics)
+                        parse_metrics_into(stripped, self._metrics, self._resume_total)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(stripped)
                             if url is not None:
@@ -909,12 +937,52 @@ class HfCloudJobRunner:
             return
         # Pre-set CANCELED so the watchdog finalises as canceled regardless
         # of whether the status poller observed a terminal stage first.
+        # (_set_terminal is idempotent, so a stage the poller already saw — a
+        # run that beat us to COMPLETED or ERROR — survives this and is what
+        # the registry classifies on.)
         self._set_terminal("CANCELED")
         try:
             self._api.cancel_job(job_id=self._hf_job_id)
         except Exception as exc:
             # Already-completed jobs may 404; that's fine.
             logger.info("cancel_job(%s) ignored: %s", self._hf_job_id, exc)
+            self._reconcile_stage_after_failed_cancel()
+
+    def _reconcile_stage_after_failed_cancel(self) -> None:
+        """Re-read the real stage when cancel_job refused.
+
+        The usual reason it refuses is that the job had ALREADY ended (404),
+        which means the CANCELED we pre-set above is a lie about a run that
+        finished on its own — and the whole point of tracking cancellation is
+        not to relabel those. The status poller can't fix it: pre-setting a
+        terminal stage stopped it.
+
+        So ask once, and adopt a terminal answer. Writes the fields directly
+        rather than going through the idempotent _set_terminal, since the value
+        being corrected is precisely the one it would refuse to overwrite.
+        Silent on any failure: an unreachable Hub leaves CANCELED standing,
+        which is the best available guess once our cancel is already out.
+        """
+        try:
+            info = self._api.inspect_job(job_id=self._hf_job_id)
+            status_obj = getattr(info, "status", None)
+            stage = getattr(status_obj, "stage", None) if status_obj is not None else None
+            if stage is None:
+                return
+            stage_str = str(stage).upper()
+            if stage_str not in _TERMINAL_STAGES or stage_str == self._terminal_status:
+                return
+            logger.info(
+                "Job %s had already reached %s before the cancel; recording that instead of CANCELED",
+                self._hf_job_id,
+                stage_str,
+            )
+            self._terminal_status = stage_str
+            msg = getattr(status_obj, "message", None)
+            if msg:
+                self._terminal_message = str(msg)
+        except Exception as exc:
+            logger.info("Could not reconcile stage for %s: %s", self._hf_job_id, exc)
 
     def is_running(self) -> bool:
         # Liveness is driven by _status_poll_loop's inspect_job calls.
@@ -944,6 +1012,16 @@ class HfCloudJobRunner:
 
     def wandb_run_url(self) -> str | None:
         return self._wandb_run_url
+
+    def terminal_stage(self) -> str | None:
+        """The platform's terminal stage, or None while the job is live.
+
+        Read by the registry watchdog in preference to returncode(), which
+        collapses every non-COMPLETED stage to 1 and so cannot tell a cancel
+        from a crash — the defect that filed every stopped cloud run as
+        `failed`. One of COMPLETED / CANCELED / ERROR / DELETED.
+        """
+        return self._terminal_status
 
     def terminal_message(self) -> str | None:
         """Status.message captured when the job reached a terminal stage.

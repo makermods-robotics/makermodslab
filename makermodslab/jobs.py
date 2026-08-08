@@ -103,8 +103,6 @@ class JobRecord(BaseModel):
     hf_flavor: str | None = None
     hf_repo_id: str | None = None
     hf_job_url: str | None = None
-    # Captured from training stdout the first time wandb prints the run URL.
-    wandb_run_url: str | None = None
     # Number of checkpoints currently visible (local: filesystem; cloud:
     # Hub repo). Filled in by JobRegistry.list/get; persisted as zero.
     checkpoint_count: int = 0
@@ -116,6 +114,8 @@ class JobRecord(BaseModel):
     # cross-runner resume of the same step re-uses the upload instead of
     # pushing the same GBs again.
     checkpoints_hub_repo_id: str | None = None
+    # Captured from training stdout the first time wandb prints the run URL.
+    wandb_run_url: str | None = None
     # Step dirs known to be present under checkpoints/ in that repo.
     checkpoints_hub_steps: list[str] = []
 
@@ -159,22 +159,129 @@ def _pid_alive(pid: int) -> bool:
 class JobRunner(Protocol):
     """Backend interface for running one job. LocalJobRunner is the only impl
     today; remote runners (SSH, Slurm) drop in here later. @runtime_checkable
-    lets `isinstance(r, JobRunner)` work in tests / sanity checks."""
+    lets `isinstance(r, JobRunner)` work in tests / sanity checks.
+
+    Three OPTIONAL hooks are read defensively by the registry watchdog via
+    `_runner_hook` rather than declared here, so a runner that can't answer
+    them still satisfies this Protocol (HfCloudJobRunner has no
+    `stop_signalled`; the local runners have no `terminal_stage`):
+
+      * `stop_signalled() -> bool` — did this runner actually deliver the
+        stop signal to a live process? False means the process was already
+        gone, so a nonzero exit code belongs to the process, not to us.
+      * `terminal_stage() -> str | None` — a platform-reported terminal stage
+        (HF Jobs' COMPLETED / CANCELED / ERROR / DELETED), which is richer
+        than an exit code and is preferred over it when present.
+      * `terminal_message() -> str | None` — the platform's own reason string
+        (e.g. HF Jobs' "Job timeout"), surfaced instead of a synthetic
+        "exited with code N".
+    """
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None: ...
     def stop(self) -> None: ...
     def is_running(self) -> bool: ...
     def returncode(self) -> int | None: ...
     def stream_log_lines(self) -> list[LogLine]: ...
-    def wandb_run_url(self) -> str | None: ...
+
+
+# Written to `error_message` when a run ends because we asked it to. The field
+# is named for its usual content but is rendered as neutral subtext, and
+# leaving it None would show the user nothing at all where a misleading
+# "Subprocess exited with code 1" used to be. The real code stays in
+# `exit_code` for anyone debugging.
+STOPPED_BY_REQUEST_MESSAGE = "Stopped at your request, not by a training error."
+
+# Written to `error_message` for a run that ended while we weren't watching and
+# left no evidence of how: no exit status from the wrapper (see
+# _EXIT_STATUS_FILENAME), no platform stage, and no stop of ours. The run is
+# filed as `interrupted` rather than done/failed, so this text has to say that
+# the outcome is unknown WITHOUT implying the weights are.
+UNCONFIRMED_OUTCOME_MESSAGE = (
+    "MakerMods Lab restarted while this run was training; its outcome could not "
+    "be confirmed. Any checkpoints on disk are intact."
+)
+
+
+def classify_terminal_state(
+    *,
+    returncode: int | None,
+    stop_requested: bool,
+    terminal_stage: str | None = None,
+) -> JobState:
+    """Decide the final state of a run that has just stopped running.
+
+    Exists because an exit code alone cannot tell a deliberate stop from a
+    crash: SIGTERM'ing the trainer yields a nonzero code, so before this every
+    press of the Stop button landed in history as `failed` with a synthetic
+    "Subprocess exited with code N" — indistinguishable from a real failure,
+    and read by at least one user as "the model is broken" when nothing was.
+
+    `stop_requested` is the registry's recorded intent, combined by logical AND
+    with the runner's own account of whether it actually signalled anything
+    (see `JobRunner`'s optional `stop_signalled` hook).
+
+    Precedence, and the reasoning for the ambiguous cases:
+
+    1. `terminal_stage` wins when the platform reports one (hf_cloud). It is
+       set once and never overwritten, so a stage observed BEFORE our cancel
+       landed is the truth about a run that beat us to the finish:
+         * COMPLETED → `done`, even with a stop pending. A run that finished
+           on its own is never relabelled.
+         * ERROR     → `failed`, even with a stop pending. The poller can only
+           have seen ERROR before our cancel took effect, so this is a genuine
+           crash that merely coincided with the stop; laundering it into
+           `interrupted` would hide a real failure.
+         * CANCELED  → `interrupted`, but only if we asked. An unsolicited
+           CANCELED (cancelled in the HF web UI, or however the platform
+           chooses to report an enforced timeout) is left as `failed` rather
+           than guessed at — see the module note in `JobRegistry.stop`.
+         * DELETED   → `failed`, unchanged from before.
+    2. `returncode == 0` → `done`, whatever else is true. A clean exit means
+       the trainer ran its own shutdown path to completion, which SIGTERM does
+       not produce; intent never overrides it.
+    3. A nonzero code with a stop we actually signalled → `interrupted`.
+       Deliberately not narrowed to signal-shaped codes (-15/-9): a trainer
+       that installs its own SIGTERM handler and exits 1 is still a run we
+       ended, and requiring -15 would leave the bug unfixed for exactly that
+       case. The cost is that a crash landing inside the microseconds between
+       the runner's "is it still alive?" check and its `terminate()` call is
+       misread as a stop. That window is unobservably narrow and carries no
+       evidence that could separate the two; every wider window (process
+       already dead before the signal, platform stage already terminal) is
+       caught above.
+    4. Anything else → `failed`, including a missing code.
+    """
+    if terminal_stage is not None:
+        stage = terminal_stage.upper()
+        if stage == "COMPLETED":
+            return "done"
+        if stage == "CANCELED" and stop_requested:
+            return "interrupted"
+        return "failed"
+    if returncode == 0:
+        return "done"
+    if stop_requested and returncode is not None:
+        return "interrupted"
+    return "failed"
+
+
+def _runner_hook(runner: object, name: str):
+    """Call an optional zero-arg runner hook, or return None.
+
+    None means "this runner can't answer", never a substantive answer — a
+    runner that doesn't implement the hook and one whose hook raised are
+    deliberately indistinguishable, because neither is evidence."""
+    fn = getattr(runner, name, None)
+    if not callable(fn):
+        return None
+    try:
+        return fn()
+    except Exception:  # pragma: no cover — a hook must never break finalisation
+        return None
 
 
 # tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
 _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:]+)<([\d:]+)")
-
-# Wandb prints something like "wandb: 🚀 View run at https://wandb.ai/<entity>/<project>/runs/<id>"
-# when it boots. We capture the first URL of that shape we see.
-_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+")
 
 # Name of the file LocalJobRunner's subprocess wrapper writes the trainer's
 # real exit status to, relative to the run's output_dir. TailingJobRunner
@@ -182,9 +289,19 @@ _WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+
 _EXIT_STATUS_FILENAME = "exit_status"
 
 
-def extract_wandb_run_url(line: str) -> str | None:
-    match = _WANDB_URL_RE.search(line)
-    return match.group(0) if match else None
+def _read_exit_status(path: Path | None) -> int | None:
+    """The trainer's real exit code from the wrapper's status file, or None.
+
+    None means "no usable evidence" for every reason alike: no path, no file
+    (the wrapper was killed before it could write, e.g. SIGKILL or a reboot),
+    or unparsable contents. Callers must not read None as a success or a
+    failure — see TailingJobRunner.returncode()."""
+    if path is None:
+        return None
+    try:
+        return int(path.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
 
 
 def _parse_duration(s: str) -> float | None:
@@ -200,6 +317,16 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
+# Wandb prints something like "wandb: 🚀 View run at https://wandb.ai/<entity>/<project>/runs/<id>"
+# when it boots. We capture the first URL of that shape we see.
+_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+")
+
+
+def extract_wandb_run_url(line: str) -> str | None:
+    match = _WANDB_URL_RE.search(line)
+    return match.group(0) if match else None
+
+
 def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | None = None) -> None:
     """Update `metrics` in-place from one stdout line.
 
@@ -207,6 +334,15 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
       * tqdm progress for current_step + total_steps + ETA (~1s cadence).
       * 'INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...' for loss/lr/grdn
         (only at log_freq cadence, default every 250 steps).
+
+    One `line` can carry MANY tqdm frames. tqdm separates its redraws with \\r,
+    and a log transport that doesn't split on \\r hands us the whole burst as one
+    line with the trailing 'INFO ... step:N ...' appended (HF Jobs' SSE log
+    stream batches ~log_freq frames per message this way; a local subprocess
+    read with universal_newlines gets one frame per line). The LAST frame is the
+    one the appended INFO line belongs to, so we must take the last match, not
+    the first — taking the first understated every step by ~log_freq−1, which
+    the abbreviated 'step:4K' token below cannot correct.
 
     `resume_total` is the run's full step target for a *resumed* run (None for a
     fresh run). On resume lerobot's tqdm bar counts only the remaining window
@@ -216,11 +352,12 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
     carries the true global step, so it needs no rebasing.
     """
     try:
-        tqdm_match = _TQDM_RE.search(line)
-        if tqdm_match:
+        tqdm_frames = _TQDM_RE.findall(line)
+        if tqdm_frames:
             try:
-                tqdm_step = int(tqdm_match.group(1))
-                total = int(tqdm_match.group(2))
+                raw_step, raw_total, raw_eta = tqdm_frames[-1]
+                tqdm_step = int(raw_step)
+                total = int(raw_total)
                 if resume_total is not None and total > 0:
                     metrics.current_step = resume_total - total + tqdm_step
                     metrics.total_steps = resume_total
@@ -228,13 +365,17 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
                     metrics.current_step = tqdm_step
                     if total > 0:
                         metrics.total_steps = total
-                eta = _parse_duration(tqdm_match.group(3))
+                eta = _parse_duration(raw_eta)
                 if eta is not None:
                     metrics.eta_seconds = eta
             except (ValueError, IndexError):
                 pass
 
         if "step:" in line and "loss:" in line:
+            # Only useful below 1000 steps: lerobot renders this through
+            # format_big_number, so the token becomes "4K" and int() raises —
+            # suppressed, leaving the (now correct) tqdm step in place. Don't
+            # try to expand the K suffix; it's rounded, hence lossy.
             with contextlib.suppress(ValueError):
                 metrics.current_step = int(line.split("step:")[1].split()[0].replace(",", ""))
             with contextlib.suppress(ValueError):
@@ -382,6 +523,10 @@ class LocalJobRunner:
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
+        # True only once we have actually signalled a LIVE process. Lets the
+        # registry tell "we killed this" from "it had already died", which the
+        # exit code alone cannot express.
+        self._stop_signalled = False
         self._status_path: Path | None = None
 
     def start(
@@ -461,9 +606,13 @@ class LocalJobRunner:
         return self._process.pid if self._process is not None else None
 
     def stop(self) -> None:
+        # Early return on an already-exited process is what makes
+        # stop_signalled() meaningful: the exit code we are about to hand the
+        # watchdog is then the process's own, and must stay a failure.
         if self._process is None or self._process.poll() is not None:
             return
         self._stop_event.set()
+        self._stop_signalled = True
         try:
             # self._process is the /bin/sh wrapper from start(); the trainer
             # is its child in the same process group (start_new_session made
@@ -483,6 +632,10 @@ class LocalJobRunner:
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
+
+    def stop_signalled(self) -> bool:
+        """Whether stop() actually delivered a signal to a live process."""
+        return self._stop_signalled
 
     def returncode(self) -> int | None:
         if self._process is None:
@@ -567,13 +720,14 @@ class TailingJobRunner:
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # Set only when stop() actually got a SIGTERM into a live process
-        # group — see stop_signalled().
-        self._stop_delivered = threading.Event()
         # Replay everything that's already on disk so the parser catches up
         # on metrics, then tail from the current EOF.
         self._tail_offset = 0
         self._wandb_run_url: str | None = None
+        # Set only when stop() actually got a SIGTERM into a LIVE process
+        # group. We have no Popen to reap, so this flag is the only record
+        # that the pid's disappearance was our doing — see stop_signalled().
+        self._stop_signalled = False
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # Required by JobRunner Protocol but irrelevant here; the subprocess
@@ -597,49 +751,54 @@ class TailingJobRunner:
             os.killpg(self._pid, signal.SIGTERM)
         except ProcessLookupError:
             # The group was already gone, so whatever ended this run, it
-            # wasn't us — leave _stop_delivered clear so stop_signalled()
-            # can't claim credit for a crash that beat the user's click.
+            # wasn't us — leave _stop_signalled clear so it can't claim credit
+            # for a crash that beat the user's click, and so returncode()
+            # keeps reporting "unconfirmed" rather than a synthesised signal.
             pass
         else:
-            self._stop_delivered.set()
+            self._stop_signalled = True
         self._stop_event.set()
+
+    def is_running(self) -> bool:
+        return _pid_alive(self._pid)
 
     def stop_signalled(self) -> bool:
         """True once stop() verifiably delivered a SIGTERM to a live process
-        group. Consulted by JobRegistry._tick() when returncode() comes back
-        None: the group TERM in stop() kills the wrapper before it can write
-        an exit status, so a user-requested stop looks identical to an
-        unconfirmed crash/restart unless this is checked.
+        group.
 
         Deliberately not just "stop() was called". A run that crashed (or died
         to a restart) before the user clicked Stop reaches killpg with nothing
         left to signal; reporting intent alone there would tell the user we
         stopped a run that had already ended on its own."""
-        return self._stop_delivered.is_set()
-
-    def is_running(self) -> bool:
-        return _pid_alive(self._pid)
+        return self._stop_signalled
 
     def returncode(self) -> int | None:
         # We can't reap a process from another session, so is_running() going
-        # False doesn't hand us an exit code the way Popen.poll() would. The
-        # wrapper LocalJobRunner.start() launched writes its own exit status
-        # to self._status_path before exiting, so read that instead of
-        # guessing from tailed log content. Absent file (wrapper itself was
-        # killed, e.g. SIGKILL or a reboot) means genuinely unconfirmed —
-        # JobRegistry._tick() reads None here as "no evidence either way" and
-        # finalises 'interrupted' rather than asserting a "done" or "failed"
-        # we can't back up.
+        # False doesn't hand us an exit code the way Popen.poll() would. Three
+        # sources of truth, in decreasing order of how much they actually know:
+        #
+        # 1. The exit-status file. The wrapper LocalJobRunner.start() launched
+        #    writes the trainer's REAL exit status there before exiting, and it
+        #    survives both a reload and a full server restart. Always preferred.
+        # 2. A stop we verifiably delivered. The group TERM in stop() kills the
+        #    wrapper before it can write step 1's file, so a deliberate stop
+        #    leaves no status behind; synthesising SIGTERM here is what lets
+        #    classify_terminal_state file it as `interrupted` (a user-requested
+        #    stop) rather than as an unexplained disappearance.
+        # 3. Otherwise: genuinely unconfirmed (the wrapper itself was SIGKILLed,
+        #    or the machine rebooted). None means "no evidence either way" —
+        #    JobRegistry._tick() finalises 'interrupted' rather than asserting a
+        #    "done" or "failed" we can't back up. Notably NOT the optimistic 0
+        #    it used to return: that reported an unconfirmed disappearance as a
+        #    successful run.
         if _pid_alive(self._pid):
             return None
-        try:
-            raw = self._status_path.read_text().strip()
-        except FileNotFoundError:
-            return None
-        try:
-            return int(raw)
-        except ValueError:
-            return None
+        rc = _read_exit_status(self._status_path)
+        if rc is not None:
+            return rc
+        if self._stop_signalled:
+            return -signal.SIGTERM
+        return None
 
     def stream_log_lines(self) -> list[LogLine]:
         out: list[LogLine] = []
@@ -821,25 +980,94 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
 _TRAIN_CONFIG_NAME = "train_config.json"
 
 
-# A Hub checkpoint's training_state/ is what makes it resumable (optimizer +
-# step). The cloud wrapper uploads the whole checkpoints/<step>/ entry, so both
-# subtrees land in the repo; this file is the cheapest existence probe.
-_HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
+# What a COMPLETE lerobot checkpoint looks like, and how to test one.
+#
+# save_checkpoint writes a checkpoint over several seconds in a fixed order:
+# pretrained_model/config.json, then the weights, then train_config.json, then
+# training_state/ (training_step.json, rng_state, and the large
+# optimizer_state.safetensors last). A directory holding only the leading files
+# is a snapshot of a save IN PROGRESS, not a resumable checkpoint — the cloud
+# uploader used to publish exactly that and seal it forever, leaving Hub
+# checkpoints that pass a naive guard and then die inside the trainer on
+# `training_state/optimizer_state.safetensors`.
+#
+# Both helpers below must stay SELF-CONTAINED (stdlib only, no module-level
+# names, no annotations): runners/hf_cloud.py inlines their source verbatim
+# into the in-container HF Jobs wrapper the same way it inlines _install_plan,
+# so the uploader's readiness rule is exactly the one these tests exercise.
 
+
+def scan_checkpoint_dir(checkpoint_dir):
+    """Inspect one checkpoints/<step>/ directory on disk.
+
+    Returns (names, fingerprint): `names` is every file below it as a relative
+    posix path ("training_state/training_step.json"); `fingerprint` is the
+    sorted (path, size, mtime_ns) tuple of the same files. Comparing the
+    fingerprint across two polls is how the uploader tells "finished" from
+    "still being written" without having to know lerobot's exact file list.
+
+    Unreadable entries are skipped rather than raised on — the walk races an
+    in-flight save, and safetensors' atomic-write temp files vanish mid-scan.
+    """
+    names = set()
+    fingerprint = []
+    for path in sorted(checkpoint_dir.rglob("*")):
+        try:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        rel = path.relative_to(checkpoint_dir).as_posix()
+        names.add(rel)
+        fingerprint.append((rel, stat.st_size, stat.st_mtime_ns))
+    return names, tuple(fingerprint)
+
+
+def missing_checkpoint_files(names):
+    """Which required artifacts are absent from `names` (relative posix paths
+    inside one checkpoints/<step>/). An empty list means complete and resumable.
+
+    scheduler_state.json is deliberately NOT required: save_training_state
+    writes it only `if scheduler is not None`, so its presence is a property of
+    the policy preset rather than of completeness. The weights are matched by
+    suffix because the filename varies (model.safetensors, or a PEFT adapter),
+    and optimizer_state.safetensors is matched at ANY depth under
+    training_state/ because a MultiAdam policy nests one directory per
+    optimizer there.
+    """
+    missing = []
+    if "pretrained_model/config.json" not in names:
+        missing.append("pretrained_model/config.json")
+    if not any(n.startswith("pretrained_model/") and n.endswith(".safetensors") for n in names):
+        missing.append("pretrained_model/*.safetensors")
+    if "pretrained_model/train_config.json" not in names:
+        missing.append("pretrained_model/train_config.json")
+    if "training_state/training_step.json" not in names:
+        missing.append("training_state/training_step.json")
+    if not any(
+        n.startswith("training_state/") and n.rsplit("/", 1)[-1] == "optimizer_state.safetensors"
+        for n in names
+    ):
+        missing.append("training_state/optimizer_state.safetensors")
+    return missing
+
+
+# Shared tail for both resume refusals: name the remedy, since "incomplete
+# checkpoint" is otherwise a dead end for the user.
+_INCOMPLETE_REMEDY = "Resume an earlier checkpoint, or fine-tune from its weights instead."
 
 # Plain-language names for the runner ids, so a user-facing refusal reads like
 # the Compute control the user actually clicked rather than an internal literal.
 _RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
 
 
-def hub_checkpoint_has_training_state(api, repo_id: str, step_dir: str) -> bool:
-    """Is checkpoints/<step_dir>/ on `repo_id` resumable — i.e. did its
-    training_state/ (optimizer + step counter) reach the Hub?
+def hub_checkpoint_missing_files(api, repo_id: str, step_dir: str) -> list[str]:
+    """Which required files of `repo_id`'s checkpoints/<step_dir>/ are absent.
 
-    Reads the repo's file listing (no bytes), so an unresumable checkpoint can
-    be refused before anything is downloaded or a GPU is rented.
-    `_HUB_TRAINING_STATE_FILE` is the cheapest existence probe for that subtree,
-    the same one the cloud runner's uploader uses.
+    Reads the repo's file listing (no bytes), so it can refuse an unresumable
+    checkpoint before anything is downloaded or a GPU is rented. An empty list
+    means complete and resumable — see missing_checkpoint_files for the rule.
 
     Shared by every consumer of a Hub checkpoint's completeness so they agree:
     the cloud→cloud resolver, the cloud→local resolver, and the re-use check
@@ -856,7 +1084,8 @@ def hub_checkpoint_has_training_state(api, repo_id: str, step_dir: str) -> bool:
         raise ValueError(
             f"Could not read {repo_id!r} to verify its checkpoint at step {step_dir}: {exc}"
         ) from exc
-    return f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" in files
+    prefix = f"checkpoints/{step_dir}/"
+    return missing_checkpoint_files({f[len(prefix) :] for f in files if f.startswith(prefix)})
 
 
 def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
@@ -875,7 +1104,8 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
     can't be resumed from the Hub: not a cloud run, no output repo, no
     checkpoints at all (the run died before its first save), an unknown step, or
-    a checkpoint whose training_state/ never made it to the Hub.
+    a checkpoint that is only partly on the Hub (missing weights or any of the
+    training_state/ files — see missing_checkpoint_files).
     """
     if source.runner != "hf_cloud":
         raise ValueError(
@@ -884,8 +1114,20 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
     if not source.hf_repo_id:
         raise ValueError(f"Cloud run {source.id!r} has no output repo on the Hub to resume from.")
     api = shared_hf_api()
-    checkpoints = _list_hub_checkpoints(api, source.hf_repo_id)
+    # Keep only the checkpoints/<step>/ entries. A repo with no checkpoint tree
+    # but a policy at its root lists a single '@root' entry (_list_hub_checkpoints'
+    # fallback) — deployable and fine-tunable, but root weights carry no
+    # training_state/, so there is nothing to resume from. Filtering here keeps
+    # the refusal a plain-language one instead of the ref-shape error below.
+    listed = _list_hub_checkpoints(api, source.hf_repo_id)
+    checkpoints = [c for c in listed if _HUB_CKPT_REF_RE.match(c.ref)]
     if not checkpoints:
+        if listed:
+            raise ValueError(
+                f"Cloud run {source.id!r} published a final policy but saved no "
+                "checkpoints, so it has no optimizer state to resume from. "
+                "Fine-tune from its weights instead."
+            )
         raise ValueError(
             f"Cloud run {source.id!r} left no checkpoints on the Hub — nothing to "
             "resume from (the run died before its first save)."
@@ -901,10 +1143,11 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
     if not m:
         raise ValueError(f"Unexpected checkpoint ref for cloud run {source.id!r}: {chosen.ref!r}")
     step_dir = m.group("step_dir")
-    if not hub_checkpoint_has_training_state(api, source.hf_repo_id, step_dir):
+    missing = hub_checkpoint_missing_files(api, source.hf_repo_id, step_dir)
+    if missing:
         raise ValueError(
-            f"Checkpoint at step {chosen.step} has no optimizer/step state "
-            "(training_state/) on the Hub, so it can't be resumed."
+            f"Checkpoint at step {chosen.step} is incomplete on the Hub (a known "
+            f"uploader race) — missing {', '.join(missing)}. {_INCOMPLETE_REMEDY}"
         )
     return source.hf_repo_id, step_dir
 
@@ -922,9 +1165,10 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     come through here.
 
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
-    can't be resumed: not a local run, no checkpoints, unknown step, or a
+    can't be resumed: not a local run, no checkpoints, unknown step, a
     weights-only checkpoint missing the training_state/ (optimizer + step)
-    needed to continue.
+    needed to continue, or a checkpoint left partly written by an interrupted
+    save.
     """
     if source.runner != "local":
         # Not a claim about lerobot — the pin resumes from a Hub repo id just
@@ -949,17 +1193,28 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
             raise ValueError(f"Run {source.id!r} has no checkpoint at step {step}.")
     # chosen.ref is <output_dir>/checkpoints/<step>/pretrained_model
     pretrained_dir = Path(chosen.ref)
+    checkpoint_dir = pretrained_dir.parent
     train_config = pretrained_dir / _TRAIN_CONFIG_NAME
-    training_state = pretrained_dir.parent / "training_state"
+    training_state = checkpoint_dir / "training_state"
     if not train_config.is_file():
         raise ValueError(
             f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, so it can't be resumed."
         )
+    # No training_state/ at all is the weights-only shape (an imported model),
+    # which deserves its own wording; a training_state/ that exists but is
+    # short of files is an interrupted save and gets the incomplete message.
     if not training_state.is_dir():
         raise ValueError(
             f"Checkpoint at step {chosen.step} has no optimizer/step state "
             "(training_state/), so it can't be resumed. Weights-only models "
             "(e.g. imported) can only start a fresh run."
+        )
+    names, _fingerprint = scan_checkpoint_dir(checkpoint_dir)
+    missing = missing_checkpoint_files(names)
+    if missing:
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} is incomplete — missing "
+            f"{', '.join(missing)}. {_INCOMPLETE_REMEDY}"
         )
     return str(train_config.resolve())
 
@@ -1024,6 +1279,106 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
     return chosen.ref
 
 
+# register_imported's fallback when a checkpoint's config.json can't be read.
+# It's a display label, not an architecture, so it can never be compared
+# against a requested policy type.
+_UNKNOWN_POLICY_TYPE = "model"
+
+
+def _check_finetune_policy_type(source: JobRecord, requested: str) -> None:
+    """Reject a fine-tune whose requested policy type contradicts its source.
+
+    A fine-tune is launched as ``--policy.type <requested>`` plus
+    ``--policy.pretrained_path <source checkpoint>`` (see
+    train.build_training_command). lerobot builds the policy class from
+    ``--policy.type`` and then loads the checkpoint's safetensors NON-strictly
+    (``PreTrainedPolicy.from_pretrained`` defaults ``strict=False``, and
+    ``make_policy`` doesn't override it), so a mismatched pair does not fail
+    loudly — it trains an essentially randomly-initialized `requested` policy
+    while the run claims to be a fine-tune of `source`. Fail up front instead.
+
+    Only compared when the source record carries a real architecture: imported
+    models fall back to the `_UNKNOWN_POLICY_TYPE` placeholder when their
+    config.json couldn't be read, and that says nothing about the weights.
+
+    Raises ValueError (→ HTTP 400) naming both types.
+    """
+    source_type = (source.config.policy_type or "").strip()
+    requested_type = (requested or "").strip()
+    if not source_type or source_type == _UNKNOWN_POLICY_TYPE:
+        return
+    if not requested_type or requested_type == source_type:
+        return
+    raise ValueError(
+        f"This run is set to train {requested_type!r}, but the fine-tune source "
+        f"{source.id!r} is a {source_type!r} checkpoint. Fine-tuning loads the "
+        f"source's weights into the policy you pick, so the two must match — "
+        f"set the policy to {source_type!r}, or pick a {requested_type!r} base "
+        "model."
+    )
+
+
+def read_pretrained_policy_type(pretrained_path: str) -> str | None:
+    """The ``type`` field (architecture) of the checkpoint's own config.json,
+    or None when the config can't be read or names no usable type. See
+    read_pretrained_config for the resolution rules and the silent-when-
+    unreadable discipline both guards share."""
+    cfg = read_pretrained_config(pretrained_path)
+    if cfg is None:
+        return None
+    return _clean_policy_type(cfg.get("type"))
+
+
+def _clean_policy_type(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _check_pretrained_policy_type(pretrained_path: str, requested: str) -> None:
+    """Reject a run whose ``--policy.type`` contradicts the checkpoint it loads.
+
+    The last line of defence before the trainer is spawned, and the only one
+    that consults the WEIGHTS' OWN config rather than MakerMods Lab's bookkeeping
+    about them. That matters twice over:
+
+    * ``_check_finetune_policy_type`` compares the source JobRecord's recorded
+      ``policy_type``, which is absent for a hand-built request and is the
+      `_UNKNOWN_POLICY_TYPE` placeholder whenever an import couldn't read its
+      config — precisely the cases it therefore skips.
+    * ``policy_pretrained_path`` is a plain field of the public
+      ``TrainingRequest``, so a caller can POST it directly with no
+      ``finetune_from_job_id`` at all and bypass that guard entirely.
+
+    MakerMods Lab cannot make the load itself strict — it shells out to
+    ``lerobot_train``, and ``make_policy`` hardcodes the non-strict default with
+    no CLI surface to override — so validating the pair up front is the only
+    available equivalent. See makermodslab/finetune_audit.py for why a mismatch is
+    unrecoverable after the fact: the architectures share no parameter names, so
+    nothing is loaded and the written checkpoint is indistinguishable from a
+    from-scratch run.
+
+    Silent when the checkpoint's architecture can't be read: an unverifiable
+    source must not block a launch. Raises ValueError (→ HTTP 400) only on a
+    contradiction we can actually prove.
+    """
+    requested_type = _clean_policy_type(requested)
+    if not requested_type:
+        return
+    actual = read_pretrained_policy_type(pretrained_path)
+    if actual is None or actual == requested_type:
+        return
+    raise ValueError(
+        f"This run is set to train {requested_type!r}, but the checkpoint it "
+        f"starts from ({pretrained_path}) is a {actual!r} model. lerobot loads "
+        f"those weights into a {requested_type!r} policy without checking, and "
+        f"the two share no parameters — the run would silently train a brand-new "
+        f"{requested_type!r} while reporting itself as a fine-tune. Set the "
+        f"policy to {actual!r}, or pick a {requested_type!r} base model."
+    )
+
+
 _CLOUD_CKPT_TTL_SECONDS = 30.0
 _CKPT_PATH_RE = re.compile(r"^checkpoints/(\d+)/pretrained_model/config\.json$")
 
@@ -1066,12 +1421,35 @@ def _list_imported_local(path: str) -> list[JobCheckpoint]:
 def _list_imported_hub(api, repo_id: str) -> list[JobCheckpoint]:
     """Auto-detect the layout of an imported Hub model repo.
 
-    A checkpoints/<step>/pretrained_model tree → reuse the tree parse.
-    Otherwise, a root config.json → a single step-0 checkpoint with a
-    'repo@root' ref (the whole repo is the pretrained_model)."""
+    A checkpoints/<step>/pretrained_model tree → the tree parse. Otherwise, a
+    root config.json → a single step-0 checkpoint with a 'repo@root' ref (the
+    whole repo is the pretrained_model).
+
+    That is now exactly _list_hub_checkpoints' rule — a trained run's repo and
+    an imported one are the same two layouts — so this delegates rather than
+    keeping a second copy that can drift. The name survives because call sites
+    (register_imported, _checkpoints_for) pass it explicitly to say WHICH kind
+    of record they are listing for."""
+    return _list_hub_checkpoints(api, repo_id)
+
+
+def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
+    """List checkpoints by introspecting the model repo file tree.
+
+    Falls back to the repo ROOT when there is no checkpoints/ tree but the root
+    holds a policy (config.json) — the same fallback _list_imported_hub applies,
+    for the same reason: a run trained with checkpoint saving off still pushes
+    its final policy to the root at the end of training, and without this the
+    job card reports zero checkpoints while a loadable model sits in the repo.
+    The '@root' ref is what the inference handler already resolves for imported
+    flat repos (rollout._resolve_policy_path), so the entry is runnable, not
+    merely listed. Resume is the one thing it can't do (root weights carry no
+    training_state/) — see _resolve_cloud_resume, which says so explicitly."""
     try:
         files = api.list_repo_files(repo_id, repo_type="model")
     except Exception:
+        # Repo may not exist yet (training just started, sidecar hasn't
+        # uploaded anything). Treat as no checkpoints.
         return []
     tree = _hub_checkpoints_from_files(files, repo_id)
     if tree:
@@ -1079,17 +1457,6 @@ def _list_imported_hub(api, repo_id: str) -> list[JobCheckpoint]:
     if "config.json" in files:
         return [JobCheckpoint(step=0, source="hub", ref=f"{repo_id}@root")]
     return []
-
-
-def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
-    """List checkpoints by introspecting the model repo file tree."""
-    try:
-        files = api.list_repo_files(repo_id, repo_type="model")
-    except Exception:
-        # Repo may not exist yet (training just started, sidecar hasn't
-        # uploaded anything). Treat as no checkpoints.
-        return []
-    return _hub_checkpoints_from_files(files, repo_id)
 
 
 _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
@@ -1254,9 +1621,9 @@ def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None, with_training_stat
 
     ``with_training_state`` widens the step-ref case to the WHOLE
     checkpoints/<step_dir>/ tree — the optimizer/rng/step state a RESUME needs
-    and a deploy or fine-tune never reads (hundreds of MB per step, so it stays
-    opt-in). The return value is unchanged (still the ``pretrained_model/``
-    dir); its parent is then the reconstructed checkpoint dir. See
+    and a deploy or fine-tune never reads (~394 MB per step, so it stays opt-in).
+    The return value is unchanged (still the ``pretrained_model/`` dir); its
+    parent is then the reconstructed checkpoint dir. See
     download_hub_resume_checkpoint, the only caller that wants it.
 
     ``tqdm_class`` is forwarded to snapshot_download for byte-progress reporting
@@ -1313,36 +1680,30 @@ def download_hub_resume_checkpoint(ref: str, *, tqdm_class=None) -> str:
         load_training_state; update_last_checkpoint runs on the checkpoints it
         WRITES, under --output_dir), so a shared-cache path is enough;
       * the weights half then stays in the shared HF cache where a later deploy
-        of the same checkpoint reuses it instead of pulling it again;
+        of the same checkpoint reuses it instead of pulling it again (F6);
       * and the child's own checkpoints/ tree stays free of a step it did not
-        produce.
+        produce — which is exactly the parent/child confusion MT12 describes on
+        the cloud side, not worth importing into the local one.
 
     Refuses (ValueError → the job's error_message) a checkpoint that arrives
-    incomplete, rather than letting the trainer die on a missing training_state/
-    halfway through startup — MT4's failure mode. The Hub listing is checked
-    before this runs (hub_checkpoint_has_training_state); this second check is on
-    the bytes that actually landed.
+    incomplete, rather than letting the trainer die on a missing
+    optimizer_state.safetensors halfway through startup — MT4's failure mode.
+    The Hub listing is checked before this runs (hub_checkpoint_missing_files);
+    this second check is on the bytes that actually landed.
 
     Downloads GBs: never call it while holding a lock others need.
     """
     pretrained_dir = Path(download_hub_checkpoint_ref(ref, tqdm_class=tqdm_class, with_training_state=True))
     checkpoint_dir = pretrained_dir.parent
-    train_config = pretrained_dir / _TRAIN_CONFIG_NAME
-    missing = [
-        name
-        for name, path in (
-            (_TRAIN_CONFIG_NAME, train_config),
-            (_HUB_TRAINING_STATE_FILE, checkpoint_dir / _HUB_TRAINING_STATE_FILE),
-        )
-        if not path.is_file()
-    ]
+    names, _fingerprint = scan_checkpoint_dir(checkpoint_dir)
+    missing = missing_checkpoint_files(names)
     if missing:
         raise ValueError(
             f"The downloaded checkpoint {hub_ref_step_label(ref)} from "
-            f"{hub_ref_repo_id(ref)} is incomplete — missing {', '.join(missing)}. "
-            "Resume an earlier checkpoint, or fine-tune from its weights instead."
+            f"{hub_ref_repo_id(ref)} is incomplete — missing "
+            f"{', '.join(missing)}. {_INCOMPLETE_REMEDY}"
         )
-    return str(train_config)
+    return str(pretrained_dir / _TRAIN_CONFIG_NAME)
 
 
 def upload_local_checkpoint(checkpoint_dir: Path, repo_id: str, step_dir: str, *, api=None) -> None:
@@ -1384,7 +1745,8 @@ def checkpoints_staging_repo_id(username: str, job_id: str) -> str:
         name, so a staging upload can't land in a repo full of someone else's
         lineage; and
       * the continuation it feeds pushes to its OWN output repo rather than back
-        into this one, so parent and child checkpoints stay distinguishable.
+        into this one, so parent and child checkpoints stay distinguishable —
+        the ambiguity MT12 records for cloud→cloud is not inherited here.
     """
     return f"{username}/{job_id}_checkpoints"
 
@@ -1955,6 +2317,13 @@ class JobRegistry:
         self._records: dict[str, JobRecord] = {}
         self._runners: dict[str, JobRunner] = {}
         self._last_persist_at: dict[str, float] = {}
+        # Ids we have asked to stop, recorded BEFORE the signal goes out so the
+        # watchdog can tell a deliberate stop from a crash (see
+        # classify_terminal_state). Guarded by _lock; entries are dropped when
+        # the record is finalised or deleted. Deliberately in-memory only: a
+        # stop cannot outlive the process that issued it, and a record found
+        # 'running' after a restart is reconciled by _load_from_disk instead.
+        self._stop_requested: set[str] = set()
 
         # job_id -> the thread materializing that job's base checkpoint before
         # its trainer can start (see _materialize_then_start). Entries are left
@@ -2178,6 +2547,12 @@ class JobRegistry:
                 source = self._records.get(config.finetune_from_job_id)
             if source is None:
                 raise ValueError(f"Fine-tune source {config.finetune_from_job_id!r} not found.")
+            # The requested policy type must be the source checkpoint's own
+            # architecture — lerobot loads the weights non-strictly, so a
+            # mismatch trains a fresh `policy_type` policy that only *looks*
+            # like a fine-tune. Checked before the pretrained path resolves
+            # (cheap, no Hub call) so a contradicting request never starts.
+            _check_finetune_policy_type(source, config.policy_type)
             config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                 source, config.finetune_from_step
             )
@@ -2202,6 +2577,53 @@ class JobRegistry:
             # loads the weights non-strictly, so a checkpoint whose robot or
             # camera set contradicts the selected dataset would otherwise train
             # silently wrong (MT44).
+            _check_pretrained_feature_space(config.policy_pretrained_path, config.dataset_repo_id)
+            if target.runner == "local" and needs_local_materialization(config.policy_pretrained_path):
+                # A step-suffixed hub ref becomes the real directory the local
+                # trainer loads — but off-request, in _materialize_then_start,
+                # which rewrites policy_pretrained_path once the bytes are here.
+                # A cloud run keeps the ref: its container materializes the same
+                # ref pod-side (see the HF Jobs wrapper), because a host path is
+                # meaningless there.
+                deferred_hub_ref = config.policy_pretrained_path
+
+        with self._lock:
+            # Authoritative local-run mutex: re-checked here, under the lock
+            # that also inserts the record, so two concurrent starts can't both
+            # pass. (The pre-flight copy above is only a fail-fast.)
+            self._assert_no_running_local(target)
+
+        # Whatever put a pretrained_path on this request — the fine-tune
+        # resolution above, or a caller setting the public field directly —
+        # its architecture must match --policy.type before we spend a GPU on
+        # it. Checked against the CHECKPOINT'S OWN config.json, so it holds
+        # even when the registry's record of that checkpoint is missing or
+        # carries the "model" placeholder. Skipped on resume: that path
+        # passes --config_path instead and never emits pretrained_path (see
+        # train.build_training_command), so there is no pair to contradict.
+        # The three things that can still have to MOVE before a trainer starts,
+        # each resolved (and refused) synchronously below but carried out in the
+        # preparing thread because each is potentially GBs over the network:
+        #   * a local fine-tune's base checkpoint, downloaded here;
+        #   * a cloud parent's checkpoint, downloaded here for a local resume;
+        #   * a local parent's checkpoint, uploaded to the Hub for a cloud one.
+        # At most one is ever set: fine-tune and resume are mutually exclusive
+        # (refused above), and a resume moves bytes in one direction only.
+        deferred_hub_ref: str | None = None
+        deferred_resume_ref: str | None = None
+        deferred_resume_upload: tuple[Path, str, str] | None = None
+        if config.policy_pretrained_path and not config.resume:
+            # Deliberately BEFORE the materialization: this reads only the
+            # checkpoint's config.json, so a contradicting pair is refused
+            # without first downloading the weights it names — and refused
+            # SYNCHRONOUSLY, as a 400, with no job record left behind.
+            _check_pretrained_policy_type(config.policy_pretrained_path, config.policy_type)
+            # Same placement, same reason, one level deeper: the ARCHITECTURE
+            # matching is not enough, because lerobot sizes the policy from the
+            # DATASET on this launch path and loads the weights non-strictly.
+            # A checkpoint whose robot or camera set contradicts the selected
+            # dataset is refused here — again from config.json alone, before
+            # the weights or the dataset are downloaded (MT44).
             _check_pretrained_feature_space(config.policy_pretrained_path, config.dataset_repo_id)
             if target.runner == "local" and needs_local_materialization(config.policy_pretrained_path):
                 # A step-suffixed hub ref becomes the real directory the local
@@ -2374,7 +2796,7 @@ class JobRegistry:
                         f"{hub_ref_step_label(deferred_hub_ref)} from "
                         f"{hub_ref_repo_id(deferred_hub_ref)}…"
                     )
-                    thread_target: Callable[..., None] = self._materialize_then_start
+                    thread_target = self._materialize_then_start
                     thread_args: tuple = (job_id, deferred_hub_ref, lerobot_output_dir, prep)
                 elif deferred_resume_ref is not None:
                     prep.emit(
@@ -2406,7 +2828,12 @@ class JobRegistry:
                 if target.runner == "local":
                     runner = LocalJobRunner(record.metrics, log_file_path=log_path)
                 else:
-                    runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
+                    runner = HfCloudJobRunner(
+                        record.metrics,
+                        log_path,
+                        target.flavor,
+                        _resume_total_steps(config),
+                    )
 
                 try:
                     runner.start(job_id, config, lerobot_output_dir)
@@ -2559,10 +2986,9 @@ class JobRegistry:
         try:
             prep.emit(f"Uploading {step_dir} from {checkpoint_dir}…")
             upload_local_checkpoint(checkpoint_dir, repo_id, step_dir)
-            if not hub_checkpoint_has_training_state(shared_hf_api(), repo_id, step_dir):
-                raise ValueError(
-                    f"the upload finished but {repo_id} is still missing {_HUB_TRAINING_STATE_FILE}"
-                )
+            missing = hub_checkpoint_missing_files(shared_hf_api(), repo_id, step_dir)
+            if missing:
+                raise ValueError(f"the upload finished but {repo_id} is still missing {', '.join(missing)}")
         except Exception as exc:
             logger.exception("Resume-checkpoint upload failed for job %s", job_id)
             self._fail_prepare(
@@ -2577,7 +3003,7 @@ class JobRegistry:
         self._start_after_prepare(
             job_id,
             # A cloud runner ignores the host output dir (its pod writes to a
-            # container path); pass it anyway so the callers stay identical.
+            # container path); pass it anyway so the two callers stay identical.
             str(_job_dir(self._output_root, job_id) / "run"),
             prep,
             target,
@@ -2664,7 +3090,12 @@ class JobRegistry:
                 if target.runner == "local":
                     runner = LocalJobRunner(record.metrics, log_file_path=log_path)
                 else:
-                    runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
+                    runner = HfCloudJobRunner(
+                        record.metrics,
+                        log_path,
+                        target.flavor,
+                        _resume_total_steps(record.config),
+                    )
                 try:
                     runner.start(job_id, record.config, output_dir)
                 except Exception as exc:
@@ -2724,7 +3155,7 @@ class JobRegistry:
         # must produce a fresh upload, not a job that dies looking for bytes.
         if source.checkpoints_hub_repo_id and step_dir in source.checkpoints_hub_steps:
             with contextlib.suppress(Exception):
-                if hub_checkpoint_has_training_state(
+                if not hub_checkpoint_missing_files(
                     shared_hf_api(), source.checkpoints_hub_repo_id, step_dir
                 ):
                     return None, source.checkpoints_hub_repo_id, step_dir
@@ -2915,22 +3346,41 @@ class JobRegistry:
         return record
 
     def stop(self, job_id: str) -> JobRecord:
-        """Ask a running job to stop, and wait briefly for the new state.
+        """Ask a running job to stop, and record that we asked.
+
+        The intent is registered under the lock BEFORE any signal or cancel
+        leaves this process, so the watchdog can never finalise a stop it
+        doesn't know about — the reason every Stop press used to land in
+        history as `failed`.
+
+        Intent alone does not decide the outcome: the runner still gets to
+        report that it finished on its own, or that it was already dead when we
+        went to signal it. See classify_terminal_state for the full precedence.
 
         Works during a local fine-tune's base-checkpoint download too: that
         window has a PreparingJobRunner registered in place of the trainer, so
-        the cancel is recorded on it as usual and the materialize thread
+        the intent is recorded here as usual and the materialize thread
         finalises the run as `interrupted` when the download returns (it can't
         be aborted mid-flight — see _materialize_then_start). The 2s wait below
         will usually time out on that path, so the caller sees `running` and
-        learns the outcome from the next poll."""
+        learns the outcome from the next poll.
+
+        NOT covered: a cloud job cancelled outside MakerMods Lab (the HF web UI, or
+        a platform-side kill that HF reports as CANCELED rather than ERROR).
+        There is no intent recorded here for those, and HF's stage does not say
+        who asked, so they stay `failed` rather than being guessed into
+        `interrupted`.
+        """
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
                 raise JobNotFoundError(job_id)
             runner = self._runners.get(job_id)
-        if record.state != "running" or runner is None:
-            raise JobNotRunningError(job_id)
+            # Raised under the lock (it used to be checked outside it) so the
+            # intent below can't be recorded for a job that just finalised.
+            if record.state != "running" or runner is None:
+                raise JobNotRunningError(job_id)
+            self._stop_requested.add(job_id)
         runner.stop()
         # The watchdog will finalise the record (state, ended_at, exit_code).
         # Wait briefly so the caller sees the new state in the response.
@@ -3099,6 +3549,7 @@ class JobRegistry:
             self._records.pop(job_id, None)
             self._runners.pop(job_id, None)
             self._last_persist_at.pop(job_id, None)
+            self._stop_requested.discard(job_id)
             self._prepare_threads.pop(job_id, None)
         with contextlib.suppress(FileNotFoundError):
             shutil.rmtree(_job_dir(self._output_root, job_id))
@@ -3151,18 +3602,11 @@ class JobRegistry:
                         # finished (or crashed) while the server was down
                         # isn't reported as merely unconfirmed when the
                         # evidence is sitting right there on disk.
-                        rc: int | None = None
-                        status_path = Path(record.output_dir) / _EXIT_STATUS_FILENAME
-                        with contextlib.suppress(FileNotFoundError, ValueError):
-                            rc = int(status_path.read_text().strip())
+                        rc = _read_exit_status(Path(record.output_dir) / _EXIT_STATUS_FILENAME)
                         if rc is None:
                             record.state = "interrupted"
                             if record.error_message is None:
-                                record.error_message = (
-                                    "MakerMods Lab restarted while this run was training; "
-                                    "its outcome could not be confirmed. Any checkpoints on "
-                                    "disk are intact."
-                                )
+                                record.error_message = UNCONFIRMED_OUTCOME_MESSAGE
                         else:
                             record.state = "done" if rc == 0 else "failed"
                             record.exit_code = rc
@@ -3188,6 +3632,7 @@ class JobRegistry:
                         record.metrics,
                         _job_log_path(self._output_root, record.id),
                         record.hf_flavor,
+                        _resume_total_steps(record.config),
                     )
                     runner.reattach(record.hf_job_id)
                     self._runners[record.id] = runner
@@ -3366,53 +3811,57 @@ class JobRegistry:
 
             # Subprocess exited since the last tick. Finalise.
             rc = runner.returncode()
+            # A stop counts only if we asked for it AND the runner didn't tell
+            # us it never got to signal anything (already-dead process). A
+            # runner that can't answer abstains rather than vetoing.
+            with self._lock:
+                asked_to_stop = jid in self._stop_requested
+            signalled = _runner_hook(runner, "stop_signalled")
+            stop_requested = asked_to_stop and signalled is not False
+            terminal_stage = _runner_hook(runner, "terminal_stage")
+            if rc is None and terminal_stage is None:
+                # is_running() already said the process is gone, but nothing
+                # here knows HOW it ended: no exit status on disk, no platform
+                # stage, and no stop we can prove we delivered (that case
+                # synthesises SIGTERM in TailingJobRunner.returncode() and so
+                # never reaches this branch). Deliberately NOT routed through
+                # classify_terminal_state, whose fallthrough is `failed`:
+                # asserting a "done" or "failed" we can't back up is exactly
+                # what MT10 removed. Reuse the honest 'interrupted' state a
+                # dead pid at boot already gets — models.py lists such a run's
+                # checkpoints, since the state is a claim about how we found
+                # out, not about whether the weights exist.
+                state: JobState = "interrupted"
+            else:
+                state = classify_terminal_state(
+                    returncode=rc,
+                    stop_requested=stop_requested,
+                    terminal_stage=terminal_stage,
+                )
             with self._lock:
                 if record.wandb_run_url is None:
                     record.wandb_run_url = runner.wandb_run_url()
-                if rc is None:
-                    # is_running() already said the process is gone, but the
-                    # runner has no evidence of how it ended (e.g. a
-                    # reattached local job — TailingJobRunner — whose pid
-                    # disappeared with no exit status written to disk). Don't
-                    # assert a "done" or "failed" we can't back up; reuse the
-                    # same honest 'interrupted' state a dead pid at boot
-                    # already gets.
-                    record.state = "interrupted"
-                    if record.error_message is None:
-                        # A user-requested stop of a reattached run also lands
-                        # here with no exit status: stop() group-TERMs the
-                        # wrapper before it can write one. Consult the runner
-                        # so that case doesn't get blamed on a restart that
-                        # never happened.
-                        stop_signalled = getattr(runner, "stop_signalled", None)
-                        if callable(stop_signalled) and stop_signalled():
-                            record.error_message = (
-                                "This run was stopped at your request; its exact exit "
-                                "status could not be confirmed. Any checkpoints on disk "
-                                "are intact."
-                            )
-                        else:
-                            record.error_message = (
-                                "MakerMods Lab restarted while this run was training; its "
-                                "outcome could not be confirmed. Any checkpoints on disk "
-                                "are intact."
-                            )
-                else:
-                    record.state = "done" if rc == 0 else "failed"
+                record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc
-                if rc is not None and rc != 0 and record.error_message is None:
-                    # Prefer a runner-supplied reason (e.g. HF Jobs'
-                    # 'Job timeout') over the synthetic exit-code message.
-                    reason = None
-                    get_message = getattr(runner, "terminal_message", None)
-                    if callable(get_message):
-                        try:
-                            reason = get_message()
-                        except Exception:
-                            reason = None
-                    record.error_message = reason or f"Subprocess exited with code {rc}"
+                if record.error_message is None:
+                    if state == "interrupted":
+                        # Never the synthetic exit-code text here: that message
+                        # on a run the user stopped themselves is what made a
+                        # deliberate pause look like a broken model. The
+                        # classifier only reaches `interrupted` when we asked,
+                        # so the unconfirmed wording belongs to the branch
+                        # above — a disappearance nobody asked for.
+                        record.error_message = (
+                            STOPPED_BY_REQUEST_MESSAGE if stop_requested else UNCONFIRMED_OUTCOME_MESSAGE
+                        )
+                    elif state == "failed":
+                        # Prefer a runner-supplied reason (e.g. HF Jobs'
+                        # 'Job timeout') over the synthetic exit-code message.
+                        reason = _runner_hook(runner, "terminal_message")
+                        record.error_message = reason or f"Subprocess exited with code {rc}"
                 self._runners.pop(jid, None)
+                self._stop_requested.discard(jid)
             self._persist(record, force=True)
             self._notify_change()
 
@@ -3463,4 +3912,7 @@ __all__ = [
     "JobNotRunningError",
     "job_registry",
     "parse_metrics_into",
+    "classify_terminal_state",
+    "STOPPED_BY_REQUEST_MESSAGE",
+    "UNCONFIRMED_OUTCOME_MESSAGE",
 ]

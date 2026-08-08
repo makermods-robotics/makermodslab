@@ -786,8 +786,13 @@ const DeployPanel: React.FC = () => {
                 <CheckpointDropdown
                   id="deploy-checkpoint"
                   checkpoints={checkpoints}
-                  selectedStep={selectedStep}
-                  onChange={setSelectedStep}
+                  // Single-job list: steps are unique here, so the step maps
+                  // 1:1 onto the checkpoint's identifying ref.
+                  selectedRef={
+                    checkpoints.find((c) => c.step === selectedStep)?.ref ??
+                    null
+                  }
+                  onChange={(c) => setSelectedStep(c.step)}
                 />
               )}
               {robotCheckpointArmMismatch ? (
