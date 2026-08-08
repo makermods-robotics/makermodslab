@@ -25,6 +25,20 @@ interface Props {
   /** Trigger id, so a <Label htmlFor> can be attached when the dropdown is
    * rendered as a labelled form field (the Run panel). */
   id?: string;
+  /** Which run each checkpoint came from, keyed by `ref`, for the callers that
+   * merge a whole resume lineage into one list (JobCard, ModelCard).
+   *
+   * Optional because most callers show a single run's checkpoints, where the
+   * attribution would be the same word on every row. Even when supplied it is
+   * only RENDERED if the list actually spans more than one run — see below.
+   *
+   * Each value carries the run NUMBER as the visible distinguisher — runs on
+   * one chain share a name by design — plus a `detail` string surfaced on
+   * hover for matching a row against a log line or an API message. */
+  owners?: Record<
+    string,
+    { name: string; number: number; detail: string }
+  >;
 }
 
 export const CheckpointDropdown: React.FC<Props> = ({
@@ -35,6 +49,7 @@ export const CheckpointDropdown: React.FC<Props> = ({
   placeholder = "Select checkpoint",
   className,
   id,
+  owners,
 }) => {
   // step 0 is the sentinel for a whole-repo/single-model checkpoint — an
   // imported flat model, or a tracked run whose repo holds only the final
@@ -53,6 +68,24 @@ export const CheckpointDropdown: React.FC<Props> = ({
   const sortKey = (c: JobCheckpoint) =>
     c.step === 0 ? Number.MAX_SAFE_INTEGER : c.step;
   const ordered = [...checkpoints].sort((a, b) => sortKey(b) - sortKey(a));
+  // Attribution earns its space only when the list MERGES runs. A single run's
+  // checkpoints all carry the same owner, so printing it on every row would be
+  // noise on the common case — and on a lineage it is the opposite of noise,
+  // because "step 2000" appears once per run that saved one and the step alone
+  // cannot say which is which (the `selectedRef` note above is the same fact
+  // from the selection side).
+  const attributed =
+    owners !== undefined &&
+    new Set(ordered.map((c) => owners[c.ref]?.detail).filter(Boolean)).size > 1;
+  // Resolved, not assumed: a `selectedRef` naming a checkpoint that is no
+  // longer in the list (a refresh dropped it) must fall back to the
+  // placeholder, never to a step number invented from a missing entry — step 0
+  // is the "latest" sentinel, so a `?? 0` would have quietly labelled a stale
+  // selection "latest".
+  const selected =
+    selectedRef === null
+      ? undefined
+      : checkpoints.find((c) => c.ref === selectedRef);
   return (
     <Select
       value={selectedRef ?? undefined}
@@ -70,18 +103,53 @@ export const CheckpointDropdown: React.FC<Props> = ({
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <SelectValue placeholder={placeholder} />
+        {/* The TRIGGER stays the step alone even when the list is attributed.
+            Radix would otherwise mirror the whole selected row into it, and the
+            trigger is the tightest space on the card (ModelCard pins it to
+            w-36, JobCard shares a single action line with the Resume button) —
+            an owner + timestamp there would push the step out of view, losing
+            the one fact the collapsed control exists to show. The disambiguator
+            belongs where the ambiguity is visible: the open list. */}
+        {attributed && selected !== undefined ? (
+          <SelectValue placeholder={placeholder}>
+            {labelFor(selected.step)}
+          </SelectValue>
+        ) : (
+          <SelectValue placeholder={placeholder} />
+        )}
       </SelectTrigger>
       <SelectContent className="bg-popover border-border">
-        {ordered.map((c) => (
-          <SelectItem
-            key={c.ref}
-            value={c.ref}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {labelFor(c.step)}
-          </SelectItem>
-        ))}
+        {ordered.map((c) => {
+          const owner = owners?.[c.ref];
+          return (
+            <SelectItem
+              key={c.ref}
+              value={c.ref}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {attributed && owner ? (
+                // Two lines rather than one: the step is what the user picks
+                // by, so it keeps the readable weight, and the run it belongs
+                // to sits under it. The RUN NUMBER leads that second line — it
+                // is short enough for a dense row and is the same handle the
+                // backend's refusals lead with, so a 409 naming #46 points at
+                // a row the user can find. The timestamp and full id stay one
+                // hover away rather than spending width here.
+                <span className="flex flex-col gap-0.5" title={owner.detail}>
+                  <span>{labelFor(c.step)}</span>
+                  <span className="whitespace-nowrap text-[10px] leading-none text-muted-foreground">
+                    {owner.number > 0 ? (
+                      <span className="font-mono">#{owner.number} </span>
+                    ) : null}
+                    {owner.name}
+                  </span>
+                </span>
+              ) : (
+                labelFor(c.step)
+              )}
+            </SelectItem>
+          );
+        })}
       </SelectContent>
     </Select>
   );

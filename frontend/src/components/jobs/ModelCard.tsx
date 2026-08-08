@@ -42,6 +42,7 @@ import {
 } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { displayDedupeSuffix, splitDedupeSuffix } from "@/lib/modelNames";
+import { checkpointOwners } from "./resumeSeed";
 
 interface Props {
   /** The model, represented by its backing job record: an import, or a
@@ -687,6 +688,13 @@ const ModelCard: React.FC<Props> = ({
                 disabled={!selectorEnabled}
                 placeholder="No checkpoints"
                 className="w-36"
+                // Same ambiguity as JobCard's resume row, same fix: this list
+                // merges a lineage, so "step 2000" can appear once per run and
+                // the runs share a display name. It matters more here — the
+                // selection routes Run / Fine-tune / Download to the OWNING
+                // record, so picking the wrong one silently acts on a
+                // different model's weights.
+                owners={checkpointOwners(lineageCheckpoints)}
               />,
               "shrink-0",
             )}

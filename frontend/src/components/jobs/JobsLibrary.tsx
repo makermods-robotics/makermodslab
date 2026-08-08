@@ -10,7 +10,6 @@ import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import {
-  blockedByContinuedOwner,
   buildResumeSeed,
   loadLineageCheckpoints,
   noResumeReason,
@@ -21,12 +20,7 @@ import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import JobsDropdown, { JobsEntry } from "./JobsDropdown";
 import { useJobsData } from "./JobsDataContext";
-import {
-  HubJob,
-  JobRecord,
-  isHubJobActive,
-  jobDisplayName,
-} from "@/lib/jobsApi";
+import { HubJob, JobRecord, isHubJobActive } from "@/lib/jobsApi";
 
 /** Recency keys (ms) for the mixed local/cloud/hub list — every library is
  * ordered newest-first regardless of where a run lives. */
@@ -75,6 +69,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     untrackedHubJobs,
     supersededIds,
     ancestorsOf,
+    chainCheckpointCount,
     isJobActive,
     hubAuthenticated,
     hubJobsPermission,
@@ -137,11 +132,10 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     [untrackedHubJobs, matchesQuery, showOnline],
   );
 
-  // Active = running, or the CHAIN has a checkpoint (see isJobActive; it stays
-  // chain-wide on purpose, because a tip whose only checkpoints are inherited
-  // is precisely the row the user must reach in order to delete it and free
-  // its parent). Everything else folds under UNTRACKED inside the dropdown so
-  // the trigger lands on what's still relevant. Superseded runs are dropped
+  // Active = running, or the CHAIN has a checkpoint (see isJobActive) — which
+  // under chain rewind is the same thing as "resumable", since a run continues
+  // from anything on its lineage. Everything else folds under UNTRACKED inside
+  // the dropdown so the trigger lands on what's still relevant. Superseded runs are dropped
   // from both — they surface nested under their successor's card instead.
   const toEntries = useCallback(
     (jobs: JobRecord[], hubs: HubJob[]): JobsEntry[] =>
@@ -152,17 +146,16 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
             key: jobEntryKey(job),
             time: jobTime(job),
             job,
-            // The row's Resume gate is the tip's OWN checkpoint count, which
-            // under the sticks rule is not an approximation of the real answer
-            // but exactly it: only a leaf's own checkpoints are resumable, and
-            // this row is a leaf. (It used to count the whole chain, because
-            // inherited checkpoints were resumable too and the tip's own count
-            // therefore under-reported. That is no longer the rule — see
-            // `resumableCheckpoints` — so the chain-wide count would now light
-            // the button on rows the exact rule refuses.) No ancestor records
-            // are needed for it, so it also can't read low while a backfill is
-            // still in flight.
-            ownCheckpointCount: job.checkpoint_count,
+            // The row stands for a whole CHAIN, and chain rewind lets it
+            // continue from any checkpoint on that chain — so the gate counts
+            // the chain, not just this tip. The tip's own count is the wrong
+            // number for the commonest resumable shape there is: a run that
+            // died before its first save, whose checkpoints are all inherited.
+            // Counted by the provider, which holds the ancestor records — and
+            // which files a chain whose ancestors haven't landed yet as active
+            // regardless, so a row can't sit in the fold while its count reads
+            // low.
+            chainCheckpointCount: chainCheckpointCount(job),
           }),
         ),
         ...hubs.map(
@@ -174,7 +167,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           }),
         ),
       ].sort((a, b) => b.time - a.time),
-    [],
+    [chainCheckpointCount],
   );
 
   const trackedRuns = useMemo(
@@ -242,12 +235,12 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           job,
           ancestorsOf(job),
         );
-        // Newest first, and each entry knows which run owns it — so the seed
-        // resumes from the run that actually holds the checkpoint, which on a
-        // chain is often an ancestor rather than this row's own run.
+        // Newest first, and each entry knows which run owns it — which on a
+        // chain is often an ancestor. The seed continues THIS row's run either
+        // way (chain rewind); the owner only says where the bytes come from.
         const best = resumableCheckpoints(job, lineage)[0];
         if (!best) {
-          // The row's button gates on the run's own checkpoint COUNT, which
+          // The row's button gates on the chain's checkpoint COUNT, which
           // can't see the step target or the owner's state, so landing here is
           // normal — this is where the exact rule gets to explain itself. The
           // cause comes from the rule itself (`noResumeReason`) rather than
@@ -256,21 +249,11 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           // checkpoints were below its target and had been dropped by a
           // different filter entirely.
           const reason = noResumeReason(job, lineage);
-          // Sticks: every checkpoint in reach belongs to a run something has
-          // already continued, which the backend refuses as a resume source.
-          // A two-step recovery, not a dead end, so the message spells both
-          // steps out and NAMES the run and step waiting at the end of them
-          // (from the rule, so it can't name one the resume would then refuse).
-          //
-          // Reached from HERE only when this run's own checkpoints exist but
-          // couldn't be listed (a per-job fetch failure — the loader degrades
-          // to fewer entries rather than rejecting), because the row's gate
-          // already hides the button when the count is zero. The ordinary
-          // empty-handed tip meets this same guidance on its card instead.
-          // Kept complete regardless: `noResumeReason` is total, and a caller
-          // that reaches a branch with no answer is how the toast came to
-          // blame the wrong filter in the first place.
-          const blocked = blockedByContinuedOwner(job, lineage);
+          // Under chain rewind these are the genuinely stranded cases only: a
+          // chain that saved nothing anywhere, or one whose every checkpoint
+          // belongs to a finished run. The delete-first wording that used to
+          // live here is gone with the rule that made it necessary — an
+          // empty-handed tip now simply resumes from what it inherited.
           const description: Record<NoResumeReason, string> = {
             "not-resumable":
               "This run isn't in a state that can be continued.",
@@ -280,13 +263,6 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               "Every checkpoint this run can continue from belongs to a run that already " +
               "reached its target, so its learning-rate schedule is spent. Fine-tune from " +
               "the final checkpoint instead.",
-            "parent-continued": blocked
-              ? `This attempt saved no checkpoints and its parent was already continued. ` +
-                `Delete this attempt, then resume ${jobDisplayName(blocked.job)} from step ` +
-                `${blocked.ckpt.step.toLocaleString()}.`
-              : "This attempt saved no checkpoints, and the runs it continues from have " +
-                "already been continued. Delete this attempt to free its parent for a " +
-                "new continuation.",
             "at-target":
               "Every checkpoint this run can continue from is already at its step target. " +
               "Raise the target to continue, or fine-tune from the final checkpoint.",
@@ -314,7 +290,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         // runner: post-F7 a local run continuing a cloud parent lists that
         // parent's Hub repo too — see `cloudSiblingStepCap`.
         openStudio("train", {
-          train: { resume: buildResumeSeed(best.job, best.ckpt.step) },
+          train: { resume: buildResumeSeed(job, best) },
         });
       } catch (e) {
         toast({
