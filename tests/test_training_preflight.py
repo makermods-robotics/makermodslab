@@ -199,3 +199,120 @@ def test_availability_conservative_on_cache_probe_error(
     monkeypatch.setattr(datasets_mod, "try_to_load_from_cache", _boom)
 
     assert datasets_mod.is_dataset_available_locally(DATASET_ID) is True
+
+
+# ---------------------------------------------------------------------------
+# W&B credentials: a run that logs to W&B needs a key on THIS machine, and must
+# be refused before anything with a cost happens (MT40).
+# ---------------------------------------------------------------------------
+
+
+def test_cloud_wandb_without_a_key_rejects_before_the_dataset_is_touched(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is forwarded to the pod as a job secret, so a missing one makes
+    the run impossible. Refuse at the endpoint — before job_registry.start, and
+    therefore long before HfCloudJobRunner._ensure_dataset_on_hub could push a
+    local-only dataset to the Hub for a job that will never run."""
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", lambda: None)
+
+    def _fail_if_called(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("job_registry.start must not be reached when the key is missing")
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _fail_if_called)
+
+    resp = client.post(
+        "/jobs/training",
+        json={
+            "config": {"dataset_repo_id": DATASET_ID, "steps": 100, "wandb_enable": True},
+            "target": {"runner": "hf_cloud", "flavor": "a10g-small"},
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "API key" in resp.json()["detail"]
+
+
+def test_local_wandb_without_a_key_is_rejected_too(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W&B runs locally as well as on the cloud, and the guard applies to both.
+    A local trainer is a non-tty subprocess: `wandb.init` cannot prompt for a
+    login, so it fails after the record already says `running` — the same
+    useless failure as the cloud case, just on cheaper hardware."""
+    monkeypatch.setattr(server_mod, "hf_hub_offline", lambda: False)
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", lambda: None)
+
+    def _fail_if_called(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("job_registry.start must not be reached when the key is missing")
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _fail_if_called)
+
+    resp = client.post(
+        "/jobs/training",
+        json={"dataset_repo_id": DATASET_ID, "steps": 100, "wandb_enable": True},
+    )
+
+    assert resp.status_code == 400
+    assert "API key" in resp.json()["detail"]
+
+
+def test_wandb_with_a_key_is_not_blocked(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard is about the key, not about W&B: with one resolvable the
+    request proceeds into job_registry.start (stubbed)."""
+    monkeypatch.setattr(server_mod, "hf_hub_offline", lambda: False)
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", lambda: "a-key")
+
+    started = {"called": False}
+
+    def _fake_start(config, target):
+        started["called"] = True
+        return {"id": "job-123", "name": "ACT", "state": "running"}
+
+    monkeypatch.setattr(server_mod.job_registry, "start", _fake_start)
+
+    resp = client.post(
+        "/jobs/training",
+        json={"dataset_repo_id": DATASET_ID, "steps": 100, "wandb_enable": True},
+    )
+
+    assert started["called"] is True
+    assert resp.status_code == 201
+
+
+def test_a_run_with_wandb_off_never_probes_for_a_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard keys on W&B, not on the runner: an ordinary run that isn't
+    logging must not be made to depend on a credential it will never use."""
+    monkeypatch.setattr(server_mod, "hf_hub_offline", lambda: False)
+
+    def _fail_if_checked():  # pragma: no cover - must not run
+        raise AssertionError("the W&B key must not be probed when W&B is off")
+
+    monkeypatch.setattr(server_mod, "resolve_wandb_api_key", _fail_if_checked)
+    monkeypatch.setattr(
+        server_mod.job_registry,
+        "start",
+        lambda config, target: {"id": "job-1", "name": "ACT", "state": "running"},
+    )
+
+    resp = _post_local_training(client)
+    assert resp.status_code == 201
+
+
+def test_wandb_credentials_endpoint_reports_only_a_boolean(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe behind GET /system/wandb-credentials must never leak the key
+    itself — the UI only needs to know whether a launch would be refused."""
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "resolve_wandb_api_key", lambda: "super-secret-key")
+    resp = client.get("/system/wandb-credentials")
+    assert resp.status_code == 200
+    assert resp.json()["available"] is True
+    assert "super-secret-key" not in resp.text
+
+    monkeypatch.setattr(hf_cloud, "resolve_wandb_api_key", lambda: None)
+    assert client.get("/system/wandb-credentials").json()["available"] is False

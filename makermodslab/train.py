@@ -254,14 +254,25 @@ class TrainingRequest(BaseModel):
     # configs persisted before F7 — all of them cloud→cloud — keep their meaning.
     resume_from_uploaded_checkpoint: bool = False
 
-    # Weights & Biases
+    # Weights & Biases. A run that enables this needs an API key resolvable on
+    # the HOST (env or ~/.netrc): the cloud runner forwards it to the pod as a
+    # job secret, and a local trainer is a non-tty subprocess in which
+    # `wandb.init` cannot prompt for a login. JobRegistry.start refuses at
+    # submit time rather than letting either fail once the record says running.
+    #
+    # On a RESUME these are overwritten from the parent record — lerobot
+    # re-opens the parent's W&B run via the run id in the checkpoint's
+    # train_config.json, so a continuation's W&B state is inherited, not chosen.
     wandb_enable: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
     wandb_notes: str | None = None
     wandb_run_id: str | None = None
     wandb_mode: str | None = "online"
-    wandb_disable_artifact: bool = False
+    # Defaults TRUE: wandb's per-checkpoint model artifact uploads are opt-IN.
+    # Left on, a long run quietly pushes every checkpoint to W&B as well as the
+    # Hub — bytes and quota nobody asked for.
+    wandb_disable_artifact: bool = True
 
     # Environment / evaluation
     env_type: str | None = None
@@ -400,6 +411,26 @@ def build_training_command(
             cmd.extend(["--policy.private", "false"])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
+        # W&B, and ONLY the enable flag. Stated explicitly rather than left to
+        # the checkpoint's train_config.json, which is otherwise the authority
+        # on this branch: `wandb.enable` decides whether the container tries to
+        # reach W&B at all, and the parent's value getting a silent vote is
+        # exactly the MT40 defect — a wandb-enabled parent resumed into a pod
+        # with no WANDB_API_KEY, failing inside a billed GPU job rather than at
+        # submit time.
+        #
+        # The registry has already copied the parent's wandb settings onto this
+        # config (JobRegistry.start), so the value emitted here IS the parent's
+        # — inherited server-side, not chosen in the form. Nothing else in the
+        # group is emitted: lerobot re-inits the SAME W&B run
+        # (`wandb.init(resume="must")` with the checkpoint's run id), so
+        # project/entity/notes/mode are properties of a run that already exists
+        # and are rebuilt from the checkpoint's own config.
+        #
+        # Safe on this branch's raw-string decode path (see the --policy.tags
+        # note in the fresh branch): a bool decodes fine from "true"/"false";
+        # only list[str] fields have the draccus hazard.
+        cmd.extend(["--wandb.enable", "true" if request.wandb_enable else "false"])
         return cmd
 
     # Dataset

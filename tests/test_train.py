@@ -514,3 +514,82 @@ def test_hf_job_timeout_never_leaks_into_training_argv() -> None:
 
     assert not any("timeout" in tok.lower() for tok in cmd)
     assert "3h30m" not in cmd
+
+
+def test_wandb_disable_artifact_defaults_to_true() -> None:
+    """Per-checkpoint model uploads to W&B are opt-IN: left alone, a long run
+    would push every checkpoint to W&B on top of the Hub."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(dataset_repo_id="x", wandb_enable=True)
+    assert req.wandb_disable_artifact is True
+    cmd = build_training_command(req, "/tmp/out")
+    assert _arg_value(cmd, "--wandb.disable_artifact") == "true"
+
+    opted_in = build_training_command(
+        TrainingRequest(dataset_repo_id="x", wandb_enable=True, wandb_disable_artifact=False),
+        "/tmp/out",
+    )
+    assert _arg_value(opted_in, "--wandb.disable_artifact") == "false"
+
+
+def test_resume_emits_explicit_wandb_enable() -> None:
+    """A resume must STATE `--wandb.enable` rather than letting the resumed
+    train_config.json decide — that silent inheritance is the MT40 defect (a
+    W&B-enabled parent resumed into a pod with no API key). Nothing else in the
+    group is emitted: lerobot re-opens the SAME W&B run, whose project/entity
+    are already fixed and rebuilt from the checkpoint."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    on = build_training_command(
+        TrainingRequest(
+            dataset_repo_id="x",
+            resume=True,
+            config_path="/runs/a/checkpoints/5000/pretrained_model/train_config.json",
+            steps=20000,
+            wandb_enable=True,
+            wandb_project="proj",
+            wandb_entity="me",
+        ),
+        "/tmp/new",
+    )
+    assert _arg_value(on, "--wandb.enable") == "true"
+    assert [a for a in on if a.startswith("--wandb.")] == ["--wandb.enable"]
+
+
+def test_resume_of_non_wandb_parent_forces_wandb_off() -> None:
+    """The registry copies a non-W&B parent's `wandb_enable=False` onto the
+    continuation; the resume branch must then pin it off explicitly, so a stale
+    `wandb.enable: true` in the checkpoint's config can't revive it."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(
+            dataset_repo_id="x",
+            resume=True,
+            config_path="/runs/a/checkpoints/5000/pretrained_model/train_config.json",
+            steps=20000,
+            wandb_enable=False,
+        ),
+        "/tmp/new",
+    )
+    assert _arg_value(cmd, "--wandb.enable") == "false"
+    assert [a for a in cmd if a.startswith("--wandb.")] == ["--wandb.enable"]
+
+
+def test_wandb_serialization_is_runner_blind() -> None:
+    """W&B works on both runners, and these are lerobot's own trainer flags —
+    they mean the same thing in a container and in a local subprocess. So the
+    argv must not vary with `python_executable`, the only thing this function
+    sees that differs between the cloud and local call sites."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(dataset_repo_id="x", wandb_enable=True, wandb_project="proj", wandb_entity="me")
+    cloud = build_training_command(req, "/tmp/out")  # python_executable "python"
+    local = build_training_command(req, "/tmp/out", "/usr/bin/python3")
+
+    def _wandb_flags(cmd: list[str]) -> list[str]:
+        return [a for a in cmd if a.startswith("--wandb")]
+
+    assert _wandb_flags(cloud) == _wandb_flags(local)
+    assert _arg_value(local, "--wandb.enable") == "true"
