@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from huggingface_hub import constants as hf_constants
 
 from makermodslab.utils import config as cfg
 
@@ -52,6 +53,21 @@ _FROM_IMPORTED_PATH_CONSTANTS: tuple[tuple[str, str], ...] = (
     ("makermodslab.arm_identity", "LEADER_CONFIG_PATH"),
     ("makermodslab.server", "FOLLOWER_CONFIG_PATH"),
     ("makermodslab.server", "LEADER_CONFIG_PATH"),
+)
+
+# The same from-import problem one layer up: these modules bind their own copy
+# of `hf_auth.cached_whoami`, which reads the developer's real HF token through
+# `get_token()`. Stubbing `hf_auth.cached_whoami` would reach none of them — and
+# would stop `tests/test_utils_hf_auth.py` testing the genuine caching
+# behaviour — so the copies are stubbed individually instead. Keep in sync with:
+#
+#     grep -rn "cached_whoami" makermodslab/
+_FROM_IMPORTED_WHOAMI: tuple[tuple[str, str], ...] = (
+    ("makermodslab.server", "cached_whoami"),
+    ("makermodslab.models", "cached_whoami"),
+    ("makermodslab.datasets", "cached_whoami"),
+    ("makermodslab.jobs", "cached_whoami"),
+    ("makermodslab.runners.hf_cloud", "cached_whoami"),
 )
 
 
@@ -153,8 +169,84 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for module_name, attr in _FROM_IMPORTED_PATH_CONSTANTS:
         value = getattr(importlib.import_module(module_name), attr)
         _assert_outside(f"{module_name}.{attr}", value, REAL_LEROBOT_CACHE)
+    # Redirected by `_isolate_real_user_state`, not here, but it is read at call
+    # time by the "is this repo already downloaded?" probes and is the one Hub
+    # path that would otherwise resolve into the real ~/.cache/huggingface.
+    _assert_outside("huggingface_hub.constants.HF_HUB_CACHE", hf_constants.HF_HUB_CACHE, REAL_HF_CACHE_ROOT)
 
     return cache
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_user_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cut every real-machine path the dataset/model listings read out of the suite.
+
+    `tmp_lerobot_home` redirects the calibration / robots / ports state, but the
+    listing tests that don't request it get no redirection at all, and it never
+    covered the four saved-repo JSON files the listings fold in. On a clean CI
+    runner that is invisible; on a developer's populated machine the real state
+    leaks straight into the assertions — a model listing expected to be
+    ``["imported_policy"]`` also carries the developer's real pins
+    (``lerobot/smolvla_base``), and a real ``hidden_datasets.json`` entry silently
+    subtracts a row a test just seeded (observed:
+    ``test_list_all_datasets_merges_hub_and_local`` KeyErrors when the real hidden
+    set names the merged id).
+
+    So redirect all of them, unconditionally, for every test:
+
+      * the four ``SAVED_CUSTOM_*`` / ``SAVED_HIDDEN_*`` files — the pin lists
+        folded in by `list_all_datasets` / `list_all_models`, and the hidden sets
+        applied last: the same leak in the additive and subtractive directions.
+        `_JsonRepoCollection` (utils/config.py) takes a `path_of` CALLABLE and
+        re-invokes it on every access precisely so a patched constant is honoured,
+        and it holds no in-memory copy — redirecting the constant is sufficient,
+        there is no cache to clear afterwards.
+      * ``HF_LEROBOT_HOME`` — read at call time by `datasets._lerobot_cache_root`,
+        so it governs both the flat local-dataset scan and `_local_models_root()`.
+      * ``huggingface_hub.constants.HF_HUB_CACHE`` — read off the module at call
+        time by `_hub_cache_has_repo` and `try_to_load_from_cache`, i.e. the
+        default hub cache probed with ``cache_dir=None``. Left alone, tests answer
+        "is this repo already downloaded?" from whatever the developer happens to
+        have downloaded — machine-dependent, and silently different in CI.
+
+    Each redirect is a plain monkeypatch, so a test that wants its own root
+    (`tmp_lerobot_home`, `custom_models_file`, `hidden_datasets_file`, an inline
+    `SAVED_CUSTOM_DATASETS_FILE` patch, `_seed_hub_cache`) still overrides this
+    one. This is only the floor that keeps the real ``~/.cache`` out of reach by
+    default — a floor, not a wall.
+    """
+    isolated = tmp_path / "isolated_user_state"
+    lerobot_home = isolated / "lerobot"
+    hub_cache = isolated / "hub"
+    for d in (lerobot_home, hub_cache):
+        d.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("HF_LEROBOT_HOME", str(lerobot_home))
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(hub_cache))
+    # str(), not Path: these config constants are strings everywhere else.
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_DATASETS_FILE", str(isolated / "saved_custom_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_DATASETS_FILE", str(isolated / "hidden_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_MODELS_FILE", str(isolated / "saved_custom_models.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_MODELS_FILE", str(isolated / "hidden_models.json"))
+
+
+@pytest.fixture(autouse=True)
+def _stub_cached_whoami(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop every listing/job code path reading the developer's real HF identity.
+
+    `cached_whoami()` calls `get_token()`, so on a logged-in machine an unmocked
+    test resolves the developer's real username and orgs — which decides default
+    repo owners and which Hub rows a listing keeps. `None` is the shape the
+    existing per-test mocks already use for "not logged in", so it is the
+    offline-ish default here too.
+
+    Only the from-imported copies are stubbed; `hf_auth.cached_whoami` itself
+    stays real so `tests/test_utils_hf_auth.py` keeps exercising the genuine
+    caching behaviour. Plain monkeypatches, so a test's own
+    `patch("makermodslab.datasets.cached_whoami", ...)` still overrides.
+    """
+    for module_name, attr in _FROM_IMPORTED_WHOAMI:
+        monkeypatch.setattr(importlib.import_module(module_name), attr, lambda: None)
 
 
 def _snapshot_real_calibration_tree() -> dict[str, tuple[int, int, str]]:
