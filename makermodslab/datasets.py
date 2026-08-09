@@ -41,7 +41,7 @@ from .utils.config import (
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
-from .utils.hf_auth import cached_whoami, hf_hub_offline, shared_hf_api
+from .utils.hf_auth import cached_whoami, shared_hf_api
 
 logger = logging.getLogger(__name__)
 
@@ -246,8 +246,8 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
 
 class DatasetHubEditError(Exception):
     """Raised when a Hub visibility/tags edit can't proceed. `status` is the
-    HTTP status the route should return (400 offline/invalid, 403 no write
-    permission, 502 other Hub failure); `message` is the user-facing reason;
+    HTTP status the route should return (400 invalid, 403 no write permission,
+    502 other Hub failure); `message` is the user-facing reason;
     `docs_url` (optional) links auth docs for a login failure."""
 
     def __init__(self, status: int, message: str, docs_url: str | None = None) -> None:
@@ -283,13 +283,11 @@ def get_hub_settings(repo_id: str) -> dict[str, Any]:
     editor. Returns ``{"repo_id": ..., "private": bool, "tags": [str, ...]}``.
 
     Reads ``HfApi().dataset_info(repo_id)`` — the network call is the caller's
-    (the info card fetches it lazily). Raises DatasetHubEditError offline (can't
-    read reliably) or on a Hub failure so the route can surface a clear error.
+    (the info card fetches it lazily). Raises DatasetHubEditError on a Hub
+    failure so the route can surface a clear error.
     Tags come from the dataset card metadata (``dataset_info(...).tags``); the
     REQUIRED_HUB_TAGS are not stripped here — the card shows exactly what's live.
     """
-    if hf_hub_offline():
-        raise DatasetHubEditError(400, "The Hub is offline — dataset settings can't be read right now.")
     api = shared_hf_api()
     try:
         info = api.dataset_info(repo_id)
@@ -307,14 +305,10 @@ def set_dataset_visibility(repo_id: str, private: bool) -> dict[str, Any]:
     """Flip a Hub dataset's visibility (public <-> private).
 
     Wraps ``HfApi().update_repo_settings(repo_id, private=..., repo_type="dataset")``
-    (this huggingface_hub version has no ``update_repo_visibility``). Refuses
-    offline (can't mutate). Maps auth/permission failures to a clear message.
+    (this huggingface_hub version has no ``update_repo_visibility``). Maps
+    auth/permission failures to a clear message.
     Invalidates the cached Hub-existence answer so the card re-reads settings.
     """
-    if hf_hub_offline():
-        raise DatasetHubEditError(
-            400, "The Hub is offline — you can't change a dataset's visibility right now."
-        )
     api = shared_hf_api()
     try:
         api.update_repo_settings(repo_id, private=private, repo_type="dataset")
@@ -334,11 +328,9 @@ def set_dataset_tags(repo_id: str, tags: list[str]) -> dict[str, Any]:
     User-supplied `tags` are funnelled through ``with_makermodslab_tag`` FIRST, so the
     required org/product tags (makermods / openbooth / MakerModsLab) are never dropped
     by an edit, then written with ``metadata_update(..., overwrite=True)``.
-    Refuses offline. Maps auth/permission failures. Invalidates the cached
-    Hub-existence answer. Returns the final tag list actually written.
+    Maps auth/permission failures. Invalidates the cached Hub-existence answer.
+    Returns the final tag list actually written.
     """
-    if hf_hub_offline():
-        raise DatasetHubEditError(400, "The Hub is offline — you can't edit a dataset's tags right now.")
     final_tags = with_makermodslab_tag(tags)
     try:
         metadata_update(repo_id, {"tags": final_tags}, repo_type="dataset", overwrite=True)
@@ -692,8 +684,8 @@ def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
     ~/.cache/huggingface/lerobot dataset cache, and NOT a full dataset
     snapshot. Returns the snapshot root directory so the existing local-path
     reading code (_read_episode_rows, etc.) can run against it exactly like a
-    local dataset dir; None if the dataset isn't viewable this way (offline,
-    no video, or the fetch failed).
+    local dataset dir; None if the dataset isn't viewable this way (no video,
+    or the fetch failed).
 
     The episode-metadata parquet files are small regardless of how large the
     dataset's actual video is — this never pulls video/data chunks themselves;
@@ -703,8 +695,6 @@ def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
     files and re-touches already-cached files, which is fast (etag-checked
     cache hits), not a re-download.
     """
-    if hf_hub_offline():
-        return None
     if not _hub_dataset_has_video(repo_id):
         return None
     try:
@@ -917,7 +907,7 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
 
 # In-process cache of per-repo Hub dataset summaries (the /datasets/info hub
 # fallback), mirroring _HUB_STATUS_CACHE conventions: successful answers are
-# memoized for the process lifetime; the offline/error degrade is NEVER cached,
+# memoized for the process lifetime; the error degrade is NEVER cached,
 # so connectivity returning is picked up on the next check. Invalidated when
 # the repo's content changes (upload / download-complete) or the row is hidden.
 _HUB_DATASET_INFO_CACHE: dict[str, dict[str, Any]] = {}
@@ -941,13 +931,10 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     empty/None; ``source: "hub"`` tells the card which contract it got. This is
     a LAZY per-card fetch, deliberately not part of the /datasets listing.
 
-    Degrade-not-crash: returns None offline or on any fetch/parse failure (the
-    card then falls back to the sparse "not downloaded" view); only successful
-    answers are cached (see _HUB_DATASET_INFO_CACHE).
+    Degrade-not-crash: returns None on any fetch/parse failure (the card then
+    falls back to the sparse "not downloaded" view); only successful answers
+    are cached (see _HUB_DATASET_INFO_CACHE).
     """
-    if hf_hub_offline():
-        return None
-
     with _HUB_DATASET_INFO_LOCK:
         cached = _HUB_DATASET_INFO_CACHE.get(repo_id)
     if cached is not None:
@@ -992,8 +979,8 @@ def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
     a dataset with no local copy — the same tiny file get_hub_dataset_info
     uses.
 
-    Returns None when it can't be read — not local, offline, absent/private
-    repo, malformed JSON, or no ``features`` map. None means "not established",
+    Returns None when it can't be read — not local, absent/private repo,
+    malformed JSON, or no ``features`` map. None means "not established",
     never "fine": a caller must treat it as a reason to stay silent rather than
     as a clean bill of health.
     """
@@ -1003,8 +990,6 @@ def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
             info = json.loads((path / "meta" / "info.json").read_text())
         except (OSError, ValueError):
             return None
-    elif hf_hub_offline():
-        return None
     else:
         try:
             local = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")

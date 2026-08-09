@@ -878,7 +878,7 @@ def test_get_model_info_local(registry) -> None:
 def test_get_model_info_unknown_returns_none(registry) -> None:
     from makermodslab.models import get_model_info
 
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models._hub_model_info", return_value=None):
         assert get_model_info("nope") is None
 
 
@@ -894,7 +894,6 @@ def test_upload_local_model_calls_hub_public_and_tagged(registry) -> None:
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update") as mock_meta,
@@ -921,20 +920,11 @@ def test_upload_local_model_calls_hub_public_and_tagged(registry) -> None:
     assert set(result["tags"]) == set(tags)
 
 
-def test_upload_local_model_rejects_offline(registry) -> None:
-    from makermodslab.models import ModelError, upload_local_model
-
-    _seed_run(registry, "off_run", state="done")
-    with patch("makermodslab.models.hf_hub_offline", return_value=True), pytest.raises(ModelError) as ei:
-        upload_local_model("off_run")
-    assert ei.value.status == 400
-
-
 def test_upload_local_model_404_when_no_checkpoint(registry) -> None:
     from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "empty_run", state="done", with_checkpoint=False)
-    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+    with pytest.raises(ModelError) as ei:
         upload_local_model("empty_run")
     assert ei.value.status == 404
 
@@ -946,7 +936,6 @@ def test_upload_local_model_maps_auth_error(registry) -> None:
     fake_api = MagicMock()
     fake_api.create_repo.side_effect = Exception("401 Client Error: You must be authenticated")
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         pytest.raises(ModelError) as ei,
@@ -1042,7 +1031,7 @@ def test_models_endpoint_returns_listing(client, registry) -> None:
 
 
 def test_models_info_404(client, registry) -> None:
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models._hub_model_info", return_value=None):
         resp = client.get("/models/info", params={"id": "missing"})
     assert resp.status_code == 404
     assert isinstance(resp.json()["detail"], str)
@@ -1180,11 +1169,13 @@ def test_list_all_models_downloaded_only_is_local(registry, tmp_lerobot_home: Pa
 
 def test_get_model_info_downloaded_checkpoint(registry, tmp_lerobot_home: Path) -> None:
     """A downloaded/imported checkpoint resolves in get_model_info without the
-    Hub (works offline) and reports its on-disk size."""
+    Hub at all, and reports its on-disk size."""
     from makermodslab.models import get_model_info
 
     _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch(
+        "makermodslab.models._hub_model_info", side_effect=AssertionError("Hub must not be consulted")
+    ):
         info = get_model_info("user/policy")
     assert info is not None
     assert info["policy_type"] == "act"
@@ -1705,7 +1696,9 @@ def test_import_local_model_copies_tree_shape(tmp_lerobot_home: Path, tmp_path: 
     result = import_local_model(str(src), name="team/imported")
     assert result == {"repo_id": "team/imported"}
 
-    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+    with patch(
+        "makermodslab.models._hub_model_info", side_effect=AssertionError("Hub must not be consulted")
+    ):
         info = get_model_info("team/imported")
     assert info is not None
     assert info["steps"] == 300
@@ -2102,7 +2095,6 @@ def test_upload_local_model_stamps_policy_tag(registry) -> None:
 
     fake_api = MagicMock()
     with (
-        patch("makermodslab.models.hf_hub_offline", return_value=False),
         patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
         patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         patch("makermodslab.models.metadata_update") as mock_meta,

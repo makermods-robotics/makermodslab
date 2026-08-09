@@ -7,14 +7,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, Trash2, HardDrive, AlertTriangle } from "lucide-react";
+import { Loader2, Trash2, HardDrive } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import {
   DatasetItem,
   deleteDataset,
   getDatasetInfo,
 } from "@/lib/replayApi";
-import { listRunnerHardware } from "@/lib/jobsApi";
 
 interface Props {
   open: boolean;
@@ -49,10 +48,8 @@ const ManageCachesDialog: React.FC<Props> = ({
   // Repo ids currently being cleared (per-row spinner + disabled buttons).
   const [clearing, setClearing] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
-  // HF_HUB_OFFLINE on the backend: a cleared cache can't be re-downloaded.
-  const [offline, setOffline] = useState(false);
 
-  // On open: reset transient state and fetch sizes + the offline signal.
+  // On open: reset transient state and fetch sizes.
   useEffect(() => {
     if (!open) return;
     setError(null);
@@ -60,14 +57,6 @@ const ManageCachesDialog: React.FC<Props> = ({
     setSizes({});
 
     let cancelled = false;
-    listRunnerHardware(baseUrl, fetchWithHeaders)
-      .then((h) => {
-        if (!cancelled) setOffline(!!h.offline);
-      })
-      .catch(() => {
-        if (!cancelled) setOffline(false);
-      });
-
     for (const d of cached) {
       getDatasetInfo(baseUrl, fetchWithHeaders, d.repo_id)
         .then((info) => {
@@ -137,18 +126,6 @@ const ManageCachesDialog: React.FC<Props> = ({
         </DialogHeader>
 
         <div className="space-y-4">
-          {offline && (
-            <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-200">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>
-                This backend is in offline mode (
-                <code className="text-amber-800 dark:text-amber-100">HF_HUB_OFFLINE</code>). A
-                cleared cache can&apos;t be re-downloaded from the Hub until
-                offline mode is switched off.
-              </span>
-            </div>
-          )}
-
           {cached.length === 0 ? (
             <p className="rounded-md border border-border p-3 text-sm text-muted-foreground">
               No HF datasets are cached locally.

@@ -471,6 +471,68 @@ def test_hub_status_endpoint(client: TestClient) -> None:
     assert body["url"] == "https://huggingface.co/datasets/alice/pick"
 
 
+# --- is_dataset_available_locally — the two cache layouts --------------------
+# The helper the "local_only" arm above stubs out, tested for real: a wrong
+# answer here mislabels a dataset in the library. Everything is mocked — no
+# real HF API.
+
+AVAILABILITY_DATASET_ID = "alice/hub_only_dataset"
+
+
+def test_availability_true_for_flat_layout(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locally recorded (flat-layout) dataset counts as available without any
+    hub-cache probe."""
+    from makermodslab import datasets as ds
+
+    def _fail_cache(*_a, **_k):  # pragma: no cover - flat hit short-circuits first
+        raise AssertionError("flat-layout hit should short-circuit the cache probe")
+
+    monkeypatch.setattr(ds, "try_to_load_from_cache", _fail_cache)
+    _make_dataset(tmp_lerobot_home, AVAILABILITY_DATASET_ID)
+
+    assert ds.is_dataset_available_locally(AVAILABILITY_DATASET_ID) is True
+
+
+def test_availability_true_for_hub_snapshot_cache(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dataset present only in a hub snapshot cache (not the flat layout) still
+    counts as available — verified via huggingface_hub's cache lookup."""
+    from makermodslab import datasets as ds
+
+    # No flat dataset created; simulate a cache hit (real path string returned).
+    monkeypatch.setattr(ds, "try_to_load_from_cache", lambda *a, **k: "/cache/.../meta/info.json")
+
+    assert ds.is_dataset_available_locally(AVAILABILITY_DATASET_ID) is True
+
+
+def test_availability_false_when_absent_from_both_layouts(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent from the flat layout AND from every hub cache (None / sentinel,
+    i.e. non-str) => not available."""
+    from makermodslab import datasets as ds
+
+    monkeypatch.setattr(ds, "try_to_load_from_cache", lambda *a, **k: None)
+
+    assert ds.is_dataset_available_locally(AVAILABILITY_DATASET_ID) is False
+
+
+def test_availability_conservative_on_cache_probe_error(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cache-probe exception is not evidence of absence: degrade to 'assume
+    present' so an internal error never wrongly blocks a run."""
+    from makermodslab import datasets as ds
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("cache probe blew up")
+
+    monkeypatch.setattr(ds, "try_to_load_from_cache", _boom)
+
+    assert ds.is_dataset_available_locally(AVAILABILITY_DATASET_ID) is True
+
+
 # --- Rename -----------------------------------------------------------------
 
 
@@ -679,7 +741,6 @@ def test_set_dataset_visibility_calls_hfapi_with_repo_type() -> None:
     fake_api = MagicMock()
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.invalidate_hub_status") as inval,
     ):
         result = ds.set_dataset_visibility("alice/pick", private=True)
@@ -695,29 +756,12 @@ def test_set_dataset_visibility_public_passes_false() -> None:
     fake_api = MagicMock()
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.invalidate_hub_status"),
     ):
         result = ds.set_dataset_visibility("alice/pick", private=False)
 
     fake_api.update_repo_settings.assert_called_once_with("alice/pick", private=False, repo_type="dataset")
     assert result["private"] is False
-
-
-def test_set_dataset_visibility_rejected_offline() -> None:
-    """Offline: no HfApi call, a 400 DatasetHubEditError instead."""
-    from makermodslab import datasets as ds
-
-    fake_api = MagicMock()
-    with (
-        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=True),
-        pytest.raises(ds.DatasetHubEditError) as exc,
-    ):
-        ds.set_dataset_visibility("alice/pick", private=True)
-
-    assert exc.value.status == 400
-    fake_api.update_repo_settings.assert_not_called()
 
 
 def test_set_dataset_visibility_maps_permission_error() -> None:
@@ -728,7 +772,6 @@ def test_set_dataset_visibility_maps_permission_error() -> None:
     fake_api.update_repo_settings.side_effect = Exception("403 Forbidden: no write access")
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         pytest.raises(ds.DatasetHubEditError) as exc,
     ):
         ds.set_dataset_visibility("alice/pick", private=True)
@@ -745,7 +788,6 @@ def test_set_dataset_tags_runs_through_with_makermodslab_tag_before_update() -> 
 
     _clear_hub_status_cache()
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.metadata_update") as meta,
         patch("makermodslab.datasets.invalidate_hub_status") as inval,
     ):
@@ -772,7 +814,6 @@ def test_set_dataset_tags_preserves_org_tags_when_user_omits_them() -> None:
     from makermodslab.utils.config import REQUIRED_HUB_TAGS
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.metadata_update") as meta,
         patch("makermodslab.datasets.invalidate_hub_status"),
     ):
@@ -783,26 +824,11 @@ def test_set_dataset_tags_preserves_org_tags_when_user_omits_them() -> None:
     assert result["tags"] == written
 
 
-def test_set_dataset_tags_rejected_offline() -> None:
-    from makermodslab import datasets as ds
-
-    with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=True),
-        patch("makermodslab.datasets.metadata_update") as meta,
-        pytest.raises(ds.DatasetHubEditError) as exc,
-    ):
-        ds.set_dataset_tags("alice/pick", ["robotics"])
-
-    assert exc.value.status == 400
-    meta.assert_not_called()
-
-
 def test_set_dataset_tags_maps_auth_error() -> None:
     """A 401/auth Hub failure maps to a 403 DatasetHubEditError with docs_url."""
     from makermodslab import datasets as ds
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch(
             "makermodslab.datasets.metadata_update",
             side_effect=Exception("401 you must be authenticated"),
@@ -825,7 +851,6 @@ def test_get_hub_settings_returns_private_and_tags() -> None:
     fake_api.dataset_info.return_value = fake_info
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
     ):
         result = ds.get_hub_settings("alice/pick")
 
@@ -833,25 +858,9 @@ def test_get_hub_settings_returns_private_and_tags() -> None:
     assert result == {"repo_id": "alice/pick", "private": True, "tags": ["robotics", "makermods"]}
 
 
-def test_get_hub_settings_rejected_offline() -> None:
-    from makermodslab import datasets as ds
-
-    fake_api = MagicMock()
-    with (
-        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=True),
-        pytest.raises(ds.DatasetHubEditError) as exc,
-    ):
-        ds.get_hub_settings("alice/pick")
-
-    assert exc.value.status == 400
-    fake_api.dataset_info.assert_not_called()
-
-
 def test_visibility_endpoint(client: TestClient) -> None:
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=MagicMock()),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.invalidate_hub_status"),
     ):
         resp = client.post("/datasets/visibility", json={"repo_id": "alice/pick", "private": True})
@@ -859,17 +868,10 @@ def test_visibility_endpoint(client: TestClient) -> None:
     assert resp.json() == {"repo_id": "alice/pick", "private": True}
 
 
-def test_visibility_endpoint_offline_400(client: TestClient) -> None:
-    with patch("makermodslab.datasets.hf_hub_offline", return_value=True):
-        resp = client.post("/datasets/visibility", json={"repo_id": "alice/pick", "private": True})
-    assert resp.status_code == 400
-
-
 def test_tags_endpoint_writes_and_preserves_org_tags(client: TestClient) -> None:
     from makermodslab.utils.config import REQUIRED_HUB_TAGS
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.metadata_update") as meta,
         patch("makermodslab.datasets.invalidate_hub_status"),
     ):
@@ -889,7 +891,6 @@ def test_hub_settings_endpoint(client: TestClient) -> None:
     fake_api.dataset_info.return_value = fake_info
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
     ):
         resp = client.get("/datasets/hub-settings", params={"repo_id": "alice/pick"})
     assert resp.status_code == 200
@@ -1301,7 +1302,6 @@ def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
         },
     )
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
     ):
         row = ds.get_hub_dataset_info("alice/pick")
@@ -1341,7 +1341,6 @@ def test_get_hub_dataset_info_excludes_non_video_camera_features(tmp_path: Path)
         },
     )
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)),
     ):
         row = ds.get_hub_dataset_info("alice/image_only")
@@ -1350,20 +1349,11 @@ def test_get_hub_dataset_info_excludes_non_video_camera_features(tmp_path: Path)
     assert row["cameras"] == []
 
 
-def test_get_hub_dataset_info_offline_returns_none() -> None:
-    from makermodslab import datasets as ds
-
-    _clear_hub_dataset_info_cache()
-    with patch("makermodslab.datasets.hf_hub_offline", return_value=True):
-        assert ds.get_hub_dataset_info("alice/pick") is None
-
-
 def test_get_hub_dataset_info_error_degrades_and_is_not_cached() -> None:
     from makermodslab import datasets as ds
 
     _clear_hub_dataset_info_cache()
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", side_effect=RuntimeError("hub down")) as dl,
     ):
         assert ds.get_hub_dataset_info("alice/pick") is None
@@ -1377,7 +1367,6 @@ def test_get_hub_dataset_info_caches_success(tmp_path: Path) -> None:
     _clear_hub_dataset_info_cache()
     meta = _write_hub_meta(tmp_path, {"total_episodes": 1, "total_frames": 30, "fps": 30})
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
     ):
         ds.get_hub_dataset_info("alice/cached")
@@ -1398,7 +1387,6 @@ def test_datasets_info_endpoint_hub_fallback(
     _clear_hub_dataset_info_cache()
     meta = _write_hub_meta(tmp_path, {"total_episodes": 5, "total_frames": 150, "fps": 30})
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)),
     ):
         resp = client.get("/datasets/info", params={"repo_id": "alice/hub_only"})
@@ -1409,7 +1397,7 @@ def test_datasets_info_endpoint_hub_fallback(
     assert body["size_bytes"] is None
 
     _clear_hub_dataset_info_cache()
-    with patch("makermodslab.datasets.hf_hub_offline", return_value=True):
+    with patch("makermodslab.datasets.hf_hub_download", side_effect=RuntimeError("hub down")):
         resp = client.get("/datasets/info", params={"repo_id": "alice/nowhere"})
     assert resp.status_code == 404
     assert ds is not None  # keep the import referenced
@@ -1444,22 +1432,10 @@ def test_hub_dataset_has_video_true_and_false() -> None:
         assert ds._hub_dataset_has_video("alice/pick") is False
 
 
-def test_ensure_hub_episodes_root_returns_none_offline() -> None:
-    from makermodslab import datasets as ds
-
-    with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=True),
-        patch("makermodslab.datasets.get_hub_dataset_info") as info,
-    ):
-        assert ds._ensure_hub_episodes_root("alice/pick") is None
-    info.assert_not_called()
-
-
 def test_ensure_hub_episodes_root_returns_none_when_no_video() -> None:
     from makermodslab import datasets as ds
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.get_hub_dataset_info", return_value={"cameras": []}),
         patch("makermodslab.datasets.hf_hub_download") as dl,
     ):
@@ -1489,7 +1465,6 @@ def test_ensure_hub_episodes_root_downloads_info_and_episode_chunks(tmp_path: Pa
         return str(snapshot / filename)
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         patch("makermodslab.datasets.hf_hub_download", side_effect=_fake_download),
@@ -1508,7 +1483,6 @@ def test_ensure_hub_episodes_root_degrades_on_fetch_failure() -> None:
     from makermodslab import datasets as ds
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}),
         patch("makermodslab.datasets.hf_hub_download", side_effect=RuntimeError("hub down")),
     ):
@@ -2081,7 +2055,6 @@ def test_hub_dataset_viewer_endpoints_end_to_end(
     ]
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         patch("makermodslab.datasets.hf_hub_download", side_effect=_fake_download),
     ):
@@ -2113,7 +2086,6 @@ def test_hub_dataset_viewer_endpoints_404_without_video(
     meta.write_text(json.dumps({"features": {"observation.images.front": {"dtype": "image"}}}))
 
     with (
-        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
         patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
     ):
         resp = client.get("/datasets/episodes", params={"repo_id": "alice/no_video"})

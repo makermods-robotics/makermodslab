@@ -2149,27 +2149,6 @@ def test_local_parent_resumed_on_the_cloud_refuses_without_hf_auth(
     _assert_nothing_was_created(reg)
 
 
-def test_local_parent_resumed_on_the_cloud_refuses_when_offline(
-    tmp_path, monkeypatch, cloud_preflight
-) -> None:
-    """Offline mode disables every Hub write, so the upload this continuation
-    depends on is impossible — say so instead of trying."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobTarget
-
-    reg = _resumable_source(tmp_path, "interrupted")
-    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeUploadApi())
-    monkeypatch.setattr("makermodslab.jobs.hf_hub_offline", lambda: True)
-    with (
-        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
-        pytest.raises(ValueError, match="Offline mode"),
-    ):
-        reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
-
-    _assert_nothing_was_created(reg)
-
-
 def test_local_parent_resumed_on_the_cloud_never_starts_a_fresh_run(
     tmp_path, monkeypatch, cloud_preflight
 ) -> None:

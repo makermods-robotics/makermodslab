@@ -11,15 +11,14 @@
 #   sudo systemctl restart makermodslab-station
 #   sudo systemctl stop makermodslab-station   # e.g. before running `makermodslab --dev`
 #
-# The service runs the offline posture (HF_HUB_OFFLINE=1 via makermodslab-station):
-# every hardware flow works, Hub calls fail fast. For an upload/Hub session,
-# stop the service and run `.venv/bin/makermodslab --lan` in a proxied shell — or
-# uncomment the Environment lines below to run the service itself through a
-# proxy (then it is NOT offline-deterministic; see INSTALL.md "server
-# posture").
+# The service runs the LAN posture (makermodslab-station == `makermodslab --lan`):
+# it binds 0.0.0.0 so other machines on the network can reach it, and never
+# opens a browser. The Hub is expected to be reachable — login, dataset upload,
+# and cloud training all need it — so give the station outbound network. If it
+# sits behind a proxy, uncomment the Environment lines below.
 
 [Unit]
-Description=MakerMods Lab robot station (headless, LAN-served, Hub-offline)
+Description=MakerMods Lab robot station (headless, LAN-served)
 After=network-online.target
 Wants=network-online.target
 
@@ -30,7 +29,7 @@ ExecStart=/home/makermods/MakerModsLab/.venv/bin/makermodslab-station
 Restart=on-failure
 RestartSec=3
 # Serial ports: the unit user must be in dialout (usermod -aG dialout <user>).
-# Proxy for an online posture (see note above) — normally leave commented:
+# Proxy, if the station reaches the Hub through one — normally leave commented:
 #Environment=https_proxy=http://127.0.0.1:7897
 #Environment=http_proxy=http://127.0.0.1:7897
 #Environment=no_proxy=localhost,127.0.0.1,192.168.0.0/16

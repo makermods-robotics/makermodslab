@@ -305,18 +305,12 @@ export interface RunnerHardwareResponse {
   authenticated: boolean;
   username: string | null;
   flavors: RunnerFlavor[];
-  // True when the backend is in HF_HUB_OFFLINE mode: every Hub write is
-  // disabled, so a local-only dataset can't be uploaded for a cloud run. The
-  // training page uses this to keep Start disabled + explain why. Absent on
-  // older backends → treated as online (false).
-  offline?: boolean;
 }
 
 const EMPTY_HARDWARE: RunnerHardwareResponse = {
   authenticated: false,
   username: null,
   flavors: [],
-  offline: false,
 };
 
 export async function listRunnerHardware(

@@ -43,7 +43,7 @@ from tqdm.auto import tqdm as _base_tqdm
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
-from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
+from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, shared_hf_api
 from .utils.naming import (
     dedupe_display_names,
     derive_imported_title,
@@ -2708,7 +2708,7 @@ class JobRegistry:
             disagree about what "resumable" means);
           * the upload wasn't consented to — an upload is a disclosure, so it is
             never a silent side effect of clicking Continue;
-          * there is no Hub identity to upload as, or the server is offline.
+          * there is no Hub identity to upload as.
         """
         # The same validation a local→local resume passes: complete checkpoint,
         # known step, real training_state/. Its train_config.json is
@@ -2735,11 +2735,6 @@ class JobRegistry:
                 f"checkpoint at step {int(step_dir)} on the Hub, and it is only on "
                 "this machine. Confirm the upload in the training form (it goes to "
                 "a private repo), or continue the run locally instead."
-            )
-        if hf_hub_offline():
-            raise ValueError(
-                "Offline mode is on, so this run's checkpoint can't be uploaded to "
-                "the Hub — continue it locally, or switch offline mode off."
             )
         whoami = cached_whoami()
         username = (whoami or {}).get("name")

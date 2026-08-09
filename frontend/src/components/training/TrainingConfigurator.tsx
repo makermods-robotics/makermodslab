@@ -240,8 +240,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
   const [hardwareLoading, setHardwareLoading] = useState(true);
-  // HF_HUB_OFFLINE on the backend: Hub writes (incl. dataset upload) disabled.
-  const [offline, setOffline] = useState<boolean>(false);
 
   useEffect(() => {
     fetchWithHeaders(`${baseUrl}/system/training-extra`)
@@ -274,12 +272,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       .then((data) => {
         setAuthenticated(data.authenticated);
         setFlavors(data.flavors);
-        setOffline(!!data.offline);
       })
       .catch(() => {
         setAuthenticated(false);
         setFlavors([]);
-        setOffline(false);
       })
       .finally(() => setHardwareLoading(false));
   }, [baseUrl, fetchWithHeaders, auth.status]);
@@ -498,14 +494,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     config.steps <= resumeSeed.step
       ? `Total steps must be greater than the checkpoint's step (${resumeSeed.step.toLocaleString()}).`
       : null;
-  // A local-only dataset on a cloud run is uploadable — unless the backend is
-  // in offline mode, in which case uploads are impossible and Start is a hard
-  // block. (needsUpload is already gated on isCloud.)
-  const uploadBlockedOffline = needsUpload && offline;
-  // A local run continued on the cloud has to push its checkpoint to the Hub
-  // first, which offline mode makes impossible — a hard block, exactly like the
-  // dataset case above.
-  const checkpointUploadBlockedOffline = needsCheckpointUpload && offline;
   const startDisabled =
     isStarting ||
     uploading ||
@@ -513,8 +501,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     localBlocked ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
-    uploadBlockedOffline ||
-    checkpointUploadBlockedOffline ||
     resumeStepError != null;
   const startTooltip = localBlocked
     ? "Another local training is already running"
@@ -522,11 +508,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       ? "Log in to Hugging Face to use cloud compute"
       : targetMissingFlavor
         ? "Select a hardware flavor"
-        : uploadBlockedOffline
-          ? "Offline mode is on — the dataset can't be uploaded to the Hub"
-          : checkpointUploadBlockedOffline
-            ? "Offline mode is on — the checkpoint can't be uploaded to the Hub"
-            : undefined;
+        : undefined;
 
   return (
     <div className="w-full">
@@ -582,7 +564,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           <LocalDatasetCloudNotice
             repoId={datasetRepoId}
             sizeBytes={datasetSizeBytes}
-            offline={offline}
             uploading={uploading}
             errorMessage={uploadError}
           />
@@ -597,7 +578,6 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           <LocalCheckpointCloudNotice
             runName={resumeSeed.name}
             step={resumeSeed.step}
-            offline={offline}
           />
         </div>
       ) : null}

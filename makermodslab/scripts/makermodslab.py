@@ -461,11 +461,6 @@ def main():
         help="Headless station mode: bind 0.0.0.0 (serve other machines), don't open a browser",
     )
     parser.add_argument(
-        "--offline",
-        action="store_true",
-        help="Set HF_HUB_OFFLINE=1: every Hub call fails fast (all hardware flows work offline)",
-    )
-    parser.add_argument(
         "--stop",
         action="store_true",
         help="Stop a running MakerMods Lab and free its ports (:8000/:8080), then exit.",
@@ -478,16 +473,6 @@ def main():
 
     _ensure_path_symlinks()
 
-    if args.offline:
-        # Must land in the environment before makermodslab.server (and its
-        # huggingface_hub import) loads — uvicorn imports the app lazily, so
-        # setting it here covers both prod and the dev subprocess (env copy).
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        logger.info(
-            "HF_HUB_OFFLINE=1 (--offline): Hub features disabled (login/whoami/"
-            "dataset push will fail fast), hardware flows unaffected."
-        )
-
     if args.dev:
         if args.lan:
             logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
@@ -497,12 +482,12 @@ def main():
 
 
 def station():
-    """Entry point for headless robot stations: `makermodslab --lan --offline`.
+    """Entry point for headless robot stations: `makermodslab --lan`.
 
     Installed as `makermodslab-station` (see pyproject.toml) so the posture is a
     first-class command. Extra CLI args still pass through.
     """
-    sys.argv = [sys.argv[0], "--lan", "--offline", *sys.argv[1:]]
+    sys.argv = [sys.argv[0], "--lan", *sys.argv[1:]]
     main()
 
 

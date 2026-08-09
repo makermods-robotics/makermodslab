@@ -1,14 +1,11 @@
 import React from "react";
-import { AlertTriangle, Lock, UploadCloud, WifiOff } from "lucide-react";
+import { AlertTriangle, Lock, UploadCloud } from "lucide-react";
 
 interface LocalCheckpointCloudNoticeProps {
   /** The run being continued, for a notice that names what moves. */
   runName: string;
   /** The checkpoint step the continuation resumes from; null ⇒ the latest. */
   step: number | null;
-  /** Backend is in HF_HUB_OFFLINE mode: nothing can be uploaded, so this
-   * continuation can't run on the cloud at all. */
-  offline: boolean;
 }
 
 /**
@@ -29,35 +26,9 @@ interface LocalCheckpointCloudNoticeProps {
 const LocalCheckpointCloudNotice: React.FC<LocalCheckpointCloudNoticeProps> = ({
   runName,
   step,
-  offline,
 }) => {
   const stepLabel =
     step != null ? `step ${step.toLocaleString()}` : "its latest checkpoint";
-
-  if (offline) {
-    return (
-      <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-100">
-        <div className="flex items-start gap-2">
-          <WifiOff className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
-          <div>
-            <div className="font-semibold">
-              This checkpoint is only on this machine
-            </div>
-            <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-              Hugging Face Cloud continues from the Hub, but the server is in
-              offline mode (
-              <code className="text-amber-700 dark:text-amber-100">
-                HF_HUB_OFFLINE
-              </code>
-              ), so {stepLabel} of{" "}
-              <span className="font-medium">{runName}</span> can't be uploaded.
-              Switch off offline mode, or continue this run locally.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-100">

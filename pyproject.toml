@@ -44,8 +44,8 @@ test = [
 # The installed command is `makermodslab`; the Python package/module is
 # `makermodslab` (imports, the wheel, `makermodslab.server:app`).
 makermodslab = "makermodslab.scripts.makermodslab:main"
-# Headless robot-station posture as an installed command: --lan --offline
-# defaults, extra args pass through. What the systemd unit runs.
+# Headless robot-station posture as an installed command: --lan by default,
+# extra args pass through. What the systemd unit runs.
 makermodslab-station = "makermodslab.scripts.makermodslab:station"
 
 [tool.setuptools.packages.find]

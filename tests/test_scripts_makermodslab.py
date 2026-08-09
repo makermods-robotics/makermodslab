@@ -230,9 +230,9 @@ def test_is_uv_tool_link_false_for_regular_file(tmp_path) -> None:
     assert _is_uv_tool_link(bin_dir / "makermodslab", uv_tools_dir) is False
 
 
-def test_station_injects_lan_and_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`station()` prepends `--lan --offline` and defers to `main` — without
-    starting a server (main is stubbed). Guards the systemd unit's posture."""
+def test_station_injects_lan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`station()` prepends `--lan` and defers to `main` — without starting a
+    server (main is stubbed). Guards the systemd unit's posture."""
     from makermodslab.scripts import makermodslab as launcher
 
     captured: dict[str, list[str]] = {}
@@ -245,7 +245,7 @@ def test_station_injects_lan_and_offline(monkeypatch: pytest.MonkeyPatch) -> Non
 
     launcher.station()
 
-    assert captured["argv"] == ["makermodslab-station", "--lan", "--offline"]
+    assert captured["argv"] == ["makermodslab-station", "--lan"]
 
 
 def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -258,7 +258,7 @@ def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> N
 
     launcher.station()
 
-    assert captured["argv"] == ["makermodslab-station", "--lan", "--offline", "--dev"]
+    assert captured["argv"] == ["makermodslab-station", "--lan", "--dev"]
 
 
 def test_entry_points_target_correct_functions() -> None:
