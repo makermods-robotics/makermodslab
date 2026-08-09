@@ -2073,6 +2073,105 @@ def test_start_recording_rejects_with_400_on_duplicate_camera_names(
     assert record.recording_active is False
 
 
+def test_start_recording_rejects_with_400_when_the_robot_has_no_cameras(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A record with an EMPTY camera list must refuse too.
+
+    The record is the only source of session cameras, so an empty one records a
+    whole dataset with no video — the same silent loss a wrong robot name
+    causes, and just as invisible until the dataset is opened.
+    """
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    _idle_mutexes(monkeypatch)
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record("blind", {"cameras": []}, allow_create=True)
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name="blind"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "blind" in result["message"]
+    assert "Robot settings" in result["message"]
+    # Names what it is refusing, not a generic "before starting".
+    assert "recording" in result["message"]
+    # Refused BEFORE the active flag is claimed, so there is no session to stop.
+    assert record.recording_active is False
+
+
+def test_start_recording_refuses_a_robot_saved_without_any_cameras(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The motivating case: nobody chose a camera-less session — the record was
+    saved with its ports and calibrations and simply never had a camera added
+    (the same shape external cleanup of stale camera entries leaves behind).
+    The record carries no `cameras` key at all, so this also pins the
+    missing-key path, not just an explicit empty list. Without this refusal that
+    robot records silently, and videolessly.
+    """
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    _idle_mutexes(monkeypatch)
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        "legacy",
+        {
+            "leader_port": "/dev/leader",
+            "follower_port": "/dev/follower",
+            "leader_config": "teleop",
+            "follower_config": "robot",
+        },
+        allow_create=True,
+    )
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name="legacy"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "legacy" in result["message"]
+    assert "Robot settings" in result["message"]
+    # The camera gate, not the missing-record branch of load_robot_cameras
+    # (which also says "Robot settings" — the record here exists).
+    assert "no cameras configured" in result["message"]
+    assert record.recording_active is False
+
+
+def test_start_recording_still_allows_a_blank_robot_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The no-cameras refusal is scoped to a NAMED robot.
+
+    A blank name is a camera-less session by definition (see
+    utils/config.load_robot_cameras) — there is no record to judge and no name
+    to put in the message — so it must still get past the camera check, or the
+    gate would quietly become "recording always requires a robot record".
+    Config construction is stubbed to raise so the start fails immediately
+    afterwards, without touching hardware; the assertion is on WHICH failure.
+    """
+    import makermodslab.record as record
+
+    _idle_mutexes(monkeypatch)
+
+    def _boom(request, cameras=None):
+        raise RuntimeError("stop before hardware")
+
+    monkeypatch.setattr(record, "create_record_config", _boom)
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name=""))
+
+    assert result["success"] is False
+    # It failed at config construction, NOT at the camera gate.
+    assert "no cameras configured" not in result["message"]
+    assert "stop before hardware" in result["message"]
+
+
 def test_start_recording_ignores_a_stale_cameras_payload(
     monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
 ) -> None:
