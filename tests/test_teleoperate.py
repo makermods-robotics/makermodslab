@@ -596,20 +596,30 @@ class _FakeCamera:
 class _FakeConnectableBus(_FakeBus):
     """Motor bus double that tracks open/closed state for teardown tests."""
 
-    def __init__(self, port: str = "COM_FAKE", connected: bool = True, silent: bool = False) -> None:
+    def __init__(
+        self,
+        port: str = "COM_FAKE",
+        connected: bool = True,
+        silent: bool = False,
+        ping_dead: bool = False,
+    ) -> None:
         super().__init__(port=port)
         self.is_connected = connected
         self.disconnect_calls = 0
         self.disconnect_torque_flags: list[bool] = []
         # silent=True models the real post-handshake-failure state: the serial
         # port is open (is_connected True, because lerobot's is_connected is
-        # just port_handler.is_open) but no motor answers.
+        # just port_handler.is_open) but no motor answers — pings AND writes
+        # both fail. ping_dead=True models the narrower, more dangerous case:
+        # a degraded-but-recoverable bus where the zero-retry ping fails but a
+        # retried write would still land.
         self.silent = silent
+        self.ping_dead = ping_dead
         self.pings: list[str] = []
 
     def ping(self, motor: str, num_retry: int = 0):
         self.pings.append(motor)
-        return None if self.silent else 777
+        return None if (self.silent or self.ping_dead) else 777
 
     def disable_torque(self, motor: str, num_retry: int = 0) -> None:
         if self.silent:
@@ -777,6 +787,25 @@ def test_force_disconnect_partial_does_not_alarm_on_a_bus_that_never_opened() ->
     assert problems == []
 
 
+def test_force_disable_torque_still_writes_when_the_probe_fails_but_the_bus_is_alive() -> None:
+    """The exact case the probe must not be allowed to veto: a
+    degraded-but-recoverable bus where the zero-retry ping used for liveness
+    fails on every motor, but the retried (num_retry=5) disable_torque write
+    still lands. Gating the write on the probe result would leave a genuinely
+    energized arm rigid — the probe may only be consulted after a write
+    failure, never before one.
+    """
+    from makermodslab.teleoperate import force_disable_torque
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER", ping_dead=True)
+
+    problems = force_disable_torque(_FakeArm(bus), "robot")
+
+    # Every motor's write was attempted and landed, despite the dead probe.
+    assert [motor for motor, _ in bus.disabled] == list(bus.motors)
+    assert problems == []
+
+
 def test_force_disable_torque_does_not_alarm_when_no_motor_answers() -> None:
     """The real "arm unplugged / wrong port" shape, and the one the
     is_connected guard cannot catch.
@@ -784,10 +813,12 @@ def test_force_disable_torque_does_not_alarm_when_no_motor_answers() -> None:
     lerobot's MotorsBus._connect calls openPort() BEFORE _handshake(), and
     does not close the port when the handshake fails. So for an unpowered arm,
     browned-out servos, a wrong baud rate, or a valid-but-wrong serial device,
-    is_connected is still True on a bus no motor is listening on. Writing
-    torque-disable to all of them fails, and reporting that as "TORQUE MAY
-    STILL BE ENABLED ... unplug its power" is actively misleading about an arm
-    that has no power. Probe first, and say what was actually observed.
+    is_connected is still True on a bus no motor is listening on. The
+    torque-disable write is still attempted on every motor (a
+    degraded-but-recoverable bus could have taken it), and only once every
+    motor's write has failed does the probe get consulted to say what was
+    actually observed, instead of reporting "TORQUE MAY STILL BE ENABLED ...
+    unplug its power" on an arm that has no power to unplug.
     """
     from makermodslab.teleoperate import force_disable_torque
 
@@ -795,8 +826,8 @@ def test_force_disable_torque_does_not_alarm_when_no_motor_answers() -> None:
 
     problems = force_disable_torque(_FakeArm(bus), "robot")
 
-    assert bus.pings == list(bus.motors)  # probed every motor before giving up
-    assert bus.disabled == []  # no futile write storm against a dead bus
+    assert bus.pings == list(bus.motors)  # probed every motor after every write failed
+    assert bus.disabled == []  # every write was attempted and failed, none landed
     assert len(problems) == 1
     assert "No motor answered on COM_FOLLOWER" in problems[0]
     # The alarm is the thing under test: it must NOT be asserted as fact.
