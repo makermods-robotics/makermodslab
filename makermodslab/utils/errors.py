@@ -156,7 +156,26 @@ def friendly_hint(error_text: str | None) -> str | None:
     # lerobot's message is misleading here (a vanished device reports a
     # nonsense actual_fps), so translate. Must precede the slow-frames branch:
     # "timed out waiting for frame" would also match "waiting for frame" there.
-    if "failed to set fps" in low or "timed out waiting for frame" in low or "do not match configured" in low:
+    #
+    # Marker set kept in sync with record.py's _is_transient_camera_error — a
+    # string that module retries must end up with advice here, or the operator
+    # waits out the retries and is told nothing (credit: #38).
+    #
+    # "read thread is not running" is the marker that actually fires for the
+    # wrong-native-format case (session lands 640x360 instead of 640x480).
+    # lerobot detects that in _postprocess_image, whose only caller is
+    # _read_loop (camera_opencv.py:453) — connect()'s warmup goes through
+    # async_read instead — so the mismatch never propagates synchronously and
+    # the caller sees the dead reader instead. "do not match configured" is
+    # kept only as a forward guard in case upstream ever raises it inline; it
+    # cannot fire on today's connect path, so it must not be the only marker
+    # covering that failure.
+    if (
+        "failed to set fps" in low
+        or "timed out waiting for frame" in low
+        or "read thread is not running" in low
+        or "do not match configured" in low
+    ):
         return (
             "A camera couldn't start in its recording mode — it's either held by another app "
             "(close other tabs/apps using it, or quit the browser) or was unplugged. "

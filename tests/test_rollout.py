@@ -1593,6 +1593,36 @@ def test_friendly_hint_servo_bus_error_is_not_a_download_failure() -> None:
         assert "download" not in hint.lower()
 
 
+def test_friendly_hint_covers_the_marker_the_wrong_format_case_actually_raises() -> None:
+    """The wrong-native-format case (session lands 640x360 instead of the
+    configured 640x480) reaches a synchronous caller as "read thread is not
+    running", NOT as "do not match configured". lerobot detects the mismatch in
+    _postprocess_image, whose only caller is _read_loop (camera_opencv.py:453);
+    connect()'s warmup goes through async_read, so the mismatch text never
+    propagates and the caller sees the dead reader instead. Keying the hint
+    solely on "do not match configured" left the case that actually happens
+    with no advice at all. Credit to #38 for establishing the propagation path.
+    """
+    from makermodslab.utils.errors import friendly_hint
+
+    # The marker that really fires.
+    live = friendly_hint("OpenCVCamera(0) read thread is not running.") or ""
+    assert "held by another app" in live
+
+    # The forward guard still answers if upstream ever raises it inline.
+    guard = (
+        friendly_hint(
+            "OpenCVCamera(0) frame width=640 or height=360 do not match configured width=640 or height=480."
+        )
+        or ""
+    )
+    assert "held by another app" in guard
+
+    # Ordering guard: the slow-frames branch below must not swallow this one.
+    slow = friendly_hint("Camera frame is too old") or ""
+    assert "can't keep up" in slow
+
+
 def test_friendly_hint_still_names_real_download_failures() -> None:
     """The other side of the tightening: a genuine fetch failure keeps its Hub
     hint. Download-step failures reach here with rollout's own
