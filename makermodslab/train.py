@@ -112,6 +112,10 @@ _POLICY_OPTIMIZER_FIELDS: dict[str, frozenset[str]] = {
     "tdmpc": frozenset({"lr"}),
     "vqbet": frozenset({"lr", "weight_decay"}),
     "pi0_fast": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    # Same PreTrainedConfig shape as pi0 (verified by dataclass introspection
+    # against the pinned lerobot: identical optimizer_lr/betas/eps/
+    # weight_decay/grad_clip_norm/scheduler_* fields and defaults).
+    "pi05": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
     "gaussian_actor": frozenset(),
 }
 

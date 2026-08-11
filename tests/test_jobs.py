@@ -4418,3 +4418,86 @@ def test_boot_reattach_stays_interrupted_when_no_exit_status_file(tmp_path) -> N
     record = reg.get("job-1")
     assert record.state == "interrupted"
     assert record.exit_code is None
+
+
+def _write_log(path: Path, messages: list[str]) -> Path:
+    """Write messages in the log.jsonl shape both runners produce."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(_json.dumps({"timestamp": 1.0, "message": m}) for m in messages) + "\n")
+    return path
+
+
+def test_oom_failure_reason_names_the_gpu_oom(tmp_path) -> None:
+    """The whole point: a run that died on CUDA OOM must finalise with a reason
+    the user can act on, not "Subprocess exited with code 1"."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(
+        tmp_path / "log.jsonl",
+        [
+            "INFO 2026-08-07 10:31:02 train.py:243 step:1 loss:2.104",
+            'File "/app/lerobot/policies/pi05/modeling_pi05.py", line 612, in forward',
+            "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 4.20 GiB. GPU 0 has a total "
+            "capacity of 79.14 GiB of which 1.88 GiB is free.",
+            "[wrapper] trainer exited with rc=1",
+        ],
+    )
+    reason = _oom_failure_reason(log, 1)
+    assert reason is not None
+    assert "memory" in reason.lower()
+    assert "batch size" in reason.lower()
+
+
+def test_oom_failure_reason_reads_past_the_last_line(tmp_path) -> None:
+    """torch prints the OOM body BELOW the exception line and the trainer keeps
+    logging on its way down, so matching only the final line would miss it."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(
+        tmp_path / "log.jsonl",
+        ["torch.OutOfMemoryError: CUDA out of memory."]
+        + [f"[wrapper] scanning checkpoints {i}" for i in range(30)],
+    )
+    assert _oom_failure_reason(log, 1) is not None
+
+
+def test_oom_failure_reason_is_silent_on_an_ordinary_failure(tmp_path) -> None:
+    """No OOM evidence ⇒ None, so the caller keeps its existing message rather
+    than mislabelling every failure as out of memory."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(tmp_path / "log.jsonl", ["ValueError: expected 6-dim action, got 12"])
+    assert _oom_failure_reason(log, 1) is None
+    assert _oom_failure_reason(tmp_path / "missing.jsonl", 1) is None
+
+
+def test_oom_failure_reason_recognises_a_sigkill_with_an_empty_log(tmp_path) -> None:
+    """The host OOM killer sends SIGKILL and the process prints nothing, so the
+    exit code is the only evidence there is."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(tmp_path / "log.jsonl", ["INFO step:120 loss:0.8"])
+    for rc in (-9, 137):
+        reason = _oom_failure_reason(log, rc)
+        assert reason is not None and "ram" in reason.lower()
+    assert _oom_failure_reason(log, 1) is None
+
+
+def test_read_log_tail_messages_survives_a_mid_line_seek(tmp_path) -> None:
+    """The reader seeks to a fixed byte offset, which lands inside a record;
+    the fragment must be dropped, not fed to json.loads as a whole line."""
+    from makermodslab.jobs import _LOG_TAIL_BYTES, _read_log_tail_messages
+
+    filler = ["x" * 200 for _ in range(_LOG_TAIL_BYTES // 200 + 40)]
+    log = _write_log(tmp_path / "log.jsonl", [*filler, "torch.OutOfMemoryError: CUDA out of memory."])
+    messages = _read_log_tail_messages(log)
+    assert messages  # the fragment didn't take the whole window with it
+    assert messages[-1] == "torch.OutOfMemoryError: CUDA out of memory."
+
+
+def test_read_log_tail_messages_skips_malformed_lines(tmp_path) -> None:
+    from makermodslab.jobs import _read_log_tail_messages
+
+    path = tmp_path / "log.jsonl"
+    path.write_text('{"timestamp": 1.0, "message": "ok"}\nnot json at all\n{"timestamp": 2.0}\n')
+    assert _read_log_tail_messages(path) == ["ok"]

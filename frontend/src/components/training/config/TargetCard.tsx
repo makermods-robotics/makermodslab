@@ -22,8 +22,16 @@ const formatHourly = (unitCostUsd: number, unitLabel: string): string => {
   return `$${hourly.toFixed(2)}/hr`;
 };
 
+// VRAM is included because it is the one spec that decides whether a run
+// starts at all: the big VLA policies OOM on a small card at the standard
+// batch size, and the failure lands on the first training step, minutes after
+// the user has already paid for the box.
 const formatFlavorLine = (f: RunnerFlavor): string => {
-  const accel = f.accelerator ? f.accelerator : f.cpu;
+  const accel = f.accelerator
+    ? f.vram
+      ? `${f.accelerator} · ${f.vram} VRAM`
+      : f.accelerator
+    : f.cpu;
   return `${f.pretty_name} · ${accel} · ${formatHourly(f.unit_cost_usd, f.unit_label)}`;
 };
 

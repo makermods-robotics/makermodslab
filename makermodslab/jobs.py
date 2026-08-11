@@ -43,6 +43,7 @@ from tqdm.auto import tqdm as _base_tqdm
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
+from .utils.errors import is_out_of_memory
 from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
 from .utils.naming import (
     dedupe_display_names,
@@ -2278,6 +2279,87 @@ def _job_meta_path(output_root: Path, job_id: str) -> Path:
     return _job_dir(output_root, job_id) / "job.json"
 
 
+# How much of log.jsonl the post-mortem below reads. A verbose training log
+# runs to many MB; the cause is always in the last handful of lines, so we
+# decode a fixed tail rather than materializing the file.
+_LOG_TAIL_BYTES = 64 * 1024
+_LOG_TAIL_LINES = 80
+
+# Exit codes that mean the OS killed the trainer rather than the trainer
+# raising: SIGKILL is what the Linux OOM killer sends when the HOST (not the
+# GPU) runs out of memory, and it leaves nothing at all in the log. Popen
+# reports it as -9; a shell-wrapped process reports 128+9.
+_SIGKILL_EXIT_CODES = frozenset({-9, 137})
+
+_GPU_OOM_MESSAGE = (
+    "Out of memory — the training process ran out of GPU memory. "
+    "Turn on mixed precision (AMP), lower the batch size, or use a larger GPU."
+)
+_HOST_OOM_MESSAGE = (
+    "Killed by the operating system — almost always the host running out of RAM. "
+    "Lower the batch size or the number of dataloader workers."
+)
+
+
+def _read_log_tail_messages(log_path: Path) -> builtins.list[str]:
+    """The `message` field of the last few log.jsonl lines, oldest first.
+
+    Both runners write the same JSON-lines format (LocalJobRunner from the
+    subprocess's stdout, HfCloudJobRunner from the HF Jobs log stream), so one
+    reader covers local and cloud runs alike. Unreadable file → empty list; a
+    malformed line is skipped rather than raising, exactly as
+    read_persisted_logs does.
+    """
+    try:
+        with log_path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - _LOG_TAIL_BYTES))
+            data = fh.read()
+    except OSError:
+        return []
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    # Seeking into the middle of the file lands inside a line; drop that
+    # fragment so json.loads isn't handed half a record.
+    if size > _LOG_TAIL_BYTES and lines:
+        lines = lines[1:]
+    out: builtins.list[str] = []
+    for raw in lines[-_LOG_TAIL_LINES:]:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            message = json.loads(raw).get("message")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(message, str):
+            out.append(message)
+    return out
+
+
+def _oom_failure_reason(log_path: Path, rc: int | None) -> str | None:
+    """Ran-out-of-memory, as a sentence, or None when that isn't what happened.
+
+    Subprocess/container forensics, the same shape rollout.py uses: the trainer
+    is not in this process, so its log is the only evidence. Without this an
+    OOM finalises as the synthetic "Subprocess exited with code 1" — HF Jobs
+    reports a crashed container as a bare stage change and carries no reason of
+    its own — which is how an intensive policy (PI0.5 dying on step 1) came
+    back from the cloud looking like it had failed for no reason at all.
+
+    The whole tail window is matched, not just the last line: torch prints the
+    "CUDA out of memory" body BELOW the exception line, and the trainer usually
+    logs a few more lines on its way down.
+    """
+    if is_out_of_memory("\n".join(_read_log_tail_messages(log_path))):
+        return _GPU_OOM_MESSAGE
+    # No traceback at all + a SIGKILL exit is the host-RAM OOM killer, which
+    # never gets the chance to print anything.
+    if rc in _SIGKILL_EXIT_CODES:
+        return _HOST_OOM_MESSAGE
+    return None
+
+
 class JobAlreadyRunningError(Exception):
     """Raised when start() is called while another local job is running."""
 
@@ -3784,6 +3866,9 @@ class JobRegistry:
 
             # Subprocess exited since the last tick. Finalise.
             rc = runner.returncode()
+            # Mine the log for an out-of-memory death BEFORE taking the lock —
+            # it reads a 64 KB tail off disk, and rc is all it needs.
+            oom_reason = _oom_failure_reason(_job_log_path(self._output_root, jid), rc) if rc else None
             # A stop counts only if we asked for it AND the runner didn't tell
             # us it never got to signal anything (already-dead process). A
             # runner that can't answer abstains rather than vetoing.
@@ -3831,8 +3916,12 @@ class JobRegistry:
                     elif state == "failed":
                         # Prefer a runner-supplied reason (e.g. HF Jobs'
                         # 'Job timeout') over the synthetic exit-code message.
+                        # An OOM found in the log outranks both: HF Jobs' own
+                        # message for a crashed container is generic where it
+                        # exists at all, and "exited with code 1" tells the
+                        # user nothing they can act on.
                         reason = _runner_hook(runner, "terminal_message")
-                        record.error_message = reason or f"Subprocess exited with code {rc}"
+                        record.error_message = oom_reason or reason or f"Subprocess exited with code {rc}"
                 self._runners.pop(jid, None)
                 self._stop_requested.discard(jid)
             self._persist(record, force=True)

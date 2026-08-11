@@ -1639,6 +1639,42 @@ def test_friendly_hint_maps_common_failures() -> None:
     assert friendly_hint(None) is None
 
 
+def test_is_out_of_memory_matches_every_allocator_backend() -> None:
+    """The wording differs per backend, so each one is keyed separately."""
+    from makermodslab.utils.errors import is_out_of_memory
+
+    for text in (
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+        "RuntimeError: HIP out of memory. Tried to allocate 512.00 MiB",
+        "RuntimeError: MPS backend out of memory (MPS allocated: 9.06 GB)",
+        "RuntimeError: CUDA error: out of memory",
+        "RuntimeError: [enforce fail] DefaultCPUAllocator: can't allocate memory: you tried to allocate",
+    ):
+        assert is_out_of_memory(text), text
+    assert not is_out_of_memory("RuntimeError: shape mismatch")
+    assert not is_out_of_memory("")
+    assert not is_out_of_memory(None)
+
+
+def test_is_out_of_memory_ignores_a_bare_killed() -> None:
+    """ "Killed" alone is not evidence: the host OOM killer prints nothing, and
+    plenty of benign lines contain the word. That case is recognised from the
+    exit code instead (see jobs._oom_failure_reason)."""
+    from makermodslab.utils.errors import is_out_of_memory
+
+    assert not is_out_of_memory("Killed")
+    assert not is_out_of_memory("stop requested: killed the training subprocess")
+
+
+def test_friendly_hint_names_the_three_oom_remedies() -> None:
+    from makermodslab.utils.errors import friendly_hint
+
+    hint = (friendly_hint("torch.OutOfMemoryError: CUDA out of memory.") or "").lower()
+    assert "mixed precision" in hint
+    assert "batch size" in hint
+    assert "larger gpu" in hint
+
+
 def test_friendly_hint_servo_bus_error_is_not_a_download_failure() -> None:
     """A servo that stops answering must read as an ARM problem.
 

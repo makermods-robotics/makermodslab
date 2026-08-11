@@ -45,6 +45,7 @@ import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import ImportModelModal from "@/components/jobs/ImportModelModal";
+import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import {
   AdvancedSection,
   FormSection,
@@ -217,6 +218,13 @@ const DeployPanel: React.FC = () => {
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(
     null,
   );
+  const [policyExtra, setPolicyExtra] = useState<{
+    policyType: string;
+    packageName: string;
+    installTarget: string;
+    installHint: string;
+  } | null>(null);
+  const [checkingExtra, setCheckingExtra] = useState(false);
 
   // Per camera DISPLAY name → the NAME of one of the selected robot's cameras.
   // Keyed by the stripped display name (== requestKey), and sent verbatim as
@@ -569,6 +577,7 @@ const DeployPanel: React.FC = () => {
     allCamerasBound &&
     !temporalEnsembleInvalid &&
     !submitting &&
+    !checkingExtra &&
     !inferenceActive;
 
   const handleStart = async () => {
@@ -579,6 +588,38 @@ const DeployPanel: React.FC = () => {
       !policyConfig
     )
       return;
+
+    // Pre-flight: pi0/pi0_fast/pi05/smolvla/diffusion need an optional
+    // package installed locally. The rollout subprocess runs against this
+    // machine's own environment (it drives the physically-connected robot),
+    // so catch a missing extra here with a one-click installer instead of a
+    // buried ImportError after the rollout has already claimed the cameras.
+    if (policyConfig.policy_type) {
+      setCheckingExtra(true);
+      try {
+        const r = await fetchWithHeaders(
+          `${baseUrl}/system/policy-extra/${policyConfig.policy_type}`,
+        );
+        if (r.ok) {
+          const extra = await r.json();
+          if (extra.needs_extra && !extra.available) {
+            setPolicyExtra({
+              policyType: policyConfig.policy_type,
+              packageName: extra.package,
+              installTarget: extra.install_target,
+              installHint: extra.install_hint,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Check failed (offline / older backend) — fall through and let the
+        // rollout report any problem itself.
+      } finally {
+        setCheckingExtra(false);
+      }
+    }
+
     // Drops every CameraThumbnail's browser stream so the rollout subprocess can
     // open the same camera index via OpenCV without colliding on the device.
     setSubmitting(true);
@@ -1102,9 +1143,11 @@ const DeployPanel: React.FC = () => {
           <Play className="h-4 w-4" />
           {submitting
             ? "Starting…"
-            : evalEpisodes > 1
-              ? `Start evaluation (${evalEpisodes})`
-              : "Start inference"}
+            : checkingExtra
+              ? "Checking…"
+              : evalEpisodes > 1
+                ? `Start evaluation (${evalEpisodes})`
+                : "Start inference"}
         </Button>
         <Button
           onClick={handleStop}
@@ -1130,6 +1173,18 @@ const DeployPanel: React.FC = () => {
           }}
         />
       </LibrarySection>
+
+      {policyExtra && (
+        <PolicyExtraDialog
+          open={!!policyExtra}
+          onOpenChange={(o) => !o && setPolicyExtra(null)}
+          policyType={policyExtra.policyType}
+          packageName={policyExtra.packageName}
+          installTarget={policyExtra.installTarget}
+          installHint={policyExtra.installHint}
+          purpose="inference"
+        />
+      )}
     </div>
   );
 };

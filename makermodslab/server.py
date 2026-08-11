@@ -431,6 +431,7 @@ _POLICY_TYPE_TO_LEROBOT = {
     "act": "act",
     "diffusion": "diffusion",
     "pi0": "pi0",
+    "pi05": "pi05",
     "smolvla": "smolvla",
     "tdmpc": "tdmpc",
     "vqbet": "vqbet",
@@ -1783,6 +1784,31 @@ def delete_job(job_id: str):
         add_dismissed_hub_job(record.hf_job_id)
 
 
+def _format_accelerator(accelerator) -> str | None:
+    """Render a JobHardwareInfo's accelerator as a label — 2× Nvidia A100 —
+    or None on a CPU flavor.
+
+    huggingface_hub returns this field as a JobAccelerator OBJECT (type, model,
+    quantity, vram, manufacturer), not a string. Forwarding it raw put a nested
+    dict on the wire under a field the frontend types as `string`, which the
+    hardware dropdown then interpolated into its label as "[object Object]".
+    Flattened here rather than in the frontend so `vram` — the one number that
+    says whether a policy will fit — survives as its own field instead of being
+    buried in a shape nothing declared.
+    """
+    if accelerator is None:
+        return None
+    quantity = str(getattr(accelerator, "quantity", "") or "").strip()
+    model = str(getattr(accelerator, "model", "") or "").strip()
+    manufacturer = str(getattr(accelerator, "manufacturer", "") or "").strip()
+    name = " ".join(part for part in (manufacturer, model) if part)
+    if not name:
+        # A future hub version could rename the fields out from under us; a
+        # plain str() still beats a dict the UI would render as [object Object].
+        return str(accelerator)
+    return f"{quantity}× {name}" if quantity and quantity != "1" else name
+
+
 @app.get("/jobs/runners/hardware")
 def get_runners_hardware():
     """Return HF Jobs flavor catalog + auth state for the TargetCard.
@@ -1814,7 +1840,8 @@ def get_runners_hardware():
                 "pretty_name": h.pretty_name,
                 "cpu": h.cpu,
                 "ram": h.ram,
-                "accelerator": h.accelerator,
+                "accelerator": _format_accelerator(h.accelerator),
+                "vram": getattr(h.accelerator, "vram", None),
                 "unit_cost_usd": h.unit_cost_usd,
                 "unit_label": h.unit_label,
             }

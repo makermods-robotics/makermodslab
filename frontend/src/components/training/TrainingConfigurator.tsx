@@ -108,6 +108,15 @@ interface TrainingConfiguratorProps {
   actionsContainer?: HTMLElement | null;
 }
 
+// PI0.5 is a 4B-parameter VLA — a real cloud run OOM'd an 80GB A100 on step 1
+// at the standard batch_size=8 in full precision. Every other policy keeps the
+// historical off default; only PI0.5 needs mixed precision to fit.
+const POLICY_DEFAULT_USE_AMP: Record<string, boolean> = {
+  pi05: true,
+};
+const defaultUseAmp = (policyType: string): boolean =>
+  POLICY_DEFAULT_USE_AMP[policyType] ?? false;
+
 function configToRequest(
   c: TrainingConfig,
   needsCheckpointUpload: boolean,
@@ -243,7 +252,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     wandb_mode: "online",
     wandb_disable_artifact: false,
     policy_device: resumeSeed?.policyDevice ?? "auto",
-    policy_use_amp: resumeSeed?.policyUseAmp ?? false,
+    // A resume prefills the parent run's own AMP setting (it may not match
+    // today's per-policy default); a fresh run gets the per-policy default.
+    policy_use_amp: resumeSeed?.policyUseAmp ?? defaultUseAmp(policyType),
     optimizer_type: resumeSeed?.optimizerType ?? "adam",
     optimizer_lr: resumeSeed?.optimizerLr,
     optimizer_weight_decay: resumeSeed?.optimizerWeightDecay,
@@ -290,6 +301,29 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const [hardwareLoading, setHardwareLoading] = useState(true);
   // HF_HUB_OFFLINE on the backend: Hub writes (incl. dataset upload) disabled.
   const [offline, setOffline] = useState<boolean>(false);
+
+  // Whether the user has hand-toggled the AMP switch this session — once they
+  // have, their choice wins over the per-policy default below, same as any
+  // other form field the policy dropdown doesn't reset.
+  const ampTouchedRef = useRef(false);
+
+  // The policy dropdown lives inside this same mounted form (PolicyField ->
+  // updateConfig("policy_type", ...) -> onPolicyTypeChange), so switching
+  // architecture does not remount the component or re-run the useState
+  // initializer above. Re-apply the per-policy AMP default whenever the
+  // selection changes, unless the user already touched the switch by hand.
+  // A resumeSeed's policyType is locked (see policyLocked below), so this
+  // never fires from a real dropdown change during a resume — but effects
+  // still run once on mount, which would otherwise stomp the parent run's own
+  // prefilled AMP value with today's per-policy default the instant the form
+  // opens. Skip entirely when resuming.
+  useEffect(() => {
+    if (ampTouchedRef.current || resumeSeed) return;
+    setTrainingConfig((prev) => ({
+      ...prev,
+      policy_use_amp: defaultUseAmp(policyType),
+    }));
+  }, [policyType, resumeSeed]);
 
   useEffect(() => {
     fetchWithHeaders(`${baseUrl}/system/training-extra`)
@@ -344,6 +378,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
     if (key === "dataset_repo_id") return;
+    if (key === "policy_use_amp") ampTouchedRef.current = true;
     setTrainingConfig((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -469,8 +504,8 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
 
-    // Pre-flight: smolvla/pi0/diffusion need an optional package installed
-    // locally. Catch it here with a one-click installer instead of a buried
+    // Pre-flight: smolvla/pi0/pi0_fast/pi05/diffusion need an optional package
+    // installed locally. Catch it here with a one-click installer instead of a buried
     // ImportError after the job has already started. Cloud jobs run in their
     // own environment, so the local package is irrelevant — skip the check.
     if (config.target.runner === "local") {
@@ -742,6 +777,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           packageName={policyExtra.packageName}
           installTarget={policyExtra.installTarget}
           installHint={policyExtra.installHint}
+          purpose="training"
         />
       )}
     </div>
