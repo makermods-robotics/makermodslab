@@ -368,21 +368,28 @@ const JobCard: React.FC<Props> = ({
   // reached its target — the way to build on it is Fine-tune, which starts a
   // fresh LR schedule instead of restoring a spent one.
   //
-  // Sticks (user decision 2026-08-07), the second and larger narrowing: an
-  // INHERITED checkpoint is no longer a resume source at all. Its owner has a
-  // child by construction — the run below it on this card's own path — and
-  // jobs.py refuses a second continuation of a run that already has one, so
-  // the button would only buy a 409. The dropdown still lists the whole
-  // lineage, and an inherited checkpoint remains selectable for inference; it
-  // is Resume alone that dims, via the existing `selectedIsResumable` gate.
-  // The empty-handed case (this tip saved nothing, so no selection lights the
-  // button) is recoverable by deleting this run and resuming its parent —
-  // which the library row's toast spells out.
+  // Continue is deliberately NOT step-selectable (user decision 2026-08-10):
+  // it always takes the newest resumable checkpoint, `resumableCheckpoints`
+  // being newest-first. That is the one-click behaviour the jobs library row
+  // has always had, so the two entry points now differ in nothing at all.
+  //
+  // The dropdown beside it still drives Run / Fine-tune / Download, where
+  // picking an older checkpoint is a real choice. Resuming from one is not:
+  // it re-trains steps the chain already covered, and it blocks the intended
+  // end state, where a continuation ABSORBS its parent (inheriting its
+  // checkpoints outright, so there is no ancestor left to reach back to). A
+  // rewound child re-writes steps its parent still holds, so absorbing it
+  // would have to either collide or silently discard the superseded ones;
+  // continuing from the newest checkpoint is a pure append and does neither.
+  //
+  // What stays is the REACH, invisibly: the newest resumable checkpoint may
+  // be owned by an ANCESTOR, since a tip that died before saving anything has
+  // none of its own. The user presses one button and never learns which run
+  // held the bytes — but that reach is what keeps every row in the library
+  // done-or-resumable, and buildResumeSeed still records the owner separately
+  // from the lineage edge so the chain stays linear.
   const resumable = resumableCheckpoints(job, lineageCheckpoints);
-  const selectedIsResumable =
-    !isRunning &&
-    selected != null &&
-    resumable.some((c) => c.ckpt.ref === selected.ckpt.ref);
+  const resumeSource = isRunning ? null : (resumable[0] ?? null);
 
   // ONE verb. This used to fork into "Continue" (a local-owned checkpoint) and
   // "Resume" (a cloud-owned one) — two buttons that differed only in wording,
@@ -394,18 +401,21 @@ const JobCard: React.FC<Props> = ({
   // form's default, which the form itself already shows and lets you change.
   // Asking a novice to tell two verbs apart for one action is the cost; there
   // is no benefit left to pay it with.
-  const canResume = selectedIsResumable;
+  const canResume = resumeSource != null;
 
-  // Step 0 is the whole-repo/single-model sentinel (see CheckpointDropdown),
-  // which has no meaningful number to name — matching its "latest" label.
+  // Names the step it WILL use, not one the user chose — the button is now the
+  // whole decision. Step 0 is the whole-repo/single-model sentinel (see
+  // CheckpointDropdown), which has no meaningful number to name, matching its
+  // "latest" label.
+  const resumeStep = resumeSource?.ckpt.step ?? null;
   const resumeLabel =
-    selectedStep == null || selectedStep === 0
+    resumeStep == null || resumeStep === 0
       ? "Resume from latest"
-      : `Resume from step ${selectedStep.toLocaleString()}`;
+      : `Resume from step ${resumeStep.toLocaleString()}`;
 
   // No dialog and no route jump: continuing opens the Train panel's
   // "Start a new training" form in resume mode, seeded from this run and the
-  // dropdown's checkpoint — the same in-place flow Fine-tune already uses,
+  // newest resumable checkpoint — the same in-place flow Fine-tune already uses,
   // rather than navigating away to /training and losing the studio.
   //
   // The configurator PREFILLS from this seed, then renders read-only the
@@ -416,15 +426,18 @@ const JobCard: React.FC<Props> = ({
   // resume).
   //
   // The payload itself comes from the ONE shared builder (buildResumeSeed), so
-  // this and the library's row-level quick-resume can no longer drift. It is
-  // handed THIS card's run (the leaf being continued — the lineage edge) plus
-  // the selected entry, which carries its own owner; the builder keeps those
-  // two apart. Passing the owner as the run is precisely the fork bug chain
-  // rewind fixes. The runner still follows the owner there, since it says where
-  // the bytes live and therefore whether they must move first (F7).
+  // this and the library's row-level quick-resume can no longer drift — they
+  // now pass the same entry, the top of the same rule's list. It is handed
+  // THIS card's run (the leaf being continued — the lineage edge) plus that
+  // entry, which carries its own owner; the builder keeps those two apart.
+  // Passing the owner as the run is precisely the fork bug chain rewind fixes.
+  // The runner still follows the owner there, since it says where the bytes
+  // live and therefore whether they must move first (F7).
   const goToResume = () => {
-    if (selected == null) return;
-    openStudio("train", { train: { resume: buildResumeSeed(job, selected) } });
+    if (resumeSource == null) return;
+    openStudio("train", {
+      train: { resume: buildResumeSeed(job, resumeSource) },
+    });
   };
 
   const handleResume = (e: React.MouseEvent) => {
