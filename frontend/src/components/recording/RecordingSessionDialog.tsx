@@ -66,6 +66,10 @@ type Phase = "preparing" | "recording" | "resetting" | "completed";
 interface BackendStatus {
   recording_active: boolean;
   current_phase: string;
+  // Only meaningful while current_phase === "reconnecting_robot" — which
+  // connect attempt is about to be retried, out of connect_retry_max.
+  connect_retry_attempt?: number;
+  connect_retry_max?: number;
   current_episode?: number;
   total_episodes?: number;
   saved_episodes?: number;
@@ -771,6 +775,13 @@ const RecordingSessionDialog: React.FC<{
     // substep the startup is actually in.
     const raw = backendStatus?.current_phase;
     if (raw === "connecting_robot") return "CONNECTING ARM & CAMERAS…";
+    if (raw === "reconnecting_robot") {
+      const attempt = backendStatus?.connect_retry_attempt;
+      const max = backendStatus?.connect_retry_max;
+      return attempt && max
+        ? `CAMERA HICCUP, RETRYING (${attempt}/${max})…`
+        : "CAMERA HICCUP, RETRYING…";
+    }
     if (raw === "connecting_teleop") return "CONNECTING LEADER ARM…";
     if (raw === "stopping") return "STOPPING…";
     if (raw === "error") return "SESSION ERROR — SEE LOG";

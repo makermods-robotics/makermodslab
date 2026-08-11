@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 
@@ -42,21 +43,64 @@ def test_recording_status_handler_exposes_state_fields() -> None:
     assert "available_controls" in result
 
 
+def test_record_log_captures_teleoperate_teardown_warnings() -> None:
+    """force_disconnect_partial's teardown warnings (a leaked bus, a stuck
+    camera) are logged through makermodslab.teleoperate's logger, not this
+    module's — without it in _RECORD_LOG_LOGGER_NAMES they never reach the
+    Record page's log panel, only the server console.
+    """
+    import logging
+
+    from makermodslab.record import (
+        _attach_record_log_handler,
+        _detach_record_log_handler_locked,
+        handle_recording_log,
+    )
+
+    teleop_logger = logging.getLogger("makermodslab.teleoperate")
+    _attach_record_log_handler()
+    try:
+        teleop_logger.warning("Could not release robot bus on COM_FOLLOWER: wedged")
+    finally:
+        import makermodslab.record as record_module
+
+        with record_module._record_log_lock:
+            _detach_record_log_handler_locked()
+
+    assert "Could not release robot bus on COM_FOLLOWER" in handle_recording_log()["logs"]
+
+
 def test_recording_status_surfaces_preparing_substeps(monkeypatch) -> None:
     """record_with_web_events refines the coarse "preparing" window into named
-    substeps ("connecting_robot", "connecting_teleop") by writing current_phase.
-    The status handler must pass those through verbatim so the UI can name the
-    substep — verified here without touching hardware by driving the module
-    global the worker sets."""
+    substeps ("connecting_robot", "connecting_teleop", "reconnecting_robot")
+    by writing current_phase. The status handler must pass those through
+    verbatim so the UI can name the substep — verified here without touching
+    hardware by driving the module global the worker sets."""
     from makermodslab import record
 
-    for substep in ("connecting_robot", "connecting_teleop"):
+    for substep in ("connecting_robot", "connecting_teleop", "reconnecting_robot"):
         monkeypatch.setattr(record, "current_phase", substep)
         # An active session with no config still surfaces current_phase.
         result = record.handle_recording_status()
         assert result["current_phase"] == substep
         # A preparing substep is not a completed/errored session.
         assert result["session_ended"] is False
+
+
+def test_recording_status_surfaces_connect_retry_attempt(monkeypatch) -> None:
+    """During the "reconnecting_robot" backoff substep, the UI needs which
+    attempt is in flight (and the ceiling) to show "retrying (2/3)…" instead
+    of a static label for the whole multi-attempt window.
+    """
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "current_phase", "reconnecting_robot")
+    monkeypatch.setattr(record, "connect_retry_attempt", 2)
+
+    result = record.handle_recording_status()
+
+    assert result["connect_retry_attempt"] == 2
+    assert result["connect_retry_max"] == record._CONNECT_ATTEMPTS
 
 
 class _FakeWorker:
@@ -1142,6 +1186,8 @@ def _run_record_session(
     num_episodes: int = 1,
     reset_time_s: int = 10,
     record_loop_side_effect=None,
+    connect_side_effect=None,
+    teleop=None,
 ):
     """Drive record_with_web_events with every lerobot dependency mocked so no
     real hardware, dataset, or record_loop runs. Returns the spy call log for
@@ -1171,7 +1217,7 @@ def _run_record_session(
     # lerobot symbols resolved at call time inside record_with_web_events.
     monkeypatch.setattr("lerobot.robots.make_robot_from_config", lambda cfg: robot, raising=False)
     monkeypatch.setattr(
-        "lerobot.teleoperators.make_teleoperator_from_config", lambda cfg: None, raising=False
+        "lerobot.teleoperators.make_teleoperator_from_config", lambda cfg: teleop, raising=False
     )
     monkeypatch.setattr(
         "lerobot.processor.make_default_processors", lambda: (None, None, None), raising=False
@@ -1215,8 +1261,18 @@ def _run_record_session(
 
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", _FakeDataset, raising=False)
 
-    # robot.connect(calibrate=False) is called on the double.
-    robot.connect = lambda **kwargs: None  # type: ignore[attr-defined]
+    # robot.connect(calibrate=False) is called on the double. connect_side_effect
+    # (when given) is called with the 1-based attempt number and may raise, which
+    # is how the connect-retry tests below drive the failure paths.
+    if connect_side_effect is None:
+        robot.connect = lambda **kwargs: None  # type: ignore[attr-defined]
+    else:
+        connect_attempts = itertools.count(1)
+
+        def _connect(**kwargs):
+            connect_side_effect(next(connect_attempts))
+
+        robot.connect = _connect  # type: ignore[attr-defined]
     robot.name = "so101"  # type: ignore[attr-defined]
     robot.cameras = {}  # type: ignore[attr-defined]
     robot.action_features = {}  # type: ignore[attr-defined]
@@ -1236,8 +1292,9 @@ def _run_record_session(
             video=False,
         )
     )
-    # No teleop device: keep the return path follower-only and simple.
-    cfg.teleop = None
+    if teleop is None:
+        # No teleop device: keep the return path follower-only and simple.
+        cfg.teleop = None
 
     web_events = {
         "exit_early": False,
@@ -2468,3 +2525,158 @@ def test_recording_status_reports_saved_episodes_at_session_end(
 
     assert status["session_ended"] is True
     assert status["saved_episodes"] == 5
+
+
+# --- connect-retry loop: teardown, phase, and retry counter -----------------
+#
+# These drive record_with_web_events end to end (via _run_record_session) so
+# they fail when the production logic is deleted, rather than asserting on a
+# monkeypatched global. Each spies on force_disconnect_partial and snapshots
+# the phase globals *at the moment of the teardown*, which is the ordering the
+# UI depends on.
+
+_TRANSIENT = "failed to set fps=30 (actual_fps=5.0)"
+_TERMINAL = "Could not connect on port COM_FOLLOWER"
+
+
+def _spy_teardowns(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Replace record.force_disconnect_partial with a spy that records the
+    label and the phase globals as they stood when the teardown ran."""
+    import makermodslab.record as record
+
+    seen: list[dict] = []
+
+    def _spy(device, label="device"):
+        seen.append(
+            {
+                "label": label,
+                "phase": record.current_phase,
+                "attempt": record.connect_retry_attempt,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(record, "force_disconnect_partial", _spy)
+    monkeypatch.setattr(record.time, "sleep", lambda *_a, **_k: None)
+    return seen
+
+
+def test_transient_connect_failure_retries_inside_the_reconnecting_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The retry substep must be entered BEFORE the component-wise teardown,
+    not just around the backoff sleep. The teardown is the slow part (each
+    wedged camera's disconnect joins a read thread waiting out a frame
+    timeout), so if the phase flipped after it the operator would stare at a
+    static "Connecting arm & cameras…" for exactly the window the substep
+    exists to explain."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    def _connect(attempt: int) -> None:
+        if attempt == 1:
+            raise RuntimeError(_TRANSIENT)
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), connect_side_effect=_connect)
+
+    assert error is None  # attempt 2 connected, session ran normally
+    assert len(seen) == 1  # exactly one failed attempt was torn down
+    # The ordering this test exists for: phase and counter are already set when
+    # the teardown runs.
+    assert seen[0]["phase"] == "reconnecting_robot"
+    assert seen[0]["attempt"] == 2  # the attempt about to run, not the failed one
+    assert seen[0]["label"] == "robot"
+    # ...and the counter is back to its documented "0 unless retrying" resting
+    # state once the connect succeeds.
+    assert record.connect_retry_attempt == 0
+
+
+def test_transient_connect_failure_gives_up_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A camera that never recovers is retried _CONNECT_ATTEMPTS times, torn
+    down after every one of them (including the last, so a terminal failure
+    can't leak the bus and camera read threads into the rest of the process),
+    and then re-raised."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    def _connect(attempt: int) -> None:
+        raise RuntimeError(_TRANSIENT)
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), connect_side_effect=_connect)
+
+    assert isinstance(error, RuntimeError) and _TRANSIENT in str(error)
+    assert len(seen) == record._CONNECT_ATTEMPTS
+    # Retrying attempts announce themselves; the final one is a plain failure,
+    # so it must NOT claim a retry is in flight.
+    assert [s["attempt"] for s in seen] == [2, 3, 0]
+    assert [s["phase"] for s in seen] == [
+        "reconnecting_robot",
+        "reconnecting_robot",
+        "connecting_robot",
+    ]
+    assert record.connect_retry_attempt == 0
+
+
+def test_non_transient_connect_failure_tears_down_without_retrying(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A wrong-port/unplugged failure isn't camera turbulence: no retry, no
+    backoff, no "camera hiccup" label — but the teardown still runs, because
+    the port may have opened before the handshake failed."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    def _connect(attempt: int) -> None:
+        raise RuntimeError(_TERMINAL)
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), connect_side_effect=_connect)
+
+    assert isinstance(error, RuntimeError) and _TERMINAL in str(error)
+    assert len(seen) == 1  # one attempt, no retry
+    assert seen[0]["phase"] == "connecting_robot"
+    assert seen[0]["attempt"] == 0
+    assert record.connect_retry_attempt == 0
+
+
+def test_teleop_connect_failure_releases_both_devices(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The follower connected fine a moment earlier, so a leader failure must
+    release BOTH — otherwise the follower's bus and camera read threads stay
+    open for the rest of the process and the next session dies on the leak."""
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    class _FailingTeleop:
+        def connect(self, **kwargs):
+            raise RuntimeError("leader bus did not answer")
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), teleop=_FailingTeleop())
+
+    assert isinstance(error, RuntimeError) and "leader bus" in str(error)
+    # Both devices released, follower first.
+    assert [s["label"] for s in seen] == ["robot", "teleop"]
