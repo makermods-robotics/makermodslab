@@ -50,6 +50,7 @@ from .teleoperate import (
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
+    require_robot_cameras,
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
@@ -696,8 +697,16 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         # before the flag is claimed, so a wrong robot name or an ambiguous
         # camera set is a plain 400 instead of a session that starts and
         # silently records no video.
+        #
+        # `require_robot_cameras` (not `load_robot_cameras`) so a named robot
+        # whose record holds NO cameras is refused too: that record is the only
+        # source of session cameras, so an empty one records a whole dataset
+        # with no video at all — the same silent loss a wrong robot name causes,
+        # and just as invisible until the dataset is opened. It is reachable
+        # without anyone choosing it: a record starts life camera-less, and
+        # external cleanup of stale camera entries can empty one that had them.
         try:
-            session_cameras = load_robot_cameras(request.robot_name)
+            session_cameras = require_robot_cameras(request.robot_name, "recording")
         except CameraResolutionError as exc:
             logger.warning("Rejected recording start: %s", exc)
             return {"success": False, "status_code": 400, "message": str(exc)}

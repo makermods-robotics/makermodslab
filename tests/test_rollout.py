@@ -682,6 +682,79 @@ def test_handle_start_inference_blocked_when_wiggle_active(monkeypatch) -> None:
     assert "wiggle" in result["message"].lower()
 
 
+def _camera_less_robot_record(tmp_lerobot_home, monkeypatch, name: str) -> None:
+    """Write a robot record whose camera list is empty into a redirected
+    ROBOTS_PATH — the shape a never-configured record (or one an external
+    cleanup of stale camera entries emptied) has."""
+    from makermodslab.utils import config as cfg
+
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(name, {"cameras": []}, allow_create=True)
+
+
+def test_handle_start_inference_rejects_a_robot_with_no_cameras(monkeypatch, tmp_lerobot_home) -> None:
+    """A camera-less record must 400 even when the request binds nothing.
+
+    This is the case bind_robot_cameras structurally cannot catch: empty
+    `camera_bindings` short-circuit before the record is ever read, so without
+    its own check the run would start and drive the arm with no vision at all.
+    """
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest
+
+    _camera_less_robot_record(tmp_lerobot_home, monkeypatch, "blind")
+
+    result = rollout.handle_start_inference(
+        InferenceRequest(
+            follower_port="/dev/ttyUSB0",
+            follower_config="robot_a",
+            policy_ref="user/repo@checkpoints/000050",
+            robot_name="blind",
+            camera_bindings={},
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "blind" in result["message"]
+    assert "Robot settings" in result["message"]
+    # Names what it is refusing, not a generic "before starting".
+    assert "running a policy" in result["message"]
+    # The claimed slot is handed back, so this rejection can't wedge the next start.
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_no_cameras_message_wins_over_the_binding_error(
+    monkeypatch, tmp_lerobot_home
+) -> None:
+    """With bindings set, a camera-less record would already fail inside
+    bind_robot_cameras — but as "no camera named 'wrist'; cameras on this robot:
+    none", which reads like a bad binding. The record-level check runs first so
+    the user is told the actual fix: the robot has no cameras, add one."""
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest
+
+    _camera_less_robot_record(tmp_lerobot_home, monkeypatch, "blind")
+
+    result = rollout.handle_start_inference(
+        InferenceRequest(
+            follower_port="/dev/ttyUSB0",
+            follower_config="robot_a",
+            policy_ref="user/repo@checkpoints/000050",
+            robot_name="blind",
+            camera_bindings={"front": "wrist"},
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "no cameras configured" in result["message"]
+    assert "no camera named" not in result["message"]
+    assert rollout.inference_active is False
+
+
 def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp_path) -> None:
     """The stop dialog promises the follower eases back to its start pose on
     teardown. That behaviour is lerobot's `return_to_initial_position`, which
@@ -1121,7 +1194,9 @@ def test_handle_start_inference_ignores_a_stale_cameras_payload() -> None:
     assert req.camera_bindings == {}
 
 
-def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypatch, tmp_path) -> None:
+def test_handle_start_inference_bimanual_builds_bi_so_follower_command(
+    monkeypatch, tmp_path, tmp_lerobot_home
+) -> None:
     """End-to-end (no hardware): a bimanual request stages the two follower
     calibrations and hands Popen a `bi_so_follower` argv with both ports and
     two stdin newlines (one prompt per sub-arm's connect()).
@@ -1129,9 +1204,15 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     Mirrors the pin-test's stub pattern: subprocess, the two preflights, and the
     staging helper are all replaced so nothing real runs; the startup worker (and
     its stdout pump) run inline via _SyncThread and HOME is redirected so the log
-    file lands in tmp."""
+    file lands in tmp.
+
+    A real robot record is written for the request's `robot_name` because the
+    start path now resolves that record's cameras even when `camera_bindings` is
+    empty (a camera-less record is refused). The record's camera stays UNBOUND,
+    so the argv this test asserts on is unchanged — no `--robot.cameras` arg."""
     from makermodslab import rollout
 
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "dual_arm")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
     monkeypatch.setattr(

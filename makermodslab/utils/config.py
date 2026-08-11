@@ -573,6 +573,45 @@ def load_robot_cameras(robot_name: str) -> dict[str, dict]:
     return record_cameras_by_name(record.get("cameras") or [])
 
 
+def require_robot_cameras(robot_name: str, action: str) -> dict[str, dict]:
+    """`load_robot_cameras`, but a NAMED robot that has no cameras is refused.
+
+    The robot record is the only source of a session's cameras, so a record with
+    an empty camera list means the activity would run blind: recording would
+    write a whole dataset with no video, and inference would feed a policy none
+    of the image features it was trained on. Neither surfaces at the time — the
+    dataset simply turns out to be useless, and the policy simply behaves badly
+    — so the refusal has to happen at the start.
+
+    An empty list is reachable without anyone choosing it: a record is created
+    camera-less and stays that way until someone adds one, and external cleanup
+    of stale entries (removing cameras that predate `unique_id` support, say)
+    can empty a record that used to have them. "No cameras" is therefore not
+    evidence that a camera-less session was intended, and must not be read as
+    one.
+
+    `action` completes the sentence "…before {action}" ("recording", "running a
+    policy"), so each flow names what it is refusing rather than a generic
+    "starting".
+
+    A BLANK name is deliberately still allowed through as a camera-less session
+    ({}), exactly as `load_robot_cameras` documents: there is no record to judge
+    (and no name to put in the message). Only a robot that IS named and DOES
+    resolve is held to having at least one camera.
+
+    Callers that only need the cameras — and any read-only lister — should keep
+    using `load_robot_cameras`; this is for the start paths that must refuse.
+    Teleoperation and calibration open no cameras at all and must not use it.
+    """
+    cameras = load_robot_cameras(robot_name)
+    name = (robot_name or "").strip()
+    if name and not cameras:
+        raise CameraResolutionError(
+            f"Robot '{name}' has no cameras configured — add one in Robot settings before {action}."
+        )
+    return cameras
+
+
 def _positive_int(value: object) -> int | None:
     """`value` as a usable pixel dimension, or None. bool is excluded (it is an
     int subclass, and `True` as a width is always a bug, never a 1-pixel frame)."""

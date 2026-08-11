@@ -84,6 +84,7 @@ from .utils.config import (
     bimanual_base_id,
     bind_robot_cameras,
     list_robot_records,
+    require_robot_cameras,
     setup_follower_calibration_file,
     stage_bimanual_follower_calibrations,
 )
@@ -1776,7 +1777,16 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     # read, no hardware). A binding that names a camera the record doesn't have
     # must 4xx in the panel; deferring it to the startup worker would surface
     # the same mistake as a mid-startup failure after the model download.
+    #
+    # The record's own camera count is checked FIRST, and separately, because
+    # the binding resolution cannot see this case: empty `camera_bindings`
+    # short-circuit inside bind_robot_cameras before the record is ever read, so
+    # a camera-less record would otherwise start a run that drives the arm with
+    # no vision at all. Checking it ahead of the bindings also means the message
+    # names the real fix ("no cameras configured — add one") instead of the
+    # binding-shaped "no camera named 'x'; cameras on this robot: none".
     try:
+        require_robot_cameras(request.robot_name, "running a policy")
         _session_cameras(request)
     except CameraResolutionError as exc:
         _release_slot()
