@@ -4418,6 +4418,8 @@ def test_boot_reattach_stays_interrupted_when_no_exit_status_file(tmp_path) -> N
     record = reg.get("job-1")
     assert record.state == "interrupted"
     assert record.exit_code is None
+
+
 def _write_log(path: Path, messages: list[str]) -> Path:
     """Write messages in the log.jsonl shape both runners produce."""
     path.parent.mkdir(parents=True, exist_ok=True)
