@@ -930,6 +930,73 @@ def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
     assert "--duration=60" in cmd
 
 
+def test_build_rollout_cmd_omits_temporal_ensemble_when_unset() -> None:
+    """Default (None) must leave the checkpoint's own config untouched — no
+    --policy.temporal_ensemble_coeff, and crucially no n_action_steps override
+    that would silently re-tune a policy the user didn't ask to change."""
+    from makermodslab.rollout import _build_rollout_cmd
+
+    cmd = _build_rollout_cmd(_stub_request(), "/local/pretrained_model", [])
+    assert not any(a.startswith("--policy.temporal_ensemble_coeff=") for a in cmd)
+    assert not any(a.startswith("--policy.n_action_steps=") for a in cmd)
+
+
+def test_build_rollout_cmd_pins_n_action_steps_with_temporal_ensemble() -> None:
+    """ACT raises NotImplementedError when temporal_ensemble_coeff is set with
+    n_action_steps > 1 (checkpoints ship 100), so the two flags must always
+    travel together."""
+    from makermodslab.rollout import InferenceRequest, _build_rollout_cmd
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        temporal_ensemble_coeff=0.01,
+    )
+    cmd = _build_rollout_cmd(req, "/local/pretrained_model", [])
+    assert "--policy.temporal_ensemble_coeff=0.01" in cmd
+    assert "--policy.n_action_steps=1" in cmd
+
+
+def test_eval_runner_cmd_carries_temporal_ensemble_flags() -> None:
+    """The flags live in the shared _rollout_cli_args, so evaluation mode's
+    separate entry point gets them too — a run scored over N episodes must use
+    the same action selection the single-rollout path would."""
+    from makermodslab.rollout import InferenceRequest, _build_eval_runner_cmd
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        eval_episodes=5,
+        temporal_ensemble_coeff=0.01,
+    )
+    cmd = _build_eval_runner_cmd(req, "/local/pretrained_model", [])
+    assert "makermodslab.eval_runner" in cmd
+    assert "--policy.temporal_ensemble_coeff=0.01" in cmd
+    assert "--policy.n_action_steps=1" in cmd
+
+
+def test_handle_start_inference_rejects_non_positive_ensemble_coeff() -> None:
+    """Weights are exp(-coeff * i): 0 weights the whole chunk equally and a
+    negative coefficient makes the STALEST prediction dominate. Reject before
+    the arm moves under it — and release the session slot on the way out."""
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest, handle_start_inference
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        temporal_ensemble_coeff=0,
+    )
+    result = handle_start_inference(req)
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "temporal_ensemble_coeff" in result["message"]
+    assert rollout.inference_active is False
+
+
 # ---------------------------------------------------------------------------
 # handle_start_inference — the arm-count 409 guard (fires before any port opens)
 # ---------------------------------------------------------------------------
@@ -1572,6 +1639,42 @@ def test_friendly_hint_maps_common_failures() -> None:
     assert friendly_hint(None) is None
 
 
+def test_is_out_of_memory_matches_every_allocator_backend() -> None:
+    """The wording differs per backend, so each one is keyed separately."""
+    from makermodslab.utils.errors import is_out_of_memory
+
+    for text in (
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+        "RuntimeError: HIP out of memory. Tried to allocate 512.00 MiB",
+        "RuntimeError: MPS backend out of memory (MPS allocated: 9.06 GB)",
+        "RuntimeError: CUDA error: out of memory",
+        "RuntimeError: [enforce fail] DefaultCPUAllocator: can't allocate memory: you tried to allocate",
+    ):
+        assert is_out_of_memory(text), text
+    assert not is_out_of_memory("RuntimeError: shape mismatch")
+    assert not is_out_of_memory("")
+    assert not is_out_of_memory(None)
+
+
+def test_is_out_of_memory_ignores_a_bare_killed() -> None:
+    """ "Killed" alone is not evidence: the host OOM killer prints nothing, and
+    plenty of benign lines contain the word. That case is recognised from the
+    exit code instead (see jobs._oom_failure_reason)."""
+    from makermodslab.utils.errors import is_out_of_memory
+
+    assert not is_out_of_memory("Killed")
+    assert not is_out_of_memory("stop requested: killed the training subprocess")
+
+
+def test_friendly_hint_names_the_three_oom_remedies() -> None:
+    from makermodslab.utils.errors import friendly_hint
+
+    hint = (friendly_hint("torch.OutOfMemoryError: CUDA out of memory.") or "").lower()
+    assert "mixed precision" in hint
+    assert "batch size" in hint
+    assert "larger gpu" in hint
+
+
 def test_friendly_hint_servo_bus_error_is_not_a_download_failure() -> None:
     """A servo that stops answering must read as an ARM problem.
 
@@ -1617,6 +1720,34 @@ def test_friendly_hint_still_names_real_download_failures() -> None:
     assert missing is not None and "hub" in missing.lower()
     full = friendly_hint("Failed to download the model: OSError: [Errno 28] No space left on device")
     assert full is not None and "disk space" in full.lower()
+
+
+def test_friendly_hint_for_capture_size_mismatch_also_suggests_restart() -> None:
+    """Hardware-confirmed 2026-07-31: a camera reporting the wrong
+    width/height on connect is not always a genuine capability mismatch —
+    twice on the bench, the SAME camera kept failing with this identical
+    error for 15+ seconds and across a retry with no unplugging involved,
+    and only restarting the makermodslab process (not reconfiguring the camera)
+    cleared it. Sending the user to "click Auto" alone, with no escalation
+    path, is a dead end when the session is actually wedged rather than
+    misconfigured — the hint must mention restarting as the fallback."""
+    from makermodslab.utils.errors import friendly_hint
+
+    hint = (
+        friendly_hint(
+            "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+        )
+        or ""
+    )
+    assert "restart" in hint.lower()
+
+    height_hint = (
+        friendly_hint(
+            "OpenCVCamera(0) failed to set capture_height=480 (actual_height=1080, height_success=True)."
+        )
+        or ""
+    )
+    assert "restart" in height_hint.lower()
 
 
 def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:

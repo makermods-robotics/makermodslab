@@ -29,6 +29,11 @@ export const GRID_MIN_H = "min-h-[18.875rem]";
  * directions. Same measurement as GRID_MIN_H — change them together (and keep
  * both literal: Tailwind only generates classes it can see). */
 export const GRID_H = "h-[18.875rem]";
+/** Just the 16.5rem card row, without the footer slot. An empty/no-match state
+ * that renders its OWN footer row beneath it (jobs' Untracked toggle) must use
+ * this instead of GRID_MIN_H — otherwise message + footer stack to 21.25rem and
+ * that library sits 2.375rem taller than the other panels'. */
+export const GRID_ROW_MIN_H = "min-h-[16.5rem]";
 
 /**
  * The shared library grid, capped at one row. Every studio library (datasets,

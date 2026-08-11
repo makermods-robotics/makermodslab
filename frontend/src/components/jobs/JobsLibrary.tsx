@@ -138,22 +138,18 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const toEntries = useCallback(
     (jobs: JobRecord[], hubs: HubJob[]): JobsEntry[] =>
       [
-        ...jobs.map(
-          (job): JobsEntry => ({
-            kind: "job",
-            key: jobEntryKey(job),
-            time: jobTime(job),
-            job,
-          }),
-        ),
-        ...hubs.map(
-          (job): JobsEntry => ({
-            kind: "hub",
-            key: hubEntryKey(job),
-            time: hubTime(job),
-            job,
-          }),
-        ),
+        ...jobs.map((job): JobsEntry => ({
+          kind: "job",
+          key: jobEntryKey(job),
+          time: jobTime(job),
+          job,
+        })),
+        ...hubs.map((job): JobsEntry => ({
+          kind: "hub",
+          key: hubEntryKey(job),
+          time: hubTime(job),
+          job,
+        })),
       ].sort((a, b) => b.time - a.time),
     [],
   );
@@ -275,6 +271,30 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         ? "No online jobs."
         : "No training jobs yet.";
 
+  // First run: nothing anywhere, before any filter or search narrows anything
+  // down (main, #79). Distinct from `emptyMessage`, which answers "your current
+  // view is empty" inside the picker — here there is no view to have, so the
+  // toolbar and the cloud-auth notices are suppressed too and one instruction
+  // stands on its own. Deliberately reads the unfiltered source lists, so a
+  // filter that hides every run still gets the picker with its own message
+  // rather than this.
+  const isEmpty =
+    localJobs.length === 0 &&
+    trackedCloudJobs.length === 0 &&
+    untrackedHubJobs.length === 0;
+
+  // The one thing worth saying on a first run that the instruction can't: why
+  // the cloud half might be silent. Blank when there's nothing to explain.
+  const emptyHint = !showOnline
+    ? ""
+    : hubError
+      ? ""
+      : !hubAuthenticated
+        ? " Sign in with Hugging Face to see your cloud jobs."
+        : !hubJobsPermission
+          ? " Your Hugging Face token is missing the job.read permission, so cloud jobs can't be listed."
+          : "";
+
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="space-y-3">
       <LibraryHeader
@@ -296,14 +316,16 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
       <CollapsibleContent className={SLIDE}>
         <div className="space-y-3">
-          <LibraryToolbar
-            query={search}
-            onQueryChange={setSearch}
-            searchPlaceholder="Search jobs"
-            filters={FILTERS}
-            filter={filter}
-            onFilterChange={setFilter}
-          />
+          {isEmpty ? null : (
+            <LibraryToolbar
+              query={search}
+              onQueryChange={setSearch}
+              searchPlaceholder="Search jobs"
+              filters={FILTERS}
+              filter={filter}
+              onFilterChange={setFilter}
+            />
+          )}
 
           {error ? (
             <p className="text-sm text-destructive">
@@ -315,13 +337,16 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               Couldn't load cloud jobs: {hubError}
             </p>
           ) : null}
-          {showOnline && !hubError && !hubAuthenticated &&
+          {!isEmpty &&
+          showOnline &&
+          !hubError &&
+          !hubAuthenticated &&
           trackedCloudJobs.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               Sign in with Hugging Face to see your cloud jobs.
             </p>
           ) : null}
-          {showOnline && hubAuthenticated && !hubJobsPermission ? (
+          {!isEmpty && showOnline && hubAuthenticated && !hubJobsPermission ? (
             <p className="text-sm text-warn">
               Your Hugging Face token is missing the{" "}
               <code className="text-warn">job.read</code> permission, so cloud
@@ -343,51 +368,62 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               reserves the same height a tall card does — the card scrolls
               inside the box rather than growing it. */}
           <div className={cn(GRID_H, "flex flex-col gap-2 overflow-hidden")}>
-            <div className="shrink-0">
-              <JobsDropdown
-                entries={activeEntries}
-                untracked={untrackedEntries}
-                selectedKey={selectedKey}
-                onSelect={(entry) => setPickedKey(entry.key)}
-                onStop={stop}
-                onResume={handleResume}
-                onDismissHub={dismissHub}
-                resumingId={resumingId}
-                emptyMessage={emptyMessage}
-              />
-            </div>
-            {/* Overflow is spent HERE, on the detail card, never on the page:
+            {isEmpty ? (
+              // Inside the reserved block, not instead of it: the height is
+              // what keeps the three studio panels' action rows on one row, so
+              // a first run has to hold it exactly like a populated one does.
+              <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+                No training jobs yet. Start one above.{emptyHint}
+              </div>
+            ) : (
+              <>
+                <div className="shrink-0">
+                  <JobsDropdown
+                    entries={activeEntries}
+                    untracked={untrackedEntries}
+                    selectedKey={selectedKey}
+                    onSelect={(entry) => setPickedKey(entry.key)}
+                    onStop={stop}
+                    onResume={handleResume}
+                    onDismissHub={dismissHub}
+                    resumingId={resumingId}
+                    emptyMessage={emptyMessage}
+                  />
+                </div>
+                {/* Overflow is spent HERE, on the detail card, never on the page:
                 the region takes whatever the dropdown leaves and scrolls its
                 own content. The inner wrapper is load-bearing — it leaves the
                 region's height indefinite for the card's own `h-full`, so a
                 card taller than the box hugs its content and scrolls whole
                 instead of being cut off at the box's edge. */}
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <div>
-                {selected ? (
-                  selected.kind === "job" ? (
-                    <JobCard
-                      // Remount on every run switch: JobCard holds per-run
-                      // state (its lineage checkpoint list and the selected
-                      // checkpoint ref) that its fetch effect only replaces
-                      // once the new run's fetch resolves. Without a key the
-                      // instance is reused and, in that window, Run /
-                      // Continue / Resume / Download would act on the PREVIOUS
-                      // run while the header already shows the new one.
-                      key={selected.key}
-                      job={selected.job}
-                      onStop={stop}
-                      onDelete={remove}
-                      onPlay={handlePlay}
-                      onRenamed={refresh}
-                      ancestors={ancestorsOf(selected.job)}
-                    />
-                  ) : (
-                    <HubJobCard job={selected.job} onDismiss={dismissHub} />
-                  )
-                ) : null}
-              </div>
-            </div>
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <div>
+                    {selected ? (
+                      selected.kind === "job" ? (
+                        <JobCard
+                          // Remount on every run switch: JobCard holds per-run
+                          // state (its lineage checkpoint list and the selected
+                          // checkpoint ref) that its fetch effect only replaces
+                          // once the new run's fetch resolves. Without a key the
+                          // instance is reused and, in that window, Run /
+                          // Continue / Resume / Download would act on the PREVIOUS
+                          // run while the header already shows the new one.
+                          key={selected.key}
+                          job={selected.job}
+                          onStop={stop}
+                          onDelete={remove}
+                          onPlay={handlePlay}
+                          onRenamed={refresh}
+                          ancestors={ancestorsOf(selected.job)}
+                        />
+                      ) : (
+                        <HubJobCard job={selected.job} onDismiss={dismissHub} />
+                      )
+                    ) : null}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </CollapsibleContent>

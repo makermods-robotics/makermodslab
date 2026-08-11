@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/select";
 
 import { getModels, ModelItem } from "@/lib/modelsApi";
-import { importModel, jobDisplayName } from "@/lib/jobsApi";
+import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import {
   DatasetItem,
@@ -54,6 +54,20 @@ import {
 } from "@/components/studio/panel/primitives";
 
 const NONE = "__none__";
+
+/** jobs.register_imported's fallback when a checkpoint's config.json can't be
+ * read — a display label, not an architecture. */
+const UNKNOWN_POLICY_TYPE = "model";
+
+/** The architecture a job record trains (imported models record their
+ * checkpoint's own `type`), or null when the record doesn't know it. Never
+ * returns the "model" placeholder — pushing that into the form would select a
+ * policy lerobot can't build. */
+function recordPolicyType(record: JobRecord): string | null {
+  const type = record.config?.policy_type?.trim();
+  if (!type || type === UNKNOWN_POLICY_TYPE) return null;
+  return type;
+}
 
 /** One search-result row: repo id + (local) episode count, lazily fetched, +
  * Hub marker for remote-only rows. Skips the network for Hub-only rows (a
@@ -212,9 +226,23 @@ const TrainPanel: React.FC = () => {
           const rec = await importModel(baseUrl, fetchWithHeaders, opts.repoId);
           jobId = rec.id;
           name = name ?? jobDisplayName(rec);
-          policy = rec.config?.policy_type ?? null;
+          policy = recordPolicyType(rec);
         }
         if (!jobId || !current()) return;
+        if (policy === null) {
+          // A caller-supplied job id (the job card's Fine-tune button, a studio
+          // prefill, a local model row) carries no policy type, so read it off
+          // the registry record — the same value the import branch above gets.
+          // Without this the policy stays on the "act" default while the form
+          // LOCKS the picker ("set by the base skill"), and the run silently
+          // trains ACT from e.g. smolvla weights: lerobot loads a checkpoint
+          // non-strictly, so the mismatch never surfaces at runtime.
+          const rec = await getJob(baseUrl, fetchWithHeaders, jobId).catch(
+            () => null,
+          );
+          if (!current()) return;
+          policy = rec ? recordPolicyType(rec) : null;
+        }
         const cks = await listJobCheckpoints(baseUrl, fetchWithHeaders, jobId);
         if (!current()) return;
         // A caller-pinned step (the card's dropdown choice) wins when it still

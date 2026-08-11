@@ -24,15 +24,33 @@ from pathlib import Path
 import pytest
 
 
-def _make_checkpoint(output_dir: Path, step: int, *, with_state: bool = True) -> None:
-    """Lay out a lerobot-style checkpoint under <output_dir>/checkpoints/<step>."""
+def _make_checkpoint(
+    output_dir: Path,
+    step: int,
+    *,
+    with_state: bool = True,
+    with_optimizer: bool = True,
+) -> None:
+    """Lay out a lerobot-style checkpoint under <output_dir>/checkpoints/<step>.
+
+    `with_state=False` is the weights-only shape (an imported model);
+    `with_optimizer=False` is the interrupted-save shape the cloud uploader
+    used to publish — training_state/ exists but the big optimizer file that
+    lerobot writes last never landed.
+    """
     ck = output_dir / "checkpoints" / str(step)
     pm = ck / "pretrained_model"
     pm.mkdir(parents=True)
     (pm / "config.json").write_text("{}")  # required by _list_local_checkpoints
     (pm / "train_config.json").write_text("{}")
+    (pm / "model.safetensors").write_bytes(b"weights")
     if with_state:
-        (ck / "training_state").mkdir()
+        ts = ck / "training_state"
+        ts.mkdir()
+        (ts / "training_step.json").write_text("{}")
+        (ts / "rng_state.safetensors").write_bytes(b"rng")
+        if with_optimizer:
+            (ts / "optimizer_state.safetensors").write_bytes(b"optim")
 
 
 def _record(output_dir: Path, runner: str = "local"):
@@ -76,6 +94,21 @@ def test_resolve_resume_config_path_rejects_missing_training_state(tmp_path) -> 
     _make_checkpoint(out, 2000, with_state=False)  # weights-only (e.g. imported)
     with pytest.raises(ValueError, match="training_state"):
         _resolve_resume_config_path(_record(out), 2000)
+
+
+def test_resolve_resume_config_path_rejects_interrupted_save(tmp_path) -> None:
+    """training_state/ exists but the optimizer file lerobot writes last never
+    landed — the shape the cloud uploader used to publish. It must be refused
+    at the API with the remedy named, not accepted and crashed on inside the
+    trainer."""
+    from makermodslab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000, with_optimizer=False)
+    with pytest.raises(ValueError, match="incomplete") as excinfo:
+        _resolve_resume_config_path(_record(out), 2000)
+    assert "optimizer_state.safetensors" in str(excinfo.value)
+    assert "fine-tune from its weights" in str(excinfo.value)
 
 
 def test_resolve_resume_config_path_rejects_non_local(tmp_path) -> None:
@@ -122,14 +155,27 @@ class _FakeHubApi:
         return self._files
 
 
+def _hub_checkpoint_files(step_dir: str, *, with_optimizer: bool = True) -> list[str]:
+    """The repo paths a COMPLETE cloud checkpoint publishes (or, without the
+    optimizer file, the partial tree a mid-save upload used to seal)."""
+    files = [
+        f"checkpoints/{step_dir}/pretrained_model/config.json",
+        f"checkpoints/{step_dir}/pretrained_model/model.safetensors",
+        f"checkpoints/{step_dir}/pretrained_model/train_config.json",
+        f"checkpoints/{step_dir}/training_state/training_step.json",
+        f"checkpoints/{step_dir}/training_state/rng_state.safetensors",
+    ]
+    if with_optimizer:
+        files.append(f"checkpoints/{step_dir}/training_state/optimizer_state.safetensors")
+    return files
+
+
 def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
     from makermodslab.jobs import _resolve_cloud_resume
 
-    files = [
-        "checkpoints/005000/pretrained_model/config.json",
-        "checkpoints/005000/training_state/training_step.json",
-    ]
-    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("005000"))
+    )
     repo_id, step_dir = _resolve_cloud_resume(_cloud_record(), 5000)
     assert repo_id == "user/act_ds_2026"
     assert step_dir == "005000"  # zero-padded dir name preserved
@@ -138,15 +184,40 @@ def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
 def test_resolve_cloud_resume_defaults_to_latest(monkeypatch) -> None:
     from makermodslab.jobs import _resolve_cloud_resume
 
-    files = [
-        "checkpoints/001000/pretrained_model/config.json",
-        "checkpoints/001000/training_state/training_step.json",
-        "checkpoints/003000/pretrained_model/config.json",
-        "checkpoints/003000/training_state/training_step.json",
-    ]
+    files = _hub_checkpoint_files("001000") + _hub_checkpoint_files("003000")
     monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
     _repo, step_dir = _resolve_cloud_resume(_cloud_record(), None)  # None ⇒ latest
     assert step_dir == "003000"
+
+
+def test_resolve_cloud_resume_rejects_partial_hub_checkpoint(monkeypatch) -> None:
+    """The NEW-17 shape: everything on the Hub except the optimizer file the
+    uploader raced. `training_state/training_step.json` alone used to pass this
+    guard, so the run died inside the trainer on a FileNotFoundError instead of
+    at the API with something the user can act on."""
+    from makermodslab.jobs import _resolve_cloud_resume
+
+    files = _hub_checkpoint_files("005000", with_optimizer=False)
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="incomplete on the Hub") as excinfo:
+        _resolve_cloud_resume(_cloud_record(), 5000)
+    message = str(excinfo.value)
+    assert "uploader race" in message
+    assert "training_state/optimizer_state.safetensors" in message
+    assert "fine-tune from its weights" in message  # the named remedy
+
+
+def test_resolve_cloud_resume_ignores_other_steps_when_checking_completeness(
+    monkeypatch,
+) -> None:
+    """Completeness is judged per step: a complete 001000 must not vouch for a
+    partial 003000 (the file listing is repo-wide and flat)."""
+    from makermodslab.jobs import _resolve_cloud_resume
+
+    files = _hub_checkpoint_files("001000") + _hub_checkpoint_files("003000", with_optimizer=False)
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="incomplete on the Hub"):
+        _resolve_cloud_resume(_cloud_record(), 3000)
 
 
 def test_resolve_cloud_resume_rejects_no_checkpoints(monkeypatch) -> None:
@@ -170,11 +241,9 @@ def test_resolve_cloud_resume_rejects_missing_training_state(monkeypatch) -> Non
 def test_resolve_cloud_resume_rejects_unknown_step(monkeypatch) -> None:
     from makermodslab.jobs import _resolve_cloud_resume
 
-    files = [
-        "checkpoints/005000/pretrained_model/config.json",
-        "checkpoints/005000/training_state/training_step.json",
-    ]
-    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("005000"))
+    )
     with pytest.raises(ValueError, match="no checkpoint at step 9999"):
         _resolve_cloud_resume(_cloud_record(), 9999)
 
@@ -193,18 +262,93 @@ def test_resolve_cloud_resume_rejects_missing_repo() -> None:
         _resolve_cloud_resume(_cloud_record(repo_id=None), None)
 
 
-def test_extract_wandb_run_url_finds_canonical_url() -> None:
-    from makermodslab.jobs import extract_wandb_run_url
+# ---------------------------------------------------------------------------
+# Checkpoint completeness — the single readiness rule shared by both resume
+# guards above and (inlined verbatim) by the in-container cloud uploader.
+# ---------------------------------------------------------------------------
 
-    line = "wandb: \U0001f680 View run at https://wandb.ai/me/myproj/runs/abc123 trailing text"
-    assert extract_wandb_run_url(line) == "https://wandb.ai/me/myproj/runs/abc123"
+
+def _complete_names() -> set[str]:
+    return {
+        "pretrained_model/config.json",
+        "pretrained_model/model.safetensors",
+        "pretrained_model/train_config.json",
+        "training_state/training_step.json",
+        "training_state/rng_state.safetensors",
+        "training_state/optimizer_state.safetensors",
+    }
 
 
-def test_extract_wandb_run_url_returns_none_when_absent() -> None:
-    from makermodslab.jobs import extract_wandb_run_url
+def test_missing_checkpoint_files_accepts_a_complete_tree() -> None:
+    from makermodslab.jobs import missing_checkpoint_files
 
-    assert extract_wandb_run_url("nothing here") is None
-    assert extract_wandb_run_url("https://example.com/runs/abc") is None
+    assert missing_checkpoint_files(_complete_names()) == []
+
+
+def test_missing_checkpoint_files_does_not_require_a_scheduler() -> None:
+    """save_training_state writes scheduler_state.json only `if scheduler is not
+    None`, so requiring it would permanently block scheduler-less presets."""
+    from makermodslab.jobs import missing_checkpoint_files
+
+    assert "training_state/scheduler_state.json" not in _complete_names()
+    assert missing_checkpoint_files(_complete_names()) == []
+
+
+def test_missing_checkpoint_files_flags_a_mid_save_snapshot() -> None:
+    """config.json is the FIRST artifact lerobot writes — on its own it means a
+    save just started, not a checkpoint."""
+    from makermodslab.jobs import missing_checkpoint_files
+
+    missing = missing_checkpoint_files({"pretrained_model/config.json"})
+    assert "pretrained_model/*.safetensors" in missing
+    assert "training_state/training_step.json" in missing
+    assert "training_state/optimizer_state.safetensors" in missing
+
+
+def test_missing_checkpoint_files_flags_the_optimizer_file_alone() -> None:
+    from makermodslab.jobs import missing_checkpoint_files
+
+    names = _complete_names() - {"training_state/optimizer_state.safetensors"}
+    assert missing_checkpoint_files(names) == ["training_state/optimizer_state.safetensors"]
+
+
+def test_missing_checkpoint_files_accepts_nested_multi_optimizer_state() -> None:
+    """A MultiAdam policy writes training_state/<name>/optimizer_state.safetensors,
+    so the optimizer probe must match at any depth or such runs would never be
+    considered ready."""
+    from makermodslab.jobs import missing_checkpoint_files
+
+    names = (_complete_names() - {"training_state/optimizer_state.safetensors"}) | {
+        "training_state/actor/optimizer_state.safetensors",
+        "training_state/critic/optimizer_state.safetensors",
+    }
+    assert missing_checkpoint_files(names) == []
+
+
+def test_missing_checkpoint_files_accepts_a_peft_adapter_as_weights() -> None:
+    from makermodslab.jobs import missing_checkpoint_files
+
+    names = (_complete_names() - {"pretrained_model/model.safetensors"}) | {
+        "pretrained_model/adapter_model.safetensors"
+    }
+    assert missing_checkpoint_files(names) == []
+
+
+def test_scan_checkpoint_dir_reports_relative_names_and_a_change_sensitive_fingerprint(
+    tmp_path,
+) -> None:
+    from makermodslab.jobs import missing_checkpoint_files, scan_checkpoint_dir
+
+    _make_checkpoint(tmp_path, 1000)
+    ck = tmp_path / "checkpoints" / "1000"
+
+    names, fingerprint = scan_checkpoint_dir(ck)
+    assert "training_state/optimizer_state.safetensors" in names  # posix, relative
+    assert missing_checkpoint_files(names) == []
+    assert scan_checkpoint_dir(ck)[1] == fingerprint  # stable while nothing writes
+
+    (ck / "training_state" / "optimizer_state.safetensors").write_bytes(b"grown-larger")
+    assert scan_checkpoint_dir(ck)[1] != fingerprint  # a byte written moves it
 
 
 def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
@@ -247,6 +391,102 @@ def test_parse_metrics_into_keeps_tqdm_step_when_log_line_step_is_abbreviated() 
     assert m.current_lr == pytest.approx(0.0001)
 
 
+def _tqdm_burst(first: int, last: int, total: int, eta: str = "6:26:18") -> str:
+    """One log line carrying every tqdm redraw from `first` to `last`.
+
+    tqdm separates redraws with \\r; a transport that doesn't split on \\r (HF
+    Jobs' SSE log stream) delivers the whole burst as a single line with the
+    trailing 'INFO ... step:N ...' appended to the LAST frame.
+    """
+    return "\r".join(
+        f"Training:  39%|███▊      | {s}/{total} [2:31:07<{eta},  2.12s/step]" for s in range(first, last + 1)
+    )
+
+
+@pytest.mark.parametrize(
+    ("burst", "info", "resume_total", "expect_step", "expect_total"),
+    [
+        # The real shape of a resumed cloud run: 50 frames of the remaining-window
+        # bar + an abbreviated 'step:4K' that int() can't use. Last frame 50 of
+        # 11000 remaining, on a 15000-step target → global step 4050.
+        (
+            _tqdm_burst(1, 50, 11000),
+            "INFO 2026-07-29 02:11:59 train.py:606 step:4K smpl:259K ep:878 "
+            "epch:43.90 loss:0.040 grdn:0.919 lr:8.4e-05",
+            15000,
+            4050,
+            15000,
+        ),
+        # Same batching on a fresh run: the bar is already global, and the
+        # 'step:1K' token is still unusable, so the last frame must stand.
+        (
+            _tqdm_burst(951, 1000, 10000),
+            "INFO ... step:1K smpl:8K loss:0.0077 grdn:0.9 lr:0.0001",
+            None,
+            1000,
+            10000,
+        ),
+        # Below 1000 the log line's step is a plain int and wins outright —
+        # which is also the only reason the first-frame bug stayed invisible
+        # under step 1000.
+        (
+            _tqdm_burst(901, 950, 10000),
+            "INFO ... step:950 smpl:7K loss:0.0077 grdn:0.9 lr:0.0001",
+            None,
+            950,
+            10000,
+        ),
+    ],
+    ids=["resumed-cloud-burst", "fresh-burst-abbreviated", "fresh-burst-exact"],
+)
+def test_parse_metrics_into_uses_the_last_tqdm_frame_of_a_batched_line(
+    burst: str, info: str, resume_total: int | None, expect_step: int, expect_total: int
+) -> None:
+    """A batched line's LAST tqdm frame is the one the appended INFO line belongs
+    to. Taking the first understated every step above 1000 by log_freq−1 (a real
+    run charted 8201 where the true step was 8250)."""
+    from makermodslab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into(f"{burst}{info}", m, resume_total)
+
+    assert m.current_step == expect_step
+    assert m.total_steps == expect_total
+    assert m.current_loss is not None
+    # ETA comes from the same (last) frame.
+    assert m.eta_seconds == 6 * 3600 + 26 * 60 + 18
+
+
+def test_read_metrics_history_of_a_batched_resumed_log(tmp_path) -> None:
+    """End-to-end on the shape a resumed cloud run actually writes: batched tqdm
+    bursts + abbreviated step tokens land on the true global steps (multiples of
+    log_freq), not log_freq−1 below them."""
+    from makermodslab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path)
+    root = reg._output_root
+    msgs = [
+        _tqdm_burst(first, first + 49, 11000) + f"INFO ... step:4K loss:0.04{i} grdn:0.9 lr:8.4e-05"
+        for i, first in enumerate((1, 51, 101))
+    ]
+    p = _job_log_path(root, "R")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w") as f:
+        for msg in msgs:
+            f.write(LogLine(timestamp=0.0, message=msg).model_dump_json() + "\n")
+    reg._records["R"] = JobRecord(
+        id="R",
+        name="r",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="d", resume=True, steps=15000),
+        output_dir=str(root / "R" / "run"),
+        started_at=0.0,
+    )
+
+    assert [pt.step for pt in reg.read_metrics_history("R")] == [4050, 4100, 4150]
+
+
 def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     from makermodslab.jobs import TrainingMetrics, parse_metrics_into
 
@@ -258,6 +498,19 @@ def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     assert m.current_step == 100
     assert m.total_steps == 1000
     assert m.eta_seconds == 270  # 4 min 30 s
+
+
+def test_extract_wandb_run_url_finds_canonical_url() -> None:
+    from makermodslab.jobs import extract_wandb_run_url
+
+    line = "wandb: \U0001f680 View run at https://wandb.ai/me/myproj/runs/abc123 trailing text"
+    assert extract_wandb_run_url(line) == "https://wandb.ai/me/myproj/runs/abc123"
+
+
+def test_extract_wandb_run_url_returns_none_when_absent() -> None:
+    from makermodslab.jobs import extract_wandb_run_url
+
+    assert extract_wandb_run_url("nothing here") is None
 
 
 def test_parse_metrics_into_rebases_resumed_tqdm_to_global_step() -> None:
@@ -622,7 +875,7 @@ def test_tailing_runner_returncode_unconfirmed_while_pid_alive(tmp_path) -> None
     assert runner.returncode() is None
 
 
-class _FakeRunner:
+class _FixedRcRunner:
     """Minimal JobRunner stand-in for exercising JobRegistry._tick()'s
     finalisation branch without a real subprocess."""
 
@@ -639,8 +892,8 @@ class _FakeRunner:
         return None
 
 
-class _FakeStopSignalledRunner(_FakeRunner):
-    """Like _FakeRunner, but also reports stop_signalled() == True — the
+class _FakeStopSignalledRunner(_FixedRcRunner):
+    """Like _FixedRcRunner, but also reports stop_signalled() == True — the
     shape of a TailingJobRunner whose stop() group-TERMed the wrapper before
     it could write an exit status."""
 
@@ -651,7 +904,7 @@ class _FakeStopSignalledRunner(_FakeRunner):
 def _inject_running_job(reg, tmp_path: Path, rc: int | None, runner=None):
     """Stop the registry's own watchdog thread (so our manual _tick() call
     below is deterministic, not racing a background tick), then splice a
-    'running' record backed by `runner` (default: _FakeRunner(rc)) straight
+    'running' record backed by `runner` (default: _FixedRcRunner(rc)) straight
     into the registry's internal maps — the same shape _load_from_disk /
     start() would produce."""
     reg.shutdown()
@@ -662,7 +915,7 @@ def _inject_running_job(reg, tmp_path: Path, rc: int | None, runner=None):
     record.state = "running"
     with reg._lock:
         reg._records[record.id] = record
-        reg._runners[record.id] = runner if runner is not None else _FakeRunner(rc)
+        reg._runners[record.id] = runner if runner is not None else _FixedRcRunner(rc)
     return record
 
 
@@ -692,26 +945,33 @@ def test_tick_marks_interrupted_when_runner_cannot_confirm_exit(tmp_path) -> Non
 
 
 def test_tick_uses_stop_message_when_stop_was_signalled(tmp_path) -> None:
-    """A user-requested stop of a reattached run also lands in the
-    'returncode() is None' branch above — stop() group-TERMs the wrapper
-    before it can write an exit status, so the pid disappears with no
-    evidence just like an unconfirmed crash/restart. Without consulting the
-    runner, that stop would be blamed on a restart that never happened. When
-    the runner reports stop_signalled() == True, _tick() must say the run was
-    stopped at the user's request instead."""
-    from makermodslab.jobs import JobRegistry
+    """A user-requested stop of a reattached run must never be blamed on a
+    restart that never happened.
+
+    stop() group-TERMs the wrapper before it can write an exit status, so the
+    pid disappears with no evidence on disk — the same shape as an unconfirmed
+    crash. What separates the two is the pair of signals this test sets up:
+    the registry's recorded intent (`_stop_requested`, what JobRegistry.stop()
+    writes under the lock) and the runner's own stop_signalled() confirming it
+    reached a live process. TailingJobRunner turns that pair into a
+    synthesised -SIGTERM, so the run classifies as `interrupted` and gets the
+    deliberate-stop wording rather than the unconfirmed one."""
+    import signal
+
+    from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE, UNCONFIRMED_OUTCOME_MESSAGE, JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
-    record = _inject_running_job(reg, tmp_path, rc=None, runner=_FakeStopSignalledRunner(None))
+    record = _inject_running_job(reg, tmp_path, rc=None, runner=_FakeStopSignalledRunner(-signal.SIGTERM))
+    with reg._lock:
+        reg._stop_requested.add(record.id)
 
     reg._tick()
 
     finalized = reg._records[record.id]
     assert finalized.state == "interrupted"
-    assert finalized.exit_code is None
-    assert finalized.error_message is not None
-    assert "stopped at your request" in finalized.error_message
-    assert "restarted" not in finalized.error_message
+    assert finalized.exit_code == -signal.SIGTERM
+    assert finalized.error_message == STOPPED_BY_REQUEST_MESSAGE
+    assert finalized.error_message != UNCONFIRMED_OUTCOME_MESSAGE
 
 
 def test_tick_does_not_claim_a_stop_that_never_reached_the_run(tmp_path) -> None:
@@ -845,6 +1105,55 @@ def test_list_imported_hub_empty_when_no_model() -> None:
             return ["README.md"]
 
     assert _list_imported_hub(FakeApi(), "user/repo") == []
+
+
+def test_list_hub_checkpoints_falls_back_to_root_policy() -> None:
+    """MT3 residual: a tracked run whose repo holds a root policy but NO
+    checkpoints/ tree (checkpoint saving off) used to list zero checkpoints, so
+    its job card said "no checkpoints" while a loadable model sat in the repo.
+    The cloud listing now falls back to the same '@root' entry the imported
+    listing has always returned."""
+    from makermodslab.jobs import _list_hub_checkpoints
+
+    out = _list_hub_checkpoints(_FakeHubApi(["config.json", "model.safetensors"]), "user/repo")
+    assert len(out) == 1
+    assert out[0].step == 0
+    assert out[0].source == "hub"
+    # The ref shape rollout._resolve_policy_path already downloads and runs, so
+    # the entry is deployable and not merely listed.
+    assert out[0].ref == "user/repo@root"
+
+
+def test_list_hub_checkpoints_prefers_tree_over_root() -> None:
+    """The root push is byte-identical to the final checkpoint, so a repo with
+    a tree must NOT also offer a root entry — that would be a duplicate of the
+    highest step under a second name."""
+    from makermodslab.jobs import _list_hub_checkpoints
+
+    files = ["config.json", "model.safetensors", *_hub_checkpoint_files("005000")]
+    out = _list_hub_checkpoints(_FakeHubApi(files), "user/repo")
+    assert [c.ref for c in out] == ["user/repo@checkpoints/005000"]
+
+
+def test_list_hub_checkpoints_empty_without_root_config() -> None:
+    from makermodslab.jobs import _list_hub_checkpoints
+
+    assert _list_hub_checkpoints(_FakeHubApi(["README.md", "model.safetensors"]), "user/repo") == []
+
+
+def test_resolve_cloud_resume_rejects_root_only_repo(monkeypatch) -> None:
+    """The root fallback makes a checkpoint-less repo listable and runnable, but
+    root weights carry no training_state/ — resume must refuse it in plain
+    language rather than tripping over the ref shape."""
+    from makermodslab.jobs import _resolve_cloud_resume
+
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(["config.json", "model.safetensors"]),
+    )
+    with pytest.raises(ValueError, match="saved no checkpoints") as excinfo:
+        _resolve_cloud_resume(_cloud_record(), None)
+    assert "Fine-tune from its weights" in str(excinfo.value)
 
 
 def test_read_checkpoint_config_local_reads_config_json(tmp_path) -> None:
@@ -1370,6 +1679,167 @@ def test_cloud_start_allows_unknown_status_dataset(tmp_path) -> None:
     assert record.runner == "hf_cloud"
 
 
+def test_cloud_start_passes_resume_total_to_the_runner(tmp_path) -> None:
+    """A resumed cloud run must hand the runner its full step target, or the log
+    parser can't rebase the remaining-window tqdm bar and the UI reports
+    resume-relative progress (observed: 4,251/11,000 instead of 8,251/15,000)."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(
+        dataset_repo_id="user/on_hub",
+        policy_type="act",
+        resume=True,
+        # Stands in for a resume selection; the runner (which is what turns this
+        # into a Hub download for a cloud job) is stubbed out below.
+        config_path="/somewhere/checkpoints/004000/pretrained_model/train_config.json",
+        steps=15000,
+    )
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    seen: list[tuple] = []
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    def _factory(*args, **kwargs):
+        seen.append(args)
+        return fake_runner
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", _factory),
+    ):
+        reg.start(cfg, target)
+
+    assert seen and seen[0][-1] == 15000
+
+
+def test_start_seeds_a_resumed_records_progress_at_the_checkpoint_step(tmp_path) -> None:
+    """The record a resume starts must already read 4,000/15,000 — not 0/0.
+
+    resume_total only helps once lerobot's tqdm bar exists, and nothing fills
+    the gap before it: on a real local resume that window was 12s of a 69s run,
+    during which every progress readout in the app said step 0. The seed has to
+    be on the RECORD (not just the runner) so the persisted job.json, the /jobs
+    payload and the ~1Hz progress broadcast all carry it from the first tick."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(
+        dataset_repo_id="user/on_hub",
+        policy_type="act",
+        resume=True,
+        config_path="/somewhere/checkpoints/004000/pretrained_model/train_config.json",
+        steps=15000,
+    )
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch(
+            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
+            lambda *a, **k: fake_runner,
+        ),
+    ):
+        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert (record.metrics.current_step, record.metrics.total_steps) == (4000, 15000)
+    # And it survives to disk, which is what a reattach after a restart reloads.
+    persisted = _json.loads((tmp_path / "root" / record.id / "job.json").read_text())
+    assert persisted["metrics"]["current_step"] == 4000
+
+
+def test_start_leaves_a_fresh_records_progress_at_zero(tmp_path) -> None:
+    """The non-resumed path is untouched: 0/0 is correct there, and total_steps
+    == 0 is the signal the UI renders as "Training starting…"."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act", steps=15000)
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch(
+            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
+            lambda *a, **k: fake_runner,
+        ),
+    ):
+        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert (record.metrics.current_step, record.metrics.total_steps) == (0, 0)
+
+
+def test_cloud_reattach_passes_resume_total_to_the_runner(monkeypatch, tmp_path) -> None:
+    """Re-attaching to a running cloud job after a restart must carry the resume
+    target too — otherwise the progress readout silently rebases itself on the
+    remaining window mid-run."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry
+
+    root = tmp_path / "root"
+    job_dir = root / "cloud-job"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        _json.dumps(
+            {
+                "id": "cloud-job",
+                "name": "SMOLVLA · user/ds",
+                "state": "running",
+                "config": {
+                    "dataset_repo_id": "user/ds",
+                    "policy_type": "smolvla",
+                    "resume": True,
+                    "steps": 15000,
+                },
+                "output_dir": str(job_dir / "run"),
+                "started_at": 1.0,
+                "runner": "hf_cloud",
+                "hf_job_id": "hf-job-1",
+                "hf_flavor": "a10g-small",
+            }
+        )
+    )
+
+    seen: list[tuple] = []
+
+    def _factory(*args, **kwargs):
+        seen.append(args)
+        return MagicMock()
+
+    # No watchdog: this test is about what _load_from_disk hands the runner, and
+    # the tick would poll the (stubbed) runner and the Hub for checkpoints.
+    monkeypatch.setattr(JobRegistry, "_start_watchdog", lambda self: None)
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", _factory):
+        JobRegistry(root)
+
+    assert seen and seen[0][-1] == 15000
+
+
 def test_local_start_skips_hub_preflight(tmp_path) -> None:
     """A local run on a local-only dataset is fine — no Hub involved — so the
     preflight must not fire (get_hub_status is never consulted)."""
@@ -1560,117 +2030,12 @@ def test_two_policies_of_one_task_are_not_disambiguated(monkeypatch, tmp_path) -
     assert names[b.id] == "orange_box"
 
 
-def test_two_imports_of_one_task_and_policy_are_still_disambiguated(monkeypatch, tmp_path) -> None:
-    """Same task AND same policy: nothing on either card separates them, so the
-    timestamp the title dropped comes back on both."""
-    early = "makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30"
-    late = "makermods/smolvla_makermods_orange_box_2026-08-05_09-00-00"
-    reg = _typed_hub_reg(monkeypatch, tmp_path, {early: "smolvla", late: "smolvla"})
-    a = reg.register_imported(early)
-    b = reg.register_imported(late)
-
-    names = {r.id: r.name for r in reg.list(limit=100)}
-    assert names[a.id] == "orange_box (2026-08-03)"
-    assert names[b.id] == "orange_box (2026-08-05)"
-
-
-def test_start_seeds_a_resumed_records_progress_at_the_checkpoint_step(tmp_path) -> None:
-    """The record a resume starts must already read 4,000/15,000 — not 0/0.
-
-    The tqdm rebase only helps once lerobot's bar exists, and nothing fills the
-    gap before it: on a real local resume that window was 12s of a 69s run,
-    during which every progress readout in the app said step 0. The seed has to
-    be on the RECORD (not just the runner) so the persisted job.json, the /jobs
-    payload and the ~1Hz progress broadcast all carry it from the first tick."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobRegistry, JobTarget
-    from makermodslab.train import TrainingRequest
-
-    reg = JobRegistry(tmp_path / "root")
-    cfg = TrainingRequest(
-        dataset_repo_id="user/on_hub",
-        policy_type="act",
-        resume=True,
-        config_path="/somewhere/checkpoints/004000/pretrained_model/train_config.json",
-        steps=15000,
-    )
-    fake_runner = MagicMock()
-    fake_runner.hf_job_id.return_value = "job-xyz"
-    fake_runner.hf_job_url.return_value = None
-
-    with (
-        patch(
-            "makermodslab.datasets.get_hub_status",
-            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
-        ),
-        patch(
-            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
-            lambda *a, **k: fake_runner,
-        ),
-    ):
-        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
-
-    assert (record.metrics.current_step, record.metrics.total_steps) == (4000, 15000)
-    # And it survives to disk, which is what a reattach after a restart reloads.
-    persisted = _json.loads((tmp_path / "root" / record.id / "job.json").read_text())
-    assert persisted["metrics"]["current_step"] == 4000
-
-
-def test_start_leaves_a_fresh_records_progress_at_zero(tmp_path) -> None:
-    """The non-resumed path is untouched: 0/0 is correct there, and total_steps
-    == 0 is the signal the UI renders as "Training starting…"."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobRegistry, JobTarget
-    from makermodslab.train import TrainingRequest
-
-    reg = JobRegistry(tmp_path / "root")
-    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act", steps=15000)
-    fake_runner = MagicMock()
-    fake_runner.hf_job_id.return_value = "job-xyz"
-    fake_runner.hf_job_url.return_value = None
-
-    with (
-        patch(
-            "makermodslab.datasets.get_hub_status",
-            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
-        ),
-        patch(
-            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
-            lambda *a, **k: fake_runner,
-        ),
-    ):
-        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
-
-    assert (record.metrics.current_step, record.metrics.total_steps) == (0, 0)
-
-
 # ── Resume is only for a run that stopped short ──────────────────────────────
 # A completed run's LR schedule is spent (SmolVLA's preset cosine-decays to a
 # 2.5e-6 floor over a fixed 30k-step horizon), so a continuation trains at floor
 # LR and the flat loss curve reads as convergence. The UI hides the button; this
 # is the backend half, which also catches a direct API call. Blanket by
 # decision — no per-policy exceptions.
-
-
-def _hub_checkpoint_files(step_dir: str, *, with_state: bool = True) -> list[str]:
-    """The repo paths a complete cloud checkpoint publishes.
-
-    `with_state=False` is the weights-only shape — an interrupted upload, or a
-    staging repo that lost its training_state/ — which is exactly what every
-    resume path has to refuse."""
-    files = [
-        f"checkpoints/{step_dir}/pretrained_model/config.json",
-        f"checkpoints/{step_dir}/pretrained_model/model.safetensors",
-        f"checkpoints/{step_dir}/pretrained_model/train_config.json",
-    ]
-    if with_state:
-        files += [
-            f"checkpoints/{step_dir}/training_state/training_step.json",
-            f"checkpoints/{step_dir}/training_state/optimizer_state.safetensors",
-        ]
-    return files
 
 
 def _resumable_source(tmp_path, state: str, *, job_id: str = "src", steps: int = 200):
@@ -1791,58 +2156,6 @@ def _cloud_parent(reg, *, job_id: str = "src"):
     return reg
 
 
-def _fake_resume_snapshot(tmp_path, seen: dict, *, complete: bool = True):
-    """A snapshot_download stand-in that lays down a real checkpoint tree.
-
-    Mirrors what the Hub returns for `allow_patterns=['checkpoints/<step>/*']`:
-    a snapshot root holding the whole step directory, zero-padded the way the
-    Hub names it. `complete=False` is the interrupted-upload shape — weights but
-    no training_state/ — which a resume must refuse rather than hand to the
-    trainer."""
-
-    def _download(**kwargs):
-        seen.update(kwargs)
-        root = tmp_path / "snapshot"
-        ck = root / "checkpoints" / "000100"
-        pretrained = ck / "pretrained_model"
-        pretrained.mkdir(parents=True, exist_ok=True)
-        (pretrained / "config.json").write_text("{}")
-        (pretrained / "train_config.json").write_text("{}")
-        (ck / "training_state").mkdir(exist_ok=True)
-        if complete:
-            (ck / "training_state" / "training_step.json").write_text("{}")
-        return str(root)
-
-    return _download
-
-
-class _FakeUploadApi:
-    """HfApi stand-in for the upload path: records the calls, moves no bytes.
-
-    `list_repo_files` answers from whatever has been "uploaded" so far, so the
-    post-upload verification in _upload_resume_then_start exercises the real
-    completeness rule instead of a stub that always says yes."""
-
-    def __init__(self, files: list[str] | None = None) -> None:
-        self._files = list(files or [])
-        self.created: list[dict] = []
-        self.uploaded: list[dict] = []
-        self.upload_error: Exception | None = None
-
-    def create_repo(self, **kwargs):
-        self.created.append(kwargs)
-
-    def upload_folder(self, **kwargs):
-        if self.upload_error is not None:
-            raise self.upload_error
-        self.uploaded.append(kwargs)
-        step_dir = kwargs["path_in_repo"].rsplit("/", 1)[-1]
-        self._files.extend(_hub_checkpoint_files(step_dir))
-
-    def list_repo_files(self, repo_id, repo_type):
-        return self._files
-
-
 def _local_to_cloud_request(*, consent: bool = True, job_id: str = "src"):
     from makermodslab.train import TrainingRequest
 
@@ -1895,87 +2208,6 @@ def test_cloud_parent_resumed_locally_downloads_the_chosen_step(tmp_path, monkey
     assert Path(record.config.config_path).is_file()
     assert record.state == "running"
     assert fake_runner.start.called
-
-
-def test_cloud_parent_resumed_locally_seeds_progress_from_the_inherited_step(tmp_path, monkeypatch) -> None:
-    """The record's metrics start at the checkpoint's step, not at 0 — and they
-    do so from the moment it is created, i.e. before the (minutes-long) download
-    finishes. A 0 there is what wipes the seeded loss chart."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobTarget
-
-    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
-    monkeypatch.setattr(
-        "makermodslab.jobs.shared_hf_api",
-        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
-    )
-    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}))
-    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()):
-        # `resume_from_step` left unset: "the latest checkpoint", which the
-        # resolver has to pin to a real step for the seeding to work at all.
-        record = reg.start(_resume_request(), JobTarget(runner="local"))
-        assert record.metrics.current_step == 100
-        assert record.metrics.total_steps == record.config.steps
-        assert record.config.resume_from_step == 100
-        _join_prepare(reg, record.id)
-
-
-def test_cloud_parent_resumed_locally_refuses_an_incomplete_hub_checkpoint(tmp_path, monkeypatch) -> None:
-    """Refused synchronously, from the repo's file listing, before a record or a
-    single byte exists — the completeness gate is the same one cloud→cloud uses."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobTarget
-
-    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
-    monkeypatch.setattr(
-        "makermodslab.jobs.shared_hf_api",
-        lambda: _FakeHubApi(_hub_checkpoint_files("000100", with_state=False)),
-    )
-
-    def _no_downloads(**kwargs):
-        raise AssertionError("an incomplete checkpoint must be refused before downloading")
-
-    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
-    with (
-        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
-        pytest.raises(ValueError, match="optimizer/step state"),
-    ):
-        reg.start(_resume_request(), JobTarget(runner="local"))
-
-    assert list(reg._records) == ["src"]
-    _assert_nothing_was_created(reg)
-
-
-def test_cloud_parent_resumed_locally_fails_the_job_on_an_incomplete_download(tmp_path, monkeypatch) -> None:
-    """MT4's failure mode, closed: if the bytes that land are short of a
-    resumable checkpoint, the job fails with a message naming it and NO trainer
-    is spawned — rather than lerobot dying on a missing optimizer file minutes
-    into startup."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobTarget
-
-    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
-    # The listing says complete; the bytes that arrive are not (the uploader
-    # race). Only the on-disk check can catch that.
-    monkeypatch.setattr(
-        "makermodslab.jobs.shared_hf_api",
-        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
-    )
-    monkeypatch.setattr(
-        "huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}, complete=False)
-    )
-    fake_runner = MagicMock()
-    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
-        record = reg.start(_resume_request(), JobTarget(runner="local"))
-        _join_prepare(reg, record.id)
-
-    failed = reg._records[record.id]
-    assert failed.state == "failed"
-    assert "training_state" in failed.error_message
-    assert not fake_runner.start.called
 
 
 # ── local parent → Cloud ─────────────────────────────────────────────────────
@@ -2088,7 +2320,7 @@ def test_local_parent_resumed_on_the_cloud_re_uploads_when_the_hub_lost_it(
     reg = _resumable_source(tmp_path, "interrupted")
     reg._records["src"].checkpoints_hub_repo_id = "alice/src_checkpoints"
     reg._records["src"].checkpoints_hub_steps = ["100"]
-    api = _FakeUploadApi(_hub_checkpoint_files("100", with_state=False))
+    api = _FakeUploadApi(_hub_checkpoint_files("100", with_optimizer=False))
     monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
     monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
     with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()):
@@ -2197,38 +2429,6 @@ def test_local_parent_resumed_on_the_cloud_never_starts_a_fresh_run(
     assert not fake_runner.start.called
 
 
-def test_local_parent_resumed_on_the_cloud_fails_when_the_upload_cannot_be_confirmed(
-    tmp_path, monkeypatch, cloud_preflight
-) -> None:
-    """An upload that reports success but leaves the repo short of a resumable
-    checkpoint is the same failure as one that raised — verified from the Hub's
-    own listing, before anything is submitted."""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobTarget
-
-    reg = _resumable_source(tmp_path, "interrupted")
-
-    class _SilentlyPartialApi(_FakeUploadApi):
-        def upload_folder(self, **kwargs):
-            self.uploaded.append(kwargs)
-            self._files.extend(_hub_checkpoint_files("100", with_state=False))
-
-    api = _SilentlyPartialApi()
-    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
-    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
-    fake_runner = MagicMock()
-    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
-        record = reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
-        _join_prepare(reg, record.id)
-
-    failed = reg._records[record.id]
-    assert failed.state == "failed"
-    assert "training_step.json" in failed.error_message
-    assert not fake_runner.start.called
-    assert reg._records["src"].checkpoints_hub_steps == []
-
-
 def test_cross_runner_resume_still_refuses_a_completed_parent(tmp_path, monkeypatch, cloud_preflight) -> None:
     """Only the runner-mismatch refusal went away. A parent that spent its LR
     schedule is still unresumable — on either runner, in either direction."""
@@ -2244,30 +2444,6 @@ def test_cross_runner_resume_still_refuses_a_completed_parent(tmp_path, monkeypa
     ):
         reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
     _assert_nothing_was_created(reg)
-
-
-def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> None:
-    """The other half of the gate: a same-runner cloud resume is untouched and
-    still resolves the parent's Hub checkpoint. (local→local is covered by
-    test_start_still_resumes_a_run_that_stopped_short above.)"""
-    from unittest.mock import MagicMock, patch
-
-    from makermodslab.jobs import JobTarget
-
-    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
-    monkeypatch.setattr(
-        "makermodslab.jobs.shared_hf_api",
-        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
-    )
-    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
-    fake_runner = MagicMock()
-    fake_runner.hf_job_id.return_value = "hfjob-1"
-    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
-        record = reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
-
-    assert record.config.resume is True
-    assert record.config.resume_from_hub_repo == "user/some-model"
-    assert record.config.resume_from_hub_step == "000100"
 
 
 # ---------------------------------------------------------------------------
@@ -2335,7 +2511,7 @@ def test_download_hub_checkpoint_ref_rejects_a_non_ref() -> None:
 def test_download_hub_checkpoint_ref_widens_to_the_whole_step_for_a_resume(monkeypatch, tmp_path) -> None:
     """`with_training_state` is the one difference between "load these weights"
     and "continue this run": the optimizer state comes along. Opt-in because it
-    is hundreds of MB per step that a deploy or fine-tune never reads."""
+    is ~394 MB per step that a deploy or fine-tune never reads."""
     from makermodslab.jobs import download_hub_checkpoint_ref
 
     seen: dict = {}
@@ -2359,7 +2535,7 @@ def test_download_hub_resume_checkpoint_returns_the_train_config(monkeypatch, tm
     out = Path(download_hub_resume_checkpoint("user/repo@checkpoints/000100"))
 
     assert out.name == "train_config.json" and out.is_file()
-    assert (out.parent.parent / "training_state" / "training_step.json").is_file()
+    assert (out.parent.parent / "training_state" / "optimizer_state.safetensors").is_file()
 
 
 def test_download_hub_resume_checkpoint_refuses_an_incomplete_download(monkeypatch, tmp_path) -> None:
@@ -2372,7 +2548,7 @@ def test_download_hub_resume_checkpoint_refuses_an_incomplete_download(monkeypat
         "huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}, complete=False)
     )
 
-    with pytest.raises(ValueError, match="training_state"):
+    with pytest.raises(ValueError, match="optimizer_state.safetensors"):
         download_hub_resume_checkpoint("user/repo@checkpoints/000100")
 
 
@@ -2561,12 +2737,15 @@ def test_finetune_start_cloud_keeps_the_step_ref(monkeypatch, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _patch_hub_for_finetune(monkeypatch, tmp_path):
-    """Stand-in for the CHEAP Hub read a fine-tune start makes synchronously:
-    the source run's checkpoint listing."""
+def _patch_hub_for_finetune(monkeypatch, tmp_path, policy_type: str = "act"):
+    """Stand-ins for the CHEAP Hub reads a fine-tune start makes synchronously:
+    the source's checkpoint listing, and the checkpoint's own config.json."""
+    cfg_file = tmp_path / "base_config.json"
+    cfg_file.write_text(_json.dumps({"type": policy_type}))
     monkeypatch.setattr(
         "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("003000"))
     )
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", lambda **kw: str(cfg_file))
 
 
 def _hub_finetune_request(source_id: str, policy_type: str = "act"):
@@ -2809,6 +2988,329 @@ def test_an_unknown_finetune_source_still_refuses_before_any_record(monkeypatch,
 _DEFAULT_CAMERAS = ("front", "wrist")
 
 
+# ---------------------------------------------------------------------------
+# Fine-tune policy-type guard: --policy.type must match the source checkpoint's
+# architecture, because lerobot loads pretrained weights non-strictly and would
+# otherwise train a fresh policy that only looks like a fine-tune.
+# ---------------------------------------------------------------------------
+
+
+def _finetune_source(policy_type: str, runner: str = "imported"):
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    return JobRecord(
+        id="src-1",
+        name="Imported · lerobot/smolvla_base",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type=policy_type),
+        output_dir="",
+        started_at=0.0,
+        runner=runner,
+    )
+
+
+def test_check_finetune_policy_type_rejects_mismatch() -> None:
+    from makermodslab.jobs import _check_finetune_policy_type
+
+    with pytest.raises(ValueError, match="smolvla") as exc:
+        _check_finetune_policy_type(_finetune_source("smolvla"), "act")
+    # Both sides named, so the toast tells the user what to switch.
+    assert "'act'" in str(exc.value)
+
+
+def test_check_finetune_policy_type_accepts_match() -> None:
+    from makermodslab.jobs import _check_finetune_policy_type
+
+    _check_finetune_policy_type(_finetune_source("smolvla"), "smolvla")
+
+
+def test_check_finetune_policy_type_ignores_unknown_source_type() -> None:
+    """register_imported records the "model" placeholder when a checkpoint's
+    config.json can't be read — that says nothing about the weights, so it must
+    not block a fine-tune."""
+    from makermodslab.jobs import _check_finetune_policy_type
+
+    _check_finetune_policy_type(_finetune_source("model"), "act")
+
+
+def test_finetune_start_rejects_contradicting_policy_type(tmp_path) -> None:
+    """End to end through JobRegistry.start: a smolvla base + an "act" request
+    (the old silent default) fails with a 400-shaped ValueError instead of
+    launching an ACT run from smolvla weights. No record is created."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    # A flat imported checkpoint dir whose config.json names the architecture.
+    src = tmp_path / "smolvla_ckpt"
+    src.mkdir()
+    (src / "config.json").write_text(_json.dumps({"type": "smolvla"}))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = reg.register_imported(str(src))
+    assert source.config.policy_type == "smolvla"
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",  # what the form sends when the type never propagates
+        finetune_from_job_id=source.id,
+    )
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="smolvla"),
+    ):
+        reg.start(cfg, JobTarget(runner="local"))
+
+    assert [r.id for r in reg.list(limit=10)] == [source.id]
+
+
+def test_finetune_start_accepts_matching_policy_type(tmp_path) -> None:
+    """The same fine-tune with the propagated type launches, and resolves the
+    source checkpoint into --policy.pretrained_path."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    src = tmp_path / "smolvla_ckpt"
+    src.mkdir()
+    (src / "config.json").write_text(_json.dumps({"type": "smolvla"}))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = reg.register_imported(str(src))
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="smolvla",
+        finetune_from_job_id=source.id,
+    )
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(cfg, JobTarget(runner="local"))
+
+    assert record.config.policy_type == "smolvla"
+    assert record.config.policy_pretrained_path == str(src.resolve())
+
+
+def test_read_pretrained_policy_type_reads_a_step_ref(monkeypatch, tmp_path) -> None:
+    """The pre-download policy-type guard must look inside the step it names,
+    not at the repo root — otherwise it would validate different weights than
+    the ones the run trains from."""
+    from makermodslab.jobs import read_pretrained_policy_type
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(_json.dumps({"type": "smolvla"}))
+    seen: dict = {}
+
+    def fake_download(**kwargs):
+        seen.update(kwargs)
+        return str(cfg_file)
+
+    # This one reads through jobs' module-level binding (unlike
+    # _read_checkpoint_config, which re-imports), so patch it there.
+    monkeypatch.setattr("makermodslab.jobs.hf_hub_download", fake_download)
+
+    assert read_pretrained_policy_type("user/repo@checkpoints/000500") == "smolvla"
+    assert seen["filename"] == "checkpoints/000500/pretrained_model/config.json"
+
+
+def test_contradicting_policy_type_still_refuses_before_any_record(monkeypatch, tmp_path) -> None:
+    """The cheap guards did NOT move behind the record. A request that can be
+    refused from the checkpoint's config.json alone still fails fast, with no
+    record, no job directory, and no download."""
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("a refused request must not download anything")
+
+    # The base checkpoint is smolvla; the request below asks for act.
+    _patch_hub_for_finetune(monkeypatch, tmp_path, policy_type="smolvla")
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    _fake_local_runner(monkeypatch)
+
+    with pytest.raises(ValueError, match="smolvla"):
+        reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
+
+    assert list(reg._records) == [source.id]
+    assert list(reg._output_root.iterdir()) == []
+    assert reg._prepare_threads == {}
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint-level policy-type guard. _check_finetune_policy_type compares the
+# source JobRecord's *recorded* type, so it is blind to a request that supplies
+# policy_pretrained_path directly (a public TrainingRequest field, no
+# finetune_from_job_id needed) and it opts out entirely when the record carries
+# register_imported's "model" placeholder. These cover the checkpoint's own
+# config.json being consulted instead.
+# ---------------------------------------------------------------------------
+
+
+def _flat_ckpt(tmp_path: Path, name: str, policy_type: str) -> Path:
+    """A flat pretrained_model-shaped dir whose config.json names an architecture."""
+    d = tmp_path / name
+    d.mkdir()
+    (d / "config.json").write_text(_json.dumps({"type": policy_type}))
+    return d
+
+
+def test_read_pretrained_policy_type_reads_local_config(tmp_path) -> None:
+    from makermodslab.jobs import read_pretrained_policy_type
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    assert read_pretrained_policy_type(str(ckpt)) == "smolvla"
+
+
+def test_read_pretrained_policy_type_none_when_unreadable(tmp_path) -> None:
+    """Missing config.json, blank type, and a bad Hub ref all yield None —
+    "not established", which callers must not treat as a clean result."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import read_pretrained_policy_type
+
+    bare = tmp_path / "no_config"
+    bare.mkdir()
+    assert read_pretrained_policy_type(str(bare)) is None
+
+    blank = tmp_path / "blank"
+    blank.mkdir()
+    (blank / "config.json").write_text(_json.dumps({"type": "   "}))
+    assert read_pretrained_policy_type(str(blank)) is None
+
+    # Not a directory ⇒ treated as a Hub repo id; a failed download is silent.
+    with patch("makermodslab.jobs.hf_hub_download", side_effect=OSError("offline")):
+        assert read_pretrained_policy_type("someone/nope") is None
+
+
+def test_check_pretrained_policy_type_rejects_mismatch(tmp_path) -> None:
+    from makermodslab.jobs import _check_pretrained_policy_type
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    with pytest.raises(ValueError, match="smolvla") as exc:
+        _check_pretrained_policy_type(str(ckpt), "act")
+    assert "'act'" in str(exc.value)
+
+
+def test_check_pretrained_policy_type_silent_when_matching_or_unknown(tmp_path) -> None:
+    """A match passes, and so does an unverifiable checkpoint — an unreadable
+    source must not block a launch, only an actual contradiction may."""
+    from makermodslab.jobs import _check_pretrained_policy_type
+
+    ckpt = _flat_ckpt(tmp_path, "act_ckpt", "act")
+    _check_pretrained_policy_type(str(ckpt), "act")
+
+    bare = tmp_path / "unknown"
+    bare.mkdir()
+    _check_pretrained_policy_type(str(bare), "act")
+
+
+def test_start_rejects_direct_pretrained_path_mismatch(tmp_path) -> None:
+    """The hole _check_finetune_policy_type leaves open: policy_pretrained_path
+    set directly, with no finetune_from_job_id, so the record-based guard never
+    runs. The checkpoint's own config.json must still stop it, and no record may
+    be created."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    reg = JobRegistry(tmp_path / "root")
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        policy_pretrained_path=str(ckpt),
+    )
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="smolvla"),
+    ):
+        reg.start(cfg, JobTarget(runner="local"))
+
+    assert reg.list(limit=10) == []
+
+
+def test_start_rejects_finetune_when_record_type_is_placeholder(tmp_path) -> None:
+    """register_imported stores the "model" placeholder when it can't read a
+    checkpoint's config.json, and _check_finetune_policy_type deliberately skips
+    that case. If the config becomes readable by launch time, the checkpoint
+    check must still catch the mismatch."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    src = tmp_path / "mystery_ckpt"
+    src.mkdir()
+    (src / "config.json").write_text(_json.dumps({"type": "smolvla"}))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = reg.register_imported(str(src))
+    # Simulate the import having failed to read the architecture.
+    source.config.policy_type = "model"
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        finetune_from_job_id=source.id,
+    )
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="smolvla"),
+    ):
+        reg.start(cfg, JobTarget(runner="local"))
+
+
+def test_start_allows_resume_without_checkpoint_type_check(tmp_path) -> None:
+    """Resume passes --config_path and never emits --policy.pretrained_path, so
+    the pair can't contradict and the guard must not fire on it (a resumed
+    smolvla run whose request still carries the "act" default would otherwise be
+    refused)."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    ckpt = _flat_ckpt(tmp_path, "smolvla_ckpt", "smolvla")
+    reg = JobRegistry(tmp_path / "root")
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        policy_pretrained_path=str(ckpt),
+        resume=True,
+        config_path=str(tmp_path / "train_config.json"),
+    )
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 99
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(cfg, JobTarget(runner="local"))
+    assert record.state == "running"
+
+
+# ---------------------------------------------------------------------------
+# Feature-space guard (MT44). Matching architectures are not enough: this
+# launch path is `--policy.type` + `--policy.pretrained_path`, so lerobot sizes
+# the policy from the DATASET and loads the checkpoint's weights strict=False.
+# A dof mismatch is loud-but-late for ACT and SILENT for SmolVLA/pi0 (they pad
+# to 32 dims), and renamed cameras are silent for every policy. Phase 1 refuses
+# those two; a changed camera COUNT or resolution is legitimate and only warns.
+#
+# Every Hub read is patched out: the checkpoint side through
+# jobs.hf_hub_download, the dataset side through jobs.read_dataset_features.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_CAMERAS = ("front", "wrist")
+
+
 def _feature_ckpt(
     tmp_path: Path,
     name: str,
@@ -2937,28 +3439,6 @@ def test_check_feature_space_rejects_renamed_cameras(tmp_path) -> None:
     assert "from scratch" in message
 
 
-def test_check_feature_space_rejects_disjoint_cameras_at_different_counts(tmp_path) -> None:
-    """Zero overlap is the rename mistake at an unequal count: a 1-camera `left`
-    dataset against a wrist/front checkpoint would otherwise fall past the
-    rename rule (counts differ) into the benign count-change branch. None of the
-    checkpoint's cameras survive, so it is refused."""
-    from makermodslab.jobs import _check_pretrained_feature_space
-
-    ckpt = _feature_ckpt(tmp_path, "two_cam_ckpt", cameras=("front", "wrist"))
-    with (
-        _patch_dataset_features(_dataset_features(cameras=("left",))),
-        pytest.raises(ValueError) as exc,
-    ):
-        _check_pretrained_feature_space(str(ckpt), "user/left_only_ds")
-    message = str(exc.value)
-    assert "no camera in common" in message
-    assert "front, wrist" in message
-    assert "left" in message
-    # The two ways out the message must offer.
-    assert "base model" in message
-    assert "from scratch" in message
-
-
 def test_check_feature_space_exempts_a_generic_base_from_the_rename_rule(tmp_path, caplog) -> None:
     """lerobot/smolvla_base ships camera1/camera2/camera3 — placeholders, not a
     rig. Binding those to a named 3-camera dataset is THE canonical SmolVLA
@@ -2979,11 +3459,32 @@ def test_check_feature_space_exempts_a_generic_base_from_the_rename_rule(tmp_pat
     assert "front, top, wrist" in caplog.text
 
 
+def test_check_feature_space_rejects_disjoint_cameras_at_different_counts(tmp_path) -> None:
+    """Zero overlap is the rename mistake at an unequal count, and it slipped
+    through live: a 1-camera `left` dataset against a wrist/front checkpoint
+    fell past the rename rule (counts differ) into the benign count-change
+    branch. None of the checkpoint's cameras survive, so it is refused."""
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    ckpt = _feature_ckpt(tmp_path, "two_cam_ckpt", cameras=("front", "wrist"))
+    with (
+        _patch_dataset_features(_dataset_features(cameras=("left",))),
+        pytest.raises(ValueError) as exc,
+    ):
+        _check_pretrained_feature_space(str(ckpt), "user/left_only_ds")
+    message = str(exc.value)
+    assert "no camera in common" in message
+    assert "front, wrist" in message
+    assert "left" in message
+    # The two ways out the message must offer.
+    assert "base model" in message
+    assert "from scratch" in message
+
+
 def test_check_feature_space_exempts_a_generic_base_from_the_disjoint_rule(tmp_path, caplog) -> None:
     """The canonical smolvla_base fine-tune is disjoint AND unequal in count
     (camera1/2/3 vs a real 2-camera rig), so the generic-base exemption has to
-    cover the disjoint rule too or it would refuse the commonest fine-tune there
-    is."""
+    cover the new rule too or it would refuse the commonest fine-tune there is."""
     import logging
 
     from makermodslab.jobs import _check_pretrained_feature_space
@@ -3022,9 +3523,9 @@ def test_check_feature_space_accepts_matching_features(tmp_path) -> None:
 
 
 def test_check_feature_space_allows_camera_count_change_with_a_warning(tmp_path, caplog) -> None:
-    """A dropped camera, with the rest still shared, is a real sensor-suite
-    change but a legitimate one (ACT's backbone is shared), so phase 1 records
-    it instead of refusing. The warn-and-confirm UI is phase 2."""
+    """A dropped camera is a real sensor-suite change but a legitimate one
+    (ACT's backbone is shared), so phase 1 records it instead of refusing. The
+    warn-and-confirm UI is phase 2."""
     import logging
 
     from makermodslab.jobs import _check_pretrained_feature_space
@@ -3075,9 +3576,7 @@ def test_check_feature_space_silent_when_either_side_is_unreadable(tmp_path) -> 
         _check_pretrained_feature_space(str(bare), "user/bimanual_ds")
 
     # A config.json with no feature maps at all says nothing either.
-    typed_only = tmp_path / "type_only"
-    typed_only.mkdir()
-    (typed_only / "config.json").write_text(_json.dumps({"type": "act"}))
+    typed_only = _flat_ckpt(tmp_path, "type_only", "act")
     with _patch_dataset_features(_dataset_features(state_dim=12, action_dim=12)):
         _check_pretrained_feature_space(str(typed_only), "user/bimanual_ds")
 
@@ -3088,9 +3587,8 @@ def test_check_feature_space_silent_when_either_side_is_unreadable(tmp_path) -> 
 
 
 def test_read_pretrained_feature_space_reads_a_step_ref(monkeypatch, tmp_path) -> None:
-    """The read must look inside the step the ref names, not at the repo root —
-    otherwise the guard would validate different weights than the run trains
-    from."""
+    """Like the policy-type read, this must look inside the step it names —
+    and it must come out of the SAME config.json fetch, not a second one."""
     from makermodslab.jobs import read_pretrained_feature_space
 
     cfg_file = tmp_path / "config.json"
@@ -3170,6 +3668,661 @@ def test_start_allows_matching_feature_space(tmp_path) -> None:
     ):
         record = reg.start(cfg, JobTarget(runner="local"))
     assert record.state == "running"
+
+
+# --- Deliberate stop vs genuine failure -------------------------------------
+#
+# Regression cover for the defect where every press of Stop landed in run
+# history as `failed` + "Subprocess exited with code 1", indistinguishable
+# from a crash: JobRegistry.stop() recorded no intent and the watchdog had
+# only the exit code to go on. The state machine already had `interrupted`,
+# reachable only by startup reconciliation of a stranded record.
+
+
+class _FakeRunner:
+    """Minimal JobRunner. Deliberately does NOT expose the optional hooks —
+    subclasses add them, mirroring runners that can and can't answer."""
+
+    def __init__(self, *, code=None, on_stop_code=None, stage=None, on_stop_stage=None):
+        self._code = code  # None + no stage => still running
+        self._on_stop_code = on_stop_code
+        self._stage = stage
+        self._on_stop_stage = on_stop_stage
+        self.stopped = False
+
+    def start(self, job_id, config, output_dir) -> None:
+        # No subprocess: liveness is driven by the fields above so the
+        # watchdog's exit-detection can be stepped deterministically.
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+        if self._on_stop_code is not None:
+            self._code = self._on_stop_code
+        # Idempotent like HfCloudJobRunner._set_terminal: a stage the platform
+        # already reported survives our cancel.
+        if self._on_stop_stage is not None and self._stage is None:
+            self._stage = self._on_stop_stage
+
+    def is_running(self) -> bool:
+        return self._code is None and self._stage is None
+
+    def returncode(self):
+        if self._stage is not None:
+            return 0 if self._stage == "COMPLETED" else 1
+        return self._code
+
+    def stream_log_lines(self):
+        return []
+
+    def wandb_run_url(self):
+        return None
+
+    def pid(self):
+        return 4242
+
+
+class _FakeSignallingRunner(_FakeRunner):
+    """A local-shaped runner: reports whether it actually signalled."""
+
+    def __init__(self, *, signals=True, **kw):
+        super().__init__(**kw)
+        self._signals = signals
+
+    def stop(self) -> None:
+        if self._signals:
+            super().stop()
+        else:
+            # Process was already gone; stop() short-circuits and claims
+            # nothing, exactly like LocalJobRunner's poll() guard.
+            self.stopped = True
+
+    def stop_signalled(self) -> bool:
+        return self._signals and self.stopped
+
+
+class _FakeStagedRunner(_FakeRunner):
+    """A cloud-shaped runner: reports a platform terminal stage + message."""
+
+    def __init__(self, *, message=None, **kw):
+        super().__init__(**kw)
+        self._message = message
+
+    def terminal_stage(self):
+        return self._stage
+
+    def terminal_message(self):
+        return self._message
+
+
+def _start_with(reg, runner, **cfg_kw):
+    """Start a job whose runner is `runner`, via the real JobRegistry.start."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    cfg = TrainingRequest(dataset_repo_id="user/ds", **cfg_kw)
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: runner):
+        return reg.start(cfg, JobTarget(runner="local"))
+
+
+def _stop_and_finalise(reg, job_id):
+    """Stop, then force a watchdog tick so the assertion doesn't race the
+    1Hz background thread. _tick is a no-op if that thread got there first."""
+    reg.stop(job_id)
+    reg._tick()
+    return reg.get(job_id)
+
+
+# -- the pure classifier ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rc", "stop_requested", "stage", "expected"),
+    [
+        # Local: a clean exit is `done` no matter what else is true.
+        (0, False, None, "done"),
+        (0, True, None, "done"),
+        # Local: nonzero without a stop is a real failure (unchanged).
+        (1, False, None, "failed"),
+        (-15, False, None, "failed"),
+        # Local: nonzero after a stop we signalled is deliberate.
+        (1, True, None, "interrupted"),
+        (-15, True, None, "interrupted"),
+        # No code at all: no evidence, stays a failure (unchanged).
+        (None, False, None, "failed"),
+        (None, True, None, "failed"),
+        # Cloud: the platform stage wins over the collapsed exit code.
+        (0, False, "COMPLETED", "done"),
+        (0, True, "COMPLETED", "done"),
+        (1, True, "CANCELED", "interrupted"),
+        (1, False, "CANCELED", "failed"),
+        (1, True, "ERROR", "failed"),
+        (1, False, "ERROR", "failed"),
+        (1, True, "DELETED", "failed"),
+        # Stage matching is case-insensitive (HF returns an enum we str()).
+        (1, True, "canceled", "interrupted"),
+    ],
+)
+def test_classify_terminal_state_table(rc, stop_requested, stage, expected) -> None:
+    from makermodslab.jobs import classify_terminal_state
+
+    assert (
+        classify_terminal_state(returncode=rc, stop_requested=stop_requested, terminal_stage=stage)
+        == expected
+    )
+
+
+# -- registry: local runner -------------------------------------------------
+
+
+def test_stop_records_intent_before_signalling(tmp_path) -> None:
+    """The intent must be on the registry before the signal leaves, or the
+    watchdog can finalise a stop it never heard about."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    seen: list[bool] = []
+
+    class _Probe(_FakeSignallingRunner):
+        def stop(self):
+            # Observed from inside stop(), i.e. before any signal lands.
+            seen.append(record.id in reg._stop_requested)
+            super().stop()
+
+    runner = _Probe(on_stop_code=-15)
+    record = _start_with(reg, runner)
+    reg.stop(record.id)
+
+    assert seen == [True]
+
+
+def test_local_stop_is_interrupted_not_failed(tmp_path) -> None:
+    from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+
+    final = _stop_and_finalise(reg, record.id)
+    assert final.state == "interrupted"
+    assert final.error_message == STOPPED_BY_REQUEST_MESSAGE
+    assert "exited with code" not in (final.error_message or "")
+    # The real code is still recorded for anyone debugging.
+    assert final.exit_code == -15
+    assert final.ended_at is not None
+
+
+def test_local_stop_of_trainer_that_catches_sigterm_is_still_interrupted(tmp_path) -> None:
+    """A trainer with its own SIGTERM handler exits 1, not -15. Narrowing
+    `interrupted` to signal-shaped codes would leave the bug unfixed here."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=1))
+
+    assert _stop_and_finalise(reg, record.id).state == "interrupted"
+
+
+def test_crash_without_a_stop_stays_failed(tmp_path) -> None:
+    """The unchanged path: nothing asked this to stop, so it failed."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner()
+    record = _start_with(reg, runner)
+
+    runner._code = 1  # crashed on its own
+    reg._tick()
+
+    final = reg.get(record.id)
+    assert final.state == "failed"
+    assert final.error_message == "Subprocess exited with code 1"
+
+
+def test_clean_finish_racing_a_stop_stays_done(tmp_path) -> None:
+    """rc == 0 means the trainer ran its own shutdown to completion; a stop
+    that arrived too late must not relabel it."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner(on_stop_code=0)
+    record = _start_with(reg, runner)
+
+    final = _stop_and_finalise(reg, record.id)
+    assert final.state == "done"
+    assert final.error_message is None
+
+
+def test_crash_before_the_signal_landed_is_not_laundered(tmp_path) -> None:
+    """The process died on its own between the intent and the signal, so
+    LocalJobRunner.stop() short-circuits and reports it signalled nothing.
+    The nonzero code is the process's own: still a failure."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner(signals=False)
+    record = _start_with(reg, runner)
+
+    runner._code = 1  # crashed in the window
+    final = _stop_and_finalise(reg, record.id)
+
+    assert runner.stopped is True  # we did ask
+    assert final.state == "failed"
+    assert final.error_message == "Subprocess exited with code 1"
+
+
+def test_runner_without_the_hook_still_gets_interrupted(tmp_path) -> None:
+    """A runner that can't say whether it signalled abstains rather than
+    vetoing — recorded intent alone is enough."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeRunner(on_stop_code=1)
+    assert not hasattr(runner, "stop_signalled")
+    record = _start_with(reg, runner)
+
+    assert _stop_and_finalise(reg, record.id).state == "interrupted"
+
+
+def test_stop_intent_is_dropped_after_finalisation(tmp_path) -> None:
+    """No stale intent may linger to mislabel anything later."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+    _stop_and_finalise(reg, record.id)
+
+    assert record.id not in reg._stop_requested
+
+
+def test_interrupted_state_survives_a_restart(tmp_path) -> None:
+    """The classification is persisted, not just in-memory — the user's
+    history has to still read `interrupted` on the next launch."""
+    from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+
+    root = tmp_path / "root"
+    reg = JobRegistry(root)
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+    _stop_and_finalise(reg, record.id)
+    reg.shutdown()
+
+    reloaded = JobRegistry(root).get(record.id)
+    assert reloaded.state == "interrupted"
+    assert reloaded.error_message == STOPPED_BY_REQUEST_MESSAGE
+
+
+def test_stop_rejects_an_already_finished_job_without_recording_intent(tmp_path) -> None:
+    from makermodslab.jobs import JobNotRunningError, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner()
+    record = _start_with(reg, runner)
+
+    runner._code = 0
+    reg._tick()
+    assert reg.get(record.id).state == "done"
+
+    with pytest.raises(JobNotRunningError):
+        reg.stop(record.id)
+    assert record.id not in reg._stop_requested
+
+
+# -- registry: cloud-shaped runner (classified on terminal_stage) -----------
+
+
+def test_cloud_cancel_is_interrupted(tmp_path) -> None:
+    """The reported case: a stopped HF Jobs run. returncode() collapses every
+    non-COMPLETED stage to 1, so before this it read `failed` + "Subprocess
+    exited with code 1" and looked like a broken model."""
+    from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _start_with(reg, _FakeStagedRunner(on_stop_stage="CANCELED"))
+
+    final = _stop_and_finalise(reg, record.id)
+    assert final.state == "interrupted"
+    assert final.error_message == STOPPED_BY_REQUEST_MESSAGE
+
+
+def test_cloud_job_that_completed_before_the_cancel_stays_done(tmp_path) -> None:
+    """The poller saw COMPLETED first; _set_terminal is idempotent so our
+    cancel doesn't overwrite it, and the run keeps its success."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner(on_stop_stage="CANCELED")
+    record = _start_with(reg, runner)
+
+    runner._stage = "COMPLETED"  # observed by the status poller
+    final = _stop_and_finalise(reg, record.id)
+
+    assert final.state == "done"
+    assert final.error_message is None
+
+
+def test_cloud_job_that_errored_before_the_cancel_stays_failed(tmp_path) -> None:
+    """A real crash that merely coincided with the stop must not be laundered
+    into `interrupted` — that would hide a genuine failure."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner(on_stop_stage="CANCELED", message="boom")
+    record = _start_with(reg, runner)
+
+    runner._stage = "ERROR"
+    final = _stop_and_finalise(reg, record.id)
+
+    assert final.state == "failed"
+    assert final.error_message == "boom"
+
+
+def test_cloud_timeout_stays_failed_and_keeps_its_platform_message(tmp_path) -> None:
+    """HF Jobs' 'Job timeout' arrives as an ERROR stage with a message. It is
+    a failure, not a user stop, and the message must still reach the UI."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner(message="Job timeout")
+    record = _start_with(reg, runner)
+
+    runner._stage = "ERROR"
+    reg._tick()
+
+    final = reg.get(record.id)
+    assert final.state == "failed"
+    assert final.error_message == "Job timeout"
+
+
+def test_cloud_cancel_from_outside_makermodslab_stays_failed(tmp_path) -> None:
+    """A CANCELED we never asked for (HF web UI, platform-side kill). HF's
+    stage doesn't say who asked, so this is left alone rather than guessed
+    into `interrupted`. Documented limitation, asserted so it's a choice."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeStagedRunner()
+    record = _start_with(reg, runner)
+
+    runner._stage = "CANCELED"
+    reg._tick()
+
+    assert reg.get(record.id).state == "failed"
+
+
+# -- TailingJobRunner: no Popen to reap, so the code is synthesised ---------
+
+
+def _tailing_runner(pid, monkeypatch, *, alive=True, status_path=None):
+    """A TailingJobRunner over a fake pid; os.kill (liveness probes) and
+    os.killpg (the stop signal) are both stubbed so no real process or group
+    is signalled. `status_path` defaults to a path that cannot exist, i.e. the
+    "wrapper left no exit status" case."""
+    from makermodslab import jobs as jobs_mod
+
+    state = {"alive": alive}
+
+    def fake_kill(target_pid, sig):
+        assert target_pid == pid
+        if not state["alive"]:
+            raise ProcessLookupError(pid)
+        if sig != 0:
+            state["alive"] = False  # SIGTERM landed
+
+    monkeypatch.setattr(jobs_mod.os, "kill", fake_kill)
+    monkeypatch.setattr(jobs_mod.os, "killpg", fake_kill)
+    runner = jobs_mod.TailingJobRunner(
+        jobs_mod.TrainingMetrics(),
+        Path("/nonexistent"),
+        pid,
+        status_path if status_path is not None else Path("/nonexistent/exit_status"),
+    )
+    return runner, state
+
+
+def test_tailing_runner_reports_sigterm_after_a_delivered_stop(monkeypatch) -> None:
+    """With no exit status on disk — the normal shape of a stop, since the
+    group TERM kills the wrapper before it can write one — a bare "the pid is
+    gone" would file a deliberate stop as `done`. Once we know we signalled a
+    live pid, naming the signal is the more honest synthetic answer, and it is
+    what lets classify_terminal_state reach `interrupted`."""
+    import signal as signal_mod
+
+    runner, _ = _tailing_runner(31337, monkeypatch)
+    assert runner.returncode() is None  # still alive
+
+    runner.stop()
+    assert runner.stop_signalled() is True
+    assert runner.returncode() == -signal_mod.SIGTERM
+
+
+def test_tailing_runner_prefers_the_real_exit_code_over_the_synthesised_signal(tmp_path, monkeypatch) -> None:
+    """The synthesised SIGTERM above is a fallback, never a preference. When
+    the wrapper did manage to write its status file (the trainer installed its
+    own handler, shut down cleanly and exited 0 before the group TERM reached
+    the wrapper), that REAL code wins — otherwise a run that genuinely
+    finished would be filed as `interrupted` on the strength of a signal that
+    changed nothing."""
+    status_path = tmp_path / "exit_status"
+    status_path.write_text("0")
+
+    runner, _ = _tailing_runner(31339, monkeypatch, status_path=status_path)
+    runner.stop()
+
+    assert runner.stop_signalled() is True
+    assert runner.returncode() == 0
+
+
+def test_tailing_runner_reports_unconfirmed_when_pid_was_already_gone(monkeypatch) -> None:
+    """Nothing was signalled, so the pid's absence isn't ours to claim — and
+    with no exit status on disk either, nothing else knows how it ended.
+
+    This used to synthesise an optimistic 0 (finalising as `done`), which MT10
+    removed: an unconfirmed disappearance is reported as None here and
+    finalised as `interrupted` by JobRegistry._tick(), never as a success we
+    can't back up."""
+    runner, _ = _tailing_runner(31338, monkeypatch, alive=False)
+
+    runner.stop()
+    assert runner.stop_signalled() is False
+    assert runner.returncode() is None
+
+
+def test_two_imports_of_one_task_and_policy_are_still_disambiguated(monkeypatch, tmp_path) -> None:
+    """Same task AND same policy: nothing on either card separates them, so the
+    timestamp the title dropped comes back on both."""
+    early = "makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30"
+    late = "makermods/smolvla_makermods_orange_box_2026-08-05_09-00-00"
+    reg = _typed_hub_reg(monkeypatch, tmp_path, {early: "smolvla", late: "smolvla"})
+    a = reg.register_imported(early)
+    b = reg.register_imported(late)
+
+    names = {r.id: r.name for r in reg.list(limit=100)}
+    assert names[a.id] == "orange_box (2026-08-03)"
+    assert names[b.id] == "orange_box (2026-08-05)"
+
+
+def _fake_resume_snapshot(tmp_path, seen: dict, *, complete: bool = True):
+    """A snapshot_download stand-in that lays down a real checkpoint tree.
+
+    Mirrors what the Hub returns for `allow_patterns=['checkpoints/<step>/*']`:
+    a snapshot root holding the whole step directory. `complete=False` is the
+    interrupted-upload shape — weights but no optimizer state — which a resume
+    must refuse rather than hand to the trainer."""
+
+    def _download(**kwargs):
+        seen.update(kwargs)
+        root = tmp_path / "snapshot"
+        _make_checkpoint(root, 100, with_optimizer=complete)
+        # The Hub's zero-padded dir name, which _make_checkpoint doesn't use.
+        (root / "checkpoints" / "100").rename(root / "checkpoints" / "000100")
+        return str(root)
+
+    return _download
+
+
+class _FakeUploadApi:
+    """HfApi stand-in for the upload path: records the calls, moves no bytes.
+
+    `list_repo_files` answers from whatever has been "uploaded" so far, so the
+    post-upload verification in _upload_resume_then_start exercises the real
+    completeness rule instead of a stub that always says yes."""
+
+    def __init__(self, files: list[str] | None = None) -> None:
+        self._files = list(files or [])
+        self.created: list[dict] = []
+        self.uploaded: list[dict] = []
+        self.upload_error: Exception | None = None
+
+    def create_repo(self, **kwargs):
+        self.created.append(kwargs)
+
+    def upload_folder(self, **kwargs):
+        if self.upload_error is not None:
+            raise self.upload_error
+        self.uploaded.append(kwargs)
+        step_dir = kwargs["path_in_repo"].rsplit("/", 1)[-1]
+        self._files.extend(_hub_checkpoint_files(step_dir))
+
+    def list_repo_files(self, repo_id, repo_type):
+        return self._files
+
+
+def test_cloud_parent_resumed_locally_seeds_progress_from_the_inherited_step(tmp_path, monkeypatch) -> None:
+    """The record's metrics start at the checkpoint's step, not at 0 — and they
+    do so from the moment it is created, i.e. before the (minutes-long) download
+    finishes. A 0 there is what wipes the seeded loss chart (MT16's local twin)."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}))
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()):
+        # `resume_from_step` left unset: "the latest checkpoint", which the
+        # resolver has to pin to a real step for the seeding to work at all.
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+        assert record.metrics.current_step == 100
+        assert record.metrics.total_steps == record.config.steps
+        assert record.config.resume_from_step == 100
+        _join_prepare(reg, record.id)
+
+
+def test_cloud_parent_resumed_locally_refuses_an_incomplete_hub_checkpoint(tmp_path, monkeypatch) -> None:
+    """Refused synchronously, from the repo's file listing, before a record or a
+    single byte exists — the completeness gate is the same one cloud→cloud uses."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100", with_optimizer=False)),
+    )
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("an incomplete checkpoint must be refused before downloading")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="incomplete"),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert list(reg._records) == ["src"]
+    _assert_nothing_was_created(reg)
+
+
+def test_cloud_parent_resumed_locally_fails_the_job_on_an_incomplete_download(tmp_path, monkeypatch) -> None:
+    """MT4's failure mode, closed: if the bytes that land are short of a
+    resumable checkpoint, the job fails with a message naming it and NO trainer
+    is spawned — rather than lerobot dying on a missing optimizer file minutes
+    into startup."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    # The listing says complete; the bytes that arrive are not (the uploader
+    # race). Only the on-disk check can catch that.
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download", _fake_resume_snapshot(tmp_path, {}, complete=False)
+    )
+    fake_runner = MagicMock()
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+        _join_prepare(reg, record.id)
+
+    failed = reg._records[record.id]
+    assert failed.state == "failed"
+    assert "optimizer_state.safetensors" in failed.error_message
+    assert not fake_runner.start.called
+
+
+def test_local_parent_resumed_on_the_cloud_fails_when_the_upload_cannot_be_confirmed(
+    tmp_path, monkeypatch, cloud_preflight
+) -> None:
+    """An upload that reports success but leaves the repo short of a resumable
+    checkpoint is the same failure as one that raised — verified from the Hub's
+    own listing, before anything is submitted."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+
+    class _SilentlyPartialApi(_FakeUploadApi):
+        def upload_folder(self, **kwargs):
+            self.uploaded.append(kwargs)
+            self._files.extend(_hub_checkpoint_files("100", with_optimizer=False))
+
+    api = _SilentlyPartialApi()
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: api)
+    monkeypatch.setattr("makermodslab.jobs.cached_whoami", lambda: {"name": "alice"})
+    fake_runner = MagicMock()
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_local_to_cloud_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+        _join_prepare(reg, record.id)
+
+    failed = reg._records[record.id]
+    assert failed.state == "failed"
+    assert "optimizer_state.safetensors" in failed.error_message
+    assert not fake_runner.start.called
+    assert reg._records["src"].checkpoints_hub_steps == []
+
+
+def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> None:
+    """The other half of the gate: a same-runner cloud resume is untouched and
+    still resolves the parent's Hub checkpoint. (local→local is covered by
+    test_start_still_resumes_a_run_that_stopped_short above.)"""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "hfjob-1"
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert record.config.resume is True
+    assert record.config.resume_from_hub_repo == "user/some-model"
+    assert record.config.resume_from_hub_step == "000100"
 
 
 def _write_running_job_json(job_dir: Path, output_dir: Path) -> None:
@@ -3265,3 +4418,86 @@ def test_boot_reattach_stays_interrupted_when_no_exit_status_file(tmp_path) -> N
     record = reg.get("job-1")
     assert record.state == "interrupted"
     assert record.exit_code is None
+
+
+def _write_log(path: Path, messages: list[str]) -> Path:
+    """Write messages in the log.jsonl shape both runners produce."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(_json.dumps({"timestamp": 1.0, "message": m}) for m in messages) + "\n")
+    return path
+
+
+def test_oom_failure_reason_names_the_gpu_oom(tmp_path) -> None:
+    """The whole point: a run that died on CUDA OOM must finalise with a reason
+    the user can act on, not "Subprocess exited with code 1"."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(
+        tmp_path / "log.jsonl",
+        [
+            "INFO 2026-08-07 10:31:02 train.py:243 step:1 loss:2.104",
+            'File "/app/lerobot/policies/pi05/modeling_pi05.py", line 612, in forward',
+            "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 4.20 GiB. GPU 0 has a total "
+            "capacity of 79.14 GiB of which 1.88 GiB is free.",
+            "[wrapper] trainer exited with rc=1",
+        ],
+    )
+    reason = _oom_failure_reason(log, 1)
+    assert reason is not None
+    assert "memory" in reason.lower()
+    assert "batch size" in reason.lower()
+
+
+def test_oom_failure_reason_reads_past_the_last_line(tmp_path) -> None:
+    """torch prints the OOM body BELOW the exception line and the trainer keeps
+    logging on its way down, so matching only the final line would miss it."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(
+        tmp_path / "log.jsonl",
+        ["torch.OutOfMemoryError: CUDA out of memory."]
+        + [f"[wrapper] scanning checkpoints {i}" for i in range(30)],
+    )
+    assert _oom_failure_reason(log, 1) is not None
+
+
+def test_oom_failure_reason_is_silent_on_an_ordinary_failure(tmp_path) -> None:
+    """No OOM evidence ⇒ None, so the caller keeps its existing message rather
+    than mislabelling every failure as out of memory."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(tmp_path / "log.jsonl", ["ValueError: expected 6-dim action, got 12"])
+    assert _oom_failure_reason(log, 1) is None
+    assert _oom_failure_reason(tmp_path / "missing.jsonl", 1) is None
+
+
+def test_oom_failure_reason_recognises_a_sigkill_with_an_empty_log(tmp_path) -> None:
+    """The host OOM killer sends SIGKILL and the process prints nothing, so the
+    exit code is the only evidence there is."""
+    from makermodslab.jobs import _oom_failure_reason
+
+    log = _write_log(tmp_path / "log.jsonl", ["INFO step:120 loss:0.8"])
+    for rc in (-9, 137):
+        reason = _oom_failure_reason(log, rc)
+        assert reason is not None and "ram" in reason.lower()
+    assert _oom_failure_reason(log, 1) is None
+
+
+def test_read_log_tail_messages_survives_a_mid_line_seek(tmp_path) -> None:
+    """The reader seeks to a fixed byte offset, which lands inside a record;
+    the fragment must be dropped, not fed to json.loads as a whole line."""
+    from makermodslab.jobs import _LOG_TAIL_BYTES, _read_log_tail_messages
+
+    filler = ["x" * 200 for _ in range(_LOG_TAIL_BYTES // 200 + 40)]
+    log = _write_log(tmp_path / "log.jsonl", [*filler, "torch.OutOfMemoryError: CUDA out of memory."])
+    messages = _read_log_tail_messages(log)
+    assert messages  # the fragment didn't take the whole window with it
+    assert messages[-1] == "torch.OutOfMemoryError: CUDA out of memory."
+
+
+def test_read_log_tail_messages_skips_malformed_lines(tmp_path) -> None:
+    from makermodslab.jobs import _read_log_tail_messages
+
+    path = tmp_path / "log.jsonl"
+    path.write_text('{"timestamp": 1.0, "message": "ok"}\nnot json at all\n{"timestamp": 2.0}\n')
+    assert _read_log_tail_messages(path) == ["ok"]

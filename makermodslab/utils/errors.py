@@ -21,7 +21,9 @@ Deliberately free of any rollout/recording/teleop specifics: the input is just
 text, so every feature can reuse it regardless of where the text came from.
 Rollout mines it out of a failed subprocess's log tail (see rollout.py);
 recording/teleop run in-process and will pass the message of a caught exception
-(`str(exc)`) instead — same functions, different source.
+(`str(exc)`) instead — same functions, different source. Training is a third
+source: jobs.py mines a finished run's log the same way rollout does, local and
+cloud alike (see is_out_of_memory).
 """
 
 from __future__ import annotations
@@ -43,6 +45,36 @@ def is_cleanup_error(error_text: str | None) -> bool:
         return False
     low = error_text.lower()
     return any(marker in low for marker in CLEANUP_MARKERS)
+
+
+# An allocator running out of memory, keyed on what each backend actually
+# prints: PyTorch's CUDA allocator raises "torch.OutOfMemoryError: CUDA out of
+# memory", ROCm and MPS have their own wording, and a host-RAM allocation
+# failure surfaces through DefaultCPUAllocator. Deliberately NOT keyed on a
+# bare "killed": the Linux OOM killer's SIGKILL leaves no text in the log at
+# all, so that case is recognised from the exit code by the caller.
+OOM_MARKERS: tuple[str, ...] = (
+    "cuda out of memory",
+    "hip out of memory",
+    "mps backend out of memory",
+    "outofmemoryerror",
+    "cuda error: out of memory",
+    "defaultcpuallocator: can't allocate memory",
+)
+
+
+def is_out_of_memory(error_text: str | None) -> bool:
+    """True when the error text is an allocator running out of memory (see
+    OOM_MARKERS). Case-insensitive; None/empty text is False.
+
+    Training's most common hard failure and, until this existed, its most
+    silent one: the trainer dies on the first step, the platform reports only
+    that the process exited non-zero, and the actual cause sits in a log the
+    user has to go find and read."""
+    if not error_text:
+        return False
+    low = error_text.lower()
+    return any(marker in low for marker in OOM_MARKERS)
 
 
 def format_exception(exc: BaseException, limit: int = 500) -> str:
@@ -78,14 +110,22 @@ def classify_outcome(work_completed: bool, error_text: str | None) -> str:
 
 
 def friendly_hint(error_text: str | None) -> str | None:
-    """A plain-language, actionable headline for the common SO-101 failures,
-    or None when the text doesn't match a known pattern.
+    """A plain-language, actionable headline for the common SO-101 and
+    training failures, or None when the text doesn't match a known pattern.
 
     Pure text → hint: pass a subprocess log-tail snippet or the message of a
     caught exception — nothing here is coupled to how the text was obtained."""
     if not error_text:
         return None
     low = error_text.lower()
+    # Checked first: an OOM traceback often carries a device/allocator string
+    # that would otherwise trip one of the connection branches below, and it
+    # is unambiguous when it matches.
+    if is_out_of_memory(error_text):
+        return (
+            "The GPU ran out of memory. Turn on mixed precision (AMP), lower the batch size, "
+            "or run on a larger GPU."
+        )
     if "overload" in low or "torque_enable" in low:
         return (
             "A motor overloaded — usually the gripper holding an object too hard. Release the object / "
@@ -149,7 +189,20 @@ def friendly_hint(error_text: str | None) -> str | None:
             "set FOURCC=MJPG, and close other heavy apps, then try again."
         )
     if "failed to set capture_" in low or "actual_width" in low or "actual_height" in low:
-        return "A camera doesn't support the configured resolution — open camera settings and click Auto."
+        return (
+            "A camera didn't come up in the configured resolution — open camera settings and click Auto. "
+            "If it keeps failing the same way (even without unplugging anything), the camera's OS-level "
+            "session is likely stuck — restart MakerMods Lab to clear it."
+        )
+    # Same read-back failure as the resolution case above, from lerobot's fps
+    # negotiation step instead (_validate_fps). Both are driven by free-form
+    # numbers in the same camera-settings panel, so both can be a permanent
+    # "this device can't do that" rather than turbulence. Without this branch
+    # an unsupported fps was the one camera misconfiguration that got retried
+    # (record.py's _is_transient_camera_error matches it) and then surfaced
+    # with no guidance at all — strictly worse than the resolution case.
+    if "failed to set fps" in low or "actual_fps" in low:
+        return "A camera doesn't support the configured frame rate — open camera settings and click Auto."
     if "permission" in low and ("port" in low or "com" in low):
         return "Couldn't open the serial port — close anything else using it, or run `makermodslab --stop`."
     return None

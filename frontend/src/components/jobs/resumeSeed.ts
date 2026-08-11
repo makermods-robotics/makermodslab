@@ -19,7 +19,9 @@ import type { ResumeSeed } from "@/components/training/TrainingConfigurator";
  * its highest real step, not from the sentinel. A list holding only the
  * sentinel still yields 0, which the callers' own "already reached its
  * target" / resume gates handle. */
-export function latestResumableStep(checkpoints: JobCheckpoint[]): number | null {
+export function latestResumableStep(
+  checkpoints: JobCheckpoint[],
+): number | null {
   if (checkpoints.length === 0) return null;
   return checkpoints.reduce((best, c) => (c.step > best ? c.step : best), -1);
 }
@@ -47,13 +49,19 @@ export function latestResumableStep(checkpoints: JobCheckpoint[]): number | null
  * records are not resumable and never reach here; they map to "local" for
  * exhaustiveness.
  *
- * Scope note: this fills exactly the fields `ResumeSeed` declares today —
- * identity, dataset, policy, the step budget and the log/save cadence, plus the
- * runner and its flavor. The parent's HF Jobs timeout and its hyperparameters
- * (batch size, seed, worker count, device/AMP, optimizer) are NOT carried,
- * because the seed type has nowhere to put them and the configurator has
- * nothing to read them from. Widening that is a training-side change, not a
- * presentation one — see the PR description's deferred list.
+ * Scope note: this fills exactly the fields `ResumeSeed` declares today. That
+ * used to stop at identity, dataset, policy, the step budget, the log/save
+ * cadence and the runner/flavor — the timeout and hyperparameters were left out
+ * because the seed type had nowhere to put them. `main` has since widened the
+ * type (NEW-12), so they are carried here now; leaving them out would have
+ * quietly regressed a shipped fix the moment the two branches met. Two of them
+ * matter for different reasons: `hfJobTimeout` changes what the continuation
+ * gets (omitted, the form renders blank and the runner resolves its own
+ * default, capping a run already known to need longer), while the
+ * hyperparameters do not change what trains — lerobot rebuilds those from the
+ * checkpoint's train_config.json — but keep the form from displaying fresh-run
+ * defaults for a continuation, and keep the new record's persisted config
+ * truthful about the run's shape.
  */
 export function buildResumeSeed(job: JobRecord, step: number): ResumeSeed {
   const parent = job.config;
@@ -69,5 +77,16 @@ export function buildResumeSeed(job: JobRecord, step: number): ResumeSeed {
     saveFreq: parent.save_freq,
     runner,
     flavor: runner === "hf_cloud" ? (job.hf_flavor ?? undefined) : undefined,
+    hfJobTimeout:
+      runner === "hf_cloud" ? (parent.hf_job_timeout ?? undefined) : undefined,
+    batchSize: parent.batch_size,
+    seed: parent.seed,
+    numWorkers: parent.num_workers,
+    policyDevice: parent.policy_device,
+    policyUseAmp: parent.policy_use_amp,
+    optimizerType: parent.optimizer_type,
+    optimizerLr: parent.optimizer_lr,
+    optimizerWeightDecay: parent.optimizer_weight_decay,
+    optimizerGradClipNorm: parent.optimizer_grad_clip_norm,
   };
 }

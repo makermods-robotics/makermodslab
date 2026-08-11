@@ -120,6 +120,11 @@ const TrainingJobDialog: React.FC<{
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  // Whether selectedStep was chosen BY THE USER (dropdown) rather than
+  // auto-seeded. An auto-seeded selection follows the newest checkpoint as
+  // saves land during training; a user's explicit pick stays put (until the
+  // checkpoint it names disappears, e.g. a deleted run).
+  const userPickedStepRef = useRef(false);
 
   // Seed logs from the persistent on-disk file once on mount, so closing and
   // reopening the dialog (or coming in fresh on a finished/interrupted job)
@@ -154,12 +159,19 @@ const TrainingJobDialog: React.FC<{
           if (cancelled) return;
           setCheckpoints(cks);
           if (cks.length > 0) {
+            // Backend list is step-ascending, so the last entry is newest.
             const latest = cks[cks.length - 1].step;
-            setSelectedStep((prev) =>
-              prev != null && cks.some((c) => c.step === prev) ? prev : latest,
-            );
+            setSelectedStep((prev) => {
+              const keepUserPick =
+                userPickedStepRef.current &&
+                prev != null &&
+                cks.some((c) => c.step === prev);
+              if (!keepUserPick) userPickedStepRef.current = false;
+              return keepUserPick ? prev : latest;
+            });
           } else {
             setSelectedStep(null);
+            userPickedStepRef.current = false;
           }
         })
         .catch(() => {
@@ -437,7 +449,10 @@ const TrainingJobDialog: React.FC<{
                       checkpoints.find((c) => c.step === selectedStep)?.ref ??
                       null
                     }
-                    onChange={(c) => setSelectedStep(c.step)}
+                    onChange={(c) => {
+                      userPickedStepRef.current = true;
+                      setSelectedStep(c.step);
+                    }}
                   />
                   <Button
                     onClick={() => {

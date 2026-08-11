@@ -629,6 +629,18 @@ const JobCard: React.FC<Props> = ({
           >
             {isImported ? "\u200e" + subtitle : subtitle}
           </div>
+          {/* Why it failed, on the card itself. The reason was already on the
+              record but only the job dialog rendered it, so a run that died on
+              something actionable (out of memory) looked, from the list the
+              user actually lands on, like it had failed for no reason. */}
+          {job.state === "failed" && job.error_message ? (
+            <div
+              className="text-destructive mt-0.5 line-clamp-2 text-[11px]"
+              title={job.error_message}
+            >
+              {job.error_message}
+            </div>
+          ) : null}
         </div>
         <MetaRows rows={metaRows} />
         {showProgressBar ? (
@@ -805,6 +817,7 @@ const JobCard: React.FC<Props> = ({
           packageName={missingExtra.packageName}
           installTarget={missingExtra.installTarget}
           installHint={missingExtra.installHint}
+          purpose="training"
         />
       ) : null}
     </Card>

@@ -296,7 +296,13 @@ export interface RunnerFlavor {
   pretty_name: string;
   cpu: string;
   ram: string;
+  // Flattened by the backend from huggingface_hub's JobAccelerator object —
+  // "Nvidia T4", "4× Nvidia A100". Null on the cpu-* flavors.
   accelerator: string | null;
+  // GPU memory as the Hub words it ("16 GB", "80 GB"), null on cpu-* flavors
+  // and on an older backend that didn't send the field. This is the number
+  // that decides whether a policy fits, so it gets its own line in the picker.
+  vram?: string | null;
   unit_cost_usd: number;
   unit_label: string;
 }
