@@ -930,6 +930,73 @@ def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
     assert "--duration=60" in cmd
 
 
+def test_build_rollout_cmd_omits_temporal_ensemble_when_unset() -> None:
+    """Default (None) must leave the checkpoint's own config untouched — no
+    --policy.temporal_ensemble_coeff, and crucially no n_action_steps override
+    that would silently re-tune a policy the user didn't ask to change."""
+    from makermodslab.rollout import _build_rollout_cmd
+
+    cmd = _build_rollout_cmd(_stub_request(), "/local/pretrained_model", [])
+    assert not any(a.startswith("--policy.temporal_ensemble_coeff=") for a in cmd)
+    assert not any(a.startswith("--policy.n_action_steps=") for a in cmd)
+
+
+def test_build_rollout_cmd_pins_n_action_steps_with_temporal_ensemble() -> None:
+    """ACT raises NotImplementedError when temporal_ensemble_coeff is set with
+    n_action_steps > 1 (checkpoints ship 100), so the two flags must always
+    travel together."""
+    from makermodslab.rollout import InferenceRequest, _build_rollout_cmd
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        temporal_ensemble_coeff=0.01,
+    )
+    cmd = _build_rollout_cmd(req, "/local/pretrained_model", [])
+    assert "--policy.temporal_ensemble_coeff=0.01" in cmd
+    assert "--policy.n_action_steps=1" in cmd
+
+
+def test_eval_runner_cmd_carries_temporal_ensemble_flags() -> None:
+    """The flags live in the shared _rollout_cli_args, so evaluation mode's
+    separate entry point gets them too — a run scored over N episodes must use
+    the same action selection the single-rollout path would."""
+    from makermodslab.rollout import InferenceRequest, _build_eval_runner_cmd
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        eval_episodes=5,
+        temporal_ensemble_coeff=0.01,
+    )
+    cmd = _build_eval_runner_cmd(req, "/local/pretrained_model", [])
+    assert "makermodslab.eval_runner" in cmd
+    assert "--policy.temporal_ensemble_coeff=0.01" in cmd
+    assert "--policy.n_action_steps=1" in cmd
+
+
+def test_handle_start_inference_rejects_non_positive_ensemble_coeff() -> None:
+    """Weights are exp(-coeff * i): 0 weights the whole chunk equally and a
+    negative coefficient makes the STALEST prediction dominate. Reject before
+    the arm moves under it — and release the session slot on the way out."""
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest, handle_start_inference
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        temporal_ensemble_coeff=0,
+    )
+    result = handle_start_inference(req)
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "temporal_ensemble_coeff" in result["message"]
+    assert rollout.inference_active is False
+
+
 # ---------------------------------------------------------------------------
 # handle_start_inference — the arm-count 409 guard (fires before any port opens)
 # ---------------------------------------------------------------------------

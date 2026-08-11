@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select,
@@ -45,6 +46,7 @@ import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import ImportModelModal from "@/components/jobs/ImportModelModal";
 import {
+  AdvancedSection,
   FormSection,
   LibrarySection,
   PANEL_ENTRY_CLASS,
@@ -77,6 +79,11 @@ const JOB_SCAN_LIMIT = 200;
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
 // just stops the stepper from offering a number that would be silently reduced.
 const MAX_EVAL_EPISODES = 200;
+
+/** Coefficient of the original ACT paper's exponential weighting (see
+ * lerobot's ACTTemporalEnsembler). Offered as the starting point when the user
+ * switches temporal ensembling on. */
+const DEFAULT_TEMPORAL_ENSEMBLE_COEFF = 0.01;
 
 /** Small preview for verifying which physical camera a role binds to.
  *
@@ -194,6 +201,14 @@ const DeployPanel: React.FC = () => {
   // behaviour; "rtc" is experimental (see StartInferenceRequest).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
+  // ACT temporal ensembling. Held as (on, coeff) rather than `number | null`
+  // so clearing the number field mid-edit doesn't silently switch the feature
+  // off; the request sends the coeff only while `on`.
+  const [temporalEnsemble, setTemporalEnsemble] = useState(false);
+  const [temporalEnsembleCoeff, setTemporalEnsembleCoeff] = useState<
+    number | undefined
+  >(DEFAULT_TEMPORAL_ENSEMBLE_COEFF);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [policyConfig, setPolicyConfig] = useState<PolicyConfigSummary | null>(
     null,
@@ -531,6 +546,17 @@ const DeployPanel: React.FC = () => {
 
   const inferenceActive = status?.inference_active === true;
 
+  // Temporal ensembling is an ACT config field — no other policy type has it,
+  // and passing --policy.temporal_ensemble_coeff to one would fail the
+  // rollout's config parse. Show the control only for ACT checkpoints.
+  const isAct = policyConfig?.policy_type === "act";
+  // Empty field or a non-positive number: the backend rejects it (weights are
+  // exp(-coeff * i)), so block Start rather than round-trip a 400.
+  const temporalEnsembleInvalid =
+    isAct &&
+    temporalEnsemble &&
+    (temporalEnsembleCoeff === undefined || temporalEnsembleCoeff <= 0);
+
   // Inference drives the follower(s) only — gate on follower_ready, not
   // is_clean, so a robot with no leader port/calibration (which inference
   // never touches) can still deploy.
@@ -541,6 +567,7 @@ const DeployPanel: React.FC = () => {
     selectedRef != null &&
     !!policyConfig &&
     allCamerasBound &&
+    !temporalEnsembleInvalid &&
     !submitting &&
     !inferenceActive;
 
@@ -597,6 +624,10 @@ const DeployPanel: React.FC = () => {
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
         eval_episodes: evalEpisodes,
         inference_engine: inferenceEngine,
+        // ACT-only, and only while the switch is on — otherwise omitted so the
+        // checkpoint's own (ensembling-off) config stands.
+        temporal_ensemble_coeff:
+          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
       });
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
@@ -989,6 +1020,74 @@ const DeployPanel: React.FC = () => {
                 </div>
               )}
           </FormSection>
+
+          {/* Advanced parameters — same AdvancedSection trigger and inner
+              eyebrow/label/help-text rhythm as the Train form's AdvancedCard,
+              so the two panels read as one form. ACT-only for now: temporal
+              ensembling is an ACT config field, so for every other policy type
+              the block has nothing to hold and stays hidden. ------------- */}
+          {isAct ? (
+            <AdvancedSection
+              open={advancedOpen}
+              onOpenChange={setAdvancedOpen}
+              summary="Temporal ensembling for ACT"
+            >
+              <div className="space-y-6">
+                <section className="space-y-3">
+                  <h4 className="eyebrow">Action selection</h4>
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="deploy-temporal-ensemble"
+                      checked={temporalEnsemble}
+                      onCheckedChange={setTemporalEnsemble}
+                      className="data-[state=checked]:bg-primary"
+                    />
+                    <Label htmlFor="deploy-temporal-ensemble">
+                      Temporal ensembling
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Averages the overlapping action chunks the policy predicts
+                    at each step instead of executing one chunk open-loop —
+                    smoother motion, but the policy runs every control step, so
+                    it is slower.
+                  </p>
+                  {temporalEnsemble ? (
+                    <div className="space-y-2">
+                      <Label htmlFor="deploy-temporal-ensemble-coeff">
+                        Ensemble coefficient
+                      </Label>
+                      <NumberInput
+                        id="deploy-temporal-ensemble-coeff"
+                        integer={false}
+                        step="0.001"
+                        min={0}
+                        value={temporalEnsembleCoeff}
+                        onChange={setTemporalEnsembleCoeff}
+                        placeholder={`${DEFAULT_TEMPORAL_ENSEMBLE_COEFF} (ACT paper default)`}
+                        aria-invalid={temporalEnsembleInvalid}
+                        className={cn(
+                          "w-40",
+                          temporalEnsembleInvalid && "border-destructive",
+                        )}
+                      />
+                      {temporalEnsembleInvalid ? (
+                        <p className="text-xs text-destructive">
+                          Enter a number greater than 0.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Weights are exp(-coeff × age): higher favours the
+                          newest prediction, lower averages more evenly. The
+                          ACT paper uses {DEFAULT_TEMPORAL_ENSEMBLE_COEFF}.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+                </section>
+              </div>
+            </AdvancedSection>
+          ) : null}
         </div>
       ) : null}
 
