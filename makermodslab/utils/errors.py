@@ -154,6 +154,15 @@ def friendly_hint(error_text: str | None) -> str | None:
             "If it keeps failing the same way (even without unplugging anything), the camera's OS-level "
             "session is likely stuck — restart MakerMods Lab to clear it."
         )
+    # Same read-back failure as the resolution case above, from lerobot's fps
+    # negotiation step instead (_validate_fps). Both are driven by free-form
+    # numbers in the same camera-settings panel, so both can be a permanent
+    # "this device can't do that" rather than turbulence. Without this branch
+    # an unsupported fps was the one camera misconfiguration that got retried
+    # (record.py's _is_transient_camera_error matches it) and then surfaced
+    # with no guidance at all — strictly worse than the resolution case.
+    if "failed to set fps" in low or "actual_fps" in low:
+        return "A camera doesn't support the configured frame rate — open camera settings and click Auto."
     if "permission" in low and ("port" in low or "com" in low):
         return "Couldn't open the serial port — close anything else using it, or run `makermodslab --stop`."
     return None
