@@ -395,6 +395,20 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
     carries the true global step, so it needs no rebasing.
     """
     try:
+        # Progress only ever moves FORWARD. Training steps are monotonic in a
+        # run's own output, so a line reporting a step we have already passed
+        # did not come from the future of this run — it came from a reconnect
+        # replaying the past. Applying it would rewind current_step and drag an
+        # obsolete ETA/loss/LR along with it, which the monitor reads as a new
+        # run and answers by clearing the chart's history (review of PR #71).
+        #
+        # The de-dupe upstream is what normally stops a replay reaching here;
+        # this is the backstop that does not depend on remembering every line.
+        # Safe against the resume rebase either way: `resume_total − total +
+        # bar` holds both of its other terms fixed for a runner's lifetime, so
+        # it is monotonic in the bar exactly as a fresh run's raw bar is.
+        stale = False
+
         tqdm_frames = _TQDM_RE.findall(line)
         if tqdm_frames:
             try:
@@ -402,25 +416,39 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
                 tqdm_step = int(raw_step)
                 total = int(raw_total)
                 if resume_total is not None and total > 0:
-                    metrics.current_step = resume_total - total + tqdm_step
-                    metrics.total_steps = resume_total
+                    candidate_step = resume_total - total + tqdm_step
+                    candidate_total = resume_total
                 else:
-                    metrics.current_step = tqdm_step
-                    if total > 0:
-                        metrics.total_steps = total
-                eta = _parse_duration(raw_eta)
-                if eta is not None:
-                    metrics.eta_seconds = eta
+                    candidate_step = tqdm_step
+                    candidate_total = total if total > 0 else metrics.total_steps
+                if candidate_step < metrics.current_step:
+                    # Replayed frame. Mark the whole LINE stale: the INFO
+                    # branch below belongs to this same tqdm burst, and its
+                    # step token is often the unparsable "4K" form that could
+                    # not be judged on its own.
+                    stale = True
+                else:
+                    metrics.current_step = candidate_step
+                    metrics.total_steps = candidate_total
+                    eta = _parse_duration(raw_eta)
+                    if eta is not None:
+                        metrics.eta_seconds = eta
             except (ValueError, IndexError):
                 pass
 
-        if "step:" in line and "loss:" in line:
+        if not stale and "step:" in line and "loss:" in line:
             # Only useful below 1000 steps: lerobot renders this through
             # format_big_number, so the token becomes "4K" and int() raises —
             # suppressed, leaving the (now correct) tqdm step in place. Don't
             # try to expand the K suffix; it's rounded, hence lossy.
             with contextlib.suppress(ValueError):
-                metrics.current_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+                info_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+                if info_step < metrics.current_step:
+                    stale = True
+                else:
+                    metrics.current_step = info_step
+
+        if not stale and "step:" in line and "loss:" in line:
             with contextlib.suppress(ValueError):
                 metrics.current_loss = float(line.split("loss:")[1].split()[0])
             if "lr:" in line:

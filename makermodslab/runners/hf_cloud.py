@@ -34,10 +34,9 @@ import shlex
 import threading
 import time
 import tomllib
-from collections import deque
 from importlib.metadata import requires
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 
 from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
@@ -612,13 +611,33 @@ _TAIL_RECONNECT_BACKOFF_S = 5.0
 # the replay is deduped by content rather than by position.
 _TAIL_SILENCE_TIMEOUT_S = 600.0
 
-# How many recently-emitted lines are remembered for replay de-duplication on
-# reconnect (MT47). Bounds memory while covering a realistic replay window: a
-# 2.5-hour cloud run's log.jsonl held ~275 lines. If a replay ever exceeds this,
-# the oldest lines fall out of the window and are re-emitted — duplicated log
-# lines, which is the DELIBERATE failure direction: the previous positional
-# scheme failed the other way and went permanently silent.
-_TAIL_DEDUPE_WINDOW = 1000
+# How many emitted lines are remembered for replay de-duplication on reconnect
+# (MT47). This set NEVER EVICTS, and that is the whole point: an eviction
+# policy makes a replay LONGER than the window pathological, because a
+# from-zero replay hits the oldest entries first — exactly the ones an LRU has
+# already dropped. Each such line then looks novel, is accepted, and evicts the
+# next one, so the entire history is re-accepted in order and the metrics
+# parser walks the run's progress backwards (review of PR #71).
+#
+# Never evicting removes that mode entirely: however long a replay is, its
+# leading lines are still recognised. The cap is a memory backstop, not a
+# window — cloud log volume is small (a 2.5-hour run's log.jsonl held ~275
+# lines, and HF's SSE batches many tqdm frames per message), so a real job uses
+# a few thousand entries. Past the cap we stop REMEMBERING new lines rather
+# than forgetting old ones: recent duplicates may slip through, which is
+# cosmetic, while the early history stays recognised forever.
+_TAIL_DEDUPE_MAX_LINES = 200_000
+
+# Hand-off queue depth between a connection's reader thread and the consumer.
+# Bounded so an ABANDONED reader whose stream later recovers cannot retain an
+# unbounded backlog nobody will ever read (the reviewer measured 50k retained
+# lines against the old unbounded queue).
+_TAIL_READER_QUEUE_MAX = 256
+
+# How long a reader blocks trying to hand a line over before re-checking
+# whether its connection has been abandoned. Only a liveness knob: it bounds
+# how long an abandoned reader lingers once its queue is full.
+_TAIL_READER_PUT_TIMEOUT_S = 1.0
 
 
 def resolve_wandb_api_key() -> str | None:
@@ -683,12 +702,18 @@ class HfCloudJobRunner:
         # registry can surface it to the UI instead of a synthetic exit code.
         self._terminal_message: str | None = None
         self._wandb_run_url: str | None = None
-        # The most recently emitted log lines, for de-duplicating the prefix an
-        # SSE reconnect replays (MT47). Content, not position: `seen`-vs-total
+        # Hashes of every line emitted this run, for de-duplicating the prefix
+        # an SSE reconnect replays (MT47). Content, not position: `seen`-vs-total
         # counting assumed every reconnect replays the whole log from line 1,
         # and silently dropped every subsequent line whenever it didn't.
-        self._recent_lines: deque[str] = deque(maxlen=_TAIL_DEDUPE_WINDOW)
-        self._recent_line_set: set[str] = set()
+        #
+        # A SET that never evicts, not an LRU window — see
+        # _TAIL_DEDUPE_MAX_LINES for why eviction turned a long replay into a
+        # progress rewind. Hashes rather than the lines themselves so the cap
+        # costs single-digit MB at worst; a collision would drop one log line,
+        # which is cosmetic and cannot move the metrics (the monotonic guard in
+        # parse_metrics_into owns that).
+        self._emitted_hashes: set[int] = set()
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # output_dir is the host-local path the registry pins for local jobs;
@@ -888,7 +913,7 @@ class HfCloudJobRunner:
         """Whether this line was already emitted, so a reconnect's replayed
         prefix isn't teed to disk and the UI twice (MT47).
 
-        Content-based and bounded, deliberately replacing the positional
+        Content-based, deliberately replacing the positional
         `seen <= _lines_processed` scheme this used to use. That scheme was only
         correct if EVERY reconnect replayed the whole log from line 1; when a
         reconnect replayed less than that (or nothing at all, following from
@@ -896,19 +921,20 @@ class HfCloudJobRunner:
         cross-connection total and every subsequent line was skipped — silently,
         forever, while the job ran happily to completion.
 
-        The tradeoff runs the other way now: a line repeated legitimately within
-        the window is dropped, and a replay longer than the window is re-emitted.
-        Both are cosmetic. Going mute is not.
+        The memory is a never-evicting set, which is what makes it correct for a
+        replay of ANY length. The first version bounded it as an LRU window and
+        a replay longer than that window thrashed it end to end: the oldest line
+        had been evicted, so it read as novel, and accepting it evicted the next
+        one, and so on through the entire history (review of PR #71). Every
+        stale line was accepted and the metrics walked backwards. Nothing is
+        forgotten now; past the cap we simply stop learning new lines, so the
+        early history a full replay starts with is always recognised.
         """
-        if stripped in self._recent_line_set:
+        fingerprint = hash(stripped)
+        if fingerprint in self._emitted_hashes:
             return True
-        evicted = self._recent_lines[0] if len(self._recent_lines) == self._recent_lines.maxlen else None
-        self._recent_lines.append(stripped)
-        # deque(maxlen=…) drops the oldest on append; mirror that in the set,
-        # but only if the evicted text isn't still present later in the window.
-        if evicted is not None and evicted not in self._recent_lines:
-            self._recent_line_set.discard(evicted)
-        self._recent_line_set.add(stripped)
+        if len(self._emitted_hashes) < _TAIL_DEDUPE_MAX_LINES:
+            self._emitted_hashes.add(fingerprint)
         return False
 
     def _iter_job_logs(self):
@@ -922,39 +948,78 @@ class HfCloudJobRunner:
 
         So the blocking iteration happens on a reader thread and is consumed
         through a queue with a timeout. On silence we raise, which the caller
-        already handles as "reconnect". The reader thread is abandoned rather
-        than joined — it is stuck in exactly the read we gave up on — but it is
-        a daemon and dies with the process. That is not a new leak: before this,
-        a stalled read stranded the whole tail loop the same way, and stranded
-        it permanently.
+        already handles as "reconnect".
+
+        The reader cannot be force-killed while it sits in that blocking read —
+        nothing in Python can do that — but it MUST NOT outlive its usefulness
+        either, which the first version of this got wrong (review of PR #71):
+        every timeout stranded another live thread, and an abandoned reader
+        whose stream later recovered went on consuming into a private unbounded
+        queue nobody would ever drain. Two mechanisms fix that, and both are
+        about what happens the moment the read finally returns:
+
+          * `abandoned` is set by this generator's `finally`, i.e. as soon as
+            the consumer stops iterating (timeout, stop, or plain GC). The
+            reader checks it around every hand-off, so the next line it manages
+            to read is its last.
+          * the queue is BOUNDED, so a reader that is still producing while
+            nobody consumes blocks on `put` within a few hundred lines instead
+            of accumulating them. That block is itself interruptible: `put`
+            times out, the flag is re-checked, and the thread exits.
+
+        Between them an abandoned reader retains at most one queue's worth of
+        lines and exits on its next successful read — and it can never deliver
+        to the live consumer, which by then is draining a different queue.
         """
         assert self._hf_job_id is not None
-        queue: Queue = Queue()
+        queue: Queue = Queue(maxsize=_TAIL_READER_QUEUE_MAX)
         done = object()
+        abandoned = threading.Event()
+
+        def _finished() -> bool:
+            return abandoned.is_set() or self._stop_event.is_set()
 
         def _reader() -> None:
             try:
                 for raw in self._api.fetch_job_logs(job_id=self._hf_job_id, follow=True):
-                    queue.put(raw)
-                    if self._stop_event.is_set():
-                        break
+                    while not _finished():
+                        try:
+                            queue.put(raw, timeout=_TAIL_READER_PUT_TIMEOUT_S)
+                            break
+                        except Full:
+                            continue  # nobody draining yet — re-check the flag
+                    if _finished():
+                        return
             except Exception as exc:  # surfaced on the consuming thread
-                queue.put(exc)
+                with contextlib.suppress(Full):
+                    queue.put_nowait(exc)
             finally:
-                queue.put(done)
+                # Never block here: an abandoned reader's queue may be full and
+                # will never be drained again.
+                with contextlib.suppress(Full):
+                    queue.put_nowait(done)
 
         threading.Thread(target=_reader, name=f"hf-job-{self._hf_job_id}-sse", daemon=True).start()
 
-        while True:
-            try:
-                item = queue.get(timeout=_TAIL_SILENCE_TIMEOUT_S)
-            except Empty as exc:
-                raise TimeoutError(f"no log output for {_TAIL_SILENCE_TIMEOUT_S:.0f}s; reconnecting") from exc
-            if item is done:
-                return
-            if isinstance(item, BaseException):
-                raise item
-            yield item
+        try:
+            while True:
+                try:
+                    item = queue.get(timeout=_TAIL_SILENCE_TIMEOUT_S)
+                except Empty as exc:
+                    raise TimeoutError(
+                        f"no log output for {_TAIL_SILENCE_TIMEOUT_S:.0f}s; reconnecting"
+                    ) from exc
+                if item is done:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            # Reached on every exit path — the silence timeout, a clean end, a
+            # stream error, and the GeneratorExit of a consumer that simply
+            # stopped iterating. This is what makes the reader's lifetime the
+            # connection's lifetime rather than the process's.
+            abandoned.set()
 
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the
