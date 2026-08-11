@@ -276,9 +276,9 @@ export interface HubSettings {
   tags: string[];
 }
 
-/** Read the current visibility + tags of a Hub dataset. Throws ApiError (400
- * offline, 403 no read/write access, 502 Hub failure) with the backend message
- * in `.detail`. */
+/** Read the current visibility + tags of a Hub dataset. Throws ApiError (403
+ * no read/write access, 502 Hub failure) with the backend message in
+ * `.detail`. */
 export async function getDatasetHubSettings(
   baseUrl: string,
   fetcher: Fetcher,
@@ -294,8 +294,8 @@ export async function getDatasetHubSettings(
 }
 
 /** Flip a Hub dataset's visibility (public <-> private). MUTATES the live repo.
- * Throws ApiError (400 offline, 403 no write access, 502 Hub failure) with the
- * backend message in `.detail`. */
+ * Throws ApiError (403 no write access, 502 Hub failure) with the backend
+ * message in `.detail`. */
 export async function setDatasetVisibility(
   baseUrl: string,
   fetcher: Fetcher,
@@ -313,8 +313,8 @@ export async function setDatasetVisibility(
 
 /** Replace a Hub dataset card's `tags:`. The backend re-adds the required org
  * tags, so the returned list may include tags beyond the ones passed. MUTATES
- * the live card. Throws ApiError (400 offline, 403 no write access, 502 Hub
- * failure) with the backend message in `.detail`. */
+ * the live card. Throws ApiError (403 no write access, 502 Hub failure) with
+ * the backend message in `.detail`. */
 export async function setDatasetTags(
   baseUrl: string,
   fetcher: Fetcher,

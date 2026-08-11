@@ -152,7 +152,6 @@ from .utils.hf_auth import (
     cached_whoami,
     handle_hf_auth_status,
     handle_hf_login,
-    hf_hub_offline,
     shared_hf_api,
 )
 from .utils.system import (
@@ -701,8 +700,8 @@ def datasets_hub_status(repo_id: str):
 @app.get("/datasets/hub-settings")
 def datasets_hub_settings(repo_id: str):
     """Current Hub-side visibility + tags for a dataset, for pre-filling the
-    post-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;
-    403/502 on a Hub failure. repo_id is a query param (repo ids contain '/')."""
+    post-upload editor. Returns ``{repo_id, private, tags}``. 403/502 on a Hub
+    failure. repo_id is a query param (repo ids contain '/')."""
     try:
         return dataset_browser.get_hub_settings(repo_id)
     except dataset_browser.DatasetHubEditError as exc:
@@ -717,8 +716,8 @@ class DatasetVisibilityBody(BaseModel):
 @app.post("/datasets/visibility")
 def datasets_visibility(body: DatasetVisibilityBody):
     """Flip a Hub dataset's visibility (public <-> private). MUTATES the live
-    repo. 400 offline; 403 when the token can't write the namespace; 502 on any
-    other Hub failure. Invalidates the cached hub-status so the card re-reads."""
+    repo. 403 when the token can't write the namespace; 502 on any other Hub
+    failure. Invalidates the cached hub-status so the card re-reads."""
     try:
         return dataset_browser.set_dataset_visibility(body.repo_id, body.private)
     except dataset_browser.DatasetHubEditError as exc:
@@ -734,7 +733,7 @@ class DatasetTagsBody(BaseModel):
 def datasets_tags(body: DatasetTagsBody):
     """Replace a Hub dataset card's ``tags:`` metadata. User tags run through
     with_makermodslab_tag first, so the required org tags are never dropped. MUTATES
-    the live card. 400 offline; 403 no write permission; 502 other Hub failure.
+    the live card. 403 no write permission; 502 other Hub failure.
     Returns the final tag list actually written."""
     try:
         return dataset_browser.set_dataset_tags(body.repo_id, body.tags)
@@ -1047,7 +1046,7 @@ class ModelUploadBody(BaseModel):
 @app.post("/models/upload")
 def models_upload(body: ModelUploadBody):
     """Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged
-    model repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when
+    model repo. MUTATES the Hub (creates/updates the repo). 403 when
     the token can't write the namespace; 404 when the local model has no saved
     checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}."""
     try:
@@ -1219,37 +1218,6 @@ async def create_training_job(req: Request):
                 f"step ({cfg.resume_from_step}) to continue training."
             ),
         )
-    # Local preflight (belt-and-braces), the mirror of the cloud
-    # DatasetNotOnHubError guard: a LOCAL run with no --dataset.root makes
-    # lerobot auto-download the dataset from the Hub at start. When the Hub is
-    # offline (HF_HUB_OFFLINE) that download can't happen — it hangs or dies
-    # with a raw traceback — so reject up front with an actionable message
-    # instead of starting a doomed job. Purely offline flag + local filesystem
-    # check; no network call (no repo_exists/whoami). A RESUME run inherits its
-    # dataset via config_path and doesn't re-download, but dataset_repo_id is a
-    # required field so we can't distinguish resume by its absence; the guard is
-    # a no-op on resume anyway because the resumed dataset is by definition
-    # already local (it was trained on locally before), so is_dataset_available_
-    # locally returns True and nothing is blocked.
-    runner = body.target.runner if body.target is not None else "local"
-    if runner == "local" and cfg.dataset_repo_id and hf_hub_offline():
-        from .datasets import is_dataset_available_locally
-
-        if not is_dataset_available_locally(cfg.dataset_repo_id):
-            # 400 (matching this endpoint's other preflight rejections — the
-            # resume-steps guard above and the ValueError->400 below), NOT 409:
-            # startTrainingJob (jobsApi.ts) rewrites EVERY 409 into "Another
-            # training is already running", which would mask this message. 400
-            # lets FastAPI's `detail` reach the toast verbatim.
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Dataset '{cfg.dataset_repo_id}' isn't available locally and the "
-                    "Hub is offline (HF_HUB_OFFLINE) — it can't be downloaded for a "
-                    "local run. Start MakerMods Lab without --offline (or with Hub access) to "
-                    "fetch it, or record/obtain the dataset locally first."
-                ),
-            )
     try:
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:
@@ -1817,13 +1785,9 @@ def get_runners_hardware():
     keep this endpoint cheap (it can be re-fetched whenever auth state
     changes). The whoami cache is invalidated on login.
     """
-    # Offline mode disables every Hub write, so the cloud-training flow can't
-    # upload a local-only dataset. Surface it here (same fetch TargetCard uses)
-    # so the UI can keep Start disabled and explain why for those datasets.
-    offline = hf_hub_offline()
     info = cached_whoami()
     if info is None or not info.get("name"):
-        return {"authenticated": False, "username": None, "flavors": [], "offline": offline}
+        return {"authenticated": False, "username": None, "flavors": []}
     username: str = info["name"]
     api = shared_hf_api()
 
@@ -1833,7 +1797,7 @@ def get_runners_hardware():
             hw_list = api.list_jobs_hardware()
         except Exception as exc:
             logger.warning("list_jobs_hardware failed: %s", exc)
-            return {"authenticated": True, "username": username, "flavors": [], "offline": offline}
+            return {"authenticated": True, "username": username, "flavors": []}
         _flavors_cache["data"] = [
             {
                 "name": h.name,
@@ -1853,7 +1817,6 @@ def get_runners_hardware():
         "authenticated": True,
         "username": username,
         "flavors": _flavors_cache["data"],
-        "offline": offline,
     }
 
 

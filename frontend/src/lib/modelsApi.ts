@@ -70,8 +70,8 @@ export async function getModelInfo(
 /** POST /models/upload — push a local run's final checkpoint to the Hub as a
  * PUBLIC, MakerModsLab-tagged model repo. `id` is the local run id; `repoId` optionally
  * overrides the default namespaced repo id. MUTATES the Hub. Throws ApiError
- * (400 offline, 403 no write access, 404 no checkpoint, 502 Hub failure) with
- * the backend message in `.detail`. Returns {repo_id, url, tags}. */
+ * (403 no write access, 404 no checkpoint, 502 Hub failure) with the backend
+ * message in `.detail`. Returns {repo_id, url, tags}. */
 export async function uploadModel(
   baseUrl: string,
   fetcher: Fetcher,

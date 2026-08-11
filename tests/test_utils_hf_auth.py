@@ -112,32 +112,3 @@ def test_handle_hf_auth_status_writable_namespaces_unauthenticated() -> None:
 
     assert result["authenticated"] is False
     assert result["writable_namespaces"] == []
-
-
-def test_hf_hub_offline_detects_offline_env(monkeypatch) -> None:
-    from makermodslab.utils import hf_auth
-
-    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
-    for truthy in ("1", "true", "TRUE", "yes", "on"):
-        monkeypatch.setenv("HF_HUB_OFFLINE", truthy)
-        assert hf_auth.hf_hub_offline() is True
-
-
-def test_hf_hub_offline_false_when_unset_or_zero(monkeypatch) -> None:
-    from makermodslab.utils import hf_auth
-
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
-    assert hf_auth.hf_hub_offline() is False
-    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
-    assert hf_auth.hf_hub_offline() is False
-    monkeypatch.setenv("HF_HUB_OFFLINE", "")
-    assert hf_auth.hf_hub_offline() is False
-
-
-def test_hf_hub_offline_honours_legacy_transformers_var(monkeypatch) -> None:
-    from makermodslab.utils import hf_auth
-
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
-    assert hf_auth.hf_hub_offline() is True

@@ -64,7 +64,7 @@ from .utils.config import (
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
-from .utils.hf_auth import cached_whoami, hf_hub_offline, shared_hf_api
+from .utils.hf_auth import cached_whoami, shared_hf_api
 from .utils.naming import (
     KNOWN_POLICY_TYPES,
     POLICY_TYPES_BY_LENGTH as _POLICY_TYPES_BY_LENGTH,
@@ -134,7 +134,7 @@ def invalidate_model_listing_cache() -> None:
 
 class ModelError(Exception):
     """Raised when a model mutation (upload/delete) can't proceed. `status` is
-    the HTTP status the route should return (400 offline/invalid, 403 no write
+    the HTTP status the route should return (400 invalid, 403 no write
     permission, 404 not found, 409 busy, 502 other Hub failure); `message` is
     the user-facing reason; `docs_url` (optional) links auth docs for a login
     failure."""
@@ -1034,16 +1034,14 @@ def get_model_info(id_or_repo: str) -> dict[str, Any] | None:
         summary["size_bytes"] = _dir_size_bytes(model_dir)
         return summary
 
-    # Not local at all — try the Hub. Offline ⇒ can't read a hub-only model.
-    if hf_hub_offline():
-        return None
+    # Not local at all — try the Hub.
     return _hub_model_info(id_or_repo)
 
 
 # In-process cache of per-repo Hub model metadata (the /models/info hub
 # branch), mirroring datasets._HUB_STATUS_CACHE conventions: successful answers
-# are memoized for the process lifetime; the offline/error degrade is NEVER
-# cached, so connectivity returning is picked up on the next check. Invalidated
+# are memoized for the process lifetime; the error degrade is NEVER cached, so
+# connectivity returning is picked up on the next check. Invalidated
 # alongside the listing cache on the mutations that change a repo (upload,
 # download-complete, delete, hide) — see invalidate_model_hub_info.
 _MODEL_HUB_INFO_CACHE: dict[str, dict[str, Any]] = {}
@@ -1215,16 +1213,12 @@ def upload_local_model(model_id: str, repo_id: str | None = None) -> dict[str, A
       4. metadata_update(repo_id, {"tags": with_makermodslab_tag(None)}, repo_type=
          "model", overwrite=True).
 
-    Refuses offline (can't mutate the Hub) with a clear error. Auth/permission
-    failures map like the dataset upload path. Invalidates the model-listing
-    cache so the freshly-pushed repo appears immediately. Returns
+    Auth/permission failures map like the dataset upload path. Invalidates the
+    model-listing cache so the freshly-pushed repo appears immediately. Returns
     {repo_id, url, tags}.
 
     NOTE: this runs synchronously (a small policy checkpoint, unlike a
     multi-GB dataset) — the route calls it inline."""
-    if hf_hub_offline():
-        raise ModelError(400, "The Hub is offline — you can't upload a model right now.")
-
     record = _find_local_record(model_id)
     if record is None:
         raise ModelError(
