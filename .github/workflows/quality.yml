@@ -40,18 +40,23 @@ name: Quality
 permissions:
   contents: read
 
+#
+# `pull_request` has no `branches:` filter on purpose — see the note in
+# frontend.yml. Stacked PRs need this signal as much as main-based ones; a
+# `branches: [main]` filter silently exempted them.
 on:
   workflow_dispatch:
   push:
     branches:
       - main
   pull_request:
-    branches:
-      - main
 
 # Ensures that only the latest commit for a PR or branch is built, canceling older runs.
+# `base_ref` is part of the key because one head branch can have two open PRs
+# against different bases (a stack in flight), and those are separate runs that
+# must not cancel each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ github.base_ref }}
   cancel-in-progress: true
 
 jobs:

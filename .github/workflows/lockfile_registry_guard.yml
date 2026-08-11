@@ -9,6 +9,11 @@ permissions:
 # it hangs `npm ci` for ~8 min and then crashes ("Exit handler never called!").
 # Running `npm install` locally with a global ~/.npmrc pointing at the mirror is
 # what bakes those URLs in, so guard against it on every PR.
+#
+# `pull_request` carries no `branches:` filter, so this already covers stacked
+# PRs (base is another PR branch, not `main`). Keep it that way — adding one
+# would exempt exactly the PRs that get the least scrutiny. Tests, Quality and
+# Frontend dropped theirs to match; see the note in frontend.yml.
 
 on:
   pull_request:

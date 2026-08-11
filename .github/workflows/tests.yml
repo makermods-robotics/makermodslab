@@ -14,6 +14,14 @@
 
 # This workflow runs the pytest suite on every PR and push to main.
 # Modeled on LeRobot's fast_tests.yml, collapsed to a single dependency tier.
+#
+# `pull_request` has no `branches:` filter on purpose — see the note in
+# frontend.yml. A stacked PR (base is another PR branch, not `main`) is skipped
+# entirely by a `branches: [main]` filter, so it gets reviewed and iterated on
+# with no gate and is only ever tested once it is retargeted at `main` — the
+# worst possible moment to find out the tests broke. The `paths:` filter below
+# still keeps this cheap: on a stacked PR it is evaluated against that PR's own
+# base, so a frontend-only layer does not drag pytest along.
 name: Tests
 permissions:
   contents: read
@@ -21,8 +29,6 @@ permissions:
 on:
   workflow_dispatch:
   pull_request:
-    branches:
-      - main
     paths:
       - "makermodslab/**"
       - "tests/**"
@@ -40,8 +46,11 @@ on:
 env:
   PYTHON_VERSION: "3.12"
 
+# `base_ref` is part of the key because one head branch can have two open PRs
+# against different bases (a stack in flight), and those are separate runs that
+# must not cancel each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ github.base_ref }}
   cancel-in-progress: true
 
 jobs:

@@ -21,6 +21,24 @@
 #   2. Lockfile churn most often arrives as an accident inside an unrelated PR —
 #      c18d42c was a rename commit that swept up local npm churn. Running on
 #      every PR is what catches that.
+#
+# And deliberately NOT base-filtered, for the same family of reason. `branches:
+# [main]` used to sit under `pull_request`, which meant a *stacked* PR — one
+# whose base is another PR branch rather than `main` — matched nothing and got
+# zero checks. The repo uses stacks routinely (there is a `stacked-prs` skill;
+# #72/#73/#74 were all open with non-main bases and all reported "no checks"),
+# so the file this workflow exists to guard was going unguarded on exactly the
+# PRs that are hardest to re-check later: the gate only arrived when the PR was
+# retargeted at main, after review had already happened. Tests and Quality drop
+# their base filter for the same reason.
+#
+# The cost of running on every base is nil here: this repo is public, so
+# standard-runner minutes are free, and every merged PR to date has been
+# `main`-based — the extra runs are the handful of stacked layers themselves.
+#
+# `build_frontend.yml` is the deliberate exception and must stay `push:
+# branches: [main]` only — it commits `frontend/dist` back to the branch it runs
+# on, which must never be a PR branch.
 
 name: Frontend
 
@@ -30,11 +48,13 @@ permissions:
 on:
   workflow_dispatch:
   pull_request:
-    branches:
-      - main
 
+# `base_ref` is part of the key because one head branch can have two open PRs
+# against different bases (a stack in flight), and those are separate runs that
+# must not cancel each other — cancelling one would leave the required `Build`
+# check stuck as `cancelled` on a PR nobody touched.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ github.base_ref }}
   cancel-in-progress: true
 
 jobs:
