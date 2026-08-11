@@ -151,8 +151,18 @@ def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
     assert "--policy.tags" not in off
 
 
-def test_resume_push_to_hub_emits_public_and_tags() -> None:
-    """The resume branch must also make a pushed policy public + tagged."""
+def test_resume_push_to_hub_emits_public_but_never_tags() -> None:
+    """The resume branch makes a pushed policy public but must NOT re-pass tags.
+
+    Regression test for MT24. With --config_path present, lerobot parses through
+    draccus.parse(cls, config_file, args=cli_args), which merges each CLI
+    override into the config dict as a RAW STRING before decoding it against the
+    field type — so `--policy.tags '[a,b,c]'` reaches list[str] decoding as the
+    literal string and raises DecodingError, killing the run at startup. The
+    checkpoint's own train_config.json already carries policy.tags, so dropping
+    the flag loses nothing. The fresh-run branch still emits it (argparse splits
+    the bracket form there) — covered by the test above.
+    """
     from makermodslab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(
@@ -166,7 +176,7 @@ def test_resume_push_to_hub_emits_public_and_tags() -> None:
 
     assert _arg_value(cmd, "--policy.push_to_hub") == "true"
     assert _arg_value(cmd, "--policy.private") == "false"
-    assert _arg_value(cmd, "--policy.tags") == "[makermods,openbooth,MakerModsLab]"
+    assert "--policy.tags" not in cmd
 
 
 def test_seed_omitted_when_none() -> None:
@@ -296,6 +306,28 @@ def test_grad_clip_gated_on_policy_support() -> None:
     assert "--policy.type" in act
 
 
+def test_grad_clip_and_weight_decay_supported_for_pi05() -> None:
+    """pi05's PreTrainedConfig declares the same optimizer_lr/weight_decay/
+    grad_clip_norm trio as pi0 (verified by dataclass introspection against the
+    pinned lerobot) — it must not be treated more restrictively than pi0."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(
+            dataset_repo_id="x",
+            policy_type="pi05",
+            optimizer_lr=2.5e-5,
+            optimizer_weight_decay=0.01,
+            optimizer_grad_clip_norm=1.0,
+        ),
+        "/tmp/out",
+    )
+
+    assert _arg_value(cmd, "--policy.optimizer_lr") == "2.5e-05"
+    assert _arg_value(cmd, "--policy.optimizer_weight_decay") == "0.01"
+    assert _arg_value(cmd, "--policy.optimizer_grad_clip_norm") == "1.0"
+
+
 def test_weight_decay_gated_for_tdmpc() -> None:
     """tdmpc declares only optimizer_lr — weight_decay must be dropped."""
     from makermodslab.train import TrainingRequest, build_training_command
@@ -356,7 +388,9 @@ def test_unknown_policy_type_falls_back_to_lr_only() -> None:
     assert "--policy.optimizer_grad_clip_norm" not in cmd
 
 
-@pytest.mark.parametrize("policy_type", ["act", "diffusion", "pi0", "smolvla", "tdmpc", "vqbet", "pi0_fast"])
+@pytest.mark.parametrize(
+    "policy_type", ["act", "diffusion", "pi0", "smolvla", "tdmpc", "vqbet", "pi0_fast", "pi05"]
+)
 def test_no_optimizer_namespace_flag_is_ever_emitted(policy_type: str) -> None:
     """The `--optimizer.*` namespace is dead under the training preset. Nothing
     the builder emits may land there — including the optimizer TYPE, which the

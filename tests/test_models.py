@@ -155,23 +155,40 @@ def test_list_local_models_reads_train_config_over_record(registry) -> None:
     assert m["dataset"] == "cfg/other"
 
 
-def test_list_local_models_skips_running_and_failed(registry) -> None:
+def test_list_local_models_skips_running_but_keeps_checkpointed_interrupted(registry) -> None:
+    """A run counts as usable once it's "done" or "interrupted" (not
+    "running") and has a real checkpoint on disk (MT10). An "interrupted" run
+    that still saved a valid final checkpoint (e.g. an unconfirmed exit after
+    a server restart) must stay visible rather than vanish from the library."""
     from makermodslab.models import list_local_models
 
     _seed_run(registry, "done_run", state="done")
     _seed_run(registry, "running_run", state="running")
-    _seed_run(registry, "failed_run", state="failed")
+    _seed_run(registry, "interrupted_run", state="interrupted")
 
     ids = {m["id"] for m in list_local_models()}
-    assert ids == {"done_run"}
+    assert ids == {"done_run", "interrupted_run"}
+
+
+def test_list_local_models_skips_failed_run_even_with_checkpoint(registry) -> None:
+    """A "failed" run's exit code is a confirmed non-zero result, unlike
+    "interrupted"'s unconfirmed one — so it must not appear in the library
+    looking like a usable model, even if an earlier checkpoint saved before
+    the crash (e.g. an OOM mid-training, or a manual stop that finalizes as
+    "failed")."""
+    from makermodslab.models import list_local_models
+
+    _seed_run(registry, "failed_run", state="failed")
+    assert list_local_models() == []
 
 
 def test_list_local_models_skips_checkpointless_run(registry) -> None:
-    """A completed run that died before its first save has no checkpoint and is
-    hidden (nothing to browse / serve)."""
+    """A run that died before its first save has no checkpoint and is hidden
+    (nothing to browse / serve) regardless of its terminal state."""
     from makermodslab.models import list_local_models
 
-    _seed_run(registry, "no_ckpt", state="done", with_checkpoint=False)
+    _seed_run(registry, "no_ckpt_done", state="done", with_checkpoint=False)
+    _seed_run(registry, "no_ckpt_interrupted", state="interrupted", with_checkpoint=False)
     assert list_local_models() == []
 
 
@@ -180,6 +197,40 @@ def test_list_local_models_skips_non_local_runner(registry) -> None:
 
     _seed_run(registry, "cloud_run", state="done", runner="hf_cloud")
     assert list_local_models() == []
+
+
+def test_list_local_models_exposes_state_and_target_steps_for_interrupted_run(registry) -> None:
+    """An interrupted run kept in the library must be tellable apart from one
+    that finished normally: `steps` is the checkpoint's actual step, distinct
+    from `target_steps` (the run's configured target), and `state` carries
+    the terminal state. Without this a run interrupted at step 5000 of a
+    configured 10000 looks identical to one configured for (and that finished
+    at) exactly 5000 steps."""
+    from makermodslab.models import list_local_models
+
+    pretrained = _seed_run(registry, "interrupted_run", state="interrupted", steps=5000)
+    (pretrained / "train_config.json").write_text(
+        json.dumps({"policy": {"type": "act"}, "dataset": {"repo_id": "user/pick"}, "steps": 10000})
+    )
+
+    m = list_local_models()[0]
+    assert m["steps"] == 5000
+    assert m["target_steps"] == 10000
+    assert m["state"] == "interrupted"
+
+
+def test_list_local_models_target_steps_matches_steps_for_completed_run(registry) -> None:
+    """A run that trained to its configured target has steps == target_steps,
+    state == "done" — the case a bare `steps` count can't be told apart from
+    an interrupted run without the fields above."""
+    from makermodslab.models import list_local_models
+
+    _seed_run(registry, "done_run", state="done", steps=10000)
+
+    m = list_local_models()[0]
+    assert m["steps"] == 10000
+    assert m["target_steps"] == 10000
+    assert m["state"] == "done"
 
 
 # ---------------------------------------------------------------------------

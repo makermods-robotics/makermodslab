@@ -7,7 +7,10 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
-import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
+import CappedGrid, {
+  GRID_MIN_H,
+  GRID_ROW_MIN_H,
+} from "@/components/library/CappedGrid";
 import LibraryHeader from "@/components/library/LibraryHeader";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
@@ -170,6 +173,29 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         ? "No active online jobs."
         : "No active training jobs.";
 
+  // Nothing in the library at all, before any search or filter. The dataset and
+  // skills libraries answer that with a single dashed GRID_MIN_H box and no
+  // toolbar; jobs must too, or this panel's library is a toolbar taller than
+  // theirs and its header, search bar, and Start button sit above the other
+  // panels' (all three libraries are pinned to the panel foot, so extra height
+  // pushes everything up).
+  const isEmpty =
+    localJobs.length === 0 &&
+    trackedCloudJobs.length === 0 &&
+    untrackedHubJobs.length === 0;
+
+  // Why an empty library is empty, said inside the box instead of as a line
+  // above it — an extra line would make the panel taller again.
+  const emptyHint = !showOnline
+    ? ""
+    : hubError
+      ? ""
+      : !hubAuthenticated
+        ? " Sign in with Hugging Face to see your cloud jobs."
+        : !hubJobsPermission
+          ? " Your Hugging Face token is missing the job.read permission, so cloud jobs can't be listed."
+          : "";
+
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="space-y-3">
       <LibraryHeader
@@ -191,14 +217,16 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
       <CollapsibleContent className={SLIDE}>
         <div className="space-y-3">
-          <LibraryToolbar
-            query={search}
-            onQueryChange={setSearch}
-            searchPlaceholder="Search jobs"
-            filters={FILTERS}
-            filter={filter}
-            onFilterChange={setFilter}
-          />
+          {isEmpty ? null : (
+            <LibraryToolbar
+              query={search}
+              onQueryChange={setSearch}
+              searchPlaceholder="Search jobs"
+              filters={FILTERS}
+              filter={filter}
+              onFilterChange={setFilter}
+            />
+          )}
 
           {error ? (
             <p className="text-sm text-destructive">
@@ -210,13 +238,13 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               Couldn't load cloud jobs: {hubError}
             </p>
           ) : null}
-          {showOnline && !hubError && !hubAuthenticated &&
+          {!isEmpty && showOnline && !hubError && !hubAuthenticated &&
           trackedCloudJobs.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               Sign in with Hugging Face to see your cloud jobs.
             </p>
           ) : null}
-          {showOnline && hubAuthenticated && !hubJobsPermission ? (
+          {!isEmpty && showOnline && hubAuthenticated && !hubJobsPermission ? (
             <p className="text-sm text-warn">
               Your Hugging Face token is missing the{" "}
               <code className="text-warn">job.read</code> permission, so cloud
@@ -229,12 +257,26 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               says where it runs. The grid and the Untracked footer row share
               one space-y-2 stack so the footer sits exactly where the other
               libraries' "Show all" row sits. */}
+          {isEmpty ? (
+            <div
+              className={cn(
+                "flex items-center justify-center rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground",
+                GRID_MIN_H,
+              )}
+            >
+              No training jobs yet. Start one above.{emptyHint}
+            </div>
+          ) : (
           <div className="space-y-2">
           {activeCount === 0 ? (
+            // Only the card-row height when the Untracked toggle renders its
+            // own footer row below — the two together then equal one
+            // GRID_MIN_H block, so this library lines up with Collect's and
+            // Deploy's instead of standing 2.375rem taller.
             <p
               className={cn(
                 "flex items-center justify-center text-sm text-muted-foreground",
-                GRID_MIN_H,
+                showUntrackedToggle ? GRID_ROW_MIN_H : GRID_MIN_H,
               )}
             >
               {emptyMessage}
@@ -319,6 +361,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
             </Collapsible>
           ) : null}
           </div>
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>

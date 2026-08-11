@@ -466,6 +466,58 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
+def _is_transient_camera_error(msg: str) -> bool:
+    """True when a robot-connect failure is transient camera-session
+    turbulence, curable by a clean re-connect, rather than a real failure.
+
+    An AVCaptureSession opened into another session's asynchronous teardown
+    (e.g. right after a hot-unplug) intermittently comes up wrong —
+    forensically established 2026-07-09:
+      * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
+      * "timed out waiting for frame" — session came up frame-dead (opens
+        fine, background reader never receives a frame)
+      * "read thread is not running" — the same frame-dead session after its
+        background reader has already died (see below)
+
+    What reaches us, and what doesn't. Only `connect()`'s own exceptions land
+    here; anything raised inside a camera's background reader thread does not.
+    That matters for the wrong-native-format case (session lands 640x360
+    instead of 640x480): lerobot detects it in `_postprocess_image`, which
+    runs *only* in `_read_loop`, so its "do not match configured" text never
+    propagates — after 12 consecutive mismatches the loop dies and the caller
+    sees `async_read`'s "read thread is not running" instead (or, if the
+    reader is merely stalled, the timeout above). "do not match configured" is
+    kept in the tuple as a cheap guard in case upstream ever surfaces it
+    synchronously, but do not expect it to fire; "read thread is not running"
+    is the marker that actually catches that case today.
+
+    NOT included: "failed to set capture_" (width/height mismatch). That
+    string is also produced when a camera simply doesn't support the
+    configured resolution — a permanent misconfiguration, not turbulence —
+    and `utils/errors.py::friendly_hint` classifies it that way for the
+    operator. Retrying it would burn ~4s of backoff plus three connects on a
+    failure that cannot succeed before showing the correct "click Auto" hint.
+
+    Note "failed to set fps" has the *same* permanent-misconfiguration mode
+    (an operator can type an fps the device can't do, in the same settings
+    panel), so it is retried on the optimistic reading and then, if it never
+    recovers, handed to `friendly_hint`'s matching fps branch for the same
+    "click Auto" guidance. Keep those two in sync: any marker added here that
+    can also be a permanent misconfiguration needs a `friendly_hint` branch,
+    or the operator waits out the retries and gets no advice at the end.
+    """
+    low = msg.lower()
+    return any(
+        marker in low
+        for marker in (
+            "failed to set fps",
+            "do not match configured",
+            "read thread is not running",
+            "timed out waiting for frame",
+        )
+    )
+
+
 def create_record_config(request: RecordingRequest, cameras: dict | None = None) -> RecordConfig:
     """Create a RecordConfig from the recording request.
 
@@ -1194,8 +1246,12 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
 
     # The listing just changed — drop the cached /datasets listing so the delete
-    # reflects immediately instead of after the TTL.
+    # reflects immediately instead of after the TTL. Also drop the cached
+    # Hub-existence answer: get_hub_status memoizes "local_only" (and "on_hub")
+    # for the process lifetime, so without this a dataset checked before the
+    # delete would keep reporting "local_only" forever instead of "absent".
     invalidate_dataset_listing_cache()
+    invalidate_hub_status(repo_id)
 
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
@@ -1656,23 +1712,7 @@ def record_with_web_events(
             break
         except Exception as e:
             msg = str(e)
-            # Transient camera-session turbulence, all observed on this bench and
-            # all curable by a clean re-connect (an AVCaptureSession opened into
-            # another session's asynchronous teardown intermittently comes up
-            # wrong — forensically established 2026-07-09):
-            #   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
-            #   * "do not match configured"   — session landed the neighboring
-            #     native format (e.g. 640x360 instead of 640x480)
-            #   * "timed out waiting for frame" — session came up frame-dead
-            #     (opens fine, background reader never receives a frame)
-            transient_camera = any(
-                marker in msg.lower()
-                for marker in (
-                    "failed to set fps",
-                    "do not match configured",
-                    "timed out waiting for frame",
-                )
-            )
+            transient_camera = _is_transient_camera_error(msg)
             logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
             # If robot connection fails due to camera conflict, provide clear error
             if (

@@ -349,26 +349,6 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
               )}
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="save_checkpoint"
-              checked={config.save_checkpoint}
-              onCheckedChange={(checked) =>
-                updateConfig("save_checkpoint", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="save_checkpoint">Save checkpoints</Label>
-          </div>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="resume"
-              checked={config.resume}
-              onCheckedChange={(checked) => updateConfig("resume", checked)}
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="resume">Resume from checkpoint</Label>
-          </div>
         </section>
 
         {/* Cloud (HF Jobs) */}
@@ -402,23 +382,6 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
           </section>
         )}
 
-        {/* Misc */}
-        <section className="space-y-3">
-          <SectionHeading>Misc</SectionHeading>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="use_policy_training_preset"
-              checked={config.use_policy_training_preset}
-              onCheckedChange={(checked) =>
-                updateConfig("use_policy_training_preset", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="use_policy_training_preset">
-              Use policy training preset
-            </Label>
-          </div>
-        </section>
       </div>
     </AdvancedSection>
   );

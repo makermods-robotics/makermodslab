@@ -182,11 +182,19 @@ def _read_train_config(pretrained_dir: Path) -> dict[str, Any]:
 def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, Any]:
     """Build the listing row for one completed local run's final checkpoint.
 
-    policy_type / dataset / steps come from train_config.json where present, and
-    fall back to the registry record (config.policy_type, config.dataset_repo_id)
-    so a checkpoint missing its train_config still renders a usable row. The
-    checkpoint's actual step (its dir name) is the authoritative `steps` value;
-    train_config's `steps` is the run's target and is used only as a fallback."""
+    policy_type / dataset come from train_config.json where present, and fall
+    back to the registry record (config.policy_type, config.dataset_repo_id)
+    so a checkpoint missing its train_config still renders a usable row.
+
+    `steps` and `target_steps` are deliberately kept separate: `steps` is the
+    checkpoint's actual step (its dir name) — the authoritative count for what
+    was actually saved — while `target_steps` is the run's configured step
+    count (train_config.json's `steps`, falling back to the registry record's).
+    An "interrupted" run that stopped short of its target has `steps <
+    target_steps`; without both fields such a run is indistinguishable from
+    one that finished exactly at that checkpoint. `state` ("done" or
+    "interrupted", per the `list_local_models` gate) is carried for the same
+    reason — callers should not assume every row here trained to completion."""
     train_config = _read_train_config(pretrained_dir)
 
     policy = train_config.get("policy") or {}
@@ -195,12 +203,14 @@ def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, A
     dataset = train_config.get("dataset") or {}
     dataset_repo_id = dataset.get("repo_id") or record.config.dataset_repo_id or None
 
+    raw_target_steps = train_config.get("steps")
+    target_steps = raw_target_steps if isinstance(raw_target_steps, int) else record.config.steps
+
     # Prefer the checkpoint's real step (its dir name) over the config target.
     try:
         steps: int | None = int(pretrained_dir.parent.name)
     except (ValueError, TypeError):
-        raw_steps = train_config.get("steps")
-        steps = int(raw_steps) if isinstance(raw_steps, int) else None
+        steps = target_steps
 
     return {
         "id": record.id,
@@ -208,6 +218,8 @@ def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, A
         "policy_type": policy_type,
         "dataset": dataset_repo_id,
         "steps": steps,
+        "target_steps": target_steps,
+        "state": record.state,
         "path": str(pretrained_dir),
         "last_modified": _epoch_iso(record.ended_at or record.started_at),
         "hf_repo_id": record.hf_repo_id or None,
@@ -227,19 +239,26 @@ def _epoch_iso(ts: float | None) -> str | None:
 
 
 def list_local_models() -> list[dict[str, Any]]:
-    """Every COMPLETED local training run that produced a final checkpoint.
+    """Every local training run that produced a usable final checkpoint.
 
     Reads the job registry (never mutates it). A run qualifies iff it is a
-    `local` runner in state "done" AND has at least one valid on-disk checkpoint
-    — running / failed / interrupted runs and checkpoint-less runs are skipped
-    (a failed run may have died before its first save). Each row carries the
-    policy type, base dataset repo_id, step count, and the local checkpoint path,
-    read from the final checkpoint's train_config.json.
+    `local` runner in state "done" or "interrupted" AND has at least one
+    valid on-disk checkpoint. A "done" run with no checkpoint (crashed before
+    its first save) is skipped. An "interrupted" run (e.g. its exit couldn't
+    be confirmed after a server restart) whose checkpoint is on disk still
+    counts — that state is only a claim about how we found out, not about
+    whether the weights exist. A "failed" run is excluded even with a
+    checkpoint present: unlike "interrupted", its exit code is a confirmed
+    non-zero result, so listing it next to real models — indistinguishable,
+    selectable for inference or a Hub push — would misrepresent a known
+    failure as a usable one. Each row carries the policy type, base dataset
+    repo_id, step count, and the local checkpoint path, read from the final
+    checkpoint's train_config.json.
 
     Newest first (by the run's end/start time)."""
     out: list[dict[str, Any]] = []
     for record in job_registry.list(limit=_LOCAL_MODEL_SCAN_LIMIT):
-        if record.runner != "local" or record.state != "done":
+        if record.runner != "local" or record.state not in ("done", "interrupted"):
             continue
         pretrained_dir = _final_checkpoint_dir(record)
         if pretrained_dir is None:
@@ -251,18 +270,19 @@ def list_local_models() -> list[dict[str, Any]]:
 
 
 def _find_local_record(model_id: str) -> JobRecord | None:
-    """The completed local-run registry record for `model_id`, or None.
+    """The usable local-run registry record for `model_id`, or None.
 
-    None when the id is unknown, isn't a local run, isn't done, or left no
-    checkpoint — the same qualification `list_local_models` applies, so callers
-    (info / upload / delete) agree on what a "local model" is."""
+    None when the id is unknown, isn't a local run, isn't "done" or
+    "interrupted", or left no checkpoint — the same qualification
+    `list_local_models` applies, so callers (info / upload / delete) agree on
+    what a "local model" is."""
     from .jobs import JobNotFoundError
 
     try:
         record = job_registry.get(model_id)
     except JobNotFoundError:
         return None
-    if record.runner != "local" or record.state != "done":
+    if record.runner != "local" or record.state not in ("done", "interrupted"):
         return None
     if _final_checkpoint_dir(record) is None:
         return None
@@ -849,6 +869,8 @@ def list_all_models() -> list[dict[str, Any]]:
             "policy_type": item.get("policy_type"),
             "dataset": None,
             "steps": None,
+            "target_steps": None,
+            "state": None,
             "path": None,
             "last_modified": item.get("last_modified"),
             "hf_repo_id": repo_id,
@@ -870,7 +892,7 @@ def list_all_models() -> list[dict[str, Any]]:
             # hub row's placeholder id/name and fill in the checkpoint fields it
             # couldn't know (per the contract, `id`/`name` follow the local run
             # for a "both" model).
-            for key in ("id", "name", "policy_type", "dataset", "steps", "path"):
+            for key in ("id", "name", "policy_type", "dataset", "steps", "target_steps", "state", "path"):
                 if item.get(key) is not None:
                     existing[key] = item[key]
             a = existing.get("last_modified") or ""
@@ -921,6 +943,8 @@ def list_all_models() -> list[dict[str, Any]]:
                 "policy_type": _hub_policy_type(None, repo_id.split("/", 1)[-1]),
                 "dataset": None,
                 "steps": None,
+                "target_steps": None,
+                "state": None,
                 "path": None,
                 "last_modified": None,
                 "hf_repo_id": repo_id,

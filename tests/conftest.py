@@ -68,6 +68,19 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
     monkeypatch.setattr(cfg, "DISMISSED_HUB_JOBS_FILE", str(cache / "dismissed_hub_jobs.json"))
+    # The pinned ("saved custom") and hidden repo-id lists. These leak the
+    # HARDEST of the lot: every merged /datasets and /models listing folds them
+    # in, so on a developer machine whose real saved_custom_models.json has
+    # pinned repos, those repo ids appear in listings the test never seeded and
+    # the listing assertions fail — on that machine only, invisibly in CI.
+    # `_JsonRepoCollection` takes a `path_of` CALLABLE and re-invokes it on every
+    # access precisely so a patched constant is honoured, and it holds no
+    # in-memory copy, so redirecting the constant here is sufficient — there is
+    # no cache to clear afterwards.
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_DATASETS_FILE", str(cache / "saved_custom_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_CUSTOM_MODELS_FILE", str(cache / "saved_custom_models.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_DATASETS_FILE", str(cache / "hidden_datasets.json"))
+    monkeypatch.setattr(cfg, "SAVED_HIDDEN_MODELS_FILE", str(cache / "hidden_models.json"))
     # BiSO staging root — without this, any bimanual staging test writes into the
     # developer's real ~/.cache dir.
     monkeypatch.setattr(cfg, "MAKERMODSLAB_BISO_STAGING_PATH", str(cache / "makermodslab_biso"))

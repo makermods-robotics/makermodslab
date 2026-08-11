@@ -112,6 +112,10 @@ _POLICY_OPTIMIZER_FIELDS: dict[str, frozenset[str]] = {
     "tdmpc": frozenset({"lr"}),
     "vqbet": frozenset({"lr", "weight_decay"}),
     "pi0_fast": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    # Same PreTrainedConfig shape as pi0 (verified by dataclass introspection
+    # against the pinned lerobot: identical optimizer_lr/betas/eps/
+    # weight_decay/grad_clip_norm/scheduler_* fields and defaults).
+    "pi05": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
     "gaussian_actor": frozenset(),
 }
 
@@ -349,8 +353,18 @@ def build_training_command(
         if request.policy_push_to_hub and request.policy_repo_id:
             cmd.extend(["--policy.repo_id", request.policy_repo_id])
         if request.policy_push_to_hub:
-            # Public + required Hub tags, same global default as datasets.
-            cmd.extend(_policy_hub_flags())
+            # Visibility only — NOT _policy_hub_flags(). On the resume path
+            # lerobot parses via TrainPipelineConfig.from_pretrained(config_path,
+            # cli_args=...) -> draccus.parse(cls, config_file, args=...), which
+            # merges each CLI override into the config dict as a RAW STRING and
+            # then decodes it against the field type. `--policy.tags
+            # '[a,b,c]'` therefore reaches list[str] decoding as the literal
+            # string "[a,b,c]" and dies with DecodingError. (The fresh-run
+            # branch survives the same token because it goes through argparse,
+            # which splits the bracket form itself.) Re-passing tags is also
+            # redundant: the checkpoint's train_config.json already carries
+            # policy.tags/private/repo_id/push_to_hub. See MT24.
+            cmd.extend(["--policy.private", "false"])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
         return cmd

@@ -443,9 +443,15 @@ def _device_ports(device) -> str:
 def _bus_has_a_responding_motor(bus) -> bool:
     """True when at least one motor on ``bus`` answers a ping.
 
-    The signal ``force_disable_torque`` needs is "can we still talk to this
-    arm", and an open serial port does not answer that. ``is_connected`` is
-    literally ``port_handler.is_open`` (lerobot ``motors_bus.py``), and
+    Used only to choose the *wording* of the alarm after the torque-disable
+    pass below has already failed on every motor on this bus — it never gates
+    whether that pass runs. A degraded-but-recoverable bus (a brownout that
+    recovers, EMI, a long cable, the moments right after the control loop died
+    on a comms error) can fail every zero-retry ping while a retried write
+    would have landed, so the probe must not be allowed to veto the write.
+
+    ``is_connected`` can't stand in for this: it's literally
+    ``port_handler.is_open`` (lerobot ``motors_bus.py``), and
     ``MotorsBus._connect`` calls ``openPort()`` *before* ``_handshake()`` and
     does not close the port when the handshake fails — so an unpowered,
     browned-out, or wrong-baud arm leaves ``is_connected`` True on a bus that
@@ -453,14 +459,11 @@ def _bus_has_a_responding_motor(bus) -> bool:
 
     ``ping`` is the right probe: it is a read (so it works whatever the torque
     state is) and it returns ``None`` rather than raising on comm failure.
-    Short-circuits on the first motor that answers, so a healthy bus costs one
-    packet; a dead one costs one timeout per motor, still far cheaper than the
-    ``num_retry=5`` write storm the torque pass would otherwise spend proving
-    the same thing.
+    Short-circuits on the first motor that answers.
 
-    Defaults to True (proceed with the torque pass, preserving the old
-    behaviour) for anything that can't be probed: a bus with no ``motors``, a
-    bus without a ``ping`` method, or a test double that models neither.
+    Defaults to True (assume the bus is alive, keep the loud alarm) for
+    anything that can't be probed: a bus with no ``motors``, a bus without a
+    ``ping`` method, or a test double that models neither.
     """
     motors = getattr(bus, "motors", None) or {}
     ping = getattr(bus, "ping", None)
@@ -512,21 +515,11 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
             with contextlib.suppress(Exception):
                 port_handler.is_using = False
         port = getattr(bus, "port", None) or "unknown port"
-        # Nothing on this bus is listening: the port opened but no motor
-        # answers (arm unpowered, browned-out servos, wrong baud, or a
-        # valid-but-wrong serial device). Every torque write below would fail,
-        # and reporting that as "TORQUE MAY STILL BE ENABLED — unplug its
-        # power" is actively misleading on an arm that has no power. Say what
-        # was actually observed instead, and keep the rigid-arm advice as a
-        # conditional rather than an assertion.
-        if not _bus_has_a_responding_motor(bus):
-            message = (
-                f"No motor answered on {port} ({label}) — skipped the torque disable. "
-                "Check the arm's power and USB cable. If the arm is rigid, unplug its power to release it."
-            )
-            logger.warning(message)
-            problems.append(message)
-            continue
+        # Always attempt the disable, whatever the liveness probe below would
+        # say: a degraded-but-recoverable bus can fail every zero-retry ping
+        # while the retried write here still lands, and skipping the write on
+        # a failed probe would leave a genuinely energized arm rigid. The
+        # probe is only consulted after a failure, to pick the wording.
         failed: list[str] = []
         for motor in getattr(bus, "motors", None) or {}:
             try:
@@ -534,11 +527,27 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
             except Exception as e:
                 failed.append(f"{motor}: {e}")
         if failed:
-            message = (
-                f"TORQUE MAY STILL BE ENABLED on {port} ({label}; failed motors — {'; '.join(failed)}). "
-                "The arm can stay rigid; unplug its power to release it."
-            )
-            logger.error(message)
+            if _bus_has_a_responding_motor(bus):
+                # Something is listening, so the failed writes are a real
+                # "this joint may stay rigid" condition.
+                message = (
+                    f"TORQUE MAY STILL BE ENABLED on {port} ({label}; failed motors — {'; '.join(failed)}). "
+                    "The arm can stay rigid; unplug its power to release it."
+                )
+                logger.error(message)
+            else:
+                # Nothing on this bus is listening: the port opened but no
+                # motor answers (arm unpowered, browned-out servos, wrong
+                # baud, or a valid-but-wrong serial device). Reporting that as
+                # "TORQUE MAY STILL BE ENABLED — unplug its power" is actively
+                # misleading on an arm that has no power. Say what was
+                # actually observed, and keep the rigid-arm advice as a
+                # conditional rather than an assertion.
+                message = (
+                    f"No motor answered on {port} ({label}) — the torque disable failed on every motor. "
+                    "Check the arm's power and USB cable. If the arm is rigid, unplug its power to release it."
+                )
+                logger.warning(message)
             problems.append(message)
     return problems
 

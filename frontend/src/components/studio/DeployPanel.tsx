@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select,
@@ -44,7 +45,9 @@ import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import ImportModelModal from "@/components/jobs/ImportModelModal";
+import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import {
+  AdvancedSection,
   FormSection,
   LibrarySection,
   PANEL_ENTRY_CLASS,
@@ -77,6 +80,11 @@ const JOB_SCAN_LIMIT = 200;
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
 // just stops the stepper from offering a number that would be silently reduced.
 const MAX_EVAL_EPISODES = 200;
+
+/** Coefficient of the original ACT paper's exponential weighting (see
+ * lerobot's ACTTemporalEnsembler). Offered as the starting point when the user
+ * switches temporal ensembling on. */
+const DEFAULT_TEMPORAL_ENSEMBLE_COEFF = 0.01;
 
 /** Small preview for verifying which physical camera a role binds to.
  *
@@ -194,6 +202,14 @@ const DeployPanel: React.FC = () => {
   // behaviour; "rtc" is experimental (see StartInferenceRequest).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
+  // ACT temporal ensembling. Held as (on, coeff) rather than `number | null`
+  // so clearing the number field mid-edit doesn't silently switch the feature
+  // off; the request sends the coeff only while `on`.
+  const [temporalEnsemble, setTemporalEnsemble] = useState(false);
+  const [temporalEnsembleCoeff, setTemporalEnsembleCoeff] = useState<
+    number | undefined
+  >(DEFAULT_TEMPORAL_ENSEMBLE_COEFF);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [policyConfig, setPolicyConfig] = useState<PolicyConfigSummary | null>(
     null,
@@ -202,6 +218,13 @@ const DeployPanel: React.FC = () => {
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(
     null,
   );
+  const [policyExtra, setPolicyExtra] = useState<{
+    policyType: string;
+    packageName: string;
+    installTarget: string;
+    installHint: string;
+  } | null>(null);
+  const [checkingExtra, setCheckingExtra] = useState(false);
 
   // Per camera DISPLAY name → the NAME of one of the selected robot's cameras.
   // Keyed by the stripped display name (== requestKey), and sent verbatim as
@@ -531,6 +554,17 @@ const DeployPanel: React.FC = () => {
 
   const inferenceActive = status?.inference_active === true;
 
+  // Temporal ensembling is an ACT config field — no other policy type has it,
+  // and passing --policy.temporal_ensemble_coeff to one would fail the
+  // rollout's config parse. Show the control only for ACT checkpoints.
+  const isAct = policyConfig?.policy_type === "act";
+  // Empty field or a non-positive number: the backend rejects it (weights are
+  // exp(-coeff * i)), so block Start rather than round-trip a 400.
+  const temporalEnsembleInvalid =
+    isAct &&
+    temporalEnsemble &&
+    (temporalEnsembleCoeff === undefined || temporalEnsembleCoeff <= 0);
+
   // Inference drives the follower(s) only — gate on follower_ready, not
   // is_clean, so a robot with no leader port/calibration (which inference
   // never touches) can still deploy.
@@ -541,7 +575,9 @@ const DeployPanel: React.FC = () => {
     selectedRef != null &&
     !!policyConfig &&
     allCamerasBound &&
+    !temporalEnsembleInvalid &&
     !submitting &&
+    !checkingExtra &&
     !inferenceActive;
 
   const handleStart = async () => {
@@ -552,6 +588,38 @@ const DeployPanel: React.FC = () => {
       !policyConfig
     )
       return;
+
+    // Pre-flight: pi0/pi0_fast/pi05/smolvla/diffusion need an optional
+    // package installed locally. The rollout subprocess runs against this
+    // machine's own environment (it drives the physically-connected robot),
+    // so catch a missing extra here with a one-click installer instead of a
+    // buried ImportError after the rollout has already claimed the cameras.
+    if (policyConfig.policy_type) {
+      setCheckingExtra(true);
+      try {
+        const r = await fetchWithHeaders(
+          `${baseUrl}/system/policy-extra/${policyConfig.policy_type}`,
+        );
+        if (r.ok) {
+          const extra = await r.json();
+          if (extra.needs_extra && !extra.available) {
+            setPolicyExtra({
+              policyType: policyConfig.policy_type,
+              packageName: extra.package,
+              installTarget: extra.install_target,
+              installHint: extra.install_hint,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Check failed (offline / older backend) — fall through and let the
+        // rollout report any problem itself.
+      } finally {
+        setCheckingExtra(false);
+      }
+    }
+
     // Drops every CameraThumbnail's browser stream so the rollout subprocess can
     // open the same camera index via OpenCV without colliding on the device.
     setSubmitting(true);
@@ -597,6 +665,10 @@ const DeployPanel: React.FC = () => {
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
         eval_episodes: evalEpisodes,
         inference_engine: inferenceEngine,
+        // ACT-only, and only while the switch is on — otherwise omitted so the
+        // checkpoint's own (ensembling-off) config stands.
+        temporal_ensemble_coeff:
+          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
       });
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
@@ -786,8 +858,13 @@ const DeployPanel: React.FC = () => {
                 <CheckpointDropdown
                   id="deploy-checkpoint"
                   checkpoints={checkpoints}
-                  selectedStep={selectedStep}
-                  onChange={setSelectedStep}
+                  // Single-job list: steps are unique here, so the step maps
+                  // 1:1 onto the checkpoint's identifying ref.
+                  selectedRef={
+                    checkpoints.find((c) => c.step === selectedStep)?.ref ??
+                    null
+                  }
+                  onChange={(c) => setSelectedStep(c.step)}
                 />
               )}
               {robotCheckpointArmMismatch ? (
@@ -984,6 +1061,74 @@ const DeployPanel: React.FC = () => {
                 </div>
               )}
           </FormSection>
+
+          {/* Advanced parameters — same AdvancedSection trigger and inner
+              eyebrow/label/help-text rhythm as the Train form's AdvancedCard,
+              so the two panels read as one form. ACT-only for now: temporal
+              ensembling is an ACT config field, so for every other policy type
+              the block has nothing to hold and stays hidden. ------------- */}
+          {isAct ? (
+            <AdvancedSection
+              open={advancedOpen}
+              onOpenChange={setAdvancedOpen}
+              summary="Temporal ensembling for ACT"
+            >
+              <div className="space-y-6">
+                <section className="space-y-3">
+                  <h4 className="eyebrow">Action selection</h4>
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="deploy-temporal-ensemble"
+                      checked={temporalEnsemble}
+                      onCheckedChange={setTemporalEnsemble}
+                      className="data-[state=checked]:bg-primary"
+                    />
+                    <Label htmlFor="deploy-temporal-ensemble">
+                      Temporal ensembling
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Averages the overlapping action chunks the policy predicts
+                    at each step instead of executing one chunk open-loop —
+                    smoother motion, but the policy runs every control step, so
+                    it is slower.
+                  </p>
+                  {temporalEnsemble ? (
+                    <div className="space-y-2">
+                      <Label htmlFor="deploy-temporal-ensemble-coeff">
+                        Ensemble coefficient
+                      </Label>
+                      <NumberInput
+                        id="deploy-temporal-ensemble-coeff"
+                        integer={false}
+                        step="0.001"
+                        min={0}
+                        value={temporalEnsembleCoeff}
+                        onChange={setTemporalEnsembleCoeff}
+                        placeholder={`${DEFAULT_TEMPORAL_ENSEMBLE_COEFF} (ACT paper default)`}
+                        aria-invalid={temporalEnsembleInvalid}
+                        className={cn(
+                          "w-40",
+                          temporalEnsembleInvalid && "border-destructive",
+                        )}
+                      />
+                      {temporalEnsembleInvalid ? (
+                        <p className="text-xs text-destructive">
+                          Enter a number greater than 0.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Weights are exp(-coeff × age): higher favours the
+                          newest prediction, lower averages more evenly. The
+                          ACT paper uses {DEFAULT_TEMPORAL_ENSEMBLE_COEFF}.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+                </section>
+              </div>
+            </AdvancedSection>
+          ) : null}
         </div>
       ) : null}
 
@@ -998,9 +1143,11 @@ const DeployPanel: React.FC = () => {
           <Play className="h-4 w-4" />
           {submitting
             ? "Starting…"
-            : evalEpisodes > 1
-              ? `Start evaluation (${evalEpisodes})`
-              : "Start inference"}
+            : checkingExtra
+              ? "Checking…"
+              : evalEpisodes > 1
+                ? `Start evaluation (${evalEpisodes})`
+                : "Start inference"}
         </Button>
         <Button
           onClick={handleStop}
@@ -1026,6 +1173,18 @@ const DeployPanel: React.FC = () => {
           }}
         />
       </LibrarySection>
+
+      {policyExtra && (
+        <PolicyExtraDialog
+          open={!!policyExtra}
+          onOpenChange={(o) => !o && setPolicyExtra(null)}
+          policyType={policyExtra.policyType}
+          packageName={policyExtra.packageName}
+          installTarget={policyExtra.installTarget}
+          installHint={policyExtra.installHint}
+          purpose="inference"
+        />
+      )}
     </div>
   );
 };

@@ -370,6 +370,124 @@ def test_build_camera_configs_skips_non_opencv_type() -> None:
     assert configs == {}
 
 
+def test_is_transient_camera_error_markers_pinned_against_lerobot_source() -> None:
+    """Pins the marker set against lerobot's *actual* raise sites, not
+    hand-typed copies of them — a `str.__contains__` over a literal tuple
+    can't fail on its own, so the thing worth testing is whether upstream
+    still emits these strings, not whether the tuple matches itself. If
+    lerobot rewords one of these RuntimeErrors, this test goes red instead of
+    the retry silently stopping firing.
+
+    "failed to set capture_" is deliberately NOT pinned here — it's excluded
+    from `_is_transient_camera_error` on purpose (see its docstring)."""
+    import inspect
+
+    from lerobot.cameras.opencv import camera_opencv
+
+    source = inspect.getsource(camera_opencv)
+
+    assert "failed to set fps={self.fps} ({actual_fps=})" in source
+    assert "do not match configured width={self.capture_width} or height={self.capture_height}" in source
+    assert "Timed out waiting for frame from camera {self}" in source
+    assert "read thread is not running." in source
+
+
+def test_do_not_match_configured_is_unreachable_from_connect() -> None:
+    """Pins WHY "read thread is not running" has to be in the marker set.
+
+    The wrong-native-format error is raised by `_postprocess_image`, which is
+    called only from `_read_loop` — i.e. inside the camera's background
+    thread, where `connect()` can never see it. After 12 consecutive
+    mismatches that loop dies, and the next `async_read` raises "read thread
+    is not running" instead. If upstream ever moves the size check onto the
+    synchronous path, this test goes red and the docstring's "do not expect it
+    to fire" caveat (and this whole marker) should be revisited.
+    """
+    import inspect
+
+    from lerobot.cameras.opencv import camera_opencv
+
+    source = inspect.getsource(camera_opencv)
+    postprocess_callers = [
+        line.strip() for line in source.splitlines() if "_postprocess_image(" in line and "def " not in line
+    ]
+    assert len(postprocess_callers) == 1, postprocess_callers
+    # ...and that single call site is inside the background read loop.
+    read_loop = inspect.getsource(camera_opencv.OpenCVCamera._read_loop)
+    assert "_postprocess_image(" in read_loop
+
+
+def test_is_transient_camera_error_matches_existing_markers() -> None:
+    from makermodslab.record import _is_transient_camera_error
+
+    assert _is_transient_camera_error("OpenCVCamera(0) failed to set fps=30 (actual_fps=5.0).")
+    # 640x360 landed where 640x480 was configured — width differs, height
+    # doesn't (the previous ordering here had the two swapped).
+    assert _is_transient_camera_error(
+        "OpenCVCamera(0) frame width=360 or height=480 do not match configured width=640 or height=480."
+    )
+    assert _is_transient_camera_error(
+        "Timed out waiting for frame from camera OpenCVCamera(0) after 200 ms. Read thread alive: True."
+    )
+    # The frame-dead session once its background reader has given up — this is
+    # what the caller actually sees for the wrong-native-format case.
+    assert _is_transient_camera_error("OpenCVCamera(0) read thread is not running.")
+
+
+def test_is_transient_camera_error_false_for_unrelated_errors() -> None:
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error("Could not connect on port '/dev/ttyUSB0'.")
+    assert not _is_transient_camera_error("Failed to open OpenCVCamera(97).")
+
+
+def test_is_transient_camera_error_false_for_capture_size_mismatch() -> None:
+    """`friendly_hint()` (utils/errors.py) classifies "failed to set capture_"
+    as a permanent misconfiguration ("camera doesn't support the configured
+    resolution — click Auto"). Retrying it wastes the backoff telling the
+    operator the same thing three times."""
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+    )
+
+
+def test_every_retryable_camera_marker_that_can_be_permanent_has_a_hint() -> None:
+    """The invariant the two classifiers have to share.
+
+    A marker in `_is_transient_camera_error` that can ALSO be a permanent
+    misconfiguration costs the operator the full backoff before failing — so
+    the message they're finally shown must at least tell them what to do.
+    "failed to set fps" is exactly that case (an operator can type an fps the
+    device can't do, in the same settings panel as the resolution), and it
+    used to be the one camera misconfiguration that got retried and then
+    surfaced with no guidance at all."""
+    from makermodslab.utils.errors import friendly_hint
+
+    fps_hint = friendly_hint("OpenCVCamera(0) failed to set fps=60 (actual_fps=30.0).")
+    assert fps_hint is not None
+    assert "Auto" in fps_hint
+    # The resolution sibling still gets its own, distinct wording.
+    size_hint = friendly_hint(
+        "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+    )
+    assert size_hint is not None and size_hint != fps_hint
+
+
+def test_is_transient_camera_error_false_for_fourcc_mismatch() -> None:
+    """lerobot logs a fourcc mismatch as a warning (camera_opencv.py's
+    `_validate_fourcc`) rather than raising — it never reaches this
+    classifier as an exception message. Not retried, but for a different
+    reason than the negative cases above: excluded by construction, not by
+    policy."""
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set fourcc=MJPG (actual=YUYV, success=False)."
+    )
+
+
 def _make_dataset_dir(cache, repo_id: str, total_episodes: int):
     """Create a minimal on-disk LeRobot dataset dir (meta/info.json) under the
     tmp cache root, plus a fake video file so 'removed' is observable."""
@@ -1751,6 +1869,66 @@ def test_delete_dataset_refused_mid_upload(tmp_lerobot_home, monkeypatch: pytest
     assert result["success"] is False
     assert "uploaded" in result["message"].lower()
     assert (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_invalidates_hub_status(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful delete drops the cached Hub-existence answer too, not just
+    the listing cache — otherwise a dataset previously checked and cached as
+    "local_only" would keep reporting that forever after its local copy is
+    gone, instead of flipping to "absent"."""
+    import json
+    from unittest.mock import patch
+
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    # handle_delete_dataset resolves HF_LEROBOT_HOME via a lerobot constant
+    # that's frozen at first import, not re-read from the env var per call —
+    # tmp_lerobot_home's monkeypatch.setenv alone doesn't reach it, so point
+    # it at the tmp dir directly (test-only; not a production code path).
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    repo_id = "tester/to_delete"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    with patch("makermodslab.record.invalidate_hub_status") as inval:
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+
+    assert result["success"] is True
+    inval.assert_called_once_with(repo_id)
+    assert not (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_clears_stale_local_only_hub_status(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end reproduction of the actual bug: a dataset checked once
+    (caching "local_only") and then deleted must report "absent" on the next
+    check — not keep serving the stale, now-wrong cached answer."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab import datasets as ds
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    repo_id = "tester/stale_check"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text('{"total_episodes": 1}')
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False  # never uploaded
+    with ds._HUB_STATUS_LOCK:
+        ds._HUB_STATUS_CACHE.clear()
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.get_hub_status(repo_id)["status"] == "local_only"
+
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+        assert result["success"] is True
+
+        assert ds.get_hub_status(repo_id)["status"] == "absent"
 
 
 def test_delete_dataset_refused_mid_recording(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
