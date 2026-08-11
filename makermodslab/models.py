@@ -647,8 +647,18 @@ def list_all_models() -> list[dict[str, Any]]:
             # config.json-derived values override the hub row's tag/name-derived
             # ones (same local-wins rule as the run collapse above).
             for key in ("policy_type", "dataset", "steps", "path", "local_kind"):
-                if item.get(key) is not None:
-                    existing[key] = item[key]
+                if item.get(key) is None:
+                    continue
+                # ...EXCEPT local_kind, where "run" is sticky. A published run
+                # that the user also downloaded back matches this repo_id, but
+                # the row still carries the RUN's id (set by the collapse above),
+                # so its delete deletes the run dir — every checkpoint, published
+                # or not. Letting the downloaded copy relabel it "downloaded"
+                # would hand that destructive delete the reassuring "the Hub copy
+                # stays" dialog (see deleteSemantics.ts).
+                if key == "local_kind" and existing.get("local_kind") == "run":
+                    continue
+                existing[key] = item[key]
             a = existing.get("last_modified") or ""
             b = item.get("last_modified") or ""
             existing["last_modified"] = max(a, b) or None
@@ -888,11 +898,24 @@ def _hub_model_info(repo_id: str) -> dict[str, Any] | None:
 
 def _upload_model_error(exc: Exception) -> ModelError:
     """Map a huggingface_hub exception from create_repo/upload_folder to a
-    ModelError with a legible message. A 401/auth failure or a 403 permission
-    failure becomes a clear "you can't push this" message; anything else
-    degrades to a generic Hub-failure 502. Reuses record._upload_auth_error so
-    the 401 maps identically to the dataset upload path."""
+    ModelError with a legible message. A malformed repo id is the caller's
+    input and becomes a 400; a 401/auth failure or a 403 permission failure
+    becomes a clear "you can't push this" message; anything else degrades to a
+    generic Hub-failure 502. Reuses record._upload_auth_error so the 401 maps
+    identically to the dataset upload path."""
+    from huggingface_hub.errors import HFValidationError
+
     from .record import _upload_auth_error
+
+    if isinstance(exc, HFValidationError):
+        # Client-side validation — the request never reached the Hub, so "the
+        # Hub rejected the upload" (502) both misattributes the failure and
+        # hides the one thing the user can act on: the name they typed into
+        # PublishToHubRow's free-text repo field.
+        return ModelError(
+            400,
+            f"That's not a valid Hub repo name: {exc}",
+        )
 
     auth = _upload_auth_error(exc)
     if auth is not None:
@@ -946,13 +969,23 @@ class PublishedRepoState(NamedTuple):
 
 def _published_repo_state(repo_id: str) -> PublishedRepoState:
     """Read a model repo's published checkpoints off the Hub. Best-effort: a
-    repo that doesn't exist yet, a network blip, or a permission error all come
-    back `readable=False` with no steps, which every caller handles explicitly
-    rather than mistaking for an empty repo."""
+    network blip or a permission error comes back `readable=False` with no
+    steps, which every caller handles explicitly rather than mistaking for an
+    empty repo.
+
+    A repo that does not exist is NOT such a failure. The Hub answered, and the
+    answer is "nothing is published here" — the ordinary state of every run
+    before its first publish. Reporting that as unreadable made the picker warn
+    "couldn't reach the Hub" on the single most common path."""
+    from huggingface_hub.errors import RepositoryNotFoundError
+
     from .jobs import _HUB_CKPT_REF_RE, _hub_checkpoints_from_files
 
     try:
         files = shared_hf_api().list_repo_files(repo_id, repo_type="model")
+    except RepositoryNotFoundError:
+        # No repo yet ⇒ genuinely nothing published, and we know it.
+        return PublishedRepoState({}, False, True)
     except Exception as exc:
         logger.info("Could not read published checkpoints of %s: %s", repo_id, exc)
         return PublishedRepoState({}, False, False)
@@ -1134,6 +1167,17 @@ def upload_local_model(
     target_repo_id = repo_id or record.hf_repo_id or _default_model_repo_id(record)
     api = shared_hf_api()
     total = len(selected)
+
+    def _pin() -> None:
+        """Record the repo this run is being published into. Idempotent
+        (set_hf_repo_id no-ops on an unchanged value), so it is safe to call per
+        step; best-effort, because losing the pin must not fail an upload that
+        otherwise succeeded."""
+        try:
+            job_registry.set_hf_repo_id(model_id, target_repo_id)
+        except Exception as exc:
+            logger.info("Could not pin %s to repo %s: %s", model_id, target_repo_id, exc)
+
     try:
         api.create_repo(target_repo_id, repo_type="model", private=False, exist_ok=True)
         for done, (step, pretrained_dir) in enumerate(selected):
@@ -1148,19 +1192,23 @@ def upload_local_model(
                 # padding into the ref it later downloads by.
                 path_in_repo=f"checkpoints/{pretrained_dir.parent.name}/pretrained_model",
             )
+            # Pin as soon as the FIRST step lands, not after the loop: a queue
+            # that dies half-way has already put weights in this repo, and an
+            # unpinned run sends the retry to a freshly-computed default repo —
+            # forking the run in two and stranding what did upload. This is the
+            # failure the pin exists to prevent, so it has to happen while the
+            # loop can still throw.
+            if done == 0:
+                _pin()
     except ModelError:
         raise
     except Exception as exc:
         logger.info("Upload of local model %s -> %s failed: %s", model_id, target_repo_id, exc)
         raise _upload_model_error(exc) from exc
 
-    # Pin the repo BEFORE the cosmetic card/tag work: the weights are already
-    # up, so a later failure must not leave the run unaware of where it was
-    # published (which would send the next publish to a brand-new repo).
-    try:
-        job_registry.set_hf_repo_id(model_id, target_repo_id)
-    except Exception as exc:
-        logger.info("Could not pin %s to repo %s: %s", model_id, target_repo_id, exc)
+    # Belt-and-braces for the empty-selection-impossible case; also keeps the
+    # pin correct if the loop above ever stops pinning on the first iteration.
+    _pin()
 
     uploaded = [s for s, _ in selected]
     # Every step is on the Hub now — say so BEFORE the card/tag work below, so a
