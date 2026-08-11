@@ -20,6 +20,12 @@ const WIDE_COLUMN_MIN_PX = 800;
  * can see as literals. */
 export const GRID_MIN_H = "min-h-[18.875rem]";
 
+/** Just the 16.5rem card row, without the footer slot. An empty/no-match state
+ * that renders its OWN footer row beneath it (jobs' Untracked toggle) must use
+ * this instead of GRID_MIN_H — otherwise message + footer stack to 21.25rem and
+ * that library sits 2.375rem taller than the other panels'. */
+export const GRID_ROW_MIN_H = "min-h-[16.5rem]";
+
 /**
  * The shared library grid, capped at one row. Every studio library (datasets,
  * training jobs, models) renders one row of cards by default — three where the
