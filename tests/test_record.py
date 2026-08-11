@@ -1871,6 +1871,66 @@ def test_delete_dataset_refused_mid_upload(tmp_lerobot_home, monkeypatch: pytest
     assert (tmp_lerobot_home / repo_id).exists()
 
 
+def test_delete_dataset_invalidates_hub_status(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful delete drops the cached Hub-existence answer too, not just
+    the listing cache — otherwise a dataset previously checked and cached as
+    "local_only" would keep reporting that forever after its local copy is
+    gone, instead of flipping to "absent"."""
+    import json
+    from unittest.mock import patch
+
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    # handle_delete_dataset resolves HF_LEROBOT_HOME via a lerobot constant
+    # that's frozen at first import, not re-read from the env var per call —
+    # tmp_lerobot_home's monkeypatch.setenv alone doesn't reach it, so point
+    # it at the tmp dir directly (test-only; not a production code path).
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    repo_id = "tester/to_delete"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    with patch("makermodslab.record.invalidate_hub_status") as inval:
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+
+    assert result["success"] is True
+    inval.assert_called_once_with(repo_id)
+    assert not (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_clears_stale_local_only_hub_status(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end reproduction of the actual bug: a dataset checked once
+    (caching "local_only") and then deleted must report "absent" on the next
+    check — not keep serving the stale, now-wrong cached answer."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab import datasets as ds
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    repo_id = "tester/stale_check"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text('{"total_episodes": 1}')
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False  # never uploaded
+    with ds._HUB_STATUS_LOCK:
+        ds._HUB_STATUS_CACHE.clear()
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.get_hub_status(repo_id)["status"] == "local_only"
+
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+        assert result["success"] is True
+
+        assert ds.get_hub_status(repo_id)["status"] == "absent"
+
+
 def test_delete_dataset_refused_mid_recording(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
     """Deleting a dataset an active recording session is writing is refused —
     the delete guard now runs the full _dataset_in_use check, not just the

@@ -1246,8 +1246,12 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
 
     # The listing just changed — drop the cached /datasets listing so the delete
-    # reflects immediately instead of after the TTL.
+    # reflects immediately instead of after the TTL. Also drop the cached
+    # Hub-existence answer: get_hub_status memoizes "local_only" (and "on_hub")
+    # for the process lifetime, so without this a dataset checked before the
+    # delete would keep reporting "local_only" forever instead of "absent".
     invalidate_dataset_listing_cache()
+    invalidate_hub_status(repo_id)
 
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
