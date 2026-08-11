@@ -47,10 +47,11 @@ export type JobsEntry =
       job: JobRecord;
       /** Checkpoints reachable from this row's run — its own plus those of the
        * runs it continues. A row is a whole CHAIN (the list shows one row per
-       * leaf), and under CHAIN REWIND a run may continue from any checkpoint on
-       * its lineage, so the run's own `checkpoint_count` is the wrong number to
-       * gate Resume on: the commonest resumable shape is a tip that died before
-       * saving anything, whose checkpoints are all inherited. Counted by
+       * leaf), and a resume takes the newest checkpoint on that LINEAGE, which
+       * may be an ancestor's, so the run's own `checkpoint_count` is the wrong
+       * number to gate Resume on: the commonest resumable shape is a tip that
+       * died before saving anything, whose checkpoints are all inherited.
+       * Counted by
        * JobsDataContext, which holds the ancestor records — and which files a
        * chain whose ancestors are still being backfilled as active, so a row is
        * never hidden away in the UNTRACKED fold on the strength of a count that
@@ -212,16 +213,20 @@ function describeEntry(entry: JobsEntry): Described {
 }
 
 /** Resume is offered on a chain whose tip ended before its target with
- * something, anywhere in the chain, to continue from — chain rewind lets the
- * tip continue from any checkpoint on its lineage. The state half is the ONE
+ * something, anywhere in the chain, to continue from — the tip continues from
+ * the newest checkpoint on its lineage, its own or an ancestor's. The state
+ * half is the ONE
  * shared leaf rule (`isResumableLeaf`), so this row's button and the detail
  * card's Resume can't disagree; the checkpoint half is deliberately the cheap
  * chain-wide count, because the exact per-step answer needs a fetch. The click
  * resolves the real list and says so if it comes back empty.
  *
- * ONE verb across both levels of control: this row is the shortcut — same
- * action, same default (the newest resumable checkpoint) — and the detail
- * card below is that action plus the choice of which step to start from. */
+ * ONE verb across both levels of control, and by now the same action with
+ * nothing added: Continue is not step-selectable on either (user decision
+ * 2026-08-10), so this row and the detail card below both take the newest
+ * resumable checkpoint. The card keeps a checkpoint dropdown, but it drives
+ * only Run / Fine-tune / Download — picking an older checkpoint is a real
+ * choice for those and not for a continuation. */
 const canResumeEntry = (entry: JobsEntry): boolean =>
   entry.kind === "job" &&
   isResumableLeaf(entry.job) &&
@@ -366,7 +371,7 @@ const JobsRow: React.FC<RowProps> = ({
                 onResume(record);
               }}
               aria-label="Resume from the newest usable checkpoint"
-              title="Resume from the newest usable checkpoint (pick a specific step in the card below)"
+              title="Resume from the newest usable checkpoint"
               className="flex h-5 w-5 items-center justify-center rounded text-info transition-colors hover:bg-info/10 disabled:opacity-50"
             >
               {resuming ? (

@@ -141,8 +141,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   );
 
   // Active = running, or the CHAIN has a checkpoint (see isJobActive) — which
-  // under chain rewind is the same thing as "resumable", since a run continues
-  // from anything on its lineage. Everything else folds under UNTRACKED inside
+  // is the same thing as "resumable", since a run continues from the newest
+  // checkpoint on its lineage. Everything else folds under UNTRACKED inside
   // the dropdown so the trigger lands on what's still relevant. Superseded runs are dropped
   // from both — they surface nested under their successor's card instead.
   const toEntries = useCallback(
@@ -154,9 +154,10 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
             key: jobEntryKey(job),
             time: jobTime(job),
             job,
-            // The row stands for a whole CHAIN, and chain rewind lets it
-            // continue from any checkpoint on that chain — so the gate counts
-            // the chain, not just this tip. The tip's own count is the wrong
+            // The row stands for a whole CHAIN, and it continues from the
+            // newest checkpoint on that chain, its own or an ancestor's — so
+            // the gate counts the chain, not just this tip. The tip's own
+            // count is the wrong
             // number for the commonest resumable shape there is: a run that
             // died before its first save, whose checkpoints are all inherited.
             // Counted by the provider, which holds the ancestor records — and
@@ -232,7 +233,9 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   // card's Resume produces. Same shared loader AND same shared rule,
   // so the two entry points can offer neither a different checkpoint nor a
   // different verdict (this path used to walk its own, thinner logic).
-  // Choosing a *specific* step stays on the selected run's card below.
+  // There is no longer a second, step-selectable way in: the card's Resume
+  // takes the same newest entry this does, so the row and the card are one
+  // affordance in two places rather than a quick path and a precise one.
   const handleResume = useCallback(
     async (job: JobRecord) => {
       setResumingId(job.id);

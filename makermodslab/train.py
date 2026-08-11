@@ -198,6 +198,14 @@ class TrainingRequest(BaseModel):
     # the owner from the step would silently train from different weights than
     # the user picked. JobRegistry.start refuses an owner that is not on the
     # leaf's ancestor path or does not hold the named step.
+    #
+    # WIDER THAN THE UI, deliberately (user decision 2026-08-10). The app's
+    # Continue is latest-only: it always resumes the newest checkpoint on the
+    # lineage, so the only owner it ever names is the one that happens to hold
+    # that checkpoint — an ancestor exactly when the leaf saved nothing of its
+    # own. An arbitrary rewind is reachable only by calling the API directly.
+    # The guards below are therefore not dead code protecting a UI path; they
+    # are the whole validation for a surface the UI no longer narrows first.
     resume_from_checkpoint_job_id: str | None = None
     # Set by the "Fine-tune" flow: start a FRESH run (fresh optimizer, step 0)
     # whose weights are initialized from an imported/existing checkpoint. Unlike

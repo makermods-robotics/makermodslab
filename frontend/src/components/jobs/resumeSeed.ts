@@ -55,9 +55,10 @@ export function checkpointOwners(
 /** Load the checkpoints reachable from `leaf`, walking its OWN ancestor path:
  * the leaf's own list first, then each ancestor's, nearest first.
  *
- * Both resume entry points (the library row's one-click and the card's
- * step-picker) read this one list, so they can't offer different checkpoints
- * for the same run. Sorted newest-step-first, then deduped by `ref` — with
+ * Both resume entry points read this one list — and, since Continue stopped
+ * being step-selectable, both take the same entry out of it — so they can
+ * neither offer nor use a different checkpoint for the same run. Sorted
+ * newest-step-first, then deduped by `ref` — with
  * lineage order preserved for equal refs, the surviving entry of a duplicate
  * pair is attributed to the NEAREST run in the chain.
  *
@@ -65,11 +66,11 @@ export function checkpointOwners(
  * repo, so every run in a cloud chain enumerates the same shared tree and each
  * inherited step would otherwise appear once per run.
  *
- * The whole ancestor path is loaded even though only the leaf's OWN entries
- * are resumable (see `resumableCheckpoints`): the card LISTS this list, and
- * being able to look at what a chain saved — and to run inference on an
- * inherited checkpoint — is not the same affordance as continuing training
- * from it. Narrowing happens at the resume rule, not here.
+ * The whole ancestor path is loaded even though a resume only ever uses the
+ * newest resumable entry: the card's dropdown LISTS this list, and picking an
+ * inherited checkpoint to run inference on, fine-tune from or download is a
+ * real choice — it is continuing TRAINING from an older one that is not (see
+ * `resumableCheckpoints`). Narrowing happens at the resume rule, not here.
  *
  * KNOWN LIMIT, cloud only: because that Hub repo is shared by the WHOLE tree,
  * a checkpoint written by a FORKED SIBLING is in the listing too, and there is
@@ -182,22 +183,29 @@ function cloudSiblingStepCap(leaf: JobRecord): number | null {
  *    furthest step — above that it provably belongs to a sibling sharing the
  *    Hub repo (see `cloudSiblingStepCap`).
  *
- * CHAIN REWIND (user decision 2026-08-08). The lineage is offered WHOLE: any
- * checkpoint on the leaf's ancestor path can start a continuation, including
- * one an ancestor saved. What makes that safe — and what the earlier
- * sticks-only narrowing got wrong — is where the lineage EDGE points. A resume
- * always continues the LEAF (`buildResumeSeed` seeds the leaf as the source
- * run) and merely reads its bytes from whichever run owns the chosen
- * checkpoint. So the chain grows parent -> leaf -> new run and stays linear no
- * matter how far back the user reaches.
+ * THE REACH ACROSS THE LINEAGE, and why it survives a latest-only Continue.
+ * The list this returns spans the leaf's whole ancestor path, including
+ * checkpoints an ancestor saved. Both callers then take `[0]` and nothing
+ * else — Continue is not step-selectable (user decision 2026-08-10) — so the
+ * reach is never a choice the user makes. It exists for one case: a tip that
+ * died before saving anything has no checkpoints of its own, and without the
+ * reach it would have nothing to continue from at all. That is the invariant
+ * this rule holds up — every row in the jobs library is either done or
+ * directly resumable — and it is why the rule returns a LIST rather than the
+ * one entry its callers use: the list is what `noResumeReason` reads to
+ * explain an empty result, and returning it whole keeps that explanation in
+ * one place.
+ *
+ * What makes the reach safe is where the lineage EDGE points. A resume always
+ * continues the LEAF (`buildResumeSeed` seeds the leaf as the source run) and
+ * merely reads its bytes from whichever run owns the newest entry. So the
+ * chain grows parent -> leaf -> new run and stays linear however far back the
+ * bytes came from.
  *
  * The old fork bug was the edge pointing at the checkpoint's OWNER, which made
  * an ancestor grow a second child. Excluding continued owners was a fix aimed
  * at the symptom: it kept the chain linear by removing the offering, at the
- * cost of stranding the commonest case — a tip that died before saving
- * anything, whose only checkpoints are inherited. That tip is now simply
- * resumable, which is the invariant this rule exists to hold up: every row in
- * the jobs library is either done or directly resumable.
+ * cost of stranding exactly the empty-handed tip described above.
  *
  * What is deliberately NOT a rule: the owner sharing the leaf's runner. A
  * continuation may cross runners in EITHER direction (F7) — jobs.py
@@ -270,20 +278,23 @@ export function noResumeReason(
  * Build the seed that puts the Train panel's configurator into resume mode:
  * `leaf` continues, from the checkpoint `entry` names.
  *
- * CHAIN REWIND (user decision 2026-08-08), and the whole point of taking an
- * ENTRY rather than a bare (job, step) pair: the two records in a rewind answer
- * different questions, and collapsing them is what produced the fork bug.
+ * The whole point of taking an ENTRY rather than a bare (job, step) pair: the
+ * two records answer different questions, and collapsing them is what produced
+ * the fork bug. They are the same record on the common case — a tip resuming
+ * its own newest checkpoint — and differ only when the reach fired, i.e. when
+ * the tip had nothing of its own to offer.
  *
  *   `leaf` is the run being continued — the row the user clicked. It becomes
  *   `resume_from_job_id`, the lineage edge, so the chain grows
- *   parent -> leaf -> new run and stays linear however far back the user
- *   reached. Its config is what prefills the form, because the new run is the
- *   next attempt at THIS run, not at its ancestor.
+ *   parent -> leaf -> new run and stays linear however far back the bytes
+ *   came from. Its config is what prefills the form, because the new run is
+ *   the next attempt at THIS run, not at its ancestor.
  *
- *   `entry.job` is the run that OWNS the chosen checkpoint, which on a rewind
- *   is an ancestor. It travels as `checkpointJobId` — provenance only — so the
- *   backend knows whose storage to read the bytes from. jobs.py refuses an
- *   owner that is not on the leaf's ancestor path or does not hold the step.
+ *   `entry.job` is the run that OWNS the newest resumable checkpoint, which is
+ *   an ancestor when the leaf saved none of its own. It travels as
+ *   `checkpointJobId` — provenance only — so the backend knows whose storage
+ *   to read the bytes from. jobs.py refuses an owner that is not on the leaf's
+ *   ancestor path or does not hold the step.
  *
  * This used to be called with the OWNER as `job`, which made an ancestor's
  * checkpoint start a continuation OF THE ANCESTOR — a second child, i.e. a
@@ -294,9 +305,10 @@ export function noResumeReason(
  * read them (F7) and what the form defaults Compute to.
  *
  * THE one place a resume seed is assembled. Both entry points call it — the
- * job card's step-selectable Resume and the jobs library's row-level
- * quick-resume — because they previously built the same payload
- * independently, which is exactly the shape of duplication that drifts.
+ * job card's Resume and the jobs library's row-level quick-resume — because
+ * they previously built the same payload independently, which is exactly the
+ * shape of duplication that drifts. They now also pass the same entry, the
+ * top of the same rule's list, so there is nothing left for them to differ on.
  *
  * Carries the parent run's configured shape forward. The registry already
  * holds it as `job.config` (the persisted TrainingRequest), so this needs no
@@ -346,9 +358,9 @@ export function buildResumeSeed(
   return {
     jobId: leaf.id,
     step,
-    // Provenance, omitted on a plain tip-resume so the request stays exactly
-    // the shape it was before rewind existed (the backend reads absent as
-    // "the leaf owns it").
+    // Provenance, omitted when the leaf owns the checkpoint — the common case
+    // — so that request stays exactly the shape it was before the owner field
+    // existed (the backend reads absent as "the leaf owns it").
     checkpointJobId: owner.id === leaf.id ? undefined : owner.id,
     name: jobDisplayName(leaf),
     datasetRepoId: parent.dataset_repo_id,

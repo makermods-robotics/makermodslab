@@ -3708,8 +3708,8 @@ class JobRegistry:
            Anything else is not a rewind: a sibling, an unrelated run, or a
            descendant would put bytes from off this chain into a run whose
            history claims to be continuous. `ancestor_ids_of` is the same walk
-           the UI offers checkpoints along, so the API accepts exactly what the
-           dropdown can produce and nothing more.
+           the UI loads checkpoints along, so the API accepts nothing the UI
+           could not have reached.
         2. The owner actually holds the named step. Without this a caller could
            name any ancestor with any step and get whatever
            `_resolve_resume_config_path` happened to find — including its
@@ -3720,6 +3720,12 @@ class JobRegistry:
         rewound chain one step number can name several different checkpoints
         (see TrainingRequest.resume_from_checkpoint_job_id), so "latest" has no
         meaning once an owner is named.
+
+        The app itself only ever names an owner for a latest-only Continue — an
+        ancestor exactly when the leaf saved nothing of its own (user decision
+        2026-08-10) — so an arbitrary rewind arrives only from a direct API
+        call. That makes these two checks the whole validation for that shape,
+        not a second line behind a UI that already narrowed it.
         """
         owner_id = config.resume_from_checkpoint_job_id
         if owner_id == leaf.id:

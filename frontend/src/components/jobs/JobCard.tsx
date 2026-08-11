@@ -521,8 +521,8 @@ const JobCard: React.FC<Props> = ({
   const showInferenceRow =
     lineageCheckpoints.length > 0 && selectedStep != null;
   // The previous commit's delete-first hint is gone with the rule that needed
-  // it: under chain rewind an empty-handed tip is simply resumable — it
-  // continues ITSELF from whatever its ancestors saved — so there is no longer
+  // it: an empty-handed tip is simply resumable — it continues ITSELF from
+  // the newest thing its ancestors saved — so there is no longer
   // a state where visible inherited checkpoints are unusable for a reason the
   // card never says. What is left is a genuinely dead chain (nothing saved
   // anywhere, or everything owned by finished runs), and the library row's

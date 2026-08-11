@@ -41,9 +41,9 @@ interface JobsDataValue {
   ancestorsOf: (job: JobRecord) => JobRecord[];
   /** Checkpoints reachable from a job: its own plus its loaded ancestors'.
    *
-   * The libraries' Resume gate, because under CHAIN REWIND a run continues
-   * from anything on its lineage — so a tip that died before saving anything
-   * is resumable on its ancestors' checkpoints, and its own `checkpoint_count`
+   * The libraries' Resume gate, because a run continues from the newest
+   * checkpoint on its LINEAGE — so a tip that died before saving anything is
+   * resumable on its ancestors' checkpoints, and its own `checkpoint_count`
    * of 0 would hide the button on the commonest resumable shape there is.
    * Lives on the context because only the provider holds the ancestor records. */
   chainCheckpointCount: (job: JobRecord) => number;
@@ -369,9 +369,10 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
 
   // Checkpoints reachable from a run: its own plus every LOADED ancestor's.
   //
-  // THE resume gate, and the fold gate, on the same reading: chain rewind lets
-  // a run continue from anything on its lineage, so what decides both is what
-  // the CHAIN holds, not what this tip happened to save. The commonest
+  // THE resume gate, and the fold gate, on the same reading: a run continues
+  // from the newest checkpoint on its lineage, its own or an ancestor's, so
+  // what decides both is what the CHAIN holds, not what this tip happened to
+  // save. The commonest
   // resumable shape — a tip that died before its first checkpoint — has zero of
   // its own and a full chain behind it.
   const chainCheckpointCount = useCallback(
