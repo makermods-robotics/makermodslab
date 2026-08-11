@@ -1619,6 +1619,34 @@ def test_friendly_hint_still_names_real_download_failures() -> None:
     assert full is not None and "disk space" in full.lower()
 
 
+def test_friendly_hint_for_capture_size_mismatch_also_suggests_restart() -> None:
+    """Hardware-confirmed 2026-07-31: a camera reporting the wrong
+    width/height on connect is not always a genuine capability mismatch —
+    twice on the bench, the SAME camera kept failing with this identical
+    error for 15+ seconds and across a retry with no unplugging involved,
+    and only restarting the makermodslab process (not reconfiguring the camera)
+    cleared it. Sending the user to "click Auto" alone, with no escalation
+    path, is a dead end when the session is actually wedged rather than
+    misconfigured — the hint must mention restarting as the fallback."""
+    from makermodslab.utils.errors import friendly_hint
+
+    hint = (
+        friendly_hint(
+            "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+        )
+        or ""
+    )
+    assert "restart" in hint.lower()
+
+    height_hint = (
+        friendly_hint(
+            "OpenCVCamera(0) failed to set capture_height=480 (actual_height=1080, height_success=True)."
+        )
+        or ""
+    )
+    assert "restart" in height_hint.lower()
+
+
 def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:
     from makermodslab.rollout import _extract_error_from_log
 

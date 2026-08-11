@@ -149,7 +149,11 @@ def friendly_hint(error_text: str | None) -> str | None:
             "set FOURCC=MJPG, and close other heavy apps, then try again."
         )
     if "failed to set capture_" in low or "actual_width" in low or "actual_height" in low:
-        return "A camera doesn't support the configured resolution — open camera settings and click Auto."
+        return (
+            "A camera didn't come up in the configured resolution — open camera settings and click Auto. "
+            "If it keeps failing the same way (even without unplugging anything), the camera's OS-level "
+            "session is likely stuck — restart MakerMods Lab to clear it."
+        )
     # Same read-back failure as the resolution case above, from lerobot's fps
     # negotiation step instead (_validate_fps). Both are driven by free-form
     # numbers in the same camera-settings panel, so both can be a permanent
