@@ -174,6 +174,11 @@ class InferenceRequest(BaseModel):
     # action-generation path than the one a checkpoint was evaluated under.
     # Experimental on purpose: A/B it per run, don't assume equivalence.
     inference_engine: Literal["sync", "rtc"] = "sync"
+    # ACT temporal ensembling (see _rollout_cli_args). None = off, which is
+    # also lerobot's own default. Any positive coefficient turns it on; the
+    # original ACT paper uses 0.01. Only ACT checkpoints have this field in
+    # their config, so the UI offers it for `policy_type == "act"` alone.
+    temporal_ensemble_coeff: float | None = None
 
 
 inference_active: bool = False
@@ -1091,7 +1096,7 @@ def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: l
     at a different entry point (`makermodslab.eval_runner`, which speaks
     `lerobot-rollout`'s argv verbatim). One list, two front-ends, so a flag
     added for one is never missing from the other."""
-    return [
+    args = [
         "--strategy.type=base",
         # Emitted unconditionally, including for the "sync" default — same
         # reasoning as --strategy.type=base above and the teardown pin below:
@@ -1113,6 +1118,26 @@ def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: l
         # it. Set it explicitly so the contract is ours, not upstream's.
         "--return_to_initial_position=true",
     ]
+    # ACT temporal ensembling. `--policy.*` flags are applied by lerobot as CLI
+    # overrides ON TOP of the checkpoint's saved config (RolloutConfig.__post_init__
+    # → PreTrainedConfig.from_pretrained(cli_overrides=...)), so this re-tunes a
+    # trained ACT policy at inference time without retraining.
+    #
+    # n_action_steps=1 is NOT optional: ACTConfig.__post_init__ raises
+    # NotImplementedError when temporal_ensemble_coeff is set alongside
+    # n_action_steps > 1, and checkpoints ship the default 100. Ensembling needs
+    # the policy queried every step to have overlapping chunks to average, so
+    # the two flags always travel together.
+    #
+    # Lives here rather than in _build_rollout_cmd so eval mode's separate entry
+    # point (_build_eval_runner_cmd) carries the flags too — the whole reason
+    # this list was split out.
+    if request.temporal_ensemble_coeff is not None:
+        args += [
+            f"--policy.temporal_ensemble_coeff={request.temporal_ensemble_coeff}",
+            "--policy.n_action_steps=1",
+        ]
+    return args
 
 
 def _build_rollout_cmd(request: InferenceRequest, policy_path: str, robot_args: list[str]) -> list[str]:
@@ -1721,6 +1746,21 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     if mismatch is not None:
         _release_slot()
         return {"success": False, "status_code": 409, "message": mismatch}
+
+    # Temporal-ensemble coefficient: lerobot builds the ensemble weights as
+    # exp(-coeff * i), so a non-positive value is meaningless (0 weights every
+    # step of the chunk equally; negative inverts the decay so the STALEST
+    # prediction dominates). Reject here rather than letting draccus accept it
+    # and the arm move under a nonsense action.
+    if request.temporal_ensemble_coeff is not None and request.temporal_ensemble_coeff <= 0:
+        _release_slot()
+        return {
+            "success": False,
+            "status_code": 400,
+            "message": (
+                f"temporal_ensemble_coeff must be greater than 0 (got {request.temporal_ensemble_coeff})."
+            ),
+        }
 
     # Cheap policy-ref shape check so a malformed ref 4xxs in the modal instead
     # of failing later on the inference page (one is_dir stat, no network).

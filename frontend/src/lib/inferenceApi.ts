@@ -45,6 +45,10 @@ export interface StartInferenceRequest {
   // with action playback on a background thread. Experimental: RTC changes the
   // policy's action-generation path, not just its scheduling.
   inference_engine?: "sync" | "rtc";
+  // ACT temporal ensembling. Omit (or undefined) to leave it off, matching
+  // lerobot's default. Any positive coefficient enables it — the server also
+  // pins n_action_steps=1, which ACT requires alongside it. ACT-only.
+  temporal_ensemble_coeff?: number;
 }
 
 // Structured startup sub-phase, mirrored from rollout.py's phase constants.

@@ -39,7 +39,11 @@ import DisplayName from "@/components/library/DisplayName";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
-import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
+import {
+  JobCheckpoint,
+  dedupeCheckpointEntries,
+  listJobCheckpoints,
+} from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
@@ -139,7 +143,9 @@ const JobCard: React.FC<Props> = ({
   const [lineageCheckpoints, setLineageCheckpoints] = useState<
     { job: JobRecord; ckpt: JobCheckpoint }[]
   >([]);
-  const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  // Selection is keyed on the checkpoint `ref` (its unique identity), not the
+  // step — a lineage can hold two distinct checkpoints with the same step.
+  const [selectedRef, setSelectedRef] = useState<string | null>(null);
   // Set on a failed run whose policy needs a lerobot extra that's still missing
   // — the likely cause. Offers the same one-click install as the training form.
   const [missingExtra, setMissingExtra] = useState<{
@@ -202,7 +208,7 @@ const JobCard: React.FC<Props> = ({
     const lineage = [job, ...ancestors].filter((j) => j.checkpoint_count > 0);
     if (lineage.length === 0) {
       setLineageCheckpoints([]);
-      setSelectedStep(null);
+      setSelectedRef(null);
       return;
     }
     let cancelled = false;
@@ -214,12 +220,20 @@ const JobCard: React.FC<Props> = ({
       ),
     ).then((results) => {
       if (cancelled) return;
-      const combined = results.flat().sort((a, b) => b.ckpt.step - a.ckpt.step);
+      // Flat-merge, then collapse duplicates: a cloud resume reuses its
+      // parent's output repo, so parent and child both enumerate the same Hub
+      // checkpoint tree and every inherited step would otherwise appear
+      // twice. Lineage order puts this run's list before its ancestors' and
+      // the sort is stable for equal steps, so the surviving entry of a
+      // duplicate pair is tagged with the nearest (child) run.
+      const combined = dedupeCheckpointEntries(
+        results.flat().sort((a, b) => b.ckpt.step - a.ckpt.step),
+      );
       setLineageCheckpoints(combined);
-      setSelectedStep((prev) =>
-        prev != null && combined.some((c) => c.ckpt.step === prev)
+      setSelectedRef((prev) =>
+        prev != null && combined.some((c) => c.ckpt.ref === prev)
           ? prev
-          : (combined[0]?.ckpt.step ?? null),
+          : (combined[0]?.ckpt.ref ?? null),
       );
     });
     return () => {
@@ -304,10 +318,12 @@ const JobCard: React.FC<Props> = ({
   };
 
   // The selected checkpoint may belong to this run or an inherited source run;
-  // route inference/continue to whichever run owns it.
+  // route inference/continue to whichever run owns it. Resolved by ref, so
+  // same-step checkpoints from different runs can't be confused.
   const selected =
-    lineageCheckpoints.find((c) => c.ckpt.step === selectedStep) ?? null;
+    lineageCheckpoints.find((c) => c.ckpt.ref === selectedRef) ?? null;
   const selectedJob = selected?.job ?? job;
+  const selectedStep = selected?.ckpt.step ?? null;
   // Flat list for the dropdown (already newest-first).
   const checkpoints = lineageCheckpoints.map((c) => c.ckpt);
 
@@ -361,19 +377,39 @@ const JobCard: React.FC<Props> = ({
   // really change.
   const goToResume = (runner: "local" | "hf_cloud") => {
     if (selectedStep == null) return;
+    // Carry the parent run's whole configured shape forward. The registry
+    // already holds it as `selectedJob.config` (the persisted TrainingRequest),
+    // so this needs no extra fetch and no reading of the checkpoint's
+    // train_config.json. The configurator PREFILLS from these — nothing is
+    // locked, so the user can still extend steps, raise the timeout, or change
+    // hardware on the continuation.
+    const parent = selectedJob.config;
     navigate("/training", {
       state: {
         resume: {
           jobId: selectedJob.id,
           step: selectedStep,
           name: jobDisplayName(selectedJob),
-          datasetRepoId: selectedJob.config.dataset_repo_id,
-          policyType: selectedJob.config.policy_type,
-          sourceSteps: selectedJob.config.steps,
-          logFreq: selectedJob.config.log_freq,
-          saveFreq: selectedJob.config.save_freq,
+          datasetRepoId: parent.dataset_repo_id,
+          policyType: parent.policy_type,
+          sourceSteps: parent.steps,
+          logFreq: parent.log_freq,
+          saveFreq: parent.save_freq,
           runner,
           flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
+          // Cloud-only: without this a Continue fell back to the runner's 2h
+          // default, capping the tail of a run already known to need longer.
+          hfJobTimeout:
+            runner === "hf_cloud" ? (parent.hf_job_timeout ?? undefined) : undefined,
+          batchSize: parent.batch_size,
+          seed: parent.seed,
+          numWorkers: parent.num_workers,
+          policyDevice: parent.policy_device,
+          policyUseAmp: parent.policy_use_amp,
+          optimizerType: parent.optimizer_type,
+          optimizerLr: parent.optimizer_lr,
+          optimizerWeightDecay: parent.optimizer_weight_decay,
+          optimizerGradClipNorm: parent.optimizer_grad_clip_norm,
         },
       },
     });
@@ -604,6 +640,18 @@ const JobCard: React.FC<Props> = ({
           >
             {isImported ? "\u200e" + subtitle : subtitle}
           </div>
+          {/* Why it failed, on the card itself. The reason was already on the
+              record but only the job dialog rendered it, so a run that died on
+              something actionable (out of memory) looked, from the list the
+              user actually lands on, like it had failed for no reason. */}
+          {job.state === "failed" && job.error_message ? (
+            <div
+              className="text-destructive mt-0.5 line-clamp-2 text-[11px]"
+              title={job.error_message}
+            >
+              {job.error_message}
+            </div>
+          ) : null}
         </div>
         <MetaRows rows={metaRows} />
         {showProgressBar ? (
@@ -629,8 +677,8 @@ const JobCard: React.FC<Props> = ({
               <div className="min-w-0 flex-1">
                 <CheckpointDropdown
                   checkpoints={checkpoints}
-                  selectedStep={selectedStep}
-                  onChange={setSelectedStep}
+                  selectedRef={selectedRef}
+                  onChange={(c) => setSelectedRef(c.ref)}
                   className="w-full min-w-0"
                 />
               </div>
@@ -780,6 +828,7 @@ const JobCard: React.FC<Props> = ({
           packageName={missingExtra.packageName}
           installTarget={missingExtra.installTarget}
           installHint={missingExtra.installHint}
+          purpose="training"
         />
       ) : null}
     </Card>

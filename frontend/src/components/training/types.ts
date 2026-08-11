@@ -73,6 +73,7 @@ export const POLICY_TYPE_OPTIONS: {
   },
   { value: "diffusion", label: "Diffusion", display: "Diffusion Policy" },
   { value: "pi0", label: "PI0", display: "PI0" },
+  { value: "pi05", label: "PI0.5", display: "PI0.5" },
   { value: "smolvla", label: "SmolVLA", display: "SmolVLA" },
   { value: "tdmpc", label: "TD-MPC", display: "TD-MPC" },
   { value: "vqbet", label: "VQ-BeT", display: "VQ-BeT" },

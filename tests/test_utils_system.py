@@ -132,9 +132,10 @@ def test_policy_extra_maps_policies_to_install_targets() -> None:
     assert smol["install_target"] == "lerobot[smolvla]"
     assert "lerobot[smolvla]" in smol["install_hint"]
 
-    # pi0 and pi0_fast share the lerobot[pi] extra; diffusion uses diffusers.
+    # pi0, pi0_fast, and pi05 share the lerobot[pi] extra; diffusion uses diffusers.
     assert handle_get_policy_extra("pi0")["install_target"] == "lerobot[pi]"
     assert handle_get_policy_extra("pi0_fast")["install_target"] == "lerobot[pi]"
+    assert handle_get_policy_extra("pi05")["install_target"] == "lerobot[pi]"
     assert handle_get_policy_extra("diffusion")["package"] == "diffusers"
     assert handle_get_policy_extra("diffusion")["install_target"] == "lerobot[diffusion]"
 
