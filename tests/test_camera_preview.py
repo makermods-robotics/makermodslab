@@ -88,6 +88,42 @@ class RaisingVideoCapture(FakeVideoCapture):
         raise RuntimeError("cv2 read blew up")
 
 
+class WedgesMidStreamVideoCapture(FakeVideoCapture):
+    """A capture that streams normally and then stops returning from read() —
+    the device dying AFTER its first frame (a same-port replug while the tile
+    is already live), which BlockingVideoCapture cannot model."""
+
+    def __init__(self, index: int, backend: int | None = None) -> None:
+        super().__init__(index, backend)
+        self.unblock = threading.Event()
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        if self.reads > 1:
+            self.unblock.wait()
+        return super().read()
+
+
+class SlowFirstReadVideoCapture(FakeVideoCapture):
+    """A perfectly healthy camera that is merely slow to hand over its first
+    frame. Real USB webcams routinely take 1-3s (warm-up, exposure lock), and
+    that is exactly the interval a contending client must be willing to wait
+    out rather than declare the device wedged."""
+
+    delay = 0.3
+
+    def __init__(self, index: int, backend: int | None = None) -> None:
+        super().__init__(index, backend)
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        if self.reads == 1:
+            time.sleep(self.delay)
+        return super().read()
+
+
 class OneFrameVideoCapture(FakeVideoCapture):
     """A capture that serves exactly one frame, then reports failure — so the
     endpoint's (endless by design) generator terminates and a TestClient
@@ -245,9 +281,16 @@ def test_stream_after_stop_all_reopens_the_camera(fake_captures: list[FakeVideoC
 
 @pytest.fixture
 def fast_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shrink the wedge-containment timeouts so tests don't wait seconds."""
-    monkeypatch.setattr(camera_preview, "LOCK_ACQUIRE_TIMEOUT", 0.05)
+    """Shrink the wedge-containment timeouts so tests don't wait seconds.
+
+    Preserves the production ordering — LOCK_ACQUIRE_TIMEOUT strictly above
+    both read deadlines — because that ordering is load-bearing: a contention
+    timeout at or below the read deadline makes a slow-but-healthy read look
+    like a wedge, which these tests would then not be able to tell apart.
+    """
     monkeypatch.setattr(camera_preview, "FIRST_FRAME_TIMEOUT", 0.05)
+    monkeypatch.setattr(camera_preview, "READ_TIMEOUT", 0.05)
+    monkeypatch.setattr(camera_preview, "LOCK_ACQUIRE_TIMEOUT", 0.15)
 
 
 def test_stop_all_leaks_instead_of_hanging_on_a_wedged_read(
@@ -269,14 +312,40 @@ def test_stop_all_leaks_instead_of_hanging_on_a_wedged_read(
     # Leaked, not released: releasing under an in-flight read segfaults cv2.
     assert not fake_captures[0].released
     assert entry.wedged
-    # Deregistered anyway, so the index is not poisoned for future previews.
-    assert manager._captures == {}
-    gen2 = manager.open_stream(0)
-    assert b"--frame" in next(gen2)
-    assert len(fake_captures) == 2
-    gen2.close()
+    # Kept as a tombstone, NOT deregistered: this camera is dead until a
+    # restart, and letting the next client open a fresh capture on it just
+    # wedges (and leaks) another thread. Identity keying is what makes this
+    # safe — the tombstone names the device, not an index another camera can
+    # later occupy, which is checked in the identity tests.
+    assert manager._captures[0] is entry
+    with pytest.raises(CameraOpenError):
+        manager.open_stream(0)
+    assert len(fake_captures) == 1  # no second capture was ever opened
     # Close the wedged generator while the shrunk timeout is still patched, so
-    # its _release times out in 0.05s here rather than 2s at GC time.
+    # its _release returns at once here rather than waiting at GC time.
+    gen.close()
+
+
+def test_stop_all_skips_tombstones_instead_of_re_waiting_on_them(
+    fake_captures: list[FakeVideoCapture], fast_timeouts: None
+) -> None:
+    """stop_all runs on every recording/inference Start. A camera already known
+    wedged has a leaked capture and a lock nobody will ever release, so waiting
+    LOCK_ACQUIRE_TIMEOUT on it again would add that much latency to every Start
+    for as long as the process lives."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    next(gen)
+    entry = manager._captures[0]
+    entry.lock.acquire()  # simulate a reader wedged inside cap.read()
+    manager.stop_all(timeout=0.01)  # first pass: discovers and tombstones it
+    assert entry.wedged
+
+    started = time.monotonic()
+    manager.stop_all(timeout=0.01)  # second pass: must not re-wait on the lock
+
+    assert time.monotonic() - started < camera_preview.LOCK_ACQUIRE_TIMEOUT
+    assert manager._captures[0] is entry  # still tombstoned
     gen.close()
 
 
@@ -325,8 +394,123 @@ def test_first_frame_deadline_ends_the_stream_instead_of_blank_forever(
         next(gen)
 
     assert not instances[0].released  # leaked: release mid-read segfaults cv2
-    assert manager._captures == {}  # torn down; a retry gets a fresh entry
+    assert manager._captures[0].wedged  # tombstoned, so a retry fails fast
     instances[0].unblock.set()  # let the leaked watchdog thread finish
+
+
+def test_a_wedge_leaks_one_capture_no_matter_how_often_the_tile_retries(
+    monkeypatch: pytest.MonkeyPatch, fast_timeouts: None
+) -> None:
+    """The preview tile retries a failed stream forever (BackendCameraStream
+    backs off to a 12s poll and never stops, because most preview failures are
+    transient). If a wedge deregistered its entry, every one of those retries
+    would open a fresh capture on the same dead device and strand a fresh
+    watchdog thread inside cap.read() — an unbounded leak of threads and OS
+    handles for as long as the tile stays open. The tombstone must cap it at
+    one capture and one thread, total."""
+    instances: list[BlockingVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> BlockingVideoCapture:
+        cap = BlockingVideoCapture(index, backend)
+        instances.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen = manager.open_stream(0)
+    with pytest.raises(StopIteration):
+        next(gen)
+    threads_after_wedge = threading.active_count()
+
+    for _ in range(10):  # the retry loop, compressed
+        with pytest.raises(CameraOpenError):
+            manager.open_stream(0)
+
+    assert len(instances) == 1  # one capture opened, not eleven
+    assert threading.active_count() == threads_after_wedge  # no new watchdogs
+    instances[0].unblock.set()
+
+
+def test_a_wedge_after_the_first_frame_also_ends_the_stream(
+    monkeypatch: pytest.MonkeyPatch, fast_timeouts: None
+) -> None:
+    """Only the FIRST read used to run under the watchdog; every later one was
+    a raw cap.read(). A device that died after delivering frames therefore left
+    the generator blocked inside cv2 forever, holding the entry lock inside a
+    live MJPEG response — and uvicorn's graceful shutdown waits on in-flight
+    responses, so a --reload restart never completed. Later reads are bounded
+    by READ_TIMEOUT now, so the response ends and shutdown can proceed."""
+    instances: list[WedgesMidStreamVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> WedgesMidStreamVideoCapture:
+        cap = WedgesMidStreamVideoCapture(index, backend)
+        instances.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen = manager.open_stream(0)
+    assert b"--frame" in next(gen)  # streams normally first
+
+    started = time.monotonic()
+    with pytest.raises(StopIteration):  # the response ENDS rather than hanging
+        next(gen)
+
+    assert time.monotonic() - started < 1.0
+    assert manager._captures[0].wedged
+    assert not instances[0].released  # leaked: release mid-read segfaults cv2
+    instances[0].unblock.set()
+
+
+def test_contention_timeout_stays_above_every_read_deadline() -> None:
+    """The whole containment rests on one inference: if the entry lock is still
+    held after LOCK_ACQUIRE_TIMEOUT, the holder is wedged. That is only true
+    while every read is bounded BELOW that timeout. Invert the ordering and a
+    contender starts declaring healthy cameras dead — permanently, since a
+    wedge is now a tombstone that only a restart clears."""
+    assert camera_preview.LOCK_ACQUIRE_TIMEOUT > camera_preview.FIRST_FRAME_TIMEOUT
+    assert camera_preview.LOCK_ACQUIRE_TIMEOUT > camera_preview.READ_TIMEOUT
+
+
+def test_a_slow_first_frame_is_not_mistaken_for_a_wedge_by_a_second_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two tiles on one camera. The first spends 0.3s inside a legitimate first
+    read; the second must wait that out and stream, not time out on the lock,
+    call the camera wedged and tell the user to restart the app moments before
+    the first read succeeds. Uses the production ORDERING (contention timeout
+    above the read deadlines), scaled down."""
+    monkeypatch.setattr(camera_preview, "FIRST_FRAME_TIMEOUT", 1.0)
+    monkeypatch.setattr(camera_preview, "READ_TIMEOUT", 1.0)
+    monkeypatch.setattr(camera_preview, "LOCK_ACQUIRE_TIMEOUT", 1.5)
+    instances: list[SlowFirstReadVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> SlowFirstReadVideoCapture:
+        cap = SlowFirstReadVideoCapture(index, backend)
+        instances.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen_a = manager.open_stream(0)
+    frames: list[bytes] = []
+    # Drive A's slow first read from a thread so B genuinely contends with it.
+    reader = threading.Thread(target=lambda: frames.append(next(gen_a)), daemon=True)
+    reader.start()
+    time.sleep(0.05)  # let A get inside cap.read()
+
+    gen_b = manager.open_stream(0)  # must not raise: the hold is legitimate
+    assert b"--frame" in next(gen_b)
+
+    reader.join(2.0)
+    assert frames and b"--frame" in frames[0]
+    assert not manager._captures[0].wedged
+    assert len(instances) == 1  # both clients shared the one capture
+    gen_b.close()
+    gen_a.close()
 
 
 def test_first_read_that_raises_is_a_fast_failure_not_a_wedge(

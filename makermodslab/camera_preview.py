@@ -46,10 +46,30 @@ JPEG_QUALITY = 70
 # timeout as "the reader is wedged": leak the capture, log loudly, move on.
 # Leaking beats hanging — and the capture must NEVER be released while a read
 # may still be in flight, because cv2 segfaults.
-LOCK_ACQUIRE_TIMEOUT = 2.0
+#
+# That "lock held too long => the reader is wedged" inference is only sound if
+# EVERY read is itself bounded, and bounded BELOW the contention timeout, which
+# is why the two deadlines below exist and why LOCK_ACQUIRE_TIMEOUT is derived
+# from them rather than picked. A contention timeout under the read deadline
+# needs only two clients of one camera to brick it: the second waits less time
+# than the first is legitimately allowed to spend inside a slow first read
+# (1-3s is ordinary for a real USB webcam warming up), times out, and marks a
+# perfectly healthy device wedged.
+#
 # Deadline on the FIRST cap.read() of a stream, so a wedged device becomes a
-# visible stream error for the client instead of an eternally blank tile.
+# visible stream error for the client instead of an eternally blank tile. Kept
+# generous: it covers device warm-up and exposure lock.
 FIRST_FRAME_TIMEOUT = 5.0
+# Deadline on every LATER read. Once frames are flowing a read takes about
+# 1/TARGET_FPS (~66ms), so this is ~30x headroom for a hiccup while still
+# catching a device that dies mid-stream — the case where the stream generator,
+# not stop_all, is what hangs uvicorn's graceful shutdown (it waits on
+# in-flight responses, and an MJPEG response blocked inside cap.read() never
+# completes).
+READ_TIMEOUT = 2.0
+# Must stay strictly above the longest legitimate hold (see above); the margin
+# absorbs the watchdog join's own overshoot.
+LOCK_ACQUIRE_TIMEOUT = max(FIRST_FRAME_TIMEOUT, READ_TIMEOUT) + 1.0
 
 # Same per-platform backend pin as recording (record._platform_backend) and the
 # /available-cameras enumeration: CAP_ANY can pick different backends across
@@ -116,8 +136,11 @@ class CameraPreviewManager:
 
     A device whose read never returns (see LOCK_ACQUIRE_TIMEOUT above) is
     contained, not cured: its capture and lock are deliberately leaked, the
-    entry is marked ``wedged`` so new clients get a fast CameraOpenError, and
-    everything else keeps working. Only a process restart recovers the camera.
+    entry is marked ``wedged`` and KEPT in the registry as a tombstone so new
+    clients get a fast CameraOpenError (see :meth:`_mark_wedged` — dropping it
+    instead makes the frontend's retry loop leak a thread and a handle per
+    attempt), and everything else keeps working. Only a process restart
+    recovers the camera.
     Identity keying scopes that wedge to the device that actually wedged: an
     int-keyed wedge poisoned a *slot*, so after a renumber it fast-failed
     whatever camera had since landed there while the genuinely dead device
@@ -167,11 +190,16 @@ class CameraPreviewManager:
         recording/inference start paths, where a hang would freeze Start.
         Uvicorn's graceful shutdown is protected separately: nothing calls
         this at shutdown, but shutdown waits on in-flight responses, and the
-        bounded loop in :meth:`_frames` is what guarantees a wedged MJPEG
+        bounded reads in :meth:`_frames` are what guarantee a wedged MJPEG
         stream ends instead of holding that wait hostage.
+
+        Cameras already tombstoned as wedged are skipped outright: their
+        capture is long leaked and their lock is held by a thread that will
+        never come back, so waiting LOCK_ACQUIRE_TIMEOUT on each of them would
+        add seconds to every Start to re-learn what is already known.
         """
         with self._registry_lock:
-            entries = list(self._captures.values())
+            entries = [entry for entry in self._captures.values() if not entry.wedged]
         if not entries:
             return
         for entry in entries:
@@ -196,13 +224,14 @@ class CameraPreviewManager:
                 finally:
                     entry.lock.release()
             else:
-                entry.wedged = True
+                self._mark_wedged(entry)
                 logger.error(
                     "Camera %d preview reader is wedged inside cap.read() (stale device after "
                     "a same-port replug?) — leaking its capture instead of hanging. "
                     "Restart MakerMods Lab to recover this camera.",
                     entry.index,
                 )
+                continue  # tombstoned by _mark_wedged; leave it registered
             # Deregister so a lagging client's _release becomes a no-op and a
             # future preview starts from a fresh entry (fresh stop event).
             with self._registry_lock:
@@ -228,7 +257,9 @@ class CameraPreviewManager:
             entry.refcount += 1
         try:
             if not entry.lock.acquire(timeout=LOCK_ACQUIRE_TIMEOUT):
-                entry.wedged = True
+                # Sound because LOCK_ACQUIRE_TIMEOUT sits above every read
+                # deadline: no healthy reader can still hold this lock.
+                self._mark_wedged(entry)
                 logger.error(
                     "Camera %d preview lock held for over %.1fs (reader wedged in cap.read()?) — "
                     "refusing new preview client. Restart MakerMods Lab to recover this camera.",
@@ -260,10 +291,47 @@ class CameraPreviewManager:
             raise
         return entry
 
+    def _mark_wedged(self, entry: _SharedCapture) -> None:
+        """Tombstone a camera whose reader is stuck inside cap.read().
+
+        The entry deliberately STAYS in the registry: that is what makes
+        :meth:`_acquire`'s fast fail reachable at all. Dropping it instead, so
+        a retry "starts fresh", sounds harmless and is not — the next client
+        builds a new entry, opens a new capture on the same dead device, and
+        wedges a new thread. The preview tile retries forever (it backs off to
+        a 12s poll but never gives up, deliberately, because most preview
+        failures are transient), so that is one more leaked thread and one more
+        leaked capture handle every 12s for as long as the tile stays open.
+        The tombstone bounds the damage at exactly one of each per physically
+        wedged camera.
+
+        Sound only because the registry is keyed by identity (see the class
+        docstring): the tombstone names the device that actually died, not an
+        index another camera may later occupy. Recovery is a process restart —
+        which is what every message on this path already tells the user.
+        Recovering in-process would need a re-enumeration signal to tell "the
+        user replugged it and the runloop pump saw it come back" from "still
+        dead", and the uniqueID reads identically in both cases.
+        """
+        entry.wedged = True
+        with self._registry_lock:
+            current = self._captures.get(entry.key)
+            # Never overwrite a live entry that has since taken this key: a
+            # wedge can surface long after stop_all deregistered this entry and
+            # a later client opened a working capture for the same camera.
+            if current is None or current is entry:
+                self._captures[entry.key] = entry
+
     def _release(self, entry: _SharedCapture) -> None:
         with self._registry_lock:
             entry.refcount -= 1
             if entry.refcount > 0:
+                return
+            if entry.wedged:
+                # Tombstone: stays registered so the next client fails fast
+                # instead of opening (and wedging) another capture. Its lock is
+                # held by a thread still inside cap.read(), so there is nothing
+                # here to release and nothing worth waiting on.
                 return
             # Last client: deregister before the (slow) device release so a new
             # client never latches onto a capture that is being torn down.
@@ -272,7 +340,7 @@ class CameraPreviewManager:
         if not entry.lock.acquire(timeout=LOCK_ACQUIRE_TIMEOUT):
             # A read is (still) in flight somewhere — releasing the capture
             # under it would segfault cv2. Leak it; only a restart recovers.
-            entry.wedged = True
+            self._mark_wedged(entry)
             logger.error(
                 "Camera %d preview capture leaked on release: its lock is still held "
                 "(reader wedged in cap.read()?). Restart MakerMods Lab to recover this camera.",
@@ -287,21 +355,33 @@ class CameraPreviewManager:
         finally:
             entry.lock.release()
 
-    def _read_first_frame(self, entry: _SharedCapture):
-        """Run the stream's first cap.read() under a watchdog thread.
+    def _read_with_deadline(self, entry: _SharedCapture, timeout: float):
+        """Run one cap.read() under a watchdog thread, bounded by ``timeout``.
 
         Returns the ``(ok, frame)`` tuple; ``(False, None)`` when the read
         finished by raising (an ordinary failed read — nothing is in flight,
         so the caller releases normally); or None when the read did not
-        complete within FIRST_FRAME_TIMEOUT — meaning the helper thread is
-        still blocked inside cap.read() and the caller must treat the device
-        as wedged (and must NOT release the capture or the entry lock).
+        complete within ``timeout`` — meaning the helper thread is still
+        blocked inside cap.read() and the caller must treat the device as
+        wedged (and must NOT release the capture or the entry lock).
         Caller must hold ``entry.lock``.
+
+        Every read goes through here, not only the first. A device dies
+        mid-stream as easily as before its first frame, and an unbounded later
+        read is the worse of the two: the capture is already streaming, so the
+        blocked thread holds the entry lock inside a live MJPEG response that
+        can now never complete — which is exactly what keeps uvicorn's
+        graceful shutdown (and so a --reload restart) waiting forever.
 
         The wedge signal is the watchdog thread still being *alive* after the
         join, not an empty result: a read that raises leaves the thread dead
         and the device idle, and mistaking that for a wedge would leak a
         capture and a lock for what is really a fast, recoverable failure.
+
+        A thread per frame costs ~25us to start and join — about 0.04% of one
+        core at TARGET_FPS, orders of magnitude below the JPEG encode already
+        in this loop, and the only way to bound an uncancellable blocking call
+        in CPython.
         """
         result: list = []
 
@@ -311,9 +391,9 @@ class CameraPreviewManager:
             except Exception as exc:  # noqa: BLE001 — reported via `result`
                 result.append(exc)
 
-        watchdog = threading.Thread(target=_read, daemon=True, name=f"camera-{entry.index}-first-read")
+        watchdog = threading.Thread(target=_read, daemon=True, name=f"camera-{entry.index}-read")
         watchdog.start()
-        watchdog.join(FIRST_FRAME_TIMEOUT)
+        watchdog.join(timeout)
         if watchdog.is_alive():
             return None
         if not result or isinstance(result[0], BaseException):
@@ -347,27 +427,26 @@ class CameraPreviewManager:
                 try:
                     if entry.cap is None:  # force-released by stop_all
                         break
-                    if first_frame:
-                        read_result = self._read_first_frame(entry)
-                        if read_result is None:
-                            # The watchdog thread is still inside cap.read().
-                            # Leak the lock on purpose: releasing it would let
-                            # someone release the capture under the in-flight
-                            # read, which segfaults cv2.
-                            release_lock = False
-                            entry.wedged = True
-                            logger.error(
-                                "Camera %d produced no first frame within %.1fs (stale device "
-                                "after a same-port replug?) — ending the preview and leaking "
-                                "the capture. Restart MakerMods Lab to recover this camera.",
-                                entry.index,
-                                FIRST_FRAME_TIMEOUT,
-                            )
-                            break
-                        ok, frame = read_result
-                        first_frame = False
-                    else:
-                        ok, frame = entry.cap.read()
+                    deadline = FIRST_FRAME_TIMEOUT if first_frame else READ_TIMEOUT
+                    read_result = self._read_with_deadline(entry, deadline)
+                    if read_result is None:
+                        # The watchdog thread is still inside cap.read(). Leak
+                        # the lock on purpose: releasing it would let someone
+                        # release the capture under the in-flight read, which
+                        # segfaults cv2.
+                        release_lock = False
+                        self._mark_wedged(entry)
+                        logger.error(
+                            "Camera %d produced no %s within %.1fs (stale device after a "
+                            "same-port replug?) — ending the preview and leaking the capture. "
+                            "Restart MakerMods Lab to recover this camera.",
+                            entry.index,
+                            "first frame" if first_frame else "further frame",
+                            deadline,
+                        )
+                        break
+                    ok, frame = read_result
+                    first_frame = False
                 finally:
                     if release_lock:
                         entry.lock.release()
