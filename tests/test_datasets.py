@@ -911,6 +911,29 @@ def test_rename_namespace_ownership_is_case_insensitive(tmp_lerobot_home: Path) 
         assert rename_local_dataset("MakerMods/pick", "place") == "MakerMods/place"
 
 
+def test_rename_qualifies_hub_calls_with_canonical_namespace_casing(tmp_lerobot_home: Path) -> None:
+    """Ownership matches namespace case-insensitively, but the Hub calls that
+    follow must use whoami's own spelling, not the local directory's — a local
+    dir named `MyOrg/foo` clearing the gate and then hitting the Hub as
+    `MyOrg` instead of the canonical `myorg` risks a 404/502 on a namespace the
+    user does in fact own. The local path and returned id stay bare/original-
+    cased either way: qualifying is a Hub-side concern only."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "MyOrg/pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "myorg/pick"
+    with (
+        _signed_in_as("makermods", orgs=[("myorg", "write")]),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert rename_local_dataset("MyOrg/pick", "place") == "MyOrg/place"
+
+    fake_api.move_repo.assert_called_once_with("myorg/pick", "myorg/place", repo_type="dataset")
+    assert (tmp_lerobot_home / "MyOrg" / "place" / "meta" / "info.json").is_file()
+
+
 def test_rename_bare_id_syncs_hub_copy_under_the_users_namespace(
     tmp_lerobot_home: Path,
 ) -> None:
@@ -957,6 +980,33 @@ def test_rename_without_a_token_skips_the_hub_and_renames_locally(
     fake_api.repo_exists.assert_not_called()
     fake_api.move_repo.assert_not_called()
     assert (tmp_lerobot_home / "makermods" / "new_name" / "meta" / "info.json").is_file()
+
+
+def test_rename_whoami_failure_with_token_502s(tmp_lerobot_home: Path) -> None:
+    """A token IS present but the whoami call itself fails (network blip, cold
+    whoami cache) — cached_whoami() collapses that into the same None as "no
+    token", so without the fail_on_error split this used to fall through to a
+    local-only rename that leaves a stale Hub copy under the old name. It must
+    fail closed instead, like the neighboring repo_exists checks."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.datasets.cached_whoami", side_effect=RuntimeError("whoami failed")),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 502
+    # The escape hatch has to be discoverable from the error itself — a user in
+    # the field with a flaky connection can't act on "try again" alone.
+    assert "HF_HUB_OFFLINE" in exc.value.message
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
 
 
 # --- Rename: local-failure rollback -------------------------------------

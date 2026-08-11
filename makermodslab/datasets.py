@@ -41,7 +41,7 @@ from .utils.config import (
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
-from .utils.hf_auth import cached_whoami, hf_hub_offline, owns_namespace, shared_hf_api
+from .utils.hf_auth import cached_whoami, canonical_writable_namespace, hf_hub_offline, shared_hf_api
 
 logger = logging.getLogger(__name__)
 
@@ -1107,10 +1107,12 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
 
     Raises DatasetRenameError (with an HTTP status + message) on: a bad
     new_name, a source that isn't a local dataset, a target that already
-    exists (locally or on the Hub), a namespace the user doesn't own, the
-    dataset being actively used (recording / merge / local training), or a Hub
-    rename failure. Invalidates the cached Hub-existence answer for BOTH ids
-    so the info card re-checks after the move.
+    exists (locally or on the Hub), a namespace the user doesn't own, a failed
+    attempt to confirm the user's Hub identity while a token IS present (the
+    unauthenticated case above is distinct and never errors), the dataset
+    being actively used (recording / merge / local training), or a Hub rename
+    failure. Invalidates the cached Hub-existence answer for BOTH ids so the
+    info card re-checks after the move.
     """
     ok, reason = validate_dataset_name(new_name)
     if not ok:
@@ -1129,6 +1131,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
 
     # The namespace prefix is fixed — swap only the final path segment.
     namespace = repo_id.rsplit("/", 1)[0] if "/" in repo_id else None
+    local_name = repo_id.rsplit("/", 1)[1] if namespace else repo_id
     new_repo_id = f"{namespace}/{new_name}" if namespace else new_name
     if new_repo_id == repo_id:
         return repo_id  # no-op
@@ -1159,19 +1162,37 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
     # Hub-name bug this whole change exists to fix. The LOCAL path and the
     # RETURNED id stay bare either way: qualifying is a Hub-side concern only.
     api = shared_hf_api()
-    whoami_info = cached_whoami()
+    # cached_whoami() collapses "no token" and "token present but whoami
+    # failed" into the same None. fail_on_error=True re-raises the second
+    # case instead, so a transient whoami failure fails closed like the
+    # repo_exists checks below do, rather than silently falling through to
+    # a local-only rename that leaves a stale Hub copy under the old name.
+    try:
+        whoami_info = cached_whoami(fail_on_error=True)
+    except Exception as exc:
+        logger.warning("rename: whoami() failed: %s", exc)
+        raise DatasetRenameError(
+            502,
+            "Couldn't confirm your Hub identity to check dataset ownership. "
+            "Check your connection and try again, or set HF_HUB_OFFLINE=1 to "
+            "rename the local copy without contacting the Hub.",
+        ) from exc
     hub_repo_id: str | None = None
     hub_new_repo_id: str | None = None
     if whoami_info is not None:
-        hub_namespace = namespace or whoami_info["name"]
-        if not owns_namespace(whoami_info, hub_namespace):
+        requested_namespace = namespace or whoami_info["name"]
+        # Resolve to whoami's own spelling, not the local directory's — a
+        # locally-recorded "MyOrg/foo" would otherwise hit the Hub as
+        # "MyOrg" instead of the canonical "myorg" the account actually owns.
+        hub_namespace = canonical_writable_namespace(whoami_info, requested_namespace)
+        if hub_namespace is None:
             raise DatasetRenameError(
                 403,
-                f"This dataset belongs to '{hub_namespace}' on the Hub — you can only "
+                f"This dataset belongs to '{requested_namespace}' on the Hub — you can only "
                 "rename datasets in your own namespace. Delete your local copy instead, "
                 "or upload it under your own account to get a renameable copy.",
             )
-        hub_repo_id = repo_id if namespace else f"{hub_namespace}/{repo_id}"
+        hub_repo_id = f"{hub_namespace}/{local_name}"
         hub_new_repo_id = f"{hub_namespace}/{new_name}"
 
     # Unauthenticated (no token): there's no Hub identity to resolve ownership
