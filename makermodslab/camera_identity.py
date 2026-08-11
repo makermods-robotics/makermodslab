@@ -44,6 +44,13 @@ though it runs on the main thread — never pumps it. Pumping briefly on a
 timer keeps the in-process snapshot live (hardware-verified 2026-08-07 via
 camera_runloop_experiment.py: a background-thread runloop does NOT refresh
 the cache; pumping the main thread's does).
+
+A live device list means indices genuinely renumber *at runtime*, so any
+per-camera state a caller caches must be keyed by identity, not by index: a
+handle opened for the device that was index 0 stays bound to that device after
+another camera sorts ahead of it and becomes index 0. Callers that cache
+therefore use :func:`identify_cv2_index`, which returns the index to open
+*and* the key to file it under.
 """
 
 import asyncio
@@ -67,8 +74,29 @@ def list_cameras_in_process() -> list[dict] | None:
 
     Returns ``[{"index", "name", "unique_id"}, ...]`` reflecting the same
     (possibly stale) AVFoundation state cv2.VideoCapture resolves indices
-    against, or None when identity can't be established (non-macOS, PyObjC
-    unavailable, AVFoundation query failure).
+    against.
+
+    None and ``[]`` are **different answers**, and callers rely on that:
+
+    - None — the enumeration could not be performed at all (non-macOS, PyObjC
+      unavailable, the framework failing to load, no device-type constant
+      resolving, AVFoundation answering nothing). Nothing is known about the
+      device set, so callers fall back to trusting the index they were given.
+    - ``[]`` — the enumeration *was* performed and found zero cameras. A
+      requested device is then definitively absent, and callers must fail
+      loudly rather than open whatever sits at the index.
+
+    Keeping those apart takes deliberate care, because the natural failure of
+    almost every step here is "no devices found" rather than an exception: an
+    unloaded framework resolves no device-type constants, and a discovery
+    session handed an empty type list matches nothing by construction. Each
+    such step therefore returns None explicitly instead of falling through to
+    an empty result that would be indistinguishable from a real, empty
+    machine. (Camera permission is the one case not caught here: a process
+    denied macOS camera access enumerates only built-ins, so a Mac without a
+    built-in camera reports ``[]`` truthfully — it asked, and AVFoundation
+    showed it nothing. It cannot open those devices through cv2 either, so
+    failing loudly stays the right answer.)
     """
     if platform.system() != "Darwin":
         return None
@@ -77,7 +105,12 @@ def list_cameras_in_process() -> list[dict] | None:
         from Foundation import NSBundle
 
         bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework")
-        bundle.load()
+        if not bundle.load():
+            # Without the framework loaded no device-type constant below can
+            # resolve, and the discovery session would report an empty device
+            # set. That is a failure to ask, not an empty machine.
+            logger.warning("AVFoundation framework did not load — camera identity unavailable")
+            return None
         types = []
         for name in _AVF_DEVICE_TYPE_NAMES:
             loaded = {}
@@ -87,11 +120,33 @@ def list_cameras_in_process() -> list[dict] | None:
                 continue
             if loaded.get(name) is not None:
                 types.append(loaded[name])
+        if not types:
+            # Never run a discovery session with an empty type list: it can
+            # only match nothing, and that nothing would be a lie. Individual
+            # names are expected to miss (they are version-gated); all of them
+            # missing means the lookup itself is broken.
+            logger.warning(
+                "No AVFoundation camera device-type constants resolved (renamed by macOS?) — "
+                "camera identity unavailable"
+            )
+            return None
         cls = objc.lookUpClass("AVCaptureDeviceDiscoverySession")
         devs = []
+        answered = False
         for media_type in ("vide", "muxx"):
             session = cls.discoverySessionWithDeviceTypes_mediaType_position_(types, media_type, 0)
-            devs.extend(session.devices() or [])
+            found = session.devices()
+            # nil (a query that did not answer) is tracked apart from an empty
+            # array (a query that answered "none"); flattening both with
+            # `or []` is what would let a failed query read as an empty
+            # machine. One query answering is enough to trust the result.
+            if found is None:
+                continue
+            answered = True
+            devs.extend(found)
+        if not answered:
+            logger.warning("AVFoundation discovery answered nothing — camera identity unavailable")
+            return None
         devs.sort(key=lambda d: d.uniqueID())
         return [
             {"index": i, "name": str(d.localizedName()), "unique_id": str(d.uniqueID())}
@@ -102,24 +157,36 @@ def list_cameras_in_process() -> list[dict] | None:
         return None
 
 
-def resolve_cv2_index(unique_id: str | None, fallback_index: int) -> int | None:
-    """The index THIS process's cv2 opens for ``unique_id``.
+def resolve_in_enumeration(
+    cameras: list[dict] | None, unique_id: str | None, fallback_index: int
+) -> int | None:
+    """Position of ``unique_id`` in an in-process enumeration, else None.
 
-    - No unique_id, or identity unavailable (non-macOS / query failure):
-      ``fallback_index`` — legacy trust-the-index behavior.
-    - unique_id found in the in-process list: its position there (which can
-      differ from the fresh-subprocess enumeration index the caller has).
-    - unique_id verifiably absent: None — the device attached after this
-      process started; only a restart makes it reachable. Callers must error
-      out instead of opening a different physical camera.
+    Shared by :func:`resolve_cv2_index` and :func:`identify_cv2_index` so both
+    report an index shift, and a verifiably-absent device, identically. Both
+    inputs are nullable so a caller may hand an enumeration straight through
+    without pre-checking it.
     """
-    if not unique_id:
-        return fallback_index
-    cameras = list_cameras_in_process()
-    if cameras is None:
+    # MERGE NOTE — the integration branch's variant of this function guards
+    # `if not unique_id or not cameras`, which sends an EMPTY list to
+    # fallback_index as well. This branch guards only `cameras is None`, and
+    # the difference is deliberate: list_cameras_in_process() guarantees that
+    # None and [] are different answers (see its docstring — every "could not
+    # ask" path returns None explicitly, precisely so that [] can be trusted).
+    #   None -> nothing is known about the device set; the caller's index is
+    #           the best answer available, so trust it.
+    #   []   -> the enumeration ran and found no cameras, so the requested
+    #           device is definitively absent. Return None and let the caller
+    #           fail loudly, which is this module's whole contract.
+    # Collapsing [] into fallback_index would open whatever unrelated device
+    # sits at that number and turn the preview endpoint's honest 503 into a
+    # wrong-camera stream. Whoever resolves this conflict: the two bodies are
+    # not interchangeable, and this branch's None/[] guarantee is what makes
+    # falling through on [] correct here.
+    if not unique_id or cameras is None:
         return fallback_index
     for cam in cameras:
-        if cam["unique_id"] == unique_id:
+        if cam.get("unique_id") == unique_id:
             if cam["index"] != fallback_index:
                 logger.info(
                     "Camera %s: in-process cv2 index %d differs from enumerated index %d "
@@ -135,6 +202,65 @@ def resolve_cv2_index(unique_id: str | None, fallback_index: int) -> int | None:
         unique_id,
     )
     return None
+
+
+def resolve_cv2_index(unique_id: str | None, fallback_index: int) -> int | None:
+    """The index THIS process's cv2 opens for ``unique_id``.
+
+    - No unique_id, or identity unavailable (non-macOS / query failure):
+      ``fallback_index`` — legacy trust-the-index behavior.
+    - unique_id found in the in-process list: its position there (which can
+      differ from the fresh-subprocess enumeration index the caller has).
+    - unique_id verifiably absent: None — the device attached after this
+      process started; only a restart makes it reachable. Callers must error
+      out instead of opening a different physical camera.
+
+    Callers that additionally *cache* something per camera want
+    :func:`identify_cv2_index`, which returns the same index plus the identity
+    to key that cache by — an index alone is not a stable cache key.
+    """
+    if not unique_id:
+        return fallback_index
+    cameras = list_cameras_in_process()
+    if cameras is None:
+        return fallback_index
+    return resolve_in_enumeration(cameras, unique_id, fallback_index)
+
+
+def identify_cv2_index(unique_id: str | None, fallback_index: int) -> tuple[int, str | None] | None:
+    """``(index to open, identity key)`` for a camera — :func:`resolve_cv2_index` plus identity.
+
+    Same contract as :func:`resolve_cv2_index` for the index, including the
+    None return for a verifiably-absent device (callers must fail loudly). The
+    second element is the camera's uniqueID, or None when this process cannot
+    establish identity at all (non-macOS / PyObjC missing / query failure) —
+    the caller then has nothing better than the index to key by.
+
+    A caller who supplies no ``unique_id`` gets one **backfilled** from the
+    in-process enumeration. That is load-bearing, not cosmetic: the identity is
+    optional on the wire (the frontend's ``BackendCameraStream`` takes
+    ``uniqueId?``), so without the backfill one client would key a device by
+    its uniqueID while another keyed the *same* device by an int, and a shared,
+    single-handle resource would be opened twice.
+    """
+    cameras = list_cameras_in_process()
+    if cameras is None:
+        # No identity to be had: legacy trust-the-index behavior, and the
+        # caller keys by the index — exactly what it did before identity
+        # existed. On these platforms the in-process device list is not
+        # live-refreshed either, so indices do not renumber underneath us.
+        return fallback_index, None
+    if not unique_id:
+        for cam in cameras:
+            if cam["index"] == fallback_index:
+                return fallback_index, cam["unique_id"]
+        # Nothing at that index in this process's view. Don't invent an
+        # identity; the open itself will fail loudly enough.
+        return fallback_index, None
+    resolved = resolve_in_enumeration(cameras, unique_id, fallback_index)
+    if resolved is None:
+        return None
+    return resolved, unique_id
 
 
 async def pump_avfoundation_runloop(interval_s: float = 0.5, pump_s: float = 0.05) -> None:
