@@ -699,7 +699,16 @@ class HfCloudJobRunner:
 
         # Cloud pods can't see the host's LeRobot cache. If the dataset
         # only exists locally, push it to the Hub before submitting.
-        self._ensure_dataset_on_hub(config.dataset_repo_id)
+        #
+        # A locally-recorded dataset's id is bare; the pod has no local cache to
+        # fall back on and no namespace to guess from, so it must be handed the
+        # namespaced id or the job dies resolving the dataset. Resolve once here
+        # and pin it into the config, which is both what build_training_command
+        # emits and what JobRecord.config persists as "what actually ran".
+        local_dataset_repo_id = config.dataset_repo_id
+        if "/" not in local_dataset_repo_id:
+            config.dataset_repo_id = f"{username}/{local_dataset_repo_id}"
+        self._ensure_dataset_on_hub(local_dataset_repo_id, config.dataset_repo_id)
 
         # Mutate the config so build_training_command emits the right flags.
         # The mutated config is what gets persisted in JobRecord.config, so
@@ -827,27 +836,35 @@ class HfCloudJobRunner:
         except Exception as exc:
             logger.warning("Could not write upload log line: %s", exc)
 
-    def _ensure_dataset_on_hub(self, repo_id: str) -> None:
+    def _ensure_dataset_on_hub(self, local_repo_id: str, hub_repo_id: str) -> None:
         """If the dataset is local-only, push it to the Hub.
 
         The cloud pod resolves the dataset by repo_id; it can't see the
         host's `~/.cache/huggingface/lerobot`. We push synchronously and
         let any failure bubble up — JobRegistry.start marks the record
         as failed with the exception message.
+
+        `local_repo_id` addresses the host's cache (a locally-recorded dataset's
+        directory — and so its id — is bare); `hub_repo_id` is that id resolved
+        against the caller's namespace, which is what every Hub call here must
+        use: `dataset_info` does a literal lookup, so checking the bare id would
+        report an already-uploaded dataset as missing and re-push it, and
+        `push_to_hub`'s own upload/card calls would then 404 against the bare id
+        (the same asymmetry UploadManager handles).
         """
         try:
-            self._api.dataset_info(repo_id)
+            self._api.dataset_info(hub_repo_id)
             return
         except RepositoryNotFoundError:
             pass
 
         cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-        if not (cache_root / repo_id / "meta" / "info.json").is_file():
+        if not (cache_root / local_repo_id / "meta" / "info.json").is_file():
             # Neither local nor on Hub. Let the trainer surface the error
             # — same behaviour as before.
             return
 
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (public)...")
+        self._log_line(f"[upload] dataset {hub_repo_id} not on Hub; pushing local copy (public)...")
         from lerobot.datasets import LeRobotDataset
 
         try:
@@ -857,12 +874,14 @@ class HfCloudJobRunner:
             # follows that same default so all MakerMods Lab-produced datasets are
             # discoverable. (This intentionally reverses the earlier private
             # default — an implicit upload of a local-only dataset is now public.)
-            LeRobotDataset(repo_id).push_to_hub(tags=with_makermodslab_tag(None), private=False)
+            dataset = LeRobotDataset(local_repo_id)
+            dataset.repo_id = hub_repo_id
+            dataset.push_to_hub(tags=with_makermodslab_tag(None), private=False)
         except Exception as exc:
-            msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
+            msg = f"Failed to upload local dataset {local_repo_id} to Hub: {exc}"
             self._log_line(f"[upload] {msg}")
             raise RuntimeError(msg) from exc
-        self._log_line(f"[upload] dataset {repo_id} uploaded.")
+        self._log_line(f"[upload] dataset {hub_repo_id} uploaded.")
 
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the

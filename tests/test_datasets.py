@@ -1006,6 +1006,81 @@ def test_get_hub_settings_returns_private_and_tags() -> None:
     assert result == {"repo_id": "alice/pick", "private": True, "tags": ["robotics", "makermods"]}
 
 
+def test_hub_edit_calls_qualify_a_bare_repo_id() -> None:
+    """get_hub_status resolves a bare (locally-recorded) id against the caller's
+    namespace before deciding "on_hub" — so every Hub call the card then makes
+    on that same id has to resolve it the same way. dataset_info,
+    update_repo_settings and metadata_update are all literal lookups: left bare
+    they 404/403 on exactly the datasets the on_hub badge just advertised as
+    editable (useCanEditHub treats a bare id as the user's own namespace)."""
+    from makermodslab import datasets as ds
+
+    fake_info = MagicMock()
+    fake_info.private = False
+    fake_info.tags = ["makermods"]
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = fake_info
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.metadata_update") as fake_metadata_update,
+    ):
+        settings = ds.get_hub_settings("logo_2026")
+        ds.set_dataset_visibility("logo_2026", True)
+        ds.set_dataset_tags("logo_2026", ["robotics"])
+
+    fake_api.dataset_info.assert_called_once_with("makermods/logo_2026")
+    fake_api.update_repo_settings.assert_called_once_with(
+        "makermods/logo_2026", private=True, repo_type="dataset"
+    )
+    assert fake_metadata_update.call_args.args[0] == "makermods/logo_2026"
+    # The public contract is unchanged: callers get back the id they passed.
+    assert settings["repo_id"] == "logo_2026"
+
+
+def test_get_hub_dataset_info_qualifies_a_bare_repo_id(tmp_path: Path) -> None:
+    """The card's hub summary (and the download that follows it) address the
+    Hub by the resolved id too — hf_hub_download / snapshot_download are
+    literal lookups. The local snapshot directory keeps the caller's id, which
+    is the flat layout every local path uses."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = _write_hub_meta(tmp_path, {"total_episodes": 2, "total_frames": 60, "fps": 30})
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+    ):
+        row = ds.get_hub_dataset_info("logo_2026")
+        # Cached under the resolved id, but invalidated by the bare id every
+        # upload/download caller holds.
+        ds.get_hub_dataset_info("logo_2026")
+        assert dl.call_count == 1
+        assert "makermods/logo_2026" in ds._HUB_DATASET_INFO_CACHE
+        ds.invalidate_hub_dataset_info("logo_2026")
+        assert ds._HUB_DATASET_INFO_CACHE == {}
+
+    assert dl.call_args.args[0] == "makermods/logo_2026"
+    assert row is not None and row["repo_id"] == "logo_2026"
+
+
+def test_fetch_dataset_snapshot_qualifies_hub_id_but_keeps_local_dir(
+    tmp_lerobot_home: Path,
+) -> None:
+    from makermodslab import datasets as ds
+
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.snapshot_download") as snap,
+    ):
+        ds._fetch_dataset_snapshot("logo_2026")
+
+    assert snap.call_args.args[0] == "makermods/logo_2026"
+    assert snap.call_args.kwargs["local_dir"] == str(tmp_lerobot_home / "logo_2026")
+
+
 def test_get_hub_settings_rejected_offline() -> None:
     from makermodslab import datasets as ds
 

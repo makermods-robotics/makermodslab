@@ -354,14 +354,20 @@ def get_hub_settings(repo_id: str) -> dict[str, Any]:
     read reliably) or on a Hub failure so the route can surface a clear error.
     Tags come from the dataset card metadata (``dataset_info(...).tags``); the
     REQUIRED_HUB_TAGS are not stripped here — the card shows exactly what's live.
+
+    A bare (locally-recorded) repo_id is qualified with the caller's namespace
+    first — ``dataset_info`` does a literal lookup, so the bare id 404s even
+    when the dataset is on the Hub. The editor is offered exactly when
+    get_hub_status says ``on_hub``, which resolves the same way.
     """
     if hf_hub_offline():
         raise DatasetHubEditError(400, "The Hub is offline — dataset settings can't be read right now.")
+    hub_repo_id = _resolve_hub_repo_id(repo_id)
     api = shared_hf_api()
     try:
-        info = api.dataset_info(repo_id)
+        info = api.dataset_info(hub_repo_id)
     except Exception as exc:
-        logger.info("dataset_info(%s) failed: %s", repo_id, exc)
+        logger.info("dataset_info(%s) failed: %s", hub_repo_id, exc)
         raise _hub_edit_error(exc) from exc
     return {
         "repo_id": repo_id,
@@ -377,16 +383,19 @@ def set_dataset_visibility(repo_id: str, private: bool) -> dict[str, Any]:
     (this huggingface_hub version has no ``update_repo_visibility``). Refuses
     offline (can't mutate). Maps auth/permission failures to a clear message.
     Invalidates the cached Hub-existence answer so the card re-reads settings.
+    A bare repo_id is qualified first (``update_repo_settings`` is another
+    literal-lookup call — see get_hub_settings).
     """
     if hf_hub_offline():
         raise DatasetHubEditError(
             400, "The Hub is offline — you can't change a dataset's visibility right now."
         )
+    hub_repo_id = _resolve_hub_repo_id(repo_id)
     api = shared_hf_api()
     try:
-        api.update_repo_settings(repo_id, private=private, repo_type="dataset")
+        api.update_repo_settings(hub_repo_id, private=private, repo_type="dataset")
     except Exception as exc:
-        logger.info("update_repo_settings(%s, private=%s) failed: %s", repo_id, private, exc)
+        logger.info("update_repo_settings(%s, private=%s) failed: %s", hub_repo_id, private, exc)
         raise _hub_edit_error(exc) from exc
 
     invalidate_hub_status(repo_id)
@@ -402,15 +411,17 @@ def set_dataset_tags(repo_id: str, tags: list[str]) -> dict[str, Any]:
     required org/product tags (makermods / openbooth / MakerModsLab) are never dropped
     by an edit, then written with ``metadata_update(..., overwrite=True)``.
     Refuses offline. Maps auth/permission failures. Invalidates the cached
-    Hub-existence answer. Returns the final tag list actually written.
+    Hub-existence answer. Returns the final tag list actually written. A bare
+    repo_id is qualified first (see get_hub_settings).
     """
     if hf_hub_offline():
         raise DatasetHubEditError(400, "The Hub is offline — you can't edit a dataset's tags right now.")
     final_tags = with_makermodslab_tag(tags)
+    hub_repo_id = _resolve_hub_repo_id(repo_id)
     try:
-        metadata_update(repo_id, {"tags": final_tags}, repo_type="dataset", overwrite=True)
+        metadata_update(hub_repo_id, {"tags": final_tags}, repo_type="dataset", overwrite=True)
     except Exception as exc:
-        logger.info("metadata_update(%s, tags=%s) failed: %s", repo_id, final_tags, exc)
+        logger.info("metadata_update(%s, tags=%s) failed: %s", hub_repo_id, final_tags, exc)
         raise _hub_edit_error(exc) from exc
 
     invalidate_hub_status(repo_id)
@@ -774,15 +785,16 @@ def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
         return None
     if not _hub_dataset_has_video(repo_id):
         return None
+    hub_repo_id = _resolve_hub_repo_id(repo_id)
     try:
-        info_path = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+        info_path = hf_hub_download(hub_repo_id, filename="meta/info.json", repo_type="dataset")
         root = Path(info_path).parents[1]  # strip "meta/info.json"'s 2 path parts
-        files = shared_hf_api().list_repo_files(repo_id, repo_type="dataset")
+        files = shared_hf_api().list_repo_files(hub_repo_id, repo_type="dataset")
         for f in files:
             if f.startswith("meta/episodes/") and f.endswith(".parquet"):
-                hf_hub_download(repo_id, filename=f, repo_type="dataset")
+                hf_hub_download(hub_repo_id, filename=f, repo_type="dataset")
     except Exception as exc:
-        logger.info("hub episode metadata fetch for %s failed: %s", repo_id, exc)
+        logger.info("hub episode metadata fetch for %s failed: %s", hub_repo_id, exc)
         return None
     return root
 
@@ -901,7 +913,11 @@ def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Pat
     rel_video_path = Path("videos") / video_key / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.mp4"
     if is_hub:
         try:
-            return Path(hf_hub_download(repo_id, filename=str(rel_video_path), repo_type="dataset"))
+            return Path(
+                hf_hub_download(
+                    _resolve_hub_repo_id(repo_id), filename=str(rel_video_path), repo_type="dataset"
+                )
+            )
         except Exception as exc:
             logger.info("hub video chunk fetch for %s failed: %s", repo_id, exc)
             return None
@@ -946,7 +962,11 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
     rel_data_path = Path("data") / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
     if is_hub:
         try:
-            data_path = Path(hf_hub_download(repo_id, filename=str(rel_data_path), repo_type="dataset"))
+            data_path = Path(
+                hf_hub_download(
+                    _resolve_hub_repo_id(repo_id), filename=str(rel_data_path), repo_type="dataset"
+                )
+            )
         except Exception as exc:
             logger.info("hub data chunk fetch for %s failed: %s", repo_id, exc)
             return None
@@ -993,9 +1013,17 @@ _HUB_DATASET_INFO_LOCK = threading.Lock()
 
 def invalidate_hub_dataset_info(repo_id: str) -> None:
     """Drop the cached Hub summary for `repo_id`, so the next /datasets/info
-    re-fetches its meta/info.json (e.g. after an upload changed it)."""
+    re-fetches its meta/info.json (e.g. after an upload changed it).
+
+    Keyed by the resolved lookup id like the hub-status cache, so a bare id
+    also drops its "<namespace>/<repo_id>" entries — see invalidate_hub_status.
+    """
     with _HUB_DATASET_INFO_LOCK:
         _HUB_DATASET_INFO_CACHE.pop(repo_id, None)
+        if "/" not in repo_id:
+            suffix = f"/{repo_id}"
+            for key in [k for k in _HUB_DATASET_INFO_CACHE if k.endswith(suffix)]:
+                del _HUB_DATASET_INFO_CACHE[key]
 
 
 def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
@@ -1015,16 +1043,21 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     if hf_hub_offline():
         return None
 
+    # Resolved (and cached) by the id actually fetched: hf_hub_download does a
+    # literal lookup, so a bare id needs the namespace, and the answer depends
+    # on which one — see _resolve_hub_repo_id / _HUB_STATUS_CACHE.
+    hub_repo_id = _resolve_hub_repo_id(repo_id)
+
     with _HUB_DATASET_INFO_LOCK:
-        cached = _HUB_DATASET_INFO_CACHE.get(repo_id)
+        cached = _HUB_DATASET_INFO_CACHE.get(hub_repo_id)
     if cached is not None:
         return dict(cached)
 
     try:
-        path = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+        path = hf_hub_download(hub_repo_id, filename="meta/info.json", repo_type="dataset")
         info = json.loads(Path(path).read_text())
     except Exception as exc:
-        logger.info("hub dataset info fetch for %s failed: %s", repo_id, exc)
+        logger.info("hub dataset info fetch for %s failed: %s", hub_repo_id, exc)
         return None
 
     features = info.get("features") or {}
@@ -1043,7 +1076,7 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     }
 
     with _HUB_DATASET_INFO_LOCK:
-        _HUB_DATASET_INFO_CACHE[repo_id] = dict(row)
+        _HUB_DATASET_INFO_CACHE[hub_repo_id] = dict(row)
     return row
 
 
@@ -1417,9 +1450,13 @@ def _fetch_dataset_snapshot(repo_id: str) -> None:
     (the merged-listing scan), so on completion the listing source flips from
     "hub" to "both" — which downloading only into the hub snapshot cache would
     NOT achieve (that cache isn't walked by the listing). Invalidates the
-    hub-status + listing caches so the flip shows immediately."""
+    hub-status + listing caches so the flip shows immediately.
+
+    The Hub is addressed by the RESOLVED id (``snapshot_download`` is a literal
+    lookup — a bare id 404s), while the local directory keeps the id the caller
+    passed, matching the flat layout every other local path uses."""
     target = _lerobot_cache_root() / repo_id
-    snapshot_download(repo_id, repo_type="dataset", local_dir=str(target))
+    snapshot_download(_resolve_hub_repo_id(repo_id), repo_type="dataset", local_dir=str(target))
     invalidate_hub_status(repo_id)
     invalidate_dataset_listing_cache()
     # The card flips from the hub summary to full local detail — drop the
