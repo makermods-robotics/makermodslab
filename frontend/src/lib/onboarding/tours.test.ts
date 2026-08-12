@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { launchpadTour, studioTour } from "@/lib/onboarding/tours";
+import {
+  launchpadTour,
+  studioTour,
+  teleopTour,
+  trainingRouteTour,
+} from "@/lib/onboarding/tours";
 
-const ALL_TOURS = [launchpadTour, studioTour];
+const ALL_TOURS = [launchpadTour, studioTour, teleopTour, trainingRouteTour];
 
 describe.each(ALL_TOURS)("$id tour", (tour) => {
   it("has at least one step", () => {

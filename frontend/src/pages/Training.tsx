@@ -8,6 +8,9 @@ import TrainingConfigurator, {
 
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useStudio } from "@/contexts/StudioContext";
+import { useOnboarding } from "@/contexts/OnboardingContext";
+import { useOnceFlag } from "@/lib/onboarding/storage";
+import { trainingRouteTour } from "@/lib/onboarding/tours";
 
 // The policy type is chosen before landing here (studio Train panel, or
 // inherited by the Continue/Fine-tune flows) and arrives via router state.
@@ -56,6 +59,18 @@ const ConfigurationMode: React.FC = () => {
       "act",
   );
 
+  const { seen: hasSeenTrainingRouteTour, markSeen: markTrainingRouteTourSeen } =
+    useOnceFlag("makerlab:seen-training-tour");
+  const { start: startTour } = useOnboarding();
+
+  // First visit to this route, walk through the single-step reveal.
+  useEffect(() => {
+    if (!hasSeenTrainingRouteTour) {
+      startTour(trainingRouteTour, markTrainingRouteTourSeen);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Mirror the resolved policy type so a refresh — which drops router state —
   // restores the same choice via readStoredPolicyType().
   useEffect(() => {
@@ -68,7 +83,7 @@ const ConfigurationMode: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto max-w-3xl px-4 py-6">
+      <div className="mx-auto max-w-3xl px-4 py-6" data-tour="training-configurator">
         <TrainingConfigurator
           // Same composite the studio's Train panel keys on: the seeds are read
           // once as initial state, so the step (and a resume's checkpoint

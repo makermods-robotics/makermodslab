@@ -5,6 +5,9 @@ import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
+import { useOnboarding } from "@/contexts/OnboardingContext";
+import { useOnceFlag } from "@/lib/onboarding/storage";
+import { teleopTour } from "@/lib/onboarding/tours";
 
 const TeleoperationPage = () => {
   const navigate = useNavigate();
@@ -19,6 +22,16 @@ const TeleoperationPage = () => {
   // button, an in-app link, and the unmount safety net can't double-stop or
   // double-toast.
   const stoppedRef = useRef(false);
+
+  const { seen: hasSeenTeleopTour, markSeen: markTeleopTourSeen } =
+    useOnceFlag("makerlab:seen-teleop-tour");
+  const { start: startTour } = useOnboarding();
+
+  // First visit to this page, walk through the single-step reveal.
+  useEffect(() => {
+    if (!hasSeenTeleopTour) startTour(teleopTour, markTeleopTourSeen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Terminal outcome of a session that ended UNDER us (the status poll below
   // caught the worker dying mid-loop, or a stop from elsewhere whose cleanup
@@ -203,7 +216,7 @@ const TeleoperationPage = () => {
           )}
         </div>
       )}
-      <div className="w-full h-[95vh] flex">
+      <div className="w-full h-[95vh] flex" data-tour="teleop-page">
         <VisualizerPanel
           onGoBack={handleGoBack}
           className="lg:w-full"
