@@ -253,6 +253,12 @@ def _local_copy_differs_from_hub(repo_id: str) -> bool | None:
     when there's no local copy to protect, or when the Hub summary can't be
     read (offline / transport error): a degraded read must not manufacture a
     mismatch warning.
+
+    True is load-bearing (it blocks a cloud run — see JobRegistry.start), so
+    the comparison stays conservative. Episode counts decide it; frame counts
+    only sharpen it when BOTH sides report one, because a missing/unparsed
+    ``total_frames`` reads as 0 on either side and would otherwise fake a
+    mismatch against a dataset that is genuinely backed up.
     """
     local_info_path = _lerobot_cache_root() / repo_id / "meta" / "info.json"
     try:
@@ -264,10 +270,10 @@ def _local_copy_differs_from_hub(repo_id: str) -> bool | None:
     if hub is None:
         return None
 
-    return (int(local.get("total_episodes") or 0), int(local.get("total_frames") or 0)) != (
-        hub["total_episodes"],
-        hub["total_frames"],
-    )
+    if int(local.get("total_episodes") or 0) != hub["total_episodes"]:
+        return True
+    local_frames, hub_frames = int(local.get("total_frames") or 0), hub["total_frames"]
+    return bool(local_frames and hub_frames and local_frames != hub_frames)
 
 
 def get_hub_status(repo_id: str) -> dict[str, Any]:

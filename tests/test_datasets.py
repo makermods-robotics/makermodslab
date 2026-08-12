@@ -708,6 +708,21 @@ def test_get_hub_status_makes_no_local_differs_claim_without_a_basis(
         _clear_hub_status_cache()
         assert ds.get_hub_status("logo_2026")["local_differs"] is None
 
+    # An absent/unparsed total_frames reads as 0. It must not fake a mismatch
+    # against a dataset that is genuinely backed up — local_differs=True blocks
+    # a cloud run, so only the episode count decides on its own.
+    (tmp_lerobot_home / "no_frames_2026" / "meta").mkdir(parents=True)
+    (tmp_lerobot_home / "no_frames_2026" / "meta" / "info.json").write_text(
+        json.dumps({"total_episodes": 19})
+    )
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.get_hub_dataset_info", return_value=_hub_summary(19, 700)),
+    ):
+        _clear_hub_status_cache()
+        assert ds.get_hub_status("no_frames_2026")["local_differs"] is False
+
     # Not on the Hub: there's no repo to compare against.
     fake_api.repo_exists.return_value = False
     with (
