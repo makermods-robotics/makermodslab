@@ -603,7 +603,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     }
   };
 
-  const confirmDatasetDelete = async (resolution: DeleteResolution) => {
+  const confirmDatasetDelete = async (_resolution: DeleteResolution) => {
     if (!repoId) return;
     try {
       const result = await deleteDataset(baseUrl, fetchWithHeaders, repoId);
@@ -617,13 +617,15 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         return;
       }
       setPendingDatasetDelete(false);
-      if (resolution.clearsSelection) {
-        onOpenChange(false);
-        onDeleted?.();
-        finalize?.onDiscarded();
-      } else {
-        setReloadKey((k) => k + 1);
-      }
+      // The local copy is gone either way — for a "both" (local + Hub)
+      // dataset this flips the row to Hub-only, so there's nothing left for
+      // THIS viewer instance to show. Always close it and always release the
+      // parent list refresh / finalize flow; `clearsSelection` is reserved
+      // for whether the persisted *listing* selection is cleared (unused
+      // today — see deleteSemantics.ts), not for this.
+      onOpenChange(false);
+      onDeleted?.();
+      finalize?.onDiscarded();
     } catch (e) {
       setPendingDatasetDelete(false);
       toast({
@@ -787,7 +789,14 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         </div>
 
         <AlertDialog
-          open={deleteTarget !== null}
+          // Wait for deleteHubStatus to resolve before opening — same reason
+          // as the whole-dataset DeleteConfirmDialog below: it starts null
+          // the instant deleteTarget is set, and opening immediately would
+          // let a user confirm before either Hub disclosure above ("will NOT
+          // be updated" / "will be unaffected") has had a chance to render.
+          // The effect's `.catch` fallback guarantees a definitive status,
+          // so this can't wedge the dialog shut on a fetch failure.
+          open={deleteTarget !== null && deleteHubStatus !== null}
           onOpenChange={(next) => {
             if (!next && !deleting) {
               setDeleteTarget(null);
