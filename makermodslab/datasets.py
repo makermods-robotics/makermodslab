@@ -257,11 +257,24 @@ class DatasetHubEditError(Exception):
         self.docs_url = docs_url
 
 
+def _hub_status_code(exc: Exception) -> int | None:
+    """HTTP status carried by a huggingface_hub exception, or None if it isn't
+    an HTTP error. `HfHubHTTPError` keeps the `requests.Response` around; read
+    the real status from it rather than pattern-matching the message text,
+    which could also match a "409" that happens to appear in a repo name."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
 def _hub_edit_error(exc: Exception) -> DatasetHubEditError:
-    """Map a huggingface_hub exception raised by a visibility/tags mutation to a
-    DatasetHubEditError with a legible message. A 401/auth failure or a 403
-    permission failure becomes a clear "you can't edit this" message; anything
-    else degrades to a generic Hub-failure 502."""
+    """Map a huggingface_hub exception raised by a visibility/tags/rename
+    mutation to a DatasetHubEditError with a legible message. A 401/auth
+    failure or a 403 permission failure becomes a clear "you can't edit this"
+    message; a 409 is a name race (the target was free at the pre-check and
+    taken before the write landed) and gets the same "already exists" a
+    caller's own pre-check would report; anything else degrades to a generic
+    Hub-failure 502."""
     from .record import _upload_auth_error
 
     auth = _upload_auth_error(exc)
@@ -274,6 +287,13 @@ def _hub_edit_error(exc: Exception) -> DatasetHubEditError:
             403,
             "You don't have permission to change this dataset on the Hub. "
             "You can only edit datasets in a namespace you can write to.",
+        )
+    status = _hub_status_code(exc)
+    if status == 409 or (status is None and "conflict" in err_text):
+        return DatasetHubEditError(
+            409,
+            "The Hub already has a dataset with that name — it was taken while this "
+            "change was in flight. Pick a different name and try again.",
         )
     return DatasetHubEditError(502, f"The Hub rejected the change: {exc}")
 

@@ -782,6 +782,38 @@ def test_rename_new_name_taken_on_hub_409s_before_any_move(tmp_lerobot_home: Pat
     assert (tmp_lerobot_home / "makermods" / "old_name").exists()
 
 
+def test_rename_hub_409_is_reported_as_a_name_conflict(tmp_lerobot_home: Path) -> None:
+    """The target was free when the pre-check ran and got taken before the
+    write landed -- a genuine race, distinct from test_rename_new_name_taken_
+    on_hub_409s_before_any_move above. A 409 raised by move_repo itself has to
+    stay a 409: "already exists" tells the user to pick another name, while
+    the generic 502 "the Hub rejected the change" tells them to file a bug."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    # The status is read from the exception's response rather than pattern-
+    # matched out of its text, so this message deliberately spells out neither
+    # "409" nor "conflict": text-matching alone would fall through to the 502.
+    race = Exception("Repository already exists on the Hub")
+    race.response = MagicMock(status_code=409)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    fake_api.move_repo.side_effect = race
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 409
+    # The Hub move never landed, so the local copy must not move either.
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+    assert not (tmp_lerobot_home / "makermods" / "new_name").exists()
+
+
 def test_rename_hub_failure_blocks_local_rename(tmp_lerobot_home: Path) -> None:
     """A Hub-side rename failure (e.g. no write permission) aborts the whole
     operation — the local directory is left untouched rather than diverging
