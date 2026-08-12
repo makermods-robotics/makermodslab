@@ -1081,6 +1081,17 @@ def _dataset_in_use(repo_id: str) -> str | None:
     return None
 
 
+def _invalidate_rename_caches(*ids: str | None) -> None:
+    """Drop every cached Hub-existence answer a rename could have touched,
+    plus the dataset listing. Called on BOTH the success path and the
+    failure path of rename_local_dataset — a half-completed rename (Hub
+    moved, local move failed, rollback may or may not have landed) is
+    precisely when the cache is most likely to be wrong."""
+    for stale in set(ids) - {None}:
+        invalidate_hub_status(stale)
+    invalidate_dataset_listing_cache()
+
+
 def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     """Rename a locally-cached dataset by moving its directory, and its Hub
     copy (if any) to match.
@@ -1288,15 +1299,15 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
                 )
         else:
             logger.error("Failed to rename dataset %s -> %s: %s", repo_id, new_repo_id, exc)
+        # Invalidate on the way out too. Whatever just happened — a landed Hub
+        # move, a rollback, or a hub-status poll that raced the move window and
+        # cached the new id as "on_hub" — the cached answers can no longer be
+        # trusted, and a stale "on_hub" surviving for the process lifetime would
+        # point the info card at a URL that now 404s.
+        _invalidate_rename_caches(repo_id, new_repo_id, hub_repo_id, hub_new_repo_id)
         raise DatasetRenameError(500, f"Failed to rename dataset: {exc}") from exc
 
-    # The old id no longer exists and the new id now does — drop both cached
-    # Hub-existence answers so the next hub-status check re-queries. The
-    # qualified Hub ids are invalidated too when they differ from the bare ones,
-    # since hub-status may have cached its answer under either spelling.
-    for stale in {repo_id, new_repo_id, hub_repo_id, hub_new_repo_id} - {None}:
-        invalidate_hub_status(stale)
-    invalidate_dataset_listing_cache()
+    _invalidate_rename_caches(repo_id, new_repo_id, hub_repo_id, hub_new_repo_id)
 
     logger.info("Renamed dataset directory %s -> %s (hub: %s)", src, dst, hub_state)
     return {"repo_id": new_repo_id, "hub": hub_state}

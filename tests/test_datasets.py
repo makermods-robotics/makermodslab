@@ -1082,6 +1082,34 @@ def test_rename_rolls_the_hub_back_when_the_local_move_fails(
     ]
 
 
+def test_rename_invalidates_hub_status_when_the_local_move_fails(
+    tmp_lerobot_home: Path,
+) -> None:
+    """The Hub move can land before the local move fails (whether or not the
+    best-effort rollback then succeeds) -- that's exactly when the cached
+    Hub-existence answer is most wrong, so it has to be dropped on the failure
+    path too, not just after a full success. A stale on_hub cached for the old
+    id would otherwise survive for the process lifetime and point the info
+    card at a URL that 404s."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.os.rename", side_effect=OSError("disk full")),
+        patch("makermodslab.datasets.invalidate_hub_status") as inval,
+        pytest.raises(DatasetRenameError),
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    called = {c.args[0] for c in inval.call_args_list}
+    assert called == {"makermods/old_name", "makermods/new_name"}
+
+
 def test_rename_logs_divergence_when_the_hub_rollback_also_fails(
     tmp_lerobot_home: Path,
     caplog: pytest.LogCaptureFixture,
