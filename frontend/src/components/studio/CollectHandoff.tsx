@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CheckCircle, Loader2, Trash2, Upload as UploadIcon, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -39,6 +39,12 @@ const CollectHandoff: React.FC = () => {
   const hubUploadJustStarted = location.state?.hubUploadJustStarted as
     | string
     | undefined;
+  // Freeze whether THIS mount trusts a first-seen terminal upload status,
+  // independent of the consume-once effect below clearing the router-state
+  // signal out from under it — see useDatasetUpload's trustFirstSeed doc.
+  const [trustFirstSeed] = useState(
+    () => hubUploadJustStarted !== undefined && hubUploadJustStarted === recorded?.repo_id,
+  );
   const [dismissed, setDismissed] = useState(false);
 
   const discardedEmpty = recorded?.discarded_empty ?? false;
@@ -51,6 +57,18 @@ const CollectHandoff: React.FC = () => {
   useEffect(() => {
     if (repoId) setSelectedDataset(repoId);
   }, [repoId, setSelectedDataset]);
+
+  // Consume hubUploadJustStarted once. React Router history state survives a
+  // page reload, so leaving it in place would re-trust (and re-toast) the
+  // same upload's terminal status on every reload of this banner,
+  // indefinitely — trustFirstSeed above already captured what THIS mount
+  // needs, so this only has to stop the signal from reaching a future mount.
+  const consumedUploadSignal = useRef(false);
+  useEffect(() => {
+    if (consumedUploadSignal.current || hubUploadJustStarted === undefined) return;
+    consumedUploadSignal.current = true;
+    navigate(location.pathname, { replace: true, state: { recorded } });
+  }, [hubUploadJustStarted, navigate, location.pathname, recorded]);
 
   if (!recorded || dismissed) return null;
 
@@ -107,10 +125,7 @@ const CollectHandoff: React.FC = () => {
                   Train on this dataset
                 </Button>
                 {repoId && (
-                  <UploadToHubAction
-                    repoId={repoId}
-                    trustFirstSeed={hubUploadJustStarted === repoId}
-                  />
+                  <UploadToHubAction repoId={repoId} trustFirstSeed={trustFirstSeed} />
                 )}
               </div>
             </>
