@@ -776,6 +776,96 @@ def test_dataset_in_use_reports_episode_delete_in_progress() -> None:
         ds._episode_deletes_in_progress.discard("makermods/mid-swap")
 
 
+def test_delete_episode_and_upload_start_cannot_interleave(tmp_lerobot_home: Path) -> None:
+    """TOCTOU regression test (PR #54 review, C2): delete_local_episode's busy
+    CHECK (_dataset_in_use) and its CLAIM (_episode_deletes_in_progress.add)
+    must be atomic with respect to UploadManager.start's own check-and-claim.
+    An upload-start landing in the gap between delete's check and its claim
+    must not slip through and begin pushing a directory that's about to be
+    rewritten out from under it.
+
+    Reproduced deterministically (no real timing race): a patched
+    _dataset_in_use pauses on its FIRST call only (delete_local_episode's),
+    holding whatever synchronization the real code provides, while a second
+    thread attempts UploadManager.start for the same repo_id. If the two
+    don't share a lock, the upload's own call to _dataset_in_use runs
+    unimpeded and sees nothing claimed yet — the actual bug."""
+    from makermodslab import datasets as ds
+    from makermodslab import record as rec
+    from makermodslab.record import UploadRequest
+
+    repo_id = "makermods/three"
+    _make_dataset(tmp_lerobot_home, repo_id, episodes=3)
+
+    checked = threading.Event()
+    proceed = threading.Event()
+    real_dataset_in_use = ds._dataset_in_use
+    first_call_lock = threading.Lock()
+    first_call_done = False
+
+    def delayed_check(rid: str):
+        nonlocal first_call_done
+        with first_call_lock:
+            is_first = not first_call_done
+            first_call_done = True
+        result = real_dataset_in_use(rid)
+        if is_first:
+            checked.set()
+            assert proceed.wait(timeout=5), "test deadlocked waiting for main thread"
+        return result
+
+    mgr = rec.UploadManager()
+    # If the race isn't closed, start() succeeds and spawns a real worker
+    # thread that would hit the network (LeRobotDataset load + push_to_hub).
+    # Neuter it — only start()'s own check-and-claim is under test here.
+    mgr._worker = lambda request: None
+
+    delete_result: dict[str, Any] = {}
+
+    def run_delete() -> None:
+        with (
+            patch("makermodslab.datasets._dataset_in_use", delayed_check),
+            patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+            patch(
+                "makermodslab.datasets.delete_episodes",
+                side_effect=_stub_delete_episodes_success(2),
+            ),
+            # The real job_registry is process-global and, on a dev machine
+            # with real HF Cloud job history, listing it hits the network
+            # (checkpoint lookups) — unrelated to this test, so keep
+            # _dataset_in_use's job-registry check fast and deterministic.
+            patch("makermodslab.jobs.job_registry.list", return_value=[]),
+        ):
+            delete_result["value"] = ds.delete_local_episode(repo_id, 1)
+
+    deleter = threading.Thread(target=run_delete, daemon=True)
+    deleter.start()
+    assert checked.wait(timeout=5), "delete_local_episode never reached its busy check"
+
+    upload_result: dict[str, Any] = {}
+    upload_attempted = threading.Event()
+
+    def run_upload() -> None:
+        upload_attempted.set()
+        upload_result["value"] = mgr.start(UploadRequest(dataset_repo_id=repo_id))
+
+    uploader = threading.Thread(target=run_upload, daemon=True)
+    uploader.start()
+    assert upload_attempted.wait(timeout=5)
+    uploader.join(timeout=0.3)
+    assert uploader.is_alive(), (
+        "upload-start returned while delete_local_episode was still mid busy-check — "
+        "the two don't share a lock, so the upload slipped through the TOCTOU gap"
+    )
+
+    proceed.set()
+    deleter.join(timeout=10)
+    uploader.join(timeout=10)
+
+    assert delete_result["value"]["success"] is True
+    assert upload_result["value"]["started"] is False
+
+
 def test_delete_episode_load_failure_400s(tmp_lerobot_home: Path) -> None:
     """A dataset dir that passes the cheap `_is_dataset_dir` check (has
     meta/info.json) but isn't a real loadable LeRobotDataset (e.g. corrupt,

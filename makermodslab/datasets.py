@@ -1043,7 +1043,18 @@ class DatasetRenameError(Exception):
 # _dataset_in_use (whole-dataset delete, rename, upload-start) to know a
 # directory is mid-swap, and for a second concurrent episode-delete on the
 # same repo to be refused instead of racing the first one's swap.
-_episode_delete_lock = threading.Lock()
+#
+# _dataset_guard_lock also makes delete_local_episode's busy CHECK
+# (_dataset_in_use) and its CLAIM (_episode_deletes_in_progress.add)
+# atomic with UploadManager.start's own check-and-claim (record.py) — an
+# RLock so _dataset_in_use's own brief internal acquire (below) can nest
+# inside a caller that's already holding it. Without that, an upload could
+# observe "not in use" and start in the gap between delete's check and its
+# claim, then race the swap. rename_local_dataset and handle_delete_dataset
+# still read _dataset_in_use un-guarded — narrower than a fully shared lock
+# across every entry point, but closes the one race that actually corrupts
+# data (a background upload reading mid-rewrite).
+_dataset_guard_lock = threading.RLock()
 _episode_deletes_in_progress: set[str] = set()
 
 
@@ -1082,7 +1093,7 @@ def _dataset_in_use(repo_id: str) -> str | None:
         return "This dataset is being uploaded to the Hub right now. Wait for it to finish."
 
     # Episode delete: datasets.py owns this state directly (see above).
-    with _episode_delete_lock:
+    with _dataset_guard_lock:
         if repo_id in _episode_deletes_in_progress:
             return "An episode is being deleted from this dataset right now. Wait for it to finish."
 
@@ -1199,14 +1210,14 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
     if target is None:
         raise DatasetEpisodeDeleteError(404, f"Dataset '{repo_id}' not found in the local cache")
 
-    in_use = _dataset_in_use(repo_id)
-    if in_use is not None:
-        raise DatasetEpisodeDeleteError(409, in_use)
-
-    # Publish + claim atomically: _dataset_in_use above only looks at OTHER
-    # features' state, so without this a second concurrent call for the same
-    # repo_id would sail through the same check and race this one's swap.
-    with _episode_delete_lock:
+    # Check + claim atomically under the same lock UploadManager.start takes:
+    # without this, an upload (or a second episode-delete) could observe
+    # "not in use" in the gap between the check and the claim below, then
+    # race this call's rewrite/swap.
+    with _dataset_guard_lock:
+        in_use = _dataset_in_use(repo_id)
+        if in_use is not None:
+            raise DatasetEpisodeDeleteError(409, in_use)
         if repo_id in _episode_deletes_in_progress:
             raise DatasetEpisodeDeleteError(
                 409, "An episode is already being deleted from this dataset. Wait for it to finish."
@@ -1286,7 +1297,7 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
             "total_episodes": new_total,
         }
     finally:
-        with _episode_delete_lock:
+        with _dataset_guard_lock:
             _episode_deletes_in_progress.discard(repo_id)
 
 
