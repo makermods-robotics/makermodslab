@@ -5,6 +5,16 @@ import { useTruncationTitle } from "@/hooks/useTruncationTitle";
 interface Props {
   /** The display name as the backend resolved it, collision suffix included. */
   name: string;
+  /**
+   * What that name MEANS, when the caller is rendering a name it already
+   * shortened itself — a jobs row peeling a generated `"{POLICY} · {ns}/{task}"`
+   * down to its task (`runTaskTitle`). The hover then reveals the untouched
+   * name instead of echoing the peeled one, and it is the peel, not the DOM,
+   * that earns the tooltip: nothing is clipped, yet what's on screen is not the
+   * whole name — the same kind of invisible shortening as the dropped year
+   * below. Omit it (the normal case) and the name is its own meaning.
+   */
+  full?: string;
   className?: string;
 }
 
@@ -32,7 +42,7 @@ interface Props {
  * until hovered — that is the trade, and the hover title is what makes it
  * survivable.
  */
-const DisplayName: React.FC<Props> = ({ name, className }) => {
+const DisplayName: React.FC<Props> = ({ name, full, className }) => {
   const { base, suffix } = splitDedupeSuffix(name);
   // Rendered a year shorter than it is stored, so the two spans below no longer
   // spell the full name between them.
@@ -45,8 +55,13 @@ const DisplayName: React.FC<Props> = ({ name, className }) => {
   // The dropped year is the OTHER kind of shortening, the one the DOM can't
   // see: nothing is clipped, yet what's on screen is not the whole name. Only
   // this component knows, so it says so — and the comparison stays true however
-  // the suffix's display form changes later.
-  const hover = useTruncationTitle(name, displaySuffix !== suffix);
+  // the suffix's display form changes later. A caller-side peel (`full`) is the
+  // same case one layer up, so it feeds the same flag.
+  const peeled = full != null && full !== name;
+  const hover = useTruncationTitle(
+    full ?? name,
+    displaySuffix !== suffix || peeled,
+  );
   // A flex row in both cases: `truncate` needs a block-level box to clip
   // against, and keeping one shape means the suffixed and unsuffixed titles
   // share a baseline wherever they sit side by side in a grid.

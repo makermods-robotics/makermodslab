@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +16,7 @@ import {
   jobDisplayName,
   renameJob,
 } from "@/lib/jobsApi";
+import { runTaskTitle } from "@/lib/modelNames";
 import {
   Square,
   Trash2,
@@ -44,6 +44,7 @@ import {
   dedupeCheckpointEntries,
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
+import { buildResumeSeed } from "./resumeSeed";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
@@ -101,7 +102,6 @@ const JobCard: React.FC<Props> = ({
   onRenamed,
   ancestors = [],
 }) => {
-  const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { openStudio, openJobMonitor } = useStudio();
@@ -115,6 +115,13 @@ const JobCard: React.FC<Props> = ({
   // Alias-aware display name; the true identity (run id / hub repo id) stays
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
+  // What the title line RENDERS: a generated run name peeled to the task it
+  // learned. The policy is already on the Policy meta row below and the dataset
+  // on its own, so the widest line stops repeating them. Everything else on
+  // this card keeps `displayName` — the rename dialog prefills and compares
+  // against what the run is really called, never the peeled label — and the
+  // title's hover reveals it too (DisplayName's `full`).
+  const taskTitle = runTaskTitle(displayName);
   const importedSource = job.hf_repo_id || job.output_dir;
   const stateLabel = isImported ? "Imported" : present.label;
   const isStarting = isRunning && job.metrics.total_steps === 0;
@@ -370,59 +377,40 @@ const JobCard: React.FC<Props> = ({
     selectedStep != null &&
     endedBeforeTarget;
 
+  // No dialog and no route jump: continuing opens the Train panel's
+  // "Start a new training" form in resume mode, seeded from this run and the
+  // dropdown's checkpoint — the same in-place flow Fine-tune already uses,
+  // rather than navigating away to /training and losing the studio.
+  //
   // The configurator PREFILLS from this seed, then renders read-only the
   // settings lerobot rebuilds from the checkpoint anyway (batch size, seed,
   // device, optimizer, AMP). Steps, the log/save cadence, the worker count,
   // the cloud flavor and the timeout stay editable — those a continuation can
-  // really change.
-  const goToResume = (runner: "local" | "hf_cloud") => {
+  // really change, and so is the runner it continues ON (F7's cross-runner
+  // resume).
+  //
+  // The payload itself comes from the ONE shared builder (buildResumeSeed), so
+  // this and the library's row-level quick-resume can no longer drift. The
+  // parent's runner is derived there from the job rather than passed in: local
+  // Continue is gated on canContinue and cloud Resume on canResumeCloud, both
+  // of which already require selectedJob.runner to match, so a caller-supplied
+  // runner could only ever disagree by mistake. Where the continuation RUNS is
+  // then the form's choice, not this call site's.
+  const goToResume = () => {
     if (selectedStep == null) return;
-    // Carry the parent run's whole configured shape forward. The registry
-    // already holds it as `selectedJob.config` (the persisted TrainingRequest),
-    // so this needs no extra fetch and no reading of the checkpoint's
-    // train_config.json. The configurator PREFILLS from these — nothing is
-    // locked, so the user can still extend steps, raise the timeout, or change
-    // hardware on the continuation.
-    const parent = selectedJob.config;
-    navigate("/training", {
-      state: {
-        resume: {
-          jobId: selectedJob.id,
-          step: selectedStep,
-          name: jobDisplayName(selectedJob),
-          datasetRepoId: parent.dataset_repo_id,
-          policyType: parent.policy_type,
-          sourceSteps: parent.steps,
-          logFreq: parent.log_freq,
-          saveFreq: parent.save_freq,
-          runner,
-          flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
-          // Cloud-only: without this a Continue fell back to the runner's 2h
-          // default, capping the tail of a run already known to need longer.
-          hfJobTimeout:
-            runner === "hf_cloud" ? (parent.hf_job_timeout ?? undefined) : undefined,
-          batchSize: parent.batch_size,
-          seed: parent.seed,
-          numWorkers: parent.num_workers,
-          policyDevice: parent.policy_device,
-          policyUseAmp: parent.policy_use_amp,
-          optimizerType: parent.optimizer_type,
-          optimizerLr: parent.optimizer_lr,
-          optimizerWeightDecay: parent.optimizer_weight_decay,
-          optimizerGradClipNorm: parent.optimizer_grad_clip_norm,
-        },
-      },
+    openStudio("train", {
+      train: { resume: buildResumeSeed(selectedJob, selectedStep) },
     });
   };
 
   const handleContinue = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("local");
+    goToResume();
   };
 
   const handleResumeCloud = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("hf_cloud");
+    goToResume();
   };
 
   // Fine-tune: start a FRESH run whose weights are initialized from this
@@ -616,7 +604,8 @@ const JobCard: React.FC<Props> = ({
         </div>
         <div>
           <DisplayName
-            name={displayName}
+            name={taskTitle}
+            full={displayName}
             className="text-foreground font-semibold"
           />
           {/* When aliased, keep the true identity visible: the run id for

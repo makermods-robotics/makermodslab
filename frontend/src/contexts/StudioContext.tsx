@@ -5,6 +5,7 @@ import React, {
   useMemo,
   useState,
 } from "react";
+import type { ResumeSeed } from "@/components/training/TrainingConfigurator";
 
 export type StudioPanel = "collect" | "train" | "deploy";
 
@@ -50,11 +51,22 @@ export interface DeployPrefill {
   step?: number;
 }
 
-/** Pre-fills the Train panel: fine-tune base and/or a preselected dataset.
+/** Pre-fills the Train panel: fine-tune base, resume seed, and/or a
+ * preselected dataset.
+ *
  * A local skill's fine-tune base is a job registry id (`baseJobId`); a Hub
  * skill's is a repo id (`baseModelRepoId`) that the panel lazy-imports. Set
  * exactly one of the two. `baseStep` optionally pins the checkpoint to
- * fine-tune from (the card's dropdown choice); omitted ⇒ latest. */
+ * fine-tune from (the card's dropdown choice); omitted ⇒ latest.
+ *
+ * `resume` is the sibling of that pair for Continue / Resume-cloud, and is
+ * mutually exclusive with them — a run is either continued or used as a
+ * fine-tune base, never both. It differs in kind from the base fields on
+ * purpose: a fine-tune base is a *reference* the panel still has to resolve
+ * (import the Hub repo, read the policy type, list checkpoints), whereas a
+ * resume seed is already complete at the call site, which holds the parent's
+ * persisted `config`. So this carries the finished ResumeSeed rather than a
+ * job id for the panel to look up. */
 export interface TrainPrefill {
   baseModelRepoId?: string;
   baseJobId?: string;
@@ -63,6 +75,8 @@ export interface TrainPrefill {
    * the models listing doesn't carry this id. */
   baseName?: string;
   datasetRepoId?: string;
+  /** Built by buildResumeSeed — see components/jobs/resumeSeed.ts. */
+  resume?: ResumeSeed;
 }
 
 interface StudioContextValue {

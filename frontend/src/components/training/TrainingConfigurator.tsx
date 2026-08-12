@@ -717,17 +717,22 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               disabled={startDisabled}
               className="w-full gap-2"
             >
+              {/* Icon sizing/spacing is left to the Button's own `gap-2` and
+                  `[&_svg]:size-4`, exactly as Collect's "Start recording" and
+                  Run's "Start inference" do — an extra `mr-2` here doubled the
+                  icon gap, so the label shifted the moment the studio panel
+                  swapped its disabled stand-in for this button. */}
               {uploading ? (
                 <>
-                  <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Uploading…
+                  <Loader2 className="h-4 w-4 animate-spin" /> Uploading…
                 </>
               ) : isStarting ? (
                 <>
-                  <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Starting…
+                  <Loader2 className="h-4 w-4 animate-spin" /> Starting…
                 </>
               ) : (
                 <>
-                  <Play className="w-5 h-5 mr-2" />{" "}
+                  <Play className="h-4 w-4" />{" "}
                   {/* Sentence case, matching the disabled stand-in in
                       TrainPanel and Collect's / Run's Start buttons — these
                       used to flip to Title Case the moment the form opened. */}
