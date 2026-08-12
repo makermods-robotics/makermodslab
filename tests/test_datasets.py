@@ -543,18 +543,31 @@ def test_rename_endpoint_old_id_404s_new_id_resolves(client: TestClient, tmp_ler
 
 
 def test_rename_bare_dataset_keeps_no_namespace(tmp_lerobot_home: Path) -> None:
-    """A dataset with no namespace renames to a bare name (no prefix invented)."""
+    """A dataset with no namespace renames to a bare name (no prefix invented)
+    LOCALLY, while the Hub side is qualified to the user's own account.
+
+    repo_exists here models what the real Hub answers: the canonical `solo`
+    (unqualified) is absent, and `makermods/solo` -- where push_to_hub
+    actually put it -- is present. A blanket-False stub would let a rename
+    that never qualifies the id pass this test just as easily as a correct
+    one, which is exactly how the original bare-id bug went unnoticed."""
     from makermodslab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "solo", episodes=1)
     fake_api = MagicMock()
-    fake_api.repo_exists.return_value = False
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/solo"
     with (
         _signed_in_as(),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
     ):
-        assert rename_local_dataset("solo", "solo2") == {"repo_id": "solo2", "hub": "none"}
+        result = rename_local_dataset("solo", "solo2")
+
+    assert result == {"repo_id": "solo2", "hub": "renamed"}
+    # Qualifying is a Hub-side concern only: the local path and the returned
+    # id stay bare, while move_repo gets the ids the Hub actually uses.
+    fake_api.move_repo.assert_called_once_with("makermods/solo", "makermods/solo2", repo_type="dataset")
     assert (tmp_lerobot_home / "solo2" / "meta" / "info.json").is_file()
+    assert not (tmp_lerobot_home / "solo").exists()
 
 
 def test_rename_same_name_is_noop(tmp_lerobot_home: Path) -> None:
@@ -993,18 +1006,27 @@ def test_rename_read_only_org_namespace_skips_the_hub(tmp_lerobot_home: Path) ->
 
 def test_rename_namespace_ownership_is_case_insensitive(tmp_lerobot_home: Path) -> None:
     """The namespace comes from a local directory name, whoami's casing is the
-    Hub's — comparing them case-sensitively would refuse the user's own data."""
+    Hub's — comparing them case-sensitively would refuse the user's own data.
+
+    The dataset is ON the Hub here so move_repo is actually reached: with a
+    blanket-False repo_exists the ownership comparison this test is named for
+    could be case-sensitive (silently skipping the Hub) or case-insensitive
+    (checking and finding nothing) and this test wouldn't tell them apart."""
     from makermodslab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "MakerMods/pick", episodes=1)
 
     fake_api = MagicMock()
-    fake_api.repo_exists.return_value = False
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/pick"
     with (
         _signed_in_as("makermods"),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
     ):
-        assert rename_local_dataset("MakerMods/pick", "place") == {"repo_id": "MakerMods/place", "hub": "none"}
+        result = rename_local_dataset("MakerMods/pick", "place")
+
+    assert result == {"repo_id": "MakerMods/place", "hub": "renamed"}
+    # The id keeps the local directory's casing — the Hub resolves it either way.
+    fake_api.move_repo.assert_called_once_with("makermods/pick", "makermods/place", repo_type="dataset")
 
 
 def test_rename_qualifies_hub_calls_with_canonical_namespace_casing(tmp_lerobot_home: Path) -> None:
