@@ -631,6 +631,97 @@ def test_invalidate_hub_status_drops_namespaced_entry_for_bare_id() -> None:
     assert fake_api.repo_exists.call_count == 2
 
 
+def _hub_summary(episodes: int, frames: int) -> dict:
+    return {"total_episodes": episodes, "total_frames": frames}
+
+
+def test_get_hub_status_flags_a_local_copy_the_hub_repo_does_not_back_up(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A bare id is matched to a Hub repo by NAME, and a name match is not an
+    identity match: rename_local_dataset moves only the local directory, so a
+    freed name can be reused by a different recording while the old repo still
+    answers to it (and recording more episodes into an uploaded dataset
+    diverges the same way). Reporting that as a plain "Uploaded to
+    HuggingFace" invites deleting a local copy that was never pushed."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    (tmp_lerobot_home / "logo_2026" / "meta").mkdir(parents=True)
+    (tmp_lerobot_home / "logo_2026" / "meta" / "info.json").write_text(
+        json.dumps({"total_episodes": 25, "total_frames": 900})
+    )
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.get_hub_dataset_info", return_value=_hub_summary(19, 700)),
+    ):
+        differs = ds.get_hub_status("logo_2026")
+        # Cached "on_hub", but the flag is recomputed per call — local content
+        # changes (another recording session appends episodes) without any
+        # hub-status invalidation, so a cached answer would go stale.
+        cached_hit = ds.get_hub_status("logo_2026")
+
+    assert differs["status"] == "on_hub"
+    assert differs["local_differs"] is True
+    assert cached_hit["local_differs"] is True
+    fake_api.repo_exists.assert_called_once()
+
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.get_hub_dataset_info", return_value=_hub_summary(25, 900)),
+    ):
+        assert ds.get_hub_status("logo_2026")["local_differs"] is False
+
+
+def test_get_hub_status_makes_no_local_differs_claim_without_a_basis(
+    tmp_lerobot_home: Path,
+) -> None:
+    """None means "no claim": nothing local to protect, or the Hub summary
+    couldn't be read (offline / transport error). A degraded read must not
+    manufacture a mismatch warning."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.get_hub_dataset_info", return_value=_hub_summary(19, 700)),
+    ):
+        _clear_hub_status_cache()
+        # No local copy at all: a pure Hub dataset.
+        assert ds.get_hub_status("hub_only_2026")["local_differs"] is None
+
+    (tmp_lerobot_home / "logo_2026" / "meta").mkdir(parents=True)
+    (tmp_lerobot_home / "logo_2026" / "meta" / "info.json").write_text(
+        json.dumps({"total_episodes": 25, "total_frames": 900})
+    )
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.get_hub_dataset_info", return_value=None),
+    ):
+        _clear_hub_status_cache()
+        assert ds.get_hub_status("logo_2026")["local_differs"] is None
+
+    # Not on the Hub: there's no repo to compare against.
+    fake_api.repo_exists.return_value = False
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.get_hub_dataset_info", return_value=_hub_summary(19, 700)),
+    ):
+        _clear_hub_status_cache()
+        local_only = ds.get_hub_status("logo_2026")
+
+    assert local_only["status"] == "local_only"
+    assert local_only["local_differs"] is None
+
+
 def test_hub_status_endpoint(client: TestClient) -> None:
     _clear_hub_status_cache()
     fake_api = MagicMock()

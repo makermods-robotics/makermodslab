@@ -234,11 +234,47 @@ def _resolve_hub_repo_id(repo_id: str) -> str:
     return f"{who['name']}/{repo_id}"
 
 
+def _local_copy_differs_from_hub(repo_id: str) -> bool | None:
+    """Whether a FLAT-layout local copy of `repo_id` disagrees with the Hub repo
+    of the same name — i.e. "on the Hub" is NOT proof this local data is backed
+    up.
+
+    A bare id is matched to a Hub repo by NAME (``<namespace>/<repo_id>``), and
+    a name match is not an identity match. rename_local_dataset only moves the
+    local directory — the Hub repo keeps its old name — so a name freed locally
+    can be reused by a completely different recording while the old repo still
+    answers to it. Recording more episodes into an already-uploaded dataset
+    diverges the same way. Both render as "Uploaded to HuggingFace" with no
+    upload affordance, which invites deleting a local copy that was never
+    backed up.
+
+    Compares ``meta/info.json`` episode/frame counts (the Hub side reuses the
+    cached summary the info card already fetches). Returns None — "no claim" —
+    when there's no local copy to protect, or when the Hub summary can't be
+    read (offline / transport error): a degraded read must not manufacture a
+    mismatch warning.
+    """
+    local_info_path = _lerobot_cache_root() / repo_id / "meta" / "info.json"
+    try:
+        local = json.loads(local_info_path.read_text())
+    except (OSError, ValueError):
+        return None
+
+    hub = get_hub_dataset_info(repo_id)
+    if hub is None:
+        return None
+
+    return (int(local.get("total_episodes") or 0), int(local.get("total_frames") or 0)) != (
+        hub["total_episodes"],
+        hub["total_frames"],
+    )
+
+
 def get_hub_status(repo_id: str) -> dict[str, Any]:
     """Where a dataset repo with this id lives.
 
     Returns ``{"repo_id": ..., "status": "on_hub" | "local_only" | "absent" |
-    "unknown", "url": <hub url> | None}``:
+    "unknown", "url": <hub url> | None, "local_differs": bool | None}``:
 
     * ``on_hub``     — the repo exists on the Hub.
     * ``local_only`` — NOT on the Hub, but a usable local copy exists (a
@@ -252,11 +288,20 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
       distinct status lets the card say "not found" instead.
     * ``unknown``    — offline / unauthenticated / any transport error.
 
+    ``local_differs`` qualifies ``on_hub``: True when a local copy exists but
+    disagrees with the same-named Hub repo, so the card must not present it as
+    a backup (see _local_copy_differs_from_hub). None means "no claim" — not
+    ``on_hub``, no local copy, or the comparison couldn't be made.
+
     Never raises. Definitive Hub answers (``on_hub`` / ``local_only``) are
     memoized per repo_id for the process lifetime; ``"unknown"`` and ``"absent"``
     are NOT cached (a later record/merge/download can make an ``absent`` dataset
     appear locally without a hub-status invalidation, and a transient failure
-    should self-heal) so both re-check on the next call.
+    should self-heal) so both re-check on the next call. ``local_differs`` is
+    deliberately NOT cached alongside them: it tracks LOCAL content, which
+    changes (another recording session appends episodes) without any
+    hub-status invalidation. It re-reads a small local file and the already
+    cached Hub summary, so recomputing it per call is cheap.
 
     A locally-recorded dataset's repo_id is bare (no "namespace/" prefix) —
     that's the only form the app naturally has for it. Unlike
@@ -278,7 +323,12 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
         cached = _HUB_STATUS_CACHE.get(hub_repo_id)
     if cached is not None:
         cached_status, cached_url = cached
-        return {"repo_id": repo_id, "status": cached_status, "url": cached_url}
+        return {
+            "repo_id": repo_id,
+            "status": cached_status,
+            "url": cached_url,
+            "local_differs": (_local_copy_differs_from_hub(repo_id) if cached_status == "on_hub" else None),
+        }
 
     api = shared_hf_api()
     try:
@@ -287,7 +337,7 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
         # Offline / rate-limited / any other transport error: degrade to
         # "unknown" without caching so it re-checks once connectivity returns.
         logger.info("hub-status repo_exists(%s) failed: %s", hub_repo_id, exc)
-        return {"repo_id": repo_id, "status": "unknown", "url": None}
+        return {"repo_id": repo_id, "status": "unknown", "url": None, "local_differs": None}
 
     if exists:
         status = "on_hub"
@@ -308,7 +358,12 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
         # without a hub-status invalidation, so leave it uncached (like "unknown").
         if status in ("on_hub", "local_only"):
             _HUB_STATUS_CACHE[hub_repo_id] = (status, url)
-    return {"repo_id": repo_id, "status": status, "url": url}
+    return {
+        "repo_id": repo_id,
+        "status": status,
+        "url": url,
+        "local_differs": _local_copy_differs_from_hub(repo_id) if exists else None,
+    }
 
 
 class DatasetHubEditError(Exception):

@@ -468,6 +468,9 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   const { toast } = useToast();
   const [status, setStatus] = useState<HubStatusValue>("unknown");
   const [hubUrl, setHubUrl] = useState<string | null>(null);
+  // A Hub repo of this name exists but holds different data than the local
+  // copy, so it is NOT a backup of it — see HubStatus.local_differs.
+  const [localDiffers, setLocalDiffers] = useState(false);
   // Bumped after a visibility/tags edit to re-run the status fetch (the backend
   // invalidates its hub-status cache on a change, so this re-reads fresh).
   const [refreshKey, setRefreshKey] = useState(0);
@@ -478,6 +481,8 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     onDone: (url) => {
       setStatus("on_hub");
       setHubUrl(url);
+      // The push just made the Hub copy match the local one.
+      setLocalDiffers(false);
       toast({
         title: "Uploaded to Hub",
         description: (
@@ -522,10 +527,12 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     const controller = new AbortController();
     setStatus("unknown");
     setHubUrl(null);
+    setLocalDiffers(false);
     getDatasetHubStatus(baseUrl, fetchWithHeaders, repoId, controller.signal)
       .then((data) => {
         setStatus(data.status);
         setHubUrl(data.url);
+        setLocalDiffers(data.local_differs === true);
       })
       .catch(() => {
         // Degrade silently to "unknown" — no error spam on the card.
@@ -539,6 +546,49 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       <div className="flex items-center gap-1.5 text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" />
         <span>Uploading to Hub…</span>
+      </div>
+    );
+  }
+
+  // A Hub repo of this name exists, but it holds different data than the local
+  // copy — so it is NOT a backup of it. Say so instead of "Uploaded to
+  // HuggingFace" (which invites deleting a local copy that was never pushed)
+  // and keep offering the upload, warned that it merges into that repo.
+  if (status === "on_hub" && localDiffers) {
+    return (
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
+          On Hub, but the local copy differs
+          {hubUrl && (
+            <a
+              href={hubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 hover:text-foreground"
+            >
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </span>
+        <UploadDatasetDialog
+          repoId={repoId}
+          start={start}
+          warning={
+            <>
+              A dataset named {repoId} is already on the Hub with different
+              contents. Uploading pushes this local copy into that same repo.
+            </>
+          }
+        >
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 gap-1 border-amber-500/50 px-2 text-xs text-amber-700 dark:text-amber-300 hover:bg-amber-500/10"
+          >
+            <UploadIcon className="h-3 w-3" />
+            Upload to Hub
+          </Button>
+        </UploadDatasetDialog>
       </div>
     );
   }

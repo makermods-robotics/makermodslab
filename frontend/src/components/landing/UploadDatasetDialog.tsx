@@ -32,7 +32,11 @@ const UploadDatasetDialog: React.FC<{
   /** Popover trigger element (a button/icon). */
   children: React.ReactNode;
   align?: "start" | "center" | "end";
-}> = ({ repoId, start, children, align = "end" }) => {
+  /** Shown above the form when the upload needs a caveat — e.g. a Hub repo of
+   * this name already exists and holds different data, so this push merges
+   * into it rather than creating a fresh repo. */
+  warning?: React.ReactNode;
+}> = ({ repoId, start, children, align = "end", warning }) => {
   const { toast } = useToast();
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [isPrivate, setIsPrivate] = useState(false);
@@ -87,6 +91,11 @@ const UploadDatasetDialog: React.FC<{
         onPointerDown={(e) => e.stopPropagation()}
       >
         <div className="space-y-3">
+          {warning && (
+            <p className="leading-snug text-amber-700 dark:text-amber-400">
+              {warning}
+            </p>
+          )}
           <div className="space-y-1.5">
             <Label
               id={`hub-upload-visibility-${repoId}`}

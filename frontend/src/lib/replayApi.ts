@@ -249,6 +249,13 @@ export interface HubStatus {
   repo_id: string;
   status: HubStatusValue;
   url: string | null;
+  /** Qualifies "on_hub": a locally-recorded dataset is matched to a Hub repo by
+   * NAME, and a name match is not an identity match (a local rename frees the
+   * name while the old repo keeps it; recording more episodes diverges the
+   * copies). True = a local copy exists and disagrees with that repo, so it is
+   * NOT backed up by it. null = no claim (not on_hub, no local copy, or the
+   * comparison couldn't be made). */
+  local_differs: boolean | null;
 }
 
 /** Hub existence check, fetched lazily/separately so it never blocks the
