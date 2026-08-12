@@ -820,8 +820,40 @@ def test_rename_hub_status_check_failure_502s(tmp_lerobot_home: Path) -> None:
     assert exc.value.status == 502
     assert (tmp_lerobot_home / "makermods" / "old_name").exists()
     # The escape hatch has to be discoverable from the error itself — a user in
-    # the field with a flaky connection can't act on "try again" alone.
+    # the field with a flaky connection can't act on "try again" alone. But it
+    # must not be presented as a free equivalent: HF_HUB_OFFLINE=1 skips the
+    # Hub move it's suggested as an alternative to, so a user who follows the
+    # hint on a dataset that IS on the Hub reproduces the exact stale-name bug
+    # this whole change exists to prevent. The message has to say so.
     assert "HF_HUB_OFFLINE" in exc.value.message
+    assert "local copy only" in exc.value.message
+    assert "old name" in exc.value.message
+
+
+def test_rename_new_name_hub_check_failure_502s(tmp_lerobot_home: Path) -> None:
+    """Same as test_rename_hub_status_check_failure_502s, but the transient
+    failure is on the second repo_exists call (checking whether the new name
+    is free on the Hub) rather than the first (checking whether the dataset
+    itself is on the Hub) -- a distinct code path with its own message."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = [True, OSError("no network")]
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 502
+    assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+    fake_api.move_repo.assert_not_called()
+    assert "HF_HUB_OFFLINE" in exc.value.message
+    assert "local copy only" in exc.value.message
+    assert "old name" in exc.value.message
 
 
 # --- Rename: ownership gate ---------------------------------------------
@@ -1001,9 +1033,12 @@ def test_rename_whoami_failure_with_token_502s(tmp_lerobot_home: Path) -> None:
         rename_local_dataset("makermods/old_name", "new_name")
 
     assert exc.value.status == 502
-    # The escape hatch has to be discoverable from the error itself — a user in
-    # the field with a flaky connection can't act on "try again" alone.
+    # Same disclosure requirement as the repo_exists failures below: the hint
+    # must not read as a free equivalent when it silently leaves a Hub copy
+    # under the old name.
     assert "HF_HUB_OFFLINE" in exc.value.message
+    assert "local copy only" in exc.value.message
+    assert "old name" in exc.value.message
     fake_api.repo_exists.assert_not_called()
     fake_api.move_repo.assert_not_called()
     assert (tmp_lerobot_home / "makermods" / "old_name").exists()

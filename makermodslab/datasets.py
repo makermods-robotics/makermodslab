@@ -1173,9 +1173,9 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
         logger.warning("rename: whoami() failed: %s", exc)
         raise DatasetRenameError(
             502,
-            "Couldn't confirm your Hub identity to check dataset ownership. "
-            "Check your connection and try again, or set HF_HUB_OFFLINE=1 to "
-            "rename the local copy without contacting the Hub.",
+            "Couldn't confirm your Hub identity to check dataset ownership, so nothing "
+            "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
+            "renames the local copy only and leaves any Hub copy under the old name.",
         ) from exc
     hub_repo_id: str | None = None
     hub_new_repo_id: str | None = None
@@ -1208,9 +1208,9 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
             logger.warning("rename: repo_exists(%s) failed: %s", hub_repo_id, exc)
             raise DatasetRenameError(
                 502,
-                "Couldn't confirm whether this dataset also exists on the Hub. "
-                "Check your connection and try again, or set HF_HUB_OFFLINE=1 to "
-                "rename the local copy without contacting the Hub.",
+                "Couldn't confirm whether this dataset also exists on the Hub, so nothing "
+                "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
+                "renames the local copy only and leaves any Hub copy under the old name.",
             ) from exc
 
     if hub_repo_exists:
@@ -1220,9 +1220,9 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
             logger.warning("rename: repo_exists(%s) failed: %s", hub_new_repo_id, exc)
             raise DatasetRenameError(
                 502,
-                "Couldn't confirm whether the new name is free on the Hub. "
-                "Check your connection and try again, or set HF_HUB_OFFLINE=1 to "
-                "rename the local copy without contacting the Hub.",
+                "Couldn't confirm whether the new name is free on the Hub, so nothing was "
+                "renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
+                "renames the local copy only and leaves the Hub copy under the old name.",
             ) from exc
         if new_taken:
             raise DatasetRenameError(409, f"A dataset named '{hub_new_repo_id}' already exists on the Hub.")
