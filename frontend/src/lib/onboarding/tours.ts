@@ -39,3 +39,31 @@ export const launchpadTour: Tour = {
     },
   ],
 };
+
+/**
+ * First-run tour shown once the first time a user opens the Skill studio —
+ * walks through its three panels (Collect, Train, Deploy).
+ */
+export const studioTour: Tour = {
+  id: "studio",
+  steps: [
+    {
+      target: "[data-tour=studio-collect]",
+      title: "1 · Collect",
+      description: "Record a new dataset here, or pick one you already have.",
+      placement: "right",
+    },
+    {
+      target: "[data-tour=studio-train]",
+      title: "2 · Train",
+      description: "Turn a dataset into a trained policy.",
+      placement: "bottom",
+    },
+    {
+      target: "[data-tour=studio-deploy]",
+      title: "3 · Deploy",
+      description: "Run a trained skill on your robot.",
+      placement: "left",
+    },
+  ],
+};
