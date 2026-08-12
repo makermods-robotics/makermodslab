@@ -442,6 +442,129 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+_DOT_DIR_KINDS = ("delete-tmp", "pre-delete")
+
+
+def _parse_orphaned_dot_dir(name: str) -> tuple[str, str] | None:
+    """If `name` matches delete_local_episode's own tmp_dir/backup_dir naming
+    (".<dataset_name>.delete-tmp-<hex8>" or ".<dataset_name>.pre-delete-<hex8>"),
+    return (dataset_name, kind). Else None."""
+    if not name.startswith("."):
+        return None
+    body = name[1:]
+    for kind in _DOT_DIR_KINDS:
+        dataset_name, marker, suffix = body.rpartition(f".{kind}-")
+        if marker and len(suffix) == 8 and all(c in "0123456789abcdef" for c in suffix):
+            return dataset_name, kind
+    return None
+
+
+# Cache roots recover_orphaned_episode_delete_dirs has already swept — keyed by
+# root (not a single flag) because tests point _lerobot_cache_root() at a fresh
+# tmp dir per test, unlike a real process which only ever has one root for its
+# whole lifetime.
+_swept_roots: set[Path] = set()
+_swept_roots_lock = threading.Lock()
+
+
+def recover_orphaned_episode_delete_dirs(root: Path) -> None:
+    """Clean up or recover dot-prefixed dirs that delete_local_episode leaves
+    behind ONLY if the process is killed mid-operation — a clean run always
+    removes its own tmp_dir/backup_dir via its except/finally blocks or the
+    success path's final rmtree, so anything found here predates this process
+    (single-process app: nothing else could be mid-delete right now).
+
+    ".<name>.delete-tmp-<hex8>" (the freshly re-encoded output) is always
+    disposable — removed outright.
+
+    ".<name>.pre-delete-<hex8>" (the pre-swap backup) needs more care: if
+    "<name>" already exists as a valid dataset dir, the swap had completed and
+    only the backup's cleanup was interrupted — remove the backup. If "<name>"
+    is missing, the crash landed between staging the original aside and
+    swapping the rewritten copy in — the backup is the only surviving copy of
+    the dataset, so it's renamed back into place instead of deleted.
+    """
+    if not root.is_dir():
+        return
+
+    try:
+        top_entries = list(root.iterdir())
+    except OSError:
+        return
+
+    dot_dirs: list[Path] = []
+    for top in top_entries:
+        try:
+            if not top.is_dir():
+                continue
+        except OSError:
+            continue
+        if _parse_orphaned_dot_dir(top.name) is not None:
+            dot_dirs.append(top)
+            continue
+        if top.name.startswith("."):
+            continue
+        try:
+            sub_entries = list(top.iterdir())
+        except OSError:
+            continue
+        for sub in sub_entries:
+            try:
+                if sub.is_dir() and _parse_orphaned_dot_dir(sub.name) is not None:
+                    dot_dirs.append(sub)
+            except OSError:
+                continue
+
+    for dot_dir in dot_dirs:
+        parsed = _parse_orphaned_dot_dir(dot_dir.name)
+        if parsed is None:
+            continue
+        dataset_name, kind = parsed
+        target = dot_dir.parent / dataset_name
+
+        if kind == "delete-tmp":
+            shutil.rmtree(dot_dir, ignore_errors=True)
+            logger.info("Removed orphaned episode-delete temp dir %s (an earlier crash)", dot_dir)
+            continue
+
+        if _is_dataset_dir(target):
+            shutil.rmtree(dot_dir, ignore_errors=True)
+            logger.info(
+                "Removed orphaned episode-delete backup %s — %s already reflects the completed swap",
+                dot_dir,
+                target,
+            )
+        elif not target.exists():
+            try:
+                os.rename(dot_dir, target)
+                logger.warning(
+                    "Recovered %s from an interrupted episode-delete backup after an earlier crash",
+                    target,
+                )
+            except OSError as exc:
+                logger.error(
+                    "Found an orphaned episode-delete backup at %s but could not restore it to %s: %s",
+                    dot_dir,
+                    target,
+                    exc,
+                )
+        else:
+            logger.error(
+                "Found an orphaned episode-delete backup %s but %s already exists and isn't a valid "
+                "dataset dir — leaving both for manual inspection",
+                dot_dir,
+                target,
+            )
+
+
+def _recover_orphaned_episode_delete_dirs_once(root: Path) -> None:
+    with _swept_roots_lock:
+        if root in _swept_roots:
+            return
+        _swept_roots.add(root)
+    recover_orphaned_episode_delete_dirs(root)
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -452,6 +575,8 @@ def list_local_datasets() -> list[dict[str, Any]]:
     root = _lerobot_cache_root()
     if not root.is_dir():
         return []
+
+    _recover_orphaned_episode_delete_dirs_once(root)
 
     out: list[dict[str, Any]] = []
     try:

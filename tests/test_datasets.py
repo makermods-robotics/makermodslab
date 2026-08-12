@@ -1104,6 +1104,107 @@ def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> N
     assert tmp_dirs == []
 
 
+# --- Orphaned episode-delete dir recovery ---
+
+
+def _make_dot_dir(root: Path, repo_id: str, kind: str, episodes: int = 1) -> Path:
+    """Create a dot-prefixed sibling of `repo_id`'s dataset dir, named like
+    delete_local_episode's own tmp_dir/backup_dir (".<name>.<kind>-<hex8>"),
+    with a real dataset layout inside so recovery can be verified by content."""
+    namespace, _, name = repo_id.rpartition("/")
+    parent = (root / namespace) if namespace else root
+    parent.mkdir(parents=True, exist_ok=True)
+    dot_dir = parent / f".{name}.{kind}-aaaaaaaa"
+    (dot_dir / "meta").mkdir(parents=True)
+    (dot_dir / "meta" / "info.json").write_text(json.dumps({"total_episodes": episodes}))
+    return dot_dir
+
+
+def test_recover_orphaned_dirs_removes_stale_tmp_dir(tmp_lerobot_home: Path) -> None:
+    """A leftover .delete-tmp-* dir (crash mid re-encode) is always disposable."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    tmp_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "delete-tmp")
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not tmp_dir.exists()
+
+
+def test_recover_orphaned_dirs_removes_backup_when_swap_already_completed(
+    tmp_lerobot_home: Path,
+) -> None:
+    """If the live dataset already exists, the swap finished before the crash
+    and only the backup's own cleanup was interrupted — remove the backup."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=2)
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "pre-delete", episodes=3)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 2
+
+
+def test_recover_orphaned_dirs_restores_backup_when_live_dir_missing(
+    tmp_lerobot_home: Path,
+) -> None:
+    """If the live dataset is missing, the crash landed mid-swap and the
+    backup is the only surviving copy — restore it rather than delete it."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "pre-delete", episodes=3)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+
+
+def test_recover_orphaned_dirs_handles_top_level_repo_id(tmp_lerobot_home: Path) -> None:
+    """The same recovery works for a bare (non-namespaced) repo id, not just
+    a namespace/name one."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "pusht", "pre-delete", episodes=5)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "pusht"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 5
+
+
+def test_recover_orphaned_dirs_ignores_unrelated_dot_dirs(tmp_lerobot_home: Path) -> None:
+    """A dot-dir that doesn't match the tmp/backup naming (e.g. some other
+    hidden dir) is left alone."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=2)
+    unrelated = tmp_lerobot_home / "makermods" / ".hidden"
+    unrelated.mkdir(parents=True)
+    (unrelated / "marker").write_bytes(b"x")
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert unrelated.exists()
+
+
+def test_list_local_datasets_recovers_orphan_and_lists_it(tmp_lerobot_home: Path) -> None:
+    """list_local_datasets sweeps for orphaned episode-delete dirs (once per
+    cache root) so a dataset stranded by a crash reappears without a restart."""
+    from makermodslab.datasets import list_local_datasets
+
+    _make_dot_dir(tmp_lerobot_home, "makermods/recovered", "pre-delete", episodes=4)
+
+    repo_ids = [d["repo_id"] for d in list_local_datasets()]
+
+    assert "makermods/recovered" in repo_ids
+
+
 # --- Episode delete endpoint ---
 
 def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: Path) -> None:
