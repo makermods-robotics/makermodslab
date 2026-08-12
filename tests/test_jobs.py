@@ -6292,9 +6292,11 @@ def test_settle_terminal_metrics_snaps_a_done_run_to_its_target() -> None:
 
 def test_settle_terminal_metrics_never_invents_progress_for_a_failed_run() -> None:
     """A failed or interrupted run genuinely stopped where the last frame said.
-    Rounding that up to the target would claim training that never happened —
-    and would poison the resume flow, which reads the step to decide what is
-    left to do."""
+    Rounding that up to the target would claim training that never happened, and
+    the number is user-facing: models.py reads `metrics.current_step` as the run's
+    step. (An earlier version of this docstring also claimed it would "poison the
+    resume flow" — it would not. The resume path reads `_resume_start_step` off
+    the request, never the metrics.)"""
     from makermodslab.jobs import _settle_terminal_metrics
 
     for state in ("failed", "interrupted"):

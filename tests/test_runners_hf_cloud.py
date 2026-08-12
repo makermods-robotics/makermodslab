@@ -1127,12 +1127,20 @@ def test_repeated_silence_timeouts_do_not_strand_reader_threads(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reviewer repro 1: four silent intervals produced four concurrent live
-    reader threads. Each timeout abandons its connection, and an abandoned
-    reader must exit on the next line it manages to read rather than living to
-    the end of the process."""
+    reader threads.
+
+    `_stop_event` is deliberately NEVER set here. It is the other arm of
+    `_finished()`, so setting it would retire the parked readers on its own and
+    the test would pass with the `abandoned` mechanism deleted entirely — which
+    is exactly what an earlier version of this test did. The tail loop is left
+    running and only the connections are abandoned, so the ONLY thing that can
+    retire these readers is the per-connection flag.
+    """
     import threading
     import time
     from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
 
     before = _live_sse_threads()
     released = threading.Event()
@@ -1149,15 +1157,29 @@ def test_repeated_silence_timeouts_do_not_strand_reader_threads(
     api.fetch_job_logs = fetch_job_logs
     runner = _runner_with(api, tmp_path)
 
-    _run_tail_briefly(runner, monkeypatch, silence=0.2, seconds=1.6)
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 0.2)
+    thread = threading.Thread(target=runner._tail_loop, daemon=True)
+    thread.start()
+    time.sleep(1.6)  # several connections opened, gone silent, been abandoned
 
-    # Several connections were abandoned; now let every stranded reader wake.
+    # Wake every parked reader while the tail loop is STILL RUNNING.
     released.set()
     deadline = time.time() + 5
-    while time.time() < deadline and _live_sse_threads() > before:
+    stranded = _live_sse_threads()
+    while time.time() < deadline and stranded > before + 1:
         time.sleep(0.05)
+        # Captured INSIDE the loop: the still-running tail loop opens a fresh
+        # connection every backoff, so re-reading after the loop can catch one
+        # that was born in the gap and fail on a count that was fine.
+        stranded = _live_sse_threads()
 
-    assert _live_sse_threads() == before, "abandoned readers must not accumulate"
+    runner._stop_event.set()
+    thread.join(timeout=5)
+
+    # At most the one live connection the still-running loop legitimately holds.
+    assert stranded <= before + 1, "abandoned readers must not accumulate"
 
 
 def test_an_abandoned_reader_retains_a_bounded_backlog_and_delivers_nothing(
@@ -1165,20 +1187,24 @@ def test_an_abandoned_reader_retains_a_bounded_backlog_and_delivers_nothing(
 ) -> None:
     """Reviewer repro 1, the memory half: an abandoned reader whose stream
     recovers consumed and retained 50,000 unobserved lines against the old
-    unbounded queue. The queue is bounded now, and the lines it did buffer
-    belong to a connection the live consumer has already walked away from."""
-    import threading
+    unbounded queue.
+
+    The reader is released BEFORE it is abandoned and produces without pause, so
+    it genuinely runs at a queue nobody drains — the bound is what stops it, not
+    the abandon flag arriving first. An earlier version of this test released
+    the reader only after abandoning it, so it produced exactly one line and
+    would have passed with the cap set to a million.
+    """
     import time
     from unittest.mock import MagicMock
 
     from makermodslab.runners import hf_cloud
 
-    released = threading.Event()
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_PUT_TIMEOUT_S", 0.05)
     produced = {"n": 0}
     api = MagicMock()
 
     def fetch_job_logs(job_id, follow):
-        released.wait(timeout=10)
         while True:
             produced["n"] += 1
             yield f"stale-{produced['n']}"
@@ -1187,30 +1213,38 @@ def test_an_abandoned_reader_retains_a_bounded_backlog_and_delivers_nothing(
     runner = _runner_with(api, tmp_path)
 
     gen = runner._iter_job_logs()
-    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 0.2)
-    with pytest.raises(TimeoutError):
-        next(gen)  # silence -> abandoned, and the generator's finally fires
-    gen.close()
+    next(gen)  # one line delivered; the reader now races ahead of the consumer
+    time.sleep(0.4)  # …and fills the queue, because nobody is draining it
+    filled = produced["n"]
+    assert filled >= hf_cloud._TAIL_READER_QUEUE_MAX, (
+        f"reader never reached the bound ({filled}) — the test isn't exercising it"
+    )
+    # THE bound assertion. Without it the test passes with an unbounded queue:
+    # a reviewer set _TAIL_READER_QUEUE_MAX = 0 and the reader retained
+    # 1,069,101 lines while every other assertion here still held, because they
+    # only constrain what happens AFTER abandonment.
+    assert filled <= hf_cloud._TAIL_READER_QUEUE_MAX + 5, (
+        f"queue did not bound retention: {filled} lines held"
+    )
 
-    released.set()
-    time.sleep(1.0)
+    gen.close()  # abandon the connection
+    time.sleep(0.4)
+    after = produced["n"]
 
-    # It cannot run away: the bounded queue stops it within a queue's worth,
-    # and it exits once it notices the abandon flag.
-    assert produced["n"] <= hf_cloud._TAIL_READER_QUEUE_MAX + 5, produced["n"]
-    assert _live_sse_threads() == 0 or produced["n"] <= hf_cloud._TAIL_READER_QUEUE_MAX + 5
+    # Retention is bounded by the queue, not by the stream: once abandoned the
+    # reader stops within a put-timeout instead of running on.
+    assert after - filled <= 5, f"abandoned reader kept consuming: {filled} -> {after}"
+    assert runner._log_queue.qsize() == 0, "an abandoned connection delivers nothing onward"
 
 
-def test_a_full_replay_longer_than_the_dedupe_cap_never_rewinds_progress(
+def test_a_full_replay_of_the_whole_history_is_recognised_and_never_rewinds(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reviewer repro 2: at 1,001 unique lines a full replay thrashed the LRU
-    window, every stale line was accepted, and parse_metrics_into rewound
-    current_step from 1,001 back to 1 — which the monitor reads as a new run and
-    answers by clearing the chart.
+    """Reviewer repro 2, at the size that broke the ORIGINAL 1,000-line window.
 
-    Driven through the real tail loop so both halves of the fix are exercised:
-    the never-evicting de-dupe, and the monotonic guard behind it.
+    Named for what it is: 1,001 lines is longer than the window this replaced,
+    not longer than the 200k cap. Past-cap behaviour is covered separately
+    below, where the cap is actually lowered.
     """
     import time
     from unittest.mock import MagicMock
@@ -1228,8 +1262,7 @@ def test_a_full_replay_longer_than_the_dedupe_cap_never_rewinds_progress(
         if calls["n"] == 1:
             yield from history
             raise RuntimeError("SSE dropped after the whole history")
-        # The reconnect replays EVERYTHING from line 1, then goes quiet.
-        yield from history
+        yield from history  # the reconnect replays EVERYTHING from line 1
         while True:
             time.sleep(0.02)
 
@@ -1239,35 +1272,225 @@ def test_a_full_replay_longer_than_the_dedupe_cap_never_rewinds_progress(
     lines = _run_tail_briefly(runner, monkeypatch, seconds=2.0)
 
     assert calls["n"] == 2, "expected exactly one reconnect"
-    # Every delivered line is distinct and in order — the replay was recognised
-    # rather than re-emitted. (`lines` is a suffix of the history because the
-    # in-memory UI queue caps its backlog at 1,000; that cap predates MT47 and
-    # is about display, not de-duplication.)
     assert lines == sorted(set(lines), key=history.index)
     assert lines == history[-len(lines) :]
-    # And progress never went backwards — the defect the reviewer measured.
     assert runner._metrics.current_step == total
     assert runner._metrics.total_steps == total
 
 
-def test_parse_metrics_into_ignores_a_replayed_frame(tmp_path) -> None:
-    """The monotonic guard on its own, as the backstop that does not depend on
-    remembering any line: a stale frame moves nothing — not the step, and not
-    the ETA/loss/LR that would otherwise ride along with it."""
-    from makermodslab.jobs import TrainingMetrics, parse_metrics_into
+def test_past_the_dedupe_cap_duplicates_slip_through_but_progress_still_cannot_rewind(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap's real failure mode, with the cap actually lowered.
 
-    m = TrainingMetrics()
+    Past it we stop LEARNING new lines, so a replay of those un-learned lines is
+    re-delivered — the acknowledged cosmetic cost. What must still hold is that
+    the monotonic guard, which remembers no lines at all, refuses to let any of
+    those duplicates drag progress backwards.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_DEDUPE_MAX_LINES", 3)
+
+    total = 8
+    history = [
+        f"Training:  {i * 10}%|##| {i}/{total} [00:10<00:10,  1.00step/s]" for i in range(1, total + 1)
+    ]
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield from history
+            raise RuntimeError("SSE dropped")
+        # A PREFIX replay, not the whole history: this is what makes the final
+        # assertion falsifiable. Replaying everything ends at the max step no
+        # matter what the guard does, so `current_step == total` would hold even
+        # with the guard deleted. Ending the replay at step 4 means an
+        # unguarded parser finishes at 4, and only the guard keeps it at 8.
+        yield from history[:4]
+        while True:
+            time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch, seconds=1.5)
+
+    assert calls["n"] == 2
+    # Only the first 3 lines were ever learned, so the 4th repeats — cosmetic,
+    # and the honest cost of a bounded memory.
+    assert len(lines) > total, "expected un-learned lines to be re-delivered past the cap"
+    # The guarantee that survives it: progress never moved backwards.
+    assert runner._metrics.current_step == total
+
+
+def test_parse_metrics_into_ignores_a_replayed_frame() -> None:
+    """The monotonic guard as the backstop that remembers no lines: a stale
+    frame moves nothing — not the step, and not the ETA/loss/LR that would
+    otherwise ride along with it."""
+    from makermodslab.jobs import StepFloor, TrainingMetrics, parse_metrics_into
+
+    m, floor = TrainingMetrics(), StepFloor()
     parse_metrics_into(
         "Training:  90%|#########| 900/1000 [10:00<01:00,  1.00step/s]"
         "INFO step:900 loss:0.10 grdn:0.5 lr:1.0e-05",
         m,
+        None,
+        floor,
     )
     assert (m.current_step, m.current_loss, m.eta_seconds) == (900, 0.10, 60)
 
     parse_metrics_into(
         "Training:  10%|#| 100/1000 [01:00<09:00,  1.00step/s]INFO step:100 loss:9.99 grdn:9.9 lr:9.9e-01",
         m,
+        None,
+        floor,
     )
     assert m.current_step == 900, "a replayed frame must not rewind progress"
     assert m.current_loss == 0.10, "nor drag an obsolete loss along with it"
     assert m.eta_seconds == 60, "nor an obsolete ETA"
+
+
+def test_the_first_frame_may_correct_an_overstated_resume_seed_downward() -> None:
+    """The other direction, and the contract the guard must NOT break.
+
+    `_initial_metrics` seeds `current_step` from the step the REQUEST named, and
+    documents it as "a floor, not a claim about progress: the parser still owns
+    the value from the first tqdm frame onwards" — because the bar reflects the
+    checkpoint lerobot ACTUALLY restored. Guarding against the seed instead of
+    against accepted progress would freeze a run whose seed overstated the
+    restore (10,000 seeded, 8,000 restored ⇒ nothing moves for 2,000 steps),
+    which is the MT47 symptom by another route.
+    """
+    from makermodslab.jobs import StepFloor, TrainingMetrics, parse_metrics_into
+
+    # Seeded at 10,000; lerobot really restored 8,000 (bar total 2,000 of
+    # 10,000 ⇒ 10000 − 2000 + 0).
+    m = TrainingMetrics(current_step=10000, total_steps=10000)
+    floor = StepFloor()
+
+    parse_metrics_into("Training:   0%|| 0/2000 [00:00<20:00,  1.00step/s]", m, 10000, floor)
+    assert m.current_step == 8000, "the first real frame must own the value"
+
+    # …and from then on the guard is live: a replayed frame is still refused.
+    parse_metrics_into("Training:   0%|| 0/2000 [00:00<20:00,  1.00step/s]", m, 10000, floor)
+    parse_metrics_into("Training:  50%|#####| 1000/2000 [10:00<10:00,  1.00step/s]", m, 10000, floor)
+    assert m.current_step == 9000
+    parse_metrics_into("Training:  10%|#| 200/2000 [02:00<18:00,  1.00step/s]", m, 10000, floor)
+    assert m.current_step == 9000, "a replay after real progress is still rejected"
+
+
+def test_a_keepalive_only_connection_still_times_out_and_reconnects(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blank frames are not output.
+
+    A half-open SSE connection commonly keeps dribbling empty keepalive frames.
+    While those reset the silence deadline, such a connection is immortal — it
+    never delivers a log line and never times out — which would have left the
+    very run that motivated MT47 uncovered: its log simply stopped, and if the
+    transport was still emitting keepalives nothing would have noticed.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield "Training:  10%|#| 100/1000 [00:10<01:30,  1.00step/s]"
+            while True:  # …and from here on, only keepalives
+                yield ""
+                time.sleep(0.01)
+        else:
+            yield "recovered"
+            while True:
+                time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch, silence=0.3, seconds=1.5)
+
+    assert calls["n"] >= 2, "a keepalive-only connection must still be abandoned"
+    assert "recovered" in lines
+
+
+def test_a_stream_error_surfaces_even_when_the_queue_is_full(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The highest-severity finding of the first review, pinned.
+
+    The terminator used to be a queue item dropped under `suppress(Full)`. If
+    the stream ended or errored while the bounded queue was full, both the error
+    and the end-sentinel vanished; the consumer drained the backlog and then sat
+    out the FULL silence timeout before raising "no log output for 600s" —
+    inventing a stall and misreporting the cause of a real, immediately
+    knowable error.
+
+    Deliberately explicit about both halves: the real error arrives, and it
+    arrives without the backlog being truncated to make room for it.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_QUEUE_MAX", 2)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 30.0)
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        yield from ["a", "b", "c"]
+        raise RuntimeError("stream blew up while the queue was full")
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    gen = runner._iter_job_logs()
+    time.sleep(0.3)  # reader fills the 2-slot queue and then errors
+
+    started = time.monotonic()
+    delivered = []
+    with pytest.raises(RuntimeError, match="stream blew up"):
+        for line in gen:
+            delivered.append(line)
+    elapsed = time.monotonic() - started
+
+    assert delivered == ["a", "b", "c"], "lines must not be dropped to make room"
+    assert elapsed < 5.0, f"error waited on the silence timeout ({elapsed:.1f}s)"
+
+
+def test_a_batched_burst_cannot_walk_progress_backwards_within_one_line(
+    tmp_path,
+) -> None:
+    """One SSE message commonly batches a burst spanning several log_freq
+    boundaries, so the LAST tqdm frame and the FIRST `step:` token describe
+    different moments.
+
+    The floor is read fresh at each comparison for exactly this: reading it once
+    at the top let the earlier INFO segment be judged against a pre-tqdm floor,
+    accepted, and applied — walking `current_step` backwards inside a single
+    line and pulling the floor down with it, which reopened the skipped range to
+    any genuine replay the content de-dupe misses.
+    """
+    from makermodslab.jobs import StepFloor, TrainingMetrics, parse_metrics_into
+
+    m, floor = TrainingMetrics(), StepFloor()
+    batched = (
+        "Training:  25%|##  | 250/1000 [02:30<07:30,  1.00step/s]"
+        "INFO step:250 loss:0.50 grdn:0.5 lr:1.0e-05"
+        "Training:  50%|#### | 500/1000 [05:00<05:00,  1.00step/s]"
+        "INFO step:500 loss:0.25 grdn:0.4 lr:9.0e-06"
+    )
+    parse_metrics_into(batched, m, None, floor)
+
+    assert m.current_step == 500, "the last frame in the burst owns the step"
+    assert floor.value == 500, "and the floor must not be dragged back with it"

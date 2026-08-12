@@ -42,7 +42,7 @@ from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
-from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
+from ..jobs import LogLine, StepFloor, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makermodslab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
@@ -626,7 +626,18 @@ _TAIL_SILENCE_TIMEOUT_S = 600.0
 # a few thousand entries. Past the cap we stop REMEMBERING new lines rather
 # than forgetting old ones: recent duplicates may slip through, which is
 # cosmetic, while the early history stays recognised forever.
+#
+# The cap is sized on measured cost, not a guess: a full set of 200k hashes
+# holds ~15.5 MB. That is the ceiling a pathological run would pay, and it is
+# why the cap exists at all — a real cloud job never approaches it.
 _TAIL_DEDUPE_MAX_LINES = 200_000
+
+# How often the consumer wakes to re-check `_stop_event` while waiting for a
+# line. Without this it sat in a single 600s `get`, so a stop signalled by the
+# status poller was not observed until the silence timeout expired — which
+# _tail_loop's docstring and _set_terminal's "wakes the tail loop" comment both
+# claim it is.
+_TAIL_READER_POLL_S = 1.0
 
 # Hand-off queue depth between a connection's reader thread and the consumer.
 # Bounded so an ABANDONED reader whose stream later recovers cannot retain an
@@ -681,6 +692,9 @@ class HfCloudJobRunner:
         # construction sites in jobs.py must supply it or a resumed cloud run
         # reports resume-relative steps (e.g. 4251/11000 instead of 8251/15000).
         self._resume_total = resume_total
+        # One floor per RUNNER, not per connection: surviving a reconnect is
+        # exactly what makes it a replay guard.
+        self._step_floor = StepFloor()
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -973,8 +987,22 @@ class HfCloudJobRunner:
         """
         assert self._hf_job_id is not None
         queue: Queue = Queue(maxsize=_TAIL_READER_QUEUE_MAX)
-        done = object()
         abandoned = threading.Event()
+        # The terminator lives OUTSIDE the bounded queue, and that is not a
+        # style choice. Putting it in meant a stream that ended — cleanly or
+        # with an error — while the queue happened to be full had its
+        # terminator dropped by `suppress(Full)`. The consumer then drained the
+        # backlog, found nothing more, and sat out the full silence timeout
+        # before raising "no log output for 600s" — inventing a stall where
+        # there was a real, immediately-knowable error, and misreporting its
+        # cause. A slot the reader can always write is the fix.
+        finished = threading.Event()
+        error: list[BaseException] = []
+        # A best-effort NUDGE so the common case stays instant. Correctness
+        # never depends on it landing: if the queue is full the consumer is
+        # mid-drain and will observe `finished` within one poll tick. It exists
+        # only so a normal stream end or error doesn't wait out a poll tick.
+        wake = object()
 
         def _finished() -> bool:
             return abandoned.is_set() or self._stop_event.is_set()
@@ -991,28 +1019,54 @@ class HfCloudJobRunner:
                     if _finished():
                         return
             except Exception as exc:  # surfaced on the consuming thread
-                with contextlib.suppress(Full):
-                    queue.put_nowait(exc)
+                error.append(exc)
             finally:
-                # Never block here: an abandoned reader's queue may be full and
-                # will never be drained again.
+                # Never blocked, never dropped: unlike a queue slot, this always
+                # lands, so the consumer learns the connection is over as soon
+                # as it has drained whatever the reader managed to hand over.
+                finished.set()
                 with contextlib.suppress(Full):
-                    queue.put_nowait(done)
+                    queue.put_nowait(wake)
 
         threading.Thread(target=_reader, name=f"hf-job-{self._hf_job_id}-sse", daemon=True).start()
 
         try:
+            deadline = time.monotonic() + _TAIL_SILENCE_TIMEOUT_S
             while True:
-                try:
-                    item = queue.get(timeout=_TAIL_SILENCE_TIMEOUT_S)
-                except Empty as exc:
-                    raise TimeoutError(
-                        f"no log output for {_TAIL_SILENCE_TIMEOUT_S:.0f}s; reconnecting"
-                    ) from exc
-                if item is done:
+                if self._stop_event.is_set():
                     return
-                if isinstance(item, BaseException):
-                    raise item
+                remaining = deadline - time.monotonic()
+                try:
+                    item = queue.get(timeout=max(0.0, min(_TAIL_READER_POLL_S, remaining)))
+                except Empty as empty:
+                    # An empty queue is the ONLY point at which the terminator
+                    # may be honoured: it means everything the reader handed
+                    # over has been delivered, so a real error or a clean end
+                    # can now be reported without losing lines ahead of it.
+                    if finished.is_set():
+                        if error:
+                            raise error[0] from None
+                        return
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"no log output for {_TAIL_SILENCE_TIMEOUT_S:.0f}s; reconnecting"
+                        ) from empty
+                    continue
+                if item is wake:
+                    # FIFO, so this arrives only after every line the reader
+                    # handed over — the connection really is drained.
+                    if error:
+                        raise error[0] from None
+                    return
+                # Only REAL output counts as liveness. A half-open connection
+                # that still dribbles blank keepalive frames would otherwise
+                # reset this deadline forever and never be reconnected — which
+                # is the exact stall the timeout exists to break, so timing
+                # keepalives as though they were log lines would have left the
+                # motivating failure uncovered. The line is still yielded;
+                # _tail_loop discards blanks itself a few lines later.
+                if item.strip():
+                    deadline = time.monotonic() + _TAIL_SILENCE_TIMEOUT_S
                 yield item
         finally:
             # Reached on every exit path — the silence timeout, a clean end, a
@@ -1044,7 +1098,7 @@ class HfCloudJobRunner:
                         # the window holds exactly what was emitted.
                         if self._is_replayed(stripped):
                             continue
-                        parse_metrics_into(stripped, self._metrics, self._resume_total)
+                        parse_metrics_into(stripped, self._metrics, self._resume_total, self._step_floor)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(stripped)
                             if url is not None:
