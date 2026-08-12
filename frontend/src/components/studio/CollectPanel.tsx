@@ -35,7 +35,14 @@ import {
   SLIDE,
 } from "@/components/studio/panel/primitives";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
-import { uploadDataset, type DatasetItem } from "@/lib/replayApi";
+import { getDatasetInfo, uploadDataset, type DatasetItem } from "@/lib/replayApi";
+
+// Persists which dataset (if any) is mid post-recording review, so a page
+// reload while the non-dismissible Finalize viewer is open can reopen it
+// instead of silently dropping the user back on a bare Launchpad — see the
+// restore effect below. localStorage (not sessionStorage): closing the tab
+// mid-review and coming back later should still resume it.
+const PENDING_FINALIZE_KEY = "makermodslab.pendingFinalize";
 
 /**
  * Studio panel 1 · Collect. Stacked sections (the shared studio anatomy):
@@ -64,7 +71,7 @@ const CollectPanel: React.FC = () => {
 
   // The recording-form draft lives in StudioContext so filled-in parameters
   // survive route changes (this panel unmounts with the Launchpad route).
-  const { collectForm, updateCollectForm, closeStudio } = useStudio();
+  const { collectForm, updateCollectForm, closeStudio, openStudio } = useStudio();
   const {
     formOpen,
     datasetName,
@@ -261,6 +268,11 @@ const CollectPanel: React.FC = () => {
       setPendingFinalize(recorded);
       setViewRepo(recorded.repo_id);
       setViewOpen(true);
+      try {
+        localStorage.setItem(PENDING_FINALIZE_KEY, JSON.stringify(recorded));
+      } catch {
+        // storage unavailable (private mode) — reload-resume just won't work
+      }
     },
     [closeStudio, navigate],
   );
@@ -285,6 +297,11 @@ const CollectPanel: React.FC = () => {
     if (!recorded) return;
     setViewOpen(false);
     setPendingFinalize(null);
+    try {
+      localStorage.removeItem(PENDING_FINALIZE_KEY);
+    } catch {
+      // ignore — same as the write above
+    }
     let hubUploadJustStarted: string | undefined;
     if (pushToHub && recorded.repo_id.includes("/")) {
       try {
@@ -335,7 +352,77 @@ const CollectPanel: React.FC = () => {
   const handleDiscardFinalize = useCallback(() => {
     setViewOpen(false);
     setPendingFinalize(null);
+    try {
+      localStorage.removeItem(PENDING_FINALIZE_KEY);
+    } catch {
+      // ignore — same as the write above
+    }
   }, []);
+
+  // Resume an unfinished Finalize review after a reload. The finalize dialog
+  // is deliberately non-dismissible (see DatasetDetailDialog's finalize
+  // prop), so losing it outright on reload would leave a saved-but-unreviewed
+  // dataset with no way back short of re-recording. Runs once per page load
+  // (finalizeRestoreAttempted guards against effect re-firing from context
+  // callbacks that aren't referentially stable); re-validates against the
+  // backend rather than trusting the persisted repo id blindly, since the
+  // dataset could have been deleted or fully uploaded by some other means
+  // (another tab, the manual "Upload to Hub" button) in the meantime.
+  const finalizeRestoreAttempted = useRef(false);
+  useEffect(() => {
+    if (finalizeRestoreAttempted.current) return;
+    finalizeRestoreAttempted.current = true;
+
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(PENDING_FINALIZE_KEY);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+
+    let recorded: RecordedInfo;
+    try {
+      recorded = JSON.parse(raw) as RecordedInfo;
+    } catch {
+      try {
+        localStorage.removeItem(PENDING_FINALIZE_KEY);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    let cancelled = false;
+    getDatasetInfo(baseUrl, fetchWithHeaders, recorded.repo_id)
+      .then((info) => {
+        if (cancelled) return;
+        if (info.source === "hub" || info.total_episodes <= 0) {
+          // No local copy left — nothing for the finalize viewer to show.
+          throw new Error("no local copy left to review");
+        }
+        setPendingFinalize(recorded);
+        setViewRepo(recorded.repo_id);
+        setViewOpen(true);
+        openStudio("collect");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        try {
+          localStorage.removeItem(PENDING_FINALIZE_KEY);
+        } catch {
+          // ignore
+        }
+        toast({
+          title: "Couldn't resume dataset review",
+          description:
+            "The dataset you were reviewing before the reload is no longer available locally.",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl, fetchWithHeaders, openStudio, toast]);
 
   // Gate for the pinned Start button: robot ready + every required parameter
   // filled in (name valid per the backend's rules, task described).
