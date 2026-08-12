@@ -1676,6 +1676,41 @@ def test_cloud_start_rejects_local_only_dataset(tmp_path) -> None:
     assert reg.list(limit=10) == []
 
 
+def test_cloud_start_rejects_dataset_whose_local_copy_diverged(tmp_path) -> None:
+    """On the Hub is necessary but not sufficient: the pod trains on the HUB
+    copy, so a local copy that has diverged from it (episodes recorded after
+    the upload, or a name now shared with an unrelated repo) would silently
+    train on data the user isn't looking at. Refuse instead — uploading first
+    is the fix, and the info card offers it next to the same warning."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import DatasetHubCopyDiffersError, JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="sock_orange", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={
+                "repo_id": "sock_orange",
+                "status": "on_hub",
+                "url": "https://huggingface.co/datasets/makermods/sock_orange",
+                "local_differs": True,
+            },
+        ),
+        pytest.raises(DatasetHubCopyDiffersError) as exc,
+    ):
+        reg.start(cfg, target)
+
+    assert exc.value.repo_id == "sock_orange"
+    assert "differs from the Hub dataset" in str(exc.value)
+    # Nothing was registered — the guard fires before the record is created.
+    assert reg.list(limit=10) == []
+
+
 def test_cloud_start_allows_hub_dataset(tmp_path) -> None:
     """When the dataset is on the Hub, the preflight passes and the runner is
     started (stubbed here — we assert the guard doesn't block, not a real
@@ -1699,7 +1734,14 @@ def test_cloud_start_allows_hub_dataset(tmp_path) -> None:
     with (
         patch(
             "makermodslab.datasets.get_hub_status",
-            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+            return_value={
+                "repo_id": "user/on_hub",
+                "status": "on_hub",
+                "url": "u",
+                # In sync with the Hub copy (or no basis to claim otherwise) —
+                # the divergence guard must not fire on either.
+                "local_differs": False,
+            },
         ),
         patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", _fake_runner_factory),
     ):

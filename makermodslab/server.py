@@ -66,6 +66,7 @@ from .camera_identity import resolve_cv2_index
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
+    DatasetHubCopyDiffersError,
     DatasetNotOnHubError,
     JobAlreadyContinuedError,
     JobAlreadyRunningError,
@@ -1346,6 +1347,10 @@ async def create_training_job(req: Request):
             status_code=409,
             detail=f"{source} was already continued by {continued_by}. {remedy}",
         ) from exc
+    except DatasetHubCopyDiffersError as exc:
+        # Cloud run whose local dataset has diverged from the Hub repo the pod
+        # would train on. Same 409 shape: upload (or rename) first.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc

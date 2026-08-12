@@ -2639,6 +2639,27 @@ class DatasetNotOnHubError(Exception):
         )
 
 
+class DatasetHubCopyDiffersError(Exception):
+    """Raised by JobRegistry.start when a cloud (hf_cloud) run is requested on a
+    dataset whose local copy disagrees with the Hub repo of the same name.
+
+    Cloud training runs on the HUB copy, so this would train on data the user
+    isn't looking at without saying so: either the local copy gained episodes
+    after the upload, or the name is shared with an unrelated repo (a local
+    rename frees the name while the Hub repo keeps it — see get_hub_status's
+    ``local_differs``). Uploading first resolves the former; the latter needs a
+    different name. `repo_id` is the offending dataset."""
+
+    def __init__(self, repo_id: str) -> None:
+        self.repo_id = repo_id
+        super().__init__(
+            f"Your local copy of '{repo_id}' differs from the Hub dataset of the same "
+            "name, and cloud training runs on the Hub copy. Upload the local copy "
+            "first — or, if that Hub dataset is a different recording that happens to "
+            "share the name, rename this one before training."
+        )
+
+
 class JobRegistry:
     """Owns the registry of training jobs and their persistence.
 
@@ -2867,11 +2888,21 @@ class JobRegistry:
         # fallback so a network blip doesn't wrongly refuse a Hub dataset. The
         # browser flow uploads-then-trains before ever reaching here, so this
         # path is primarily for non-UI callers.
+        #
+        # Existing-on-the-Hub is necessary but not sufficient: the pod trains on
+        # the HUB copy, so a local copy that has diverged from it (more episodes
+        # recorded since the upload, or a name now shared with an unrelated
+        # repo — see get_hub_status's local_differs) would train on data the
+        # user isn't looking at, silently. Refuse that too rather than let it
+        # through; uploading first is the fix, and the info card offers it.
         if target.runner == "hf_cloud":
             from .datasets import get_hub_status
 
-            if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
+            hub_status = get_hub_status(config.dataset_repo_id)
+            if hub_status.get("status") == "local_only":
                 raise DatasetNotOnHubError(config.dataset_repo_id)
+            if hub_status.get("local_differs") is True:
+                raise DatasetHubCopyDiffersError(config.dataset_repo_id)
 
         # Resume and fine-tune are distinct and mutually exclusive: resume
         # continues optimizer+step from a checkpoint (needs training_state);
