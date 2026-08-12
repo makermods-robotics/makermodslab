@@ -1231,7 +1231,9 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
             dataset = LeRobotDataset(repo_id=repo_id, root=target)
         except Exception as exc:
             logger.error("Failed to load dataset %s for episode delete: %s", repo_id, exc)
-            raise DatasetEpisodeDeleteError(400, f"Could not read dataset: {exc}") from exc
+            raise DatasetEpisodeDeleteError(
+                400, f"Could not read dataset '{repo_id}'. It may be corrupted or in an unsupported format."
+            ) from exc
 
         total_episodes = dataset.meta.total_episodes
         if episode_index < 0 or episode_index >= total_episodes:
@@ -1253,7 +1255,7 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
         except Exception as exc:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.error("Failed to delete episode %s from %s: %s", episode_index, repo_id, exc)
-            raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+            raise DatasetEpisodeDeleteError(500, "Failed to delete episode. See server logs for details.") from exc
 
         backup_dir = target.parent / f".{target.name}.pre-delete-{uuid.uuid4().hex[:8]}"
         try:
@@ -1261,7 +1263,7 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
         except OSError as exc:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.error("Failed to stage %s aside for episode delete: %s", target, exc)
-            raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+            raise DatasetEpisodeDeleteError(500, "Failed to delete episode. See server logs for details.") from exc
 
         try:
             os.rename(tmp_dir, target)
@@ -1277,11 +1279,13 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
                     backup_dir,
                 )
                 raise DatasetEpisodeDeleteError(
-                    500, f"Failed to delete episode and could not restore the original dataset: {exc}"
+                    500,
+                    "Failed to delete episode and could not restore the original dataset. "
+                    "See server logs for details.",
                 ) from exc
             shutil.rmtree(tmp_dir, ignore_errors=True)
             logger.error("Failed to swap in the edited dataset for %s: %s", target, exc)
-            raise DatasetEpisodeDeleteError(500, f"Failed to delete episode: {exc}") from exc
+            raise DatasetEpisodeDeleteError(500, "Failed to delete episode. See server logs for details.") from exc
 
         shutil.rmtree(backup_dir, ignore_errors=True)
         invalidate_dataset_listing_cache()
