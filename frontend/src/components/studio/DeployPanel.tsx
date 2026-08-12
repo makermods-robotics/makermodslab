@@ -246,9 +246,22 @@ const DeployPanel: React.FC = () => {
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [stopping, setStopping] = useState(false);
 
+  // Edge-triggered "consume once": handleStart sets the pending flag, and the
+  // effect below latches it into showDeployMilestone the first time the live
+  // InferenceSessionDialog closes, then clears the pending flag so it can't
+  // re-trigger — sessionOpen cycling true→false again later (a normal
+  // redeploy from this same panel) must not resurrect this banner.
   const { seen: hasSeenDeployMilestone, markSeen: markDeployMilestoneSeen } =
     useOnceFlag("makerlab:milestone-first-deploy");
+  const [deployMilestonePending, setDeployMilestonePending] = useState(false);
   const [showDeployMilestone, setShowDeployMilestone] = useState(false);
+
+  useEffect(() => {
+    if (!sessionOpen && deployMilestonePending) {
+      setShowDeployMilestone(true);
+      setDeployMilestonePending(false);
+    }
+  }, [sessionOpen, deployMilestonePending]);
 
   // The settings block (robot, checkpoint, run parameters, cameras) collapses
   // as one so a configured deploy can be folded down to picker + actions.
@@ -680,7 +693,7 @@ const DeployPanel: React.FC = () => {
       // closing it lands back here (the studio stays open underneath).
       openInferenceSession();
       if (!hasSeenDeployMilestone) {
-        setShowDeployMilestone(true);
+        setDeployMilestonePending(true);
         markDeployMilestoneSeen();
       }
       // The POST claims the inference slot synchronously, so a status fetch
@@ -1142,11 +1155,14 @@ const DeployPanel: React.FC = () => {
         </div>
       ) : null}
 
-      {/* Deploy-started milestone — gated on the live InferenceSessionDialog
-          actually being closed (!sessionOpen) so it appears once the user
-          exits that session, mirroring the training milestone's
-          !monitorJobId guard. */}
-      {showDeployMilestone && !sessionOpen && (
+      {/* Deploy-started milestone — the effect above latches this true the
+          first time the live InferenceSessionDialog closes after handleStart
+          sets deployMilestonePending. Gated on the latched flag alone (not
+          live on !sessionOpen) so a later, unrelated session close (a normal
+          redeploy from this same panel — the banner's own copy invites
+          exactly that) can't resurrect an already-dismissed-or-shown
+          banner. */}
+      {showDeployMilestone && (
         <MilestoneReveal
           title="First skill deployed!"
           description="Your robot just ran a trained policy. Come back here anytime to redeploy it, swap checkpoints, or run a different skill."

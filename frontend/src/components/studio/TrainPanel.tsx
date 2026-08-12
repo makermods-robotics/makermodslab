@@ -151,9 +151,24 @@ const TrainPanel: React.FC = () => {
 
   const { seen: hasSeenTrainingMilestone, markSeen: markTrainingMilestoneSeen } =
     useOnceFlag("makerlab:milestone-first-training");
+  // Edge-triggered "consume once": onStarted sets the pending job id, and the
+  // effect below latches it into showTrainingMilestone the first time the
+  // monitor dialog (opened right after onStarted, see launchJob) closes, then
+  // clears the pending id so it can't re-trigger — openJobMonitor is also
+  // called from ActivityStrip, JobCard and the /training/:jobId deep link, so
+  // monitorJobId cycling non-null→null again later (e.g. opening/closing the
+  // monitor for an unrelated job) must not resurrect this banner.
   const [pendingMilestoneJobId, setPendingMilestoneJobId] = useState<
     string | null
   >(null);
+  const [showTrainingMilestone, setShowTrainingMilestone] = useState(false);
+
+  useEffect(() => {
+    if (!monitorJobId && pendingMilestoneJobId) {
+      setShowTrainingMilestone(true);
+      setPendingMilestoneJobId(null);
+    }
+  }, [monitorJobId, pendingMilestoneJobId]);
 
   // The new-training form slides open in place; the jobs library folds to its
   // header while the form is open (still expandable by hand).
@@ -684,14 +699,18 @@ const TrainPanel: React.FC = () => {
       </LibrarySection>
 
       {/* Training-started milestone — launchJob opens the monitor dialog
-          immediately after onStarted fires, so wait for it to close
-          (!monitorJobId) before revealing this, mirroring CollectHandoff's
-          "show after returning from the session" pattern. */}
-      {!monitorJobId && pendingMilestoneJobId && (
+          immediately after onStarted fires, so the effect above waits for it
+          to close before latching showTrainingMilestone true, mirroring
+          CollectHandoff's "show after returning from the session" pattern.
+          Gated on the latched flag alone (not live on !monitorJobId) so a
+          later, unrelated monitor open/close (another job's card, the
+          activity strip, a deep link, or a second training run) can't
+          resurrect an already-dismissed-or-shown banner. */}
+      {showTrainingMilestone && (
         <MilestoneReveal
           title="Training started!"
           description="Watch progress from the jobs list above. Once it finishes, run it on your robot from the Deploy panel."
-          onDismiss={() => setPendingMilestoneJobId(null)}
+          onDismiss={() => setShowTrainingMilestone(false)}
         />
       )}
 
