@@ -31,6 +31,46 @@ export function middleEllipsis(text: string, max = 32): string {
 }
 
 /**
+ * The part of a job id that tells two runs apart: its run timestamp.
+ *
+ * Needed because a display NAME does not tell two runs apart within a resume
+ * chain, and cannot: a continuation continues the same model, so every run on
+ * the chain carries the same name by design. Anywhere the UI attributes
+ * something to its owning run inside a lineage — the checkpoint dropdown, the
+ * card hints — the name alone renders identical text for different runs.
+ *
+ * The id is where the difference lives. `_named_job_id` / `_generate_job_id`
+ * (makermodslab/jobs.py) both end in `_%Y-%m-%d_%H-%M-%S`, optionally followed
+ * by the `-2`, `-3`, … guard against two runs created in the same second. That
+ * tail is returned VERBATIM rather than reformatted into something prettier:
+ * it has to stay a literal substring of the id, so what the user reads here
+ * matches what the backend's refusals print (`'alias' (id)`) and what they can
+ * search the list for. Prettifying it would break that correspondence for a
+ * few saved characters.
+ *
+ * Returns null when the id has no such tail — an imported record, or an id
+ * some other tool wrote — so callers can fall back rather than render a
+ * confident-looking lie.
+ */
+const JOB_ID_STAMP_RE = /_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(?:-\d+)?)$/;
+
+export function jobIdStamp(jobId: string): string | null {
+  return JOB_ID_STAMP_RE.exec(jobId)?.[1] ?? null;
+}
+
+/**
+ * How a run is named when it has to be told apart from its own chain: the
+ * display name plus the id's distinguishing tail.
+ *
+ * Falls back to a middle-ellipsized id when there is no timestamp tail to
+ * quote — middle, not end, for the usual reason (see `middleEllipsis`): an
+ * id's tail is the half that identifies it.
+ */
+export function jobRunStamp(jobId: string): string {
+  return jobIdStamp(jobId) ?? middleEllipsis(jobId, 24);
+}
+
+/**
  * A trailing " (…)" the backend appended to break a name collision.
  *
  * `dedupe_display_names` (makermodslab/utils/naming.py) resolves two rows that

@@ -263,11 +263,16 @@ const TrainPanel: React.FC = () => {
           setFinetuneSeed(null);
           return;
         }
+        // Carry the chosen checkpoint's own storage side along with its step:
+        // a "local" one exists only on this machine, so fine-tuning it on the
+        // cloud has to upload it first and the form has to say so.
+        const chosen = cks.find((c) => c.step === latest);
         setFinetuneSeed({
           jobId,
           step: latest,
           name: name ?? jobId,
           policyType: policy ?? "act",
+          checkpointSource: chosen?.source,
         });
         if (policy) setPolicyType(policy);
       } catch (e) {
@@ -601,9 +606,25 @@ const TrainPanel: React.FC = () => {
                 Keyed on both seeds (same composite the /training route uses):
                 switching between runs — or between resuming and fine-tuning —
                 must rebuild the form, since the seeds are read once as initial
-                state. Both null ⇒ a stable fresh key. */}
+                state. Both null ⇒ a stable fresh key.
+
+                The key carries the whole seed identity — run, step and (for a
+                resume) the checkpoint's owner — not just the run id. The jobs
+                library stays expandable while the form is open, so a second
+                Continue / Fine-tune on the same run is reachable, and only the
+                banner and the step validation read the seed live: everything
+                derived at mount (resume_from_step, the checkpoint owner, steps,
+                the optimizer/W&B prefills, the compute default) would stay
+                frozen at the first press. That shipped a request continuing
+                from the first checkpoint under a banner naming the second —
+                which the backend cannot catch, both being internally valid.
+                Resume no longer offers a step choice, so the resume half is
+                belt-and-braces; the fine-tune half is live, since ModelCard's
+                history selector really can re-fire at a different step. */}
             <TrainingConfigurator
-              key={`${resumeSeed?.jobId ?? ""}::${finetuneSeed?.jobId ?? "fresh"}`}
+              key={`${resumeSeed?.jobId ?? ""}@${resumeSeed?.step ?? ""}@${
+                resumeSeed?.checkpointJobId ?? ""
+              }::${finetuneSeed?.jobId ?? "fresh"}@${finetuneSeed?.step ?? ""}`}
               policyType={policyType}
               onPolicyTypeChange={setPolicyType}
               datasetRepoId={trainingDatasetRepoId}

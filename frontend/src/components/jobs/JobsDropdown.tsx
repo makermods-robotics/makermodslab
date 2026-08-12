@@ -31,6 +31,7 @@ import {
   isHubJobActive,
   jobDisplayName,
 } from "@/lib/jobsApi";
+import { isResumableLeaf } from "./resumeSeed";
 
 /**
  * One selectable run in the jobs dropdown. Local/cloud runs (`job`) and
@@ -39,7 +40,24 @@ import {
  * into a row of em dashes.
  */
 export type JobsEntry =
-  | { kind: "job"; key: string; time: number; job: JobRecord }
+  | {
+      kind: "job";
+      key: string;
+      time: number;
+      job: JobRecord;
+      /** Checkpoints reachable from this row's run — its own plus those of the
+       * runs it continues. A row is a whole CHAIN (the list shows one row per
+       * leaf), and a resume takes the newest checkpoint on that LINEAGE, which
+       * may be an ancestor's, so the run's own `checkpoint_count` is the wrong
+       * number to gate Resume on: the commonest resumable shape is a tip that
+       * died before saving anything, whose checkpoints are all inherited.
+       * Counted by
+       * JobsDataContext, which holds the ancestor records — and which files a
+       * chain whose ancestors are still being backfilled as active, so a row is
+       * never hidden away in the UNTRACKED fold on the strength of a count that
+       * hasn't settled. */
+      chainCheckpointCount: number;
+    }
   | { kind: "hub"; key: string; time: number; job: HubJob };
 
 function relativeTime(ms: number): string {
@@ -86,6 +104,11 @@ interface Described {
   /** What the title line MEANS: the untouched name, for the hover title. Equal
    * to `name` whenever nothing was peeled. */
   fullName: string;
+  /** The run's number, rendered beside the name. Neither `name` nor `fullName`
+   * identifies a run on a resume chain — every run on one shares them, because
+   * a continuation continues the same model. 0 ⇒ not assigned (a record the
+   * backend hasn't backfilled yet); render nothing rather than "#0". */
+  number: number;
   /** The run's policy, as a chip label — read off the record's own
    * `config.policy_type`, never inferred from the name. Null only when the
    * record states no policy (a Hub-only job). */
@@ -122,6 +145,9 @@ function describeEntry(entry: JobsEntry): Described {
     return {
       name: hubName,
       fullName: hubName,
+      // A Hub-only job has no local record, so it has no run number — the
+      // sequence numbers this registry's own runs. 0 renders nothing.
+      number: 0,
       policyLabel: null,
       policyTitle: "",
       present,
@@ -159,6 +185,10 @@ function describeEntry(entry: JobsEntry): Described {
   return {
     name,
     fullName,
+    // The run number, rendered beside the name because the name does not
+    // identify a run on its own: every run on a resume chain carries the same
+    // one. 0 ⇒ a record the backend hasn't backfilled; render nothing.
+    number: job.job_number,
     policyLabel: policyType ? policyTypeShortLabel(policyType) : null,
     policyTitle: policyType ? policyTypeDisplayName(policyType) : "",
     present,
@@ -182,13 +212,25 @@ function describeEntry(entry: JobsEntry): Described {
   };
 }
 
-/** Resume is offered on a run that ended before its target with something to
- * resume from. The row's button takes the newest checkpoint; picking a
- * specific step stays in the selected run's detail card below the dropdown. */
+/** Resume is offered on a chain whose tip ended before its target with
+ * something, anywhere in the chain, to continue from — the tip continues from
+ * the newest checkpoint on its lineage, its own or an ancestor's. The state
+ * half is the ONE
+ * shared leaf rule (`isResumableLeaf`), so this row's button and the detail
+ * card's Resume can't disagree; the checkpoint half is deliberately the cheap
+ * chain-wide count, because the exact per-step answer needs a fetch. The click
+ * resolves the real list and says so if it comes back empty.
+ *
+ * ONE verb across both levels of control, and by now the same action with
+ * nothing added: Continue is not step-selectable on either (user decision
+ * 2026-08-10), so this row and the detail card below both take the newest
+ * resumable checkpoint. The card keeps a checkpoint dropdown, but it drives
+ * only Run / Fine-tune / Download — picking an older checkpoint is a real
+ * choice for those and not for a continuation. */
 const canResumeEntry = (entry: JobsEntry): boolean =>
   entry.kind === "job" &&
-  (entry.job.state === "failed" || entry.job.state === "interrupted") &&
-  entry.job.checkpoint_count > 0;
+  isResumableLeaf(entry.job) &&
+  entry.chainCheckpointCount > 0;
 
 const COL_STATE = "w-[4.75rem] shrink-0";
 // The run's policy. Always occupies its column — a row whose record names no
@@ -222,7 +264,7 @@ interface RowProps {
  * chip, the dataset namespace is dropped) so rows of one policy+namespace stop
  * reading identically once the column truncates.
  * Everything else about the run (rename, monitor, checkpoint picker, Run,
- * Continue/Resume-from-step, Download, delete) lives in the detail card the
+ * Resume-from-step, Download, delete) lives in the detail card the
  * selection drives.
  */
 const JobsRow: React.FC<RowProps> = ({
@@ -274,7 +316,14 @@ const JobsRow: React.FC<RowProps> = ({
           <span className="truncate">{d.present.label}</span>
         </span>
         {/* The hover title is the FULL name — the peel is a display shortening,
-            so the exact identity stays one hover away. */}
+            so the exact identity stays one hover away. The number sits outside
+            that span so truncation can never eat it: it is the shortest thing
+            in the row and the only one that identifies the run. */}
+        {d.number > 0 ? (
+          <span className="shrink-0 font-mono text-muted-foreground">
+            #{d.number}
+          </span>
+        ) : null}
         <span
           className="min-w-0 flex-1 truncate text-foreground"
           title={d.fullName}
@@ -321,8 +370,8 @@ const JobsRow: React.FC<RowProps> = ({
                 e.stopPropagation();
                 onResume(record);
               }}
-              aria-label="Resume this run from its last checkpoint"
-              title="Resume from the last checkpoint (pick a specific step below)"
+              aria-label="Resume from the newest usable checkpoint"
+              title="Resume from the newest usable checkpoint"
               className="flex h-5 w-5 items-center justify-center rounded text-info transition-colors hover:bg-info/10 disabled:opacity-50"
             >
               {resuming ? (
@@ -497,6 +546,11 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
                   />
                   {d.present.label}
                 </span>
+                {d.number > 0 ? (
+                  <span className="shrink-0 font-mono text-sm text-muted-foreground">
+                    #{d.number}
+                  </span>
+                ) : null}
                 <span
                   className="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
                   title={d.fullName}

@@ -9,12 +9,17 @@ import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { listJobCheckpoints } from "@/lib/checkpointsApi";
-import { buildResumeSeed, latestResumableStep } from "./resumeSeed";
+import {
+  buildResumeSeed,
+  loadLineageCheckpoints,
+  noResumeReason,
+  resumableCheckpoints,
+} from "./resumeSeed";
+import type { NoResumeReason } from "./resumeSeed";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import JobsDropdown, { JobsEntry } from "./JobsDropdown";
-import { isJobActive, useJobsData } from "./JobsDataContext";
+import { useJobsData } from "./JobsDataContext";
 import { HubJob, JobRecord, isHubJobActive } from "@/lib/jobsApi";
 
 /** Recency keys (ms) for the mixed local/cloud/hub list — every library is
@@ -51,7 +56,9 @@ interface JobsLibraryProps {
  * list gives one row per run with its state, where it ran, when, and the
  * row-level primary actions; and the selected run's card below the dropdown
  * keeps every other affordance — monitor, rename, checkpoint picker,
- * Run / Continue / Resume-from-step / Download / delete.
+ * Run / Resume-from-step / Download / delete. (Run and Download are
+ * model-shaped actions and move to ModelCard once ModelsLibrary is rewired to
+ * render it; they still live on JobCard on this stack.)
  *
  * The models column that used to sit beside this lives in the Deploy panel
  * (ModelsLibrary) — a model artifact is deployed, not trained.
@@ -63,6 +70,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     untrackedHubJobs,
     supersededIds,
     ancestorsOf,
+    chainCheckpointCount,
+    isJobActive,
     hubAuthenticated,
     hubJobsPermission,
     error,
@@ -131,27 +140,43 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     [untrackedHubJobs, matchesQuery, showOnline],
   );
 
-  // Active = running or has runnable checkpoints. Everything else folds under
-  // UNTRACKED inside the dropdown so the trigger lands on what's still
-  // relevant. Superseded runs are dropped from both — they surface nested under
-  // their successor's card instead.
+  // Active = running, or the CHAIN has a checkpoint (see isJobActive) — which
+  // is the same thing as "resumable", since a run continues from the newest
+  // checkpoint on its lineage. Everything else folds under UNTRACKED inside
+  // the dropdown so the trigger lands on what's still relevant. Superseded runs are dropped
+  // from both — they surface nested under their successor's card instead.
   const toEntries = useCallback(
     (jobs: JobRecord[], hubs: HubJob[]): JobsEntry[] =>
       [
-        ...jobs.map((job): JobsEntry => ({
-          kind: "job",
-          key: jobEntryKey(job),
-          time: jobTime(job),
-          job,
-        })),
-        ...hubs.map((job): JobsEntry => ({
-          kind: "hub",
-          key: hubEntryKey(job),
-          time: hubTime(job),
-          job,
-        })),
+        ...jobs.map(
+          (job): JobsEntry => ({
+            kind: "job",
+            key: jobEntryKey(job),
+            time: jobTime(job),
+            job,
+            // The row stands for a whole CHAIN, and it continues from the
+            // newest checkpoint on that chain, its own or an ancestor's — so
+            // the gate counts the chain, not just this tip. The tip's own
+            // count is the wrong
+            // number for the commonest resumable shape there is: a run that
+            // died before its first save, whose checkpoints are all inherited.
+            // Counted by the provider, which holds the ancestor records — and
+            // which files a chain whose ancestors haven't landed yet as active
+            // regardless, so a row can't sit in the fold while its count reads
+            // low.
+            chainCheckpointCount: chainCheckpointCount(job),
+          }),
+        ),
+        ...hubs.map(
+          (job): JobsEntry => ({
+            kind: "hub",
+            key: hubEntryKey(job),
+            time: hubTime(job),
+            job,
+          }),
+        ),
       ].sort((a, b) => b.time - a.time),
-    [],
+    [chainCheckpointCount],
   );
 
   const trackedRuns = useMemo(
@@ -164,10 +189,10 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const activeEntries = useMemo(
     () =>
       toEntries(
-        trackedRuns.filter(isJobActive),
+        trackedRuns.filter((j) => isJobActive(j)),
         filteredHub.filter(isHubJobActive),
       ),
-    [toEntries, trackedRuns, filteredHub],
+    [toEntries, trackedRuns, filteredHub, isJobActive],
   );
   const untrackedEntries = useMemo(
     () =>
@@ -175,7 +200,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         trackedRuns.filter((j) => !isJobActive(j)),
         filteredHub.filter((h) => !isHubJobActive(h)),
       ),
-    [toEntries, trackedRuns, filteredHub],
+    [toEntries, trackedRuns, filteredHub, isJobActive],
   );
 
   const activeCount = activeEntries.length;
@@ -203,53 +228,81 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
       : autoKey;
   const selected = allEntries.find((e) => e.key === selectedKey) ?? null;
 
-  // Resume from the row: resolve the run's newest checkpoint and open the
-  // Train panel's form in resume mode with exactly the seed the card's
-  // Continue/Resume produces — same shared builder, so the two can't drift
-  // (this path used to assemble its own, thinner payload). Choosing a
-  // *specific* step stays on the selected run's card below.
+  // Resume from the row: resolve the chain's newest resumable checkpoint and
+  // open the Train panel's form in resume mode with exactly the seed the
+  // card's Resume produces. Same shared loader AND same shared rule,
+  // so the two entry points can offer neither a different checkpoint nor a
+  // different verdict (this path used to walk its own, thinner logic).
+  // There is no longer a second, step-selectable way in: the card's Resume
+  // takes the same newest entry this does, so the row and the card are one
+  // affordance in two places rather than a quick path and a precise one.
   const handleResume = useCallback(
     async (job: JobRecord) => {
       setResumingId(job.id);
       try {
-        const cks = await listJobCheckpoints(baseUrl, fetchWithHeaders, job.id);
-        const step = latestResumableStep(cks);
-        if (step == null) {
+        const lineage = await loadLineageCheckpoints(
+          baseUrl,
+          fetchWithHeaders,
+          job,
+          ancestorsOf(job),
+        );
+        // Newest first, and each entry knows which run owns it — which on a
+        // chain is often an ancestor. The seed continues THIS row's run either
+        // way (chain rewind); the owner only says where the bytes come from.
+        const best = resumableCheckpoints(job, lineage)[0];
+        if (!best) {
+          // The row's button gates on the chain's checkpoint COUNT, which
+          // can't see the step target or the owner's state, so landing here is
+          // normal — this is where the exact rule gets to explain itself. The
+          // cause comes from the rule itself (`noResumeReason`) rather than
+          // being re-guessed from the lineage here: guessing is what produced
+          // the "already at its step target" message for a run whose
+          // checkpoints were below its target and had been dropped by a
+          // different filter entirely.
+          const reason = noResumeReason(job, lineage);
+          // Under chain rewind these are the genuinely stranded cases only: a
+          // chain that saved nothing anywhere, or one whose every checkpoint
+          // belongs to a finished run. The delete-first wording that used to
+          // live here is gone with the rule that made it necessary — an
+          // empty-handed tip now simply resumes from what it inherited.
+          const description: Record<NoResumeReason, string> = {
+            "not-resumable":
+              "This run isn't in a state that can be continued.",
+            "no-checkpoints":
+              "This run and the runs it continues from saved no checkpoint.",
+            "owner-done":
+              "Every checkpoint this run can continue from belongs to a run that already " +
+              "reached its target, so its learning-rate schedule is spent. Fine-tune from " +
+              "the final checkpoint instead.",
+            "at-target":
+              "Every checkpoint this run can continue from is already at its step target. " +
+              "Raise the target to continue, or fine-tune from the final checkpoint.",
+            "sibling-cap":
+              "Every checkpoint left in this run's lineage was saved past the step this run " +
+              "reached, so it belongs to another continuation sharing the same cloud output.",
+            other: "No checkpoint in this run's lineage can be resumed from.",
+          };
           toast({
             title: "Nothing to resume from",
-            description: "This run saved no checkpoint.",
-            variant: "destructive",
+            description: description[reason],
+            variant: reason === "no-checkpoints" ? "destructive" : "default",
           });
           return;
         }
-        // KNOWN APPROXIMATION — the step above may not be this run's own.
-        // A resumed CLOUD run reuses its parent's Hub output repo, so
-        // listJobCheckpoints(job.id) returns the whole lineage's checkpoints,
-        // including ones written by sibling runs: two children forked off one
-        // parent, and the sibling that ran to completion left checkpoints at
-        // the shared target in the same repo — so "the newest checkpoint" here
-        // can belong to that sibling.
-        //
-        // True per-run checkpoint attribution is an identity-redesign item,
-        // not a fix that belongs at this call site: with FORKS in the lineage
-        // even a "newest checkpoint below our own target" pick would still
-        // land on the done sibling's interleaved checkpoints, which is
-        // semantically wrong rather than merely approximate. JobCard's lineage
-        // merge defends the CARD path (and lets the user pick a step by hand);
-        // the row's one-click resume knowingly accepts the approximation and
-        // is honest about it in the message below.
-        const target = job.config?.steps ?? 0;
-        if (target > 0 && step >= target) {
-          toast({
-            title: "Nothing to resume",
-            description:
-              "The newest checkpoint in this run's repo is already at the step target. " +
-              "Raise the step target to continue, or fine-tune from the final checkpoint. " +
-              "A resumed run shares its repo with its lineage, so this checkpoint may belong to a sibling run.",
-          });
-          return;
-        }
-        openStudio("train", { train: { resume: buildResumeSeed(job, step) } });
+        // KNOWN LIMIT, CLOUD-OWNED checkpoints only and now narrowed: the runs
+        // of a cloud chain all publish to the parent's Hub repo, so a FORKED
+        // SIBLING's checkpoints are in that listing too and nothing in them
+        // says who wrote them. resumableCheckpoints drops every step above this
+        // run's OWN furthest step — those provably belong to a sibling — so
+        // what can still slip through is a sibling that forked early, inside
+        // this run's range. Per-run attribution of Hub checkpoints is a backend
+        // change. Locally-owned checkpoints are exact (each run owns its output
+        // dir). Note the limit follows the checkpoint's OWNER, not this run's
+        // runner: post-F7 a local run continuing a cloud parent lists that
+        // parent's Hub repo too — see `cloudSiblingStepCap`.
+        openStudio("train", {
+          train: { resume: buildResumeSeed(job, best) },
+        });
       } catch (e) {
         toast({
           title: "Couldn't load checkpoints",
@@ -260,7 +313,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         setResumingId(null);
       }
     },
-    [baseUrl, fetchWithHeaders, openStudio, toast],
+    [ancestorsOf, baseUrl, fetchWithHeaders, openStudio, toast],
   );
 
   const emptyMessage = query
@@ -406,8 +459,9 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
                           // checkpoint ref) that its fetch effect only replaces
                           // once the new run's fetch resolves. Without a key the
                           // instance is reused and, in that window, Run /
-                          // Continue / Resume / Download would act on the PREVIOUS
-                          // run while the header already shows the new one.
+                          // Resume / Fine-tune / Download would act on the
+                          // PREVIOUS run while the header already shows the
+                          // new one.
                           key={selected.key}
                           job={selected.job}
                           onStop={stop}

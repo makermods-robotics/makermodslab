@@ -42,12 +42,21 @@ export interface TrainingRequest {
   // resume from. The backend resolves these into the checkpoint's config_path.
   resume_from_job_id?: string;
   resume_from_step?: number;
+  // CHAIN REWIND: which run's storage holds the chosen checkpoint, when the
+  // user rewound to an ancestor's rather than the leaf's own. `resume_from_job_id`
+  // stays the lineage edge (always the leaf); this is provenance only. Absent ⇒
+  // the leaf owns the checkpoint. See makermodslab/train.py for why it can't be
+  // derived from the step.
+  resume_from_checkpoint_job_id?: string;
   // Consent for the one resume shape that has to publish something: continuing
   // a LOCAL run on cloud compute uploads its checkpoint to a private Hub repo
   // first, because the pod can't read this machine's disk (F7). The backend
   // refuses that combination unless this is true, so it can never be a silent
   // side effect of Continue.
   upload_resume_checkpoint?: boolean;
+  // The fine-tune twin of the consent above: a base checkpoint that lives only
+  // on this machine, fine-tuned on cloud compute. Only its WEIGHTS are staged.
+  upload_finetune_checkpoint?: boolean;
   // Set by the "Fine-tune" flow: start a fresh run whose weights are init'd
   // from an imported/existing checkpoint. The backend resolves these into
   // policy_pretrained_path (which it also accepts directly).
@@ -77,6 +86,15 @@ export interface TrainingRequest {
 
 export interface JobRecord {
   id: string;
+  // Short, stable, human-facing run number ("#46"), assigned once at creation
+  // from a persisted registry counter and never reused — see JobRecord in
+  // makermodslab/jobs.py. THE distinguisher between runs in the UI: the id is
+  // unique but unspeakable, and a display name is shared by every run on a
+  // resume chain (a continuation continues the same model).
+  //
+  // 0 ⇒ unassigned, only possible for a record read before the backend
+  // backfilled it. Render nothing rather than "#0".
+  job_number: number;
   name: string;
   // User-set display alias (rename is metadata-only; the id / output dir /
   // hub repo id never change). Null/absent ⇒ show `name`.
@@ -96,6 +114,17 @@ export interface JobRecord {
   hf_job_url: string | null;
   wandb_run_url: string | null;
   checkpoint_count: number;
+  // Resume lineage, derived server-side over the WHOLE registry (not just the
+  // page this request returned) — see JobRecord in makermodslab/jobs.py.
+  //
+  // `child_ids`: the runs that resumed this one, newest-first. Empty ⇒ this
+  // record is a LEAF, the live tip of its chain, and the one the libraries
+  // give a row to; anything with children is superseded and reached through
+  // its descendant instead. A fine-tune is NOT a child — it is a new model.
+  // `ancestor_ids`: transitive resume ancestors, nearest parent first, holding
+  // only ids the server still has (so each is fetchable by id).
+  child_ids: string[];
+  ancestor_ids: string[];
 }
 
 // Per-running-job snapshot pushed by the watchdog over WS at ~1Hz. Subset
@@ -194,7 +223,22 @@ export async function startTrainingJob(
       action: "Start training",
     });
   } catch (e) {
-    if (e instanceof ApiError && e.status === 409) {
+    // The local-run mutex is the 409 this rewrite exists for: the backend's
+    // own text there is "Job already running: <repr>", which is not a sentence
+    // to show a user. It is NOT the only 409 this endpoint can return, and
+    // blanket-rewriting every one of them swallowed messages that were the
+    // whole point of the refusal — a cloud run on a local-only dataset
+    // (upload it first), and a second continuation of an already-continued run
+    // (delete the existing one first, naming it). Both of those tell the user
+    // what to do next; "another training is already running" tells them
+    // something that isn't true. So substitute only for the mutex, and pass
+    // every other refusal's `detail` through verbatim (apiRequest already puts
+    // it in the message).
+    if (
+      e instanceof ApiError &&
+      e.status === 409 &&
+      (e.detail ?? "").startsWith("Job already running")
+    ) {
       throw new Error("Another training is already running. Stop it first.");
     }
     throw e;
