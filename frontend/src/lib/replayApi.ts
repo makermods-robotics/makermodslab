@@ -1,4 +1,4 @@
-import { Fetcher, apiRequest } from "./apiClient";
+import { ApiError, Fetcher, apiRequest } from "./apiClient";
 
 export type DatasetSource = "local" | "hub" | "both";
 
@@ -198,29 +198,73 @@ export async function listEpisodes(
   );
 }
 
+interface EpisodeDeleteResult {
+  success: boolean;
+  repo_id: string;
+  deleted_episode: number;
+  total_episodes: number;
+}
+
+interface EpisodeDeleteStatus {
+  state: "idle" | "running" | "done" | "error";
+  repo_id: string | null;
+  episode_index: number | null;
+  message: string | null;
+  result: EpisodeDeleteResult | null;
+}
+
+const EPISODE_DELETE_POLL_MS = 500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Delete one episode from a locally-cached dataset. Local-only — never
- * touches a Hub copy. Rewrites the dataset via the backend's atomic
- * directory swap, so this can take a moment for a shared-video-file episode.
- * Throws ApiError (400 invalid index / dataset's only episode, 404 not
- * local, 409 busy, 507 not enough free disk space) with the backend message
- * in `.detail`.
- * POST /datasets/episode-delete. */
+ * touches a Hub copy. The actual rewrite runs on the backend in a background
+ * thread (it can take a moment for a shared-video-file episode); this
+ * function starts it and polls until it finishes, so callers keep awaiting
+ * one call exactly as before rather than holding one HTTP request open for
+ * the whole rewrite. Throws ApiError (400 invalid index / dataset's only
+ * episode, 404 not local, 409 busy, 507 not enough free disk space, or a
+ * background rewrite failure) with the backend message in `.detail`.
+ * POST /datasets/episode-delete, polls GET /datasets/episode-delete-status. */
 export async function deleteEpisode(
   baseUrl: string,
   fetcher: Fetcher,
   repoId: string,
   episodeIndex: number,
-): Promise<{
-  success: boolean;
-  repo_id: string;
-  deleted_episode: number;
-  total_episodes: number;
-}> {
-  return apiRequest(baseUrl, fetcher, "/datasets/episode-delete", {
+): Promise<EpisodeDeleteResult> {
+  await apiRequest(baseUrl, fetcher, "/datasets/episode-delete", {
     method: "POST",
     body: { repo_id: repoId, episode_index: episodeIndex },
     action: "Delete episode",
   });
+
+  // A 409 above means someone else already owns the single delete slot, so
+  // once we get here nothing else can start and overwrite it before we see
+  // our own outcome — no need to match on repo_id/episode_index below.
+  for (;;) {
+    let status: EpisodeDeleteStatus | undefined;
+    try {
+      status = await apiRequest<EpisodeDeleteStatus>(
+        baseUrl,
+        fetcher,
+        "/datasets/episode-delete-status",
+        { action: "Delete episode" },
+      );
+    } catch {
+      // transient — retry next tick
+    }
+    if (status?.state === "done" && status.result) return status.result;
+    if (status?.state === "error") {
+      throw new ApiError(
+        `Delete episode failed: ${status.message ?? "Unknown error"}`,
+        500,
+        status.message,
+      );
+    }
+    await sleep(EPISODE_DELETE_POLL_MS);
+  }
 }
 
 export interface EpisodeJointSeries {

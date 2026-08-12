@@ -696,18 +696,30 @@ class DatasetEpisodeDeleteBody(BaseModel):
 
 @app.post("/datasets/episode-delete")
 def datasets_episode_delete(body: DatasetEpisodeDeleteBody):
-    """Delete one episode from a locally-cached dataset, rewriting it via
+    """Start rewriting a locally-cached dataset to drop one episode, via
     lerobot's delete_episodes. Never touches the Hub — if this dataset is
     also on the Hub, its published copy is left exactly as it was; use
-    "Upload to Hub" to push the edited version manually. Refuses (409) if
-    the dataset is being recorded, merged, uploaded, or trained on locally,
-    or another episode-delete is already in progress for it; 400 if the
+    "Upload to Hub" to push the edited version manually.
+
+    Returns immediately with {started, repo_id, message}; the actual rewrite
+    runs in the background (it can take a while for a shared-video-file
+    episode) — poll /datasets/episode-delete-status for the outcome. Refuses
+    (409) if the dataset is being recorded, merged, uploaded, or trained on
+    locally, or another episode-delete is already in progress; 400 if the
     index is invalid or it's the dataset's only episode; 507 if there isn't
     enough free disk space for the rewrite."""
     try:
-        return dataset_browser.delete_local_episode(body.repo_id, body.episode_index)
+        return dataset_browser.start_episode_delete(body.repo_id, body.episode_index)
     except dataset_browser.DatasetEpisodeDeleteError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+@app.get("/datasets/episode-delete-status")
+def datasets_episode_delete_status():
+    """Current episode-delete state ("idle"|"running"|"done"|"error") +
+    repo_id, episode_index, message, and result once done. Single global
+    slot — one episode-delete runs at a time, same as /upload-status."""
+    return dataset_browser.get_episode_delete_status()
 
 
 @app.get("/datasets/hub-status")

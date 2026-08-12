@@ -1435,12 +1435,12 @@ class UploadManager:
             # to avoid the datasets<->record cycle documented in _dataset_in_use.
             #
             # Also take datasets.py's shared guard lock across the check AND
-            # this claim (self.state = "running" below): delete_local_episode
+            # this claim (self.state = "running" below): start_episode_delete
             # holds the same lock across its own check-and-claim, so whichever
             # of the two gets there first is guaranteed to see the other's
             # claim, closing the TOCTOU gap between "checked, not busy" and
-            # "claimed" that let an upload start against a directory
-            # delete_local_episode was about to rewrite.
+            # "claimed" that let an upload start against a directory an
+            # episode-delete was about to rewrite.
             from .datasets import _dataset_guard_lock, _dataset_in_use
 
             with _dataset_guard_lock:

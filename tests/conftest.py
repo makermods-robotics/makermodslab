@@ -111,7 +111,8 @@ def _reset_module_caches() -> None:
     with _ds._HUB_DATASET_INFO_LOCK:
         _ds._HUB_DATASET_INFO_CACHE.clear()
     with _ds._dataset_guard_lock:
-        _ds._episode_deletes_in_progress.clear()
+        _ds._delete_status = None
+    _ds._delete_thread = None
     with _models._MODEL_HUB_INFO_LOCK:
         _models._MODEL_HUB_INFO_CACHE.clear()
 
