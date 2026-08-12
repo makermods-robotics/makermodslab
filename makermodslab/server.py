@@ -751,17 +751,25 @@ class DatasetRenameBody(BaseModel):
 
 @app.post("/datasets/rename")
 def datasets_rename(body: DatasetRenameBody):
-    """Rename a locally-cached dataset by moving its directory.
+    """Rename a locally-cached dataset by moving its directory, and its Hub
+    copy (if any) to match.
 
     `new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so
     `ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is
-    being recorded, merged, or trained on locally. Returns the new repo_id.
+    being recorded, merged, or trained on locally, or if the new name is
+    already taken (locally or on the Hub).
+
+    Returns `{success, repo_id, hub}`, where `hub` is `"renamed"` (the Hub copy
+    moved too), `"none"` (the Hub has no copy of this dataset), or `"skipped"`
+    (the Hub step didn't run — offline, logged out, or someone else's
+    namespace — so a Hub copy, if any, kept its old name). The caller needs
+    that distinction to avoid claiming a Hub rename that didn't happen.
     """
     try:
-        new_repo_id = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
+        result = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
     except dataset_browser.DatasetRenameError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
-    return {"success": True, "repo_id": new_repo_id}
+    return {"success": True, **result}
 
 
 class CustomDatasetRequest(BaseModel):
