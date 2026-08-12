@@ -1081,38 +1081,48 @@ def _dataset_in_use(repo_id: str) -> str | None:
     return None
 
 
-def rename_local_dataset(repo_id: str, new_name: str) -> str:
+def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     """Rename a locally-cached dataset by moving its directory, and its Hub
     copy (if any) to match.
 
     A dataset's repo id *is* its path under the cache root, so a rename is a
     directory move. `new_name` is the NAME PART ONLY — the namespace prefix is
     fixed, so ``ns/old`` renamed to ``new`` becomes ``ns/new`` and a bare
-    ``old`` becomes ``new``. Returns the new repo id.
+    ``old`` becomes ``new``.
 
-    Renaming is only offered for datasets the user OWNS: the namespace must be
-    one they can write to (their account or a write-role org). A downloaded
-    third-party dataset is refused with a 403 before any Hub call, since moving
-    a repo in someone else's namespace can never succeed. A bare id is treated
-    as living under the user's own account for the Hub-side check and move.
+    Returns ``{"repo_id": <new id>, "hub": "renamed" | "none" | "skipped"}``:
+
+      * ``renamed`` — a Hub copy existed and was moved to match,
+      * ``none``    — the Hub was reachable and confirmed it has no copy,
+      * ``skipped`` — the Hub step didn't run (``HF_HUB_OFFLINE``, no token, or
+        a namespace this account can't write to), so a Hub copy, if one
+        exists, KEPT ITS OLD NAME.
+
+    The local rename always happens; the tri-state exists so a caller can say
+    which of those it was instead of reporting a flat success for a rename
+    that only did half the job.
+
+    A bare id is treated as living under the user's own account for the
+    Hub-side check and move. A downloaded third-party dataset
+    (``lerobot/pusht``) still renames locally — the directory is the user's
+    own and moving it needs no Hub permission — but its Hub step is skipped,
+    since moving a repo in someone else's namespace can never succeed.
 
     If `repo_id` also exists on the Hub, it's moved there FIRST via
     ``HfApi().move_repo`` — before the local directory is touched — so a Hub
     failure (offline, no permission, name taken) leaves both copies untouched
     instead of renaming only the local one and leaving a stale Hub entry under
     the old name. If the LOCAL move then fails, the Hub move is rolled back on
-    a best-effort basis. Skipped entirely when ``HF_HUB_OFFLINE`` is set or no
-    HF token is present, same as the rest of the app's Hub mutations degrade —
-    a purely local (never-uploaded) dataset still renames fine in that case.
+    a best-effort basis.
 
     Raises DatasetRenameError (with an HTTP status + message) on: a bad
     new_name, a source that isn't a local dataset, a target that already
-    exists (locally or on the Hub), a namespace the user doesn't own, a failed
-    attempt to confirm the user's Hub identity while a token IS present (the
-    unauthenticated case above is distinct and never errors), the dataset
-    being actively used (recording / merge / local training), or a Hub rename
-    failure. Invalidates the cached Hub-existence answer for BOTH ids so the
-    info card re-checks after the move.
+    exists (locally or on the Hub), a failed attempt to confirm the user's Hub
+    identity while a token IS present (the unauthenticated case above is
+    distinct and never errors), the dataset being actively used (recording /
+    merge / local training), or a Hub rename failure. Invalidates the cached
+    Hub-existence answer for BOTH ids so the info card re-checks after the
+    move.
     """
     ok, reason = validate_dataset_name(new_name)
     if not ok:
@@ -1134,7 +1144,8 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
     local_name = repo_id.rsplit("/", 1)[1] if namespace else repo_id
     new_repo_id = f"{namespace}/{new_name}" if namespace else new_name
     if new_repo_id == repo_id:
-        return repo_id  # no-op
+        # No-op: nothing moved anywhere, so no Hub copy went stale.
+        return {"repo_id": repo_id, "hub": "none"}
 
     dst = src.parent / new_name
     if dst.exists():
@@ -1144,15 +1155,17 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
     if in_use is not None:
         raise DatasetRenameError(409, in_use)
 
-    # Which ids this rename would use ON THE HUB, and whether we're allowed to.
+    # Which ids this rename would use ON THE HUB, and whether the Hub step
+    # runs at all — see the docstring for what each `hub_state` means.
     #
-    # A rename is an identity mutation, so it only makes sense for a dataset in
-    # a namespace the user can write to. The card offers Rename for anything
-    # with a local copy, which includes DOWNLOADED THIRD-PARTY datasets
-    # (lerobot/pusht): repo_exists says True, and the move_repo that follows
-    # targets someone else's namespace, where it can never succeed. Refusing
-    # here makes that a deliberate, legible 403 instead of a Hub 403 surfacing
-    # from a button the UI happily offered.
+    # The card offers Rename for anything with a local copy, which includes
+    # DOWNLOADED THIRD-PARTY datasets (lerobot/pusht): repo_exists says True,
+    # and a move_repo there would target someone else's namespace, where it
+    # can never succeed. But the local DIRECTORY is the user's own and moving
+    # it needs no Hub permission at all — so a namespace this account can't
+    # write to gates the HUB STEP, not the whole rename. Refusing the whole
+    # operation would take away a working local capability over something the
+    # Hub was never going to allow anyway.
     #
     # A bare id (a locally-recorded dataset with no "owner/" prefix) lives under
     # the user's own account on the Hub, so it's qualified to "<username>/<name>"
@@ -1177,6 +1190,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
             "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
             "renames the local copy only and leaves any Hub copy under the old name.",
         ) from exc
+    hub_state = "skipped"
     hub_repo_id: str | None = None
     hub_new_repo_id: str | None = None
     if whoami_info is not None:
@@ -1186,14 +1200,19 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
         # "MyOrg" instead of the canonical "myorg" the account actually owns.
         hub_namespace = canonical_writable_namespace(whoami_info, requested_namespace)
         if hub_namespace is None:
-            raise DatasetRenameError(
-                403,
-                f"This dataset belongs to '{requested_namespace}' on the Hub — you can only "
-                "rename datasets in your own namespace. Delete your local copy instead, "
-                "or upload it under your own account to get a renameable copy.",
+            # Someone else's namespace (a downloaded third-party dataset, or
+            # an org this token doesn't have write access to). move_repo there
+            # can never succeed, so the Hub step is skipped — hub_state stays
+            # "skipped" — but the local rename below still goes ahead.
+            logger.info(
+                "rename: '%s' belongs to '%s' on the Hub, which this account can't write to "
+                "— renaming the local copy only",
+                repo_id,
+                requested_namespace,
             )
-        hub_repo_id = f"{hub_namespace}/{local_name}"
-        hub_new_repo_id = f"{hub_namespace}/{new_name}"
+        else:
+            hub_repo_id = f"{hub_namespace}/{local_name}"
+            hub_new_repo_id = f"{hub_namespace}/{new_name}"
 
     # Unauthenticated (no token): there's no Hub identity to resolve ownership
     # against and no credential to move a repo with, so skip the Hub entirely
@@ -1201,7 +1220,9 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
     # would break renaming a never-uploaded dataset while logged out, which is
     # the case least deserving of a Hub error.
     hub_repo_exists = False
-    if hub_repo_id is not None and not hf_hub_offline():
+    if hub_repo_id is not None and hf_hub_offline():
+        logger.info("rename: HF_HUB_OFFLINE is set — renaming %s locally only", repo_id)
+    elif hub_repo_id is not None:
         try:
             hub_repo_exists = api.repo_exists(hub_repo_id, repo_type="dataset")
         except Exception as exc:
@@ -1212,6 +1233,8 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
                 "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
                 "renames the local copy only and leaves any Hub copy under the old name.",
             ) from exc
+        if not hub_repo_exists:
+            hub_state = "none"
 
     if hub_repo_exists:
         try:
@@ -1233,6 +1256,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
             logger.info("move_repo(%s -> %s) failed: %s", hub_repo_id, hub_new_repo_id, exc)
             hub_err = _hub_edit_error(exc)
             raise DatasetRenameError(hub_err.status, hub_err.message) from exc
+        hub_state = "renamed"
         logger.info("Renamed Hub dataset %s -> %s", hub_repo_id, hub_new_repo_id)
 
     try:
@@ -1274,8 +1298,8 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
         invalidate_hub_status(stale)
     invalidate_dataset_listing_cache()
 
-    logger.info("Renamed dataset directory %s -> %s", src, dst)
-    return new_repo_id
+    logger.info("Renamed dataset directory %s -> %s (hub: %s)", src, dst, hub_state)
+    return {"repo_id": new_repo_id, "hub": hub_state}
 
 
 def list_user_datasets() -> list[dict[str, Any]]:

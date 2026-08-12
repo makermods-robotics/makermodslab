@@ -388,18 +388,28 @@ export async function deleteDataset(
   });
 }
 
+/** What happened to the dataset's Hub copy during a rename: "renamed" — the
+ * Hub copy was moved to match; "none" — the Hub was reachable and confirmed
+ * it has no copy; "skipped" — the Hub step didn't run (offline, logged out,
+ * or a namespace this account can't write to), so a Hub copy, if any, KEPT
+ * ITS OLD NAME. The local rename always happens regardless. */
+export type DatasetRenameHubResult = "renamed" | "none" | "skipped";
+
 /**
  * Rename a locally-cached dataset by moving its directory. `newName` is the
  * NAME PART ONLY — the namespace prefix stays fixed (so `ns/old` -> `ns/new`).
- * Returns the new repo_id. Throws ApiError on a rejected rename (invalid name,
- * target exists, dataset in use), with the backend's message in `.detail`.
+ * Returns the new repo_id plus `hub`, which reports whether the Hub copy was
+ * renamed too — the caller must surface it rather than claim a Hub rename
+ * happened unconditionally (a "skipped" Hub copy is still live under the old
+ * name). Throws ApiError on a rejected rename (invalid name, target exists,
+ * dataset in use), with the backend's message in `.detail`.
  */
 export async function renameDataset(
   baseUrl: string,
   fetcher: Fetcher,
   repoId: string,
   newName: string,
-): Promise<{ success: boolean; repo_id: string }> {
+): Promise<{ success: boolean; repo_id: string; hub: DatasetRenameHubResult }> {
   return apiRequest(baseUrl, fetcher, "/datasets/rename", {
     method: "POST",
     body: { repo_id: repoId, new_name: newName },

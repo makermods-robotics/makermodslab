@@ -670,7 +670,22 @@ const RenameDatasetDialog: React.FC<{
     setError(null);
     try {
       const res = await renameDataset(baseUrl, fetchWithHeaders, repoId, next);
-      toast({ title: "Dataset renamed", description: res.repo_id });
+      /* The dialog has closed by the time the toast shows, so it's the only
+       * place the user learns whether the Hub copy moved — never claim a Hub
+       * rename on "skipped" (offline / logged out / unwritable namespace). */
+      if (res.hub === "renamed") {
+        toast({
+          title: "Dataset renamed",
+          description: `${res.repo_id} — the Hub copy was renamed too.`,
+        });
+      } else if (res.hub === "skipped") {
+        toast({
+          title: "Dataset renamed locally",
+          description: `${res.repo_id} — any copy on the Hub still has the old name.`,
+        });
+      } else {
+        toast({ title: "Dataset renamed", description: res.repo_id });
+      }
       onOpenChange(false);
       onRenamed(res.repo_id);
     } catch (e) {
