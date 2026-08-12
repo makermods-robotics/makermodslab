@@ -52,6 +52,8 @@ import {
   PanelHeader,
   SLIDE,
 } from "@/components/studio/panel/primitives";
+import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 
 const NONE = "__none__";
 
@@ -146,6 +148,12 @@ const TrainPanel: React.FC = () => {
   // mutation the studio performs (stop, delete, rename, hub dismiss) already
   // pulls the list afterwards rather than trusting the broadcast.
   const { refresh: refreshJobs } = useJobsData();
+
+  const { seen: hasSeenTrainingMilestone, markSeen: markTrainingMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-training");
+  const [pendingMilestoneJobId, setPendingMilestoneJobId] = useState<
+    string | null
+  >(null);
 
   // The new-training form slides open in place; the jobs library folds to its
   // header while the form is open (still expandable by hand).
@@ -641,9 +649,13 @@ const TrainPanel: React.FC = () => {
               // it once and the run stays invisible until the next mount
               // (page reload). This is the same after-mutation refetch every
               // other studio action (stop, delete, rename) already does.
-              onStarted={() => {
+              onStarted={(jobId) => {
                 toggleForm(false);
                 refreshJobs();
+                if (!hasSeenTrainingMilestone) {
+                  setPendingMilestoneJobId(jobId);
+                  markTrainingMilestoneSeen();
+                }
               }}
               actionsContainer={actionsEl}
             />
@@ -670,6 +682,18 @@ const TrainPanel: React.FC = () => {
       <LibrarySection className="mt-0">
         <JobsLibrary open={jobsOpen} onOpenChange={setJobsOpen} />
       </LibrarySection>
+
+      {/* Training-started milestone — launchJob opens the monitor dialog
+          immediately after onStarted fires, so wait for it to close
+          (!monitorJobId) before revealing this, mirroring CollectHandoff's
+          "show after returning from the session" pattern. */}
+      {!monitorJobId && pendingMilestoneJobId && (
+        <MilestoneReveal
+          title="Training started!"
+          description="Watch progress from the jobs list above. Once it finishes, run it on your robot from the Deploy panel."
+          onDismiss={() => setPendingMilestoneJobId(null)}
+        />
+      )}
 
       {/* Job monitor as a dialog over the studio (same pattern as Collect's
           RecordingSessionDialog) — closing it lands back on this panel. */}

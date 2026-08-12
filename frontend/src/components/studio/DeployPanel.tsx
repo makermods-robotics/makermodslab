@@ -60,6 +60,8 @@ import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
 import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
+import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 
 /**
  * Studio panel 3 · Deploy — run a skill (local trained checkpoint or an
@@ -172,7 +174,7 @@ const DeployPanel: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { open, deployPrefill, clearDeployPrefill } = useStudio();
-  const { openInferenceSession } = useInferenceSession();
+  const { openInferenceSession, sessionOpen } = useInferenceSession();
   const { selectedRecord: robot } = useRobots();
   // Reuse the shared lazy-import (husk-repo messaging + idempotent registration)
   // so a Hub skill resolves to a pseudo-job exactly as the Jobs cards do.
@@ -243,6 +245,10 @@ const DeployPanel: React.FC = () => {
   // rollout is actually active.
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [stopping, setStopping] = useState(false);
+
+  const { seen: hasSeenDeployMilestone, markSeen: markDeployMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-deploy");
+  const [showDeployMilestone, setShowDeployMilestone] = useState(false);
 
   // The settings block (robot, checkpoint, run parameters, cameras) collapses
   // as one so a configured deploy can be folded down to picker + actions.
@@ -673,6 +679,10 @@ const DeployPanel: React.FC = () => {
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
       openInferenceSession();
+      if (!hasSeenDeployMilestone) {
+        setShowDeployMilestone(true);
+        markDeployMilestoneSeen();
+      }
       // The POST claims the inference slot synchronously, so a status fetch
       // issued now reflects THIS run — hand the released-previews / disabled-
       // Start duty from `submitting` to `inferenceActive` (kept fresh by the
@@ -1131,6 +1141,18 @@ const DeployPanel: React.FC = () => {
           ) : null}
         </div>
       ) : null}
+
+      {/* Deploy-started milestone — gated on the live InferenceSessionDialog
+          actually being closed (!sessionOpen) so it appears once the user
+          exits that session, mirroring the training milestone's
+          !monitorJobId guard. */}
+      {showDeployMilestone && !sessionOpen && (
+        <MilestoneReveal
+          title="First skill deployed!"
+          description="Your robot just ran a trained policy. Come back here anytime to redeploy it, swap checkpoints, or run a different skill."
+          onDismiss={() => setShowDeployMilestone(false)}
+        />
+      )}
 
       {/* Actions — pinned directly above the skill library. Side by side so
           the row sits level with Collect's and Train's single Start. -------- */}
