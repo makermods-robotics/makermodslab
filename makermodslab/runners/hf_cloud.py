@@ -58,6 +58,11 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 # "huggingface/lerobot-gpu:latest" like every other one. The label travels with
 # the job itself, so any machine signed into the account can name it.
 # Read back by _hub_job_run_name in server.py.
+#
+# This is OUR key, deliberately kept alongside run_job's own `name` (below).
+# `name` defaults to a value derived from the image when the caller omits it
+# ("lerobot-gpu-latest-<hash>"), so a `name` read back off a job is not
+# necessarily one we chose; _RUN_LABEL is unambiguous.
 _RUN_LABEL = "makermodslab.run"
 
 # The Hub rejects a label whose key or value exceeds 100 characters or strays
@@ -600,18 +605,38 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
     return HF_JOB_TIMEOUT
 
 
-def _run_job_supports_labels(api) -> bool:
-    """Whether this huggingface_hub's run_job accepts `labels`.
+def _run_job_naming_kwargs(api, job_id: str) -> dict:
+    """run_job kwargs that give the submitted job `job_id` as its name.
 
-    huggingface_hub is an unpinned transitive dependency (it arrives via the
-    lerobot pin), so the installed version is not ours to guarantee. `labels`
-    is a newer parameter; passing it blind to an older run_job would raise
-    TypeError and take down cloud training entirely, which is a far worse
-    outcome than a job that merely lists under its image name.
+    Two of them, doing different jobs:
+    - `name` is what the Hub's own jobs UI displays. Left unset it defaults to
+      a value derived from the image ("lerobot-gpu-latest-<hash>"), which is
+      why untitled runs are indistinguishable on huggingface.co too.
+    - `labels[_RUN_LABEL]` is the copy _hub_job_run_name reads back, kept
+      separate because a `name` may be that image-derived default rather than
+      ours.
+
+    Both are probed on run_job's signature first: huggingface_hub is an
+    unpinned transitive dependency (it arrives via the lerobot pin), so the
+    installed version is not ours to guarantee, and passing an unsupported
+    kwarg would raise TypeError and take down cloud training entirely — far
+    worse than a job that merely lists under its image name.
+
+    An over-long id is left unnamed rather than truncated: the Hub caps a
+    label at _MAX_LABEL_LEN and would reject it, while _hub_job_run_name's
+    argv fallback recovers the name in full anyway.
     """
+    if len(job_id) > _MAX_LABEL_LEN:
+        return {}
+    params: set[str] = set()
     with contextlib.suppress(Exception):
-        return "labels" in inspect.signature(api.run_job).parameters
-    return False
+        params = set(inspect.signature(api.run_job).parameters)
+    kwargs: dict = {}
+    if "labels" in params:
+        kwargs["labels"] = {_RUN_LABEL: job_id}
+    if "name" in params:
+        kwargs["name"] = job_id
+    return kwargs
 
 
 # Cadence at which the status poller hits inspect_job. inspect_job is the
@@ -806,18 +831,13 @@ class HfCloudJobRunner:
 
         # Stamp the run's identity onto the job itself. job_id is the slug the
         # library already titles local records by ("<name>_<timestamp>"), so a
-        # labelled job reads the same whichever machine is looking at it.
-        # An over-long id is left unlabelled rather than truncated: the Hub
-        # would reject the label outright, and _hub_job_run_name's argv
-        # fallback recovers the name in full anyway.
-        extra_kwargs = {}
-        if not _run_job_supports_labels(self._api):
+        # named job reads the same whichever machine is looking at it.
+        naming_kwargs = _run_job_naming_kwargs(self._api, job_id)
+        if not naming_kwargs:
             logger.warning(
-                "huggingface_hub's run_job takes no `labels`; job %s is named from its argv instead",
+                "Could not name HF job for %s Hub-side; it will be titled from its argv instead",
                 job_id,
             )
-        elif len(job_id) <= _MAX_LABEL_LEN:
-            extra_kwargs["labels"] = {_RUN_LABEL: job_id}
 
         job = self._api.run_job(
             image=LEROBOT_IMAGE,
@@ -825,7 +845,7 @@ class HfCloudJobRunner:
             flavor=self._flavor,
             secrets=secrets,
             timeout=resolve_job_timeout(config),
-            **extra_kwargs,
+            **naming_kwargs,
         )
         self._hf_job_id = job.id
         self._hf_job_url = getattr(job, "url", None)
