@@ -102,4 +102,26 @@ describe("OnboardingContext", () => {
     expect(secondDone).toHaveBeenCalledTimes(1);
     expect(firstDone).toHaveBeenCalledTimes(1);
   });
+
+  it("restarting the same tour while it's already active does not fire onDone", () => {
+    const { result } = setup();
+    const onDone = vi.fn();
+
+    act(() => result.current.start(tour, onDone));
+    act(() => result.current.advance()); // -> step 1, still mid-flight
+
+    // Simulates e.g. Studio being closed and reopened before its own tour
+    // finished: the same tour object restarts before the user ever saw the
+    // end of it. This must NOT fire onDone (which callers wire to their
+    // useOnceFlag markSeen) — the tour has not actually been completed.
+    act(() => result.current.start(tour, onDone));
+
+    expect(onDone).not.toHaveBeenCalled();
+    expect(result.current.activeTour?.id).toBe("test-tour");
+    expect(result.current.stepIndex).toBe(0);
+
+    // It only fires once the restarted tour actually finishes.
+    act(() => result.current.skip());
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
 });

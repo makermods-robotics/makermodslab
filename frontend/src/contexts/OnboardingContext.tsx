@@ -40,10 +40,15 @@ export const OnboardingProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const start = useCallback(
     (nextTour: Tour, onDone: () => void) => {
-      if (tour) {
-        // A tour is already active (e.g. Studio opened mid-Launchpad-tour) —
-        // finish it first so its own onDone/markSeen still fires, rather
-        // than silently dropping it when the new tour clobbers this state.
+      if (tour && tour.id !== nextTour.id) {
+        // A *different* tour is already active (e.g. Studio opened
+        // mid-Launchpad-tour) — finish it first so its own onDone/markSeen
+        // still fires, rather than silently dropping it when the new tour
+        // clobbers this state. Restarting the *same* tour (e.g. Studio
+        // closed and reopened before its own tour finished) must NOT
+        // prematurely mark that tour as done — compare by id, not just
+        // "some tour is active", or re-entering an unfinished tour burns
+        // its "seen" flag without the user ever completing it.
         onDoneRef.current();
       }
       onDoneRef.current = onDone;
