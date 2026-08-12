@@ -38,11 +38,20 @@ export const OnboardingProvider: React.FC<{ children: React.ReactNode }> = ({
     setStepIndex(0);
   }, []);
 
-  const start = useCallback((nextTour: Tour, onDone: () => void) => {
-    onDoneRef.current = onDone;
-    setTour(nextTour);
-    setStepIndex(0);
-  }, []);
+  const start = useCallback(
+    (nextTour: Tour, onDone: () => void) => {
+      if (tour) {
+        // A tour is already active (e.g. Studio opened mid-Launchpad-tour) —
+        // finish it first so its own onDone/markSeen still fires, rather
+        // than silently dropping it when the new tour clobbers this state.
+        onDoneRef.current();
+      }
+      onDoneRef.current = onDone;
+      setTour(nextTour);
+      setStepIndex(0);
+    },
+    [tour],
+  );
 
   const advance = useCallback(() => {
     if (!tour) return;
