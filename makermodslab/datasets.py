@@ -1278,6 +1278,7 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
                     target,
                     backup_dir,
                 )
+                invalidate_dataset_listing_cache()
                 raise DatasetEpisodeDeleteError(
                     500,
                     "Failed to delete episode and could not restore the original dataset. "
