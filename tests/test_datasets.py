@@ -802,8 +802,7 @@ def test_delete_episode_and_upload_start_cannot_interleave(tmp_lerobot_home: Pat
     thread attempts UploadManager.start for the same repo_id. If the two
     don't share a lock, the upload's own call to _dataset_in_use runs
     unimpeded and sees nothing claimed yet — the actual bug."""
-    from makermodslab import datasets as ds
-    from makermodslab import record as rec
+    from makermodslab import datasets as ds, record as rec
     from makermodslab.record import UploadRequest
 
     repo_id = "makermods/three"
@@ -1275,6 +1274,7 @@ def test_list_local_datasets_recovers_orphan_and_lists_it(tmp_lerobot_home: Path
 
 
 # --- Episode delete endpoint ---
+
 
 def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: Path) -> None:
     _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
