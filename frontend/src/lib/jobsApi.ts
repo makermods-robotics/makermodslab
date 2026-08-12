@@ -391,6 +391,10 @@ export async function listRunnerHardware(
 
 export interface HubJob {
   id: string;
+  // The run's name, derived Hub-side by _hub_job_run_name (submission label,
+  // else the --policy.repo_id slug in the job's argv). Null when neither is
+  // available — only then does the card fall back to the image name.
+  name: string | null;
   created_at: string | null;
   docker_image: string | null;
   space_id: string | null;

@@ -266,10 +266,13 @@ const checkpointsByJob: Record<string, JobCheckpoint[]> = {
 
 const iso = (secAgo: number) => new Date((NOW - secAgo) * 1000).toISOString();
 
-/** Untracked Hub jobs (no local record): one live, two dead leftovers. */
+/** Untracked Hub jobs (no local record): one live, two dead leftovers.
+ * `name` covers the three cases the card titles by: a labelled job, one named
+ * from its argv, and one the Hub gives us nothing for (image-name fallback). */
 const hubJobs: HubJob[] = [
   {
     id: "mock-untracked-live",
+    name: "act_cube_grab_2026-08-10_14-02-11",
     created_at: iso(20 * 60),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -280,6 +283,7 @@ const hubJobs: HubJob[] = [
   },
   {
     id: "mock-untracked-done",
+    name: "smolvla_fold_towel_2026-08-08_09-31-40",
     created_at: iso(4 * D),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -290,6 +294,7 @@ const hubJobs: HubJob[] = [
   },
   {
     id: "mock-untracked-error",
+    name: null,
     created_at: iso(6 * D),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,

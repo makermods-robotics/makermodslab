@@ -51,6 +51,23 @@ logger = logging.getLogger(__name__)
 
 LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 
+# Hub job label carrying the run's identity. Every MakerMods Lab cloud run uses
+# the same image, so without it a job's only Hub-side identifier is
+# LEROBOT_IMAGE — and a job launched from another machine (no local JobRecord
+# to match it against) shows up in the library titled
+# "huggingface/lerobot-gpu:latest" like every other one. The label travels with
+# the job itself, so any machine signed into the account can name it.
+# Read back by _hub_job_run_name in server.py.
+_RUN_LABEL = "makermodslab.run"
+
+# The Hub rejects a label whose key or value exceeds 100 characters or strays
+# outside [alphanumeric . - _]. A job id is built from a _SLUG_RE-sanitised
+# dataset name (jobs._generate_job_id), so its charset already conforms — only
+# the length can overrun, via a very long dataset name. NOTE the publish repo
+# id is deliberately NOT labelled: it contains a "/", which the Hub refuses,
+# and _hub_job_run_name can already recover the run name from argv anyway.
+_MAX_LABEL_LEN = 100
+
 # The :latest image ships whatever lerobot was current when it was built —
 # which drifts from the pin in our pyproject.toml that build_training_command's
 # argv is shaped for (a real job died on `--eval_freq`, renamed upstream).
@@ -583,6 +600,20 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
     return HF_JOB_TIMEOUT
 
 
+def _run_job_supports_labels(api) -> bool:
+    """Whether this huggingface_hub's run_job accepts `labels`.
+
+    huggingface_hub is an unpinned transitive dependency (it arrives via the
+    lerobot pin), so the installed version is not ours to guarantee. `labels`
+    is a newer parameter; passing it blind to an older run_job would raise
+    TypeError and take down cloud training entirely, which is a far worse
+    outcome than a job that merely lists under its image name.
+    """
+    with contextlib.suppress(Exception):
+        return "labels" in inspect.signature(api.run_job).parameters
+    return False
+
+
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and
 # may drop during long runs (NAT eviction, laptop sleep, proxy idle timeout)
@@ -773,12 +804,28 @@ class HfCloudJobRunner:
                 )
             secrets["WANDB_API_KEY"] = wandb_key
 
+        # Stamp the run's identity onto the job itself. job_id is the slug the
+        # library already titles local records by ("<name>_<timestamp>"), so a
+        # labelled job reads the same whichever machine is looking at it.
+        # An over-long id is left unlabelled rather than truncated: the Hub
+        # would reject the label outright, and _hub_job_run_name's argv
+        # fallback recovers the name in full anyway.
+        extra_kwargs = {}
+        if not _run_job_supports_labels(self._api):
+            logger.warning(
+                "huggingface_hub's run_job takes no `labels`; job %s is named from its argv instead",
+                job_id,
+            )
+        elif len(job_id) <= _MAX_LABEL_LEN:
+            extra_kwargs["labels"] = {_RUN_LABEL: job_id}
+
         job = self._api.run_job(
             image=LEROBOT_IMAGE,
             command=wrapped_command,
             flavor=self._flavor,
             secrets=secrets,
             timeout=resolve_job_timeout(config),
+            **extra_kwargs,
         )
         self._hf_job_id = job.id
         self._hf_job_url = getattr(job, "url", None)
