@@ -95,14 +95,26 @@ _HUB_FANOUT_MAX_WORKERS = 8
 # fast and degrades to "whatever the finished authors returned".
 _HUB_FANOUT_TIMEOUT_S = 5.0
 
-# In-process cache of Hub existence checks, keyed by the repo_id the caller
-# passed in (bare local id or already-namespaced) -> (status, url). /whoami-v2
-# and repo-existence lookups hit the network, so the info card fetches this
-# lazily and we memoize the "on Hub" answer for the process lifetime. A
-# successful upload invalidates the entry (see invalidate_hub_status), so the
-# card can flip Local only -> On Hub without waiting for a cache expiry.
-# "unknown" (the offline/unauthenticated/error degrade) is never cached, so
-# connectivity returning is picked up on the next check.
+# In-process cache of Hub existence checks, keyed by the id actually LOOKED UP
+# on the Hub (see _resolve_hub_repo_id: a bare local id resolved against the
+# logged-in namespace, or an already-namespaced id as-is) -> (status, url).
+# /whoami-v2 and repo-existence lookups hit the network, so the info card
+# fetches this lazily and we memoize the "on Hub" answer for the process
+# lifetime. A successful upload invalidates the entry (see
+# invalidate_hub_status), so the card can flip Local only -> On Hub without
+# waiting for a cache expiry. "unknown" (the offline/unauthenticated/error
+# degrade) is never cached, so connectivity returning is picked up on the next
+# check.
+#
+# Keying by the RESOLVED id (not the caller's bare id) is load-bearing: the
+# answer for a bare id depends on who is logged in, and the token can change
+# mid-process (the UI has an in-app login — see handle_hf_login). Keying by the
+# bare id alone would pin the first answer to that repo id forever: a status
+# fetched before login (unauthenticated → literal bare lookup → "local_only")
+# would survive the login and keep an already-uploaded dataset reading "Local
+# only" (re-offering upload, and making the cloud-training preflight in
+# jobs.start refuse it) for the process lifetime, and a login as a different
+# account would keep serving the previous account's on_hub answer and url.
 _HUB_STATUS_CACHE: dict[str, tuple[str, str | None]] = {}
 _HUB_STATUS_LOCK = threading.Lock()
 
@@ -110,9 +122,20 @@ _HUB_STATUS_LOCK = threading.Lock()
 def invalidate_hub_status(repo_id: str) -> None:
     """Drop the cached Hub-existence answer for `repo_id`. Called after a
     successful upload so the next /datasets/hub-status re-checks (and sees
-    the freshly pushed repo)."""
+    the freshly pushed repo).
+
+    Callers pass the id they hold — a bare local id, or a namespaced one. The
+    cache is keyed by the RESOLVED lookup id, so a bare id also drops every
+    "<namespace>/<repo_id>" entry (whichever namespace was logged in when the
+    answer was cached). Dropping a same-named entry of some other namespace is
+    harmless: it just forces one re-check.
+    """
     with _HUB_STATUS_LOCK:
         _HUB_STATUS_CACHE.pop(repo_id, None)
+        if "/" not in repo_id:
+            suffix = f"/{repo_id}"
+            for key in [k for k in _HUB_STATUS_CACHE if k.endswith(suffix)]:
+                del _HUB_STATUS_CACHE[key]
 
 
 # Short-TTL cache of the merged /datasets listing. Startup + navigation re-hit
@@ -188,6 +211,29 @@ def _fan_out_hub_authors(authors: list[str], call: Callable[[str], Any]) -> list
     return [r for r in results if r is not None]
 
 
+def _resolve_hub_repo_id(repo_id: str) -> str:
+    """The id to address `repo_id` by on the Hub.
+
+    A locally-recorded dataset's repo_id is bare (no "namespace/" prefix) —
+    that's the only form the app naturally has for it, since local dataset
+    directories aren't namespaced. Some Hub APIs resolve a bare id to the
+    caller's own namespace (``create_repo``, ``delete_repo``) and some do a
+    literal lookup that 404s on it (``repo_exists``, ``dataset_info``,
+    ``update_repo_settings``, ``snapshot_download``); qualifying up front makes
+    every call agree on one repo.
+
+    Returns the id unchanged when it is already namespaced, or when there's no
+    token to resolve a namespace from — callers must degrade gracefully rather
+    than raise on the unauthenticated case.
+    """
+    if "/" in repo_id:
+        return repo_id
+    who = cached_whoami()
+    if who is None:
+        return repo_id
+    return f"{who['name']}/{repo_id}"
+
+
 def get_hub_status(repo_id: str) -> dict[str, Any]:
     """Where a dataset repo with this id lives.
 
@@ -216,26 +262,23 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
     that's the only form the app naturally has for it. Unlike
     ``HfApi.create_repo()``, ``HfApi.repo_exists()`` does a literal lookup and
     does NOT resolve a bare id to the caller's own namespace, so a bare id is
-    qualified with the caller's namespace for the existence check (and for the
-    returned ``url``) when authenticated. The public contract is unchanged:
-    the returned ``repo_id`` is always exactly what was passed in, and the
-    cache stays keyed by that same string, matching the bare id every
-    ``invalidate_hub_status()`` caller already uses.
+    qualified with the caller's namespace (``_resolve_hub_repo_id``) for the
+    existence check and for the returned ``url``. Unauthenticated, there's no
+    namespace to qualify with, so it degrades to the literal bare-id lookup
+    rather than raising. The public contract is unchanged: the returned
+    ``repo_id`` is always exactly what was passed in.
     """
+    hub_repo_id = _resolve_hub_repo_id(repo_id)
+
+    # Keyed by the RESOLVED id, so an answer never outlives the auth state it
+    # was derived from — a later login (or a switch to another account) misses
+    # the cache and re-checks instead of serving the previous namespace's
+    # answer. See _HUB_STATUS_CACHE.
     with _HUB_STATUS_LOCK:
-        cached = _HUB_STATUS_CACHE.get(repo_id)
+        cached = _HUB_STATUS_CACHE.get(hub_repo_id)
     if cached is not None:
         cached_status, cached_url = cached
         return {"repo_id": repo_id, "status": cached_status, "url": cached_url}
-
-    hub_repo_id = repo_id
-    if "/" not in hub_repo_id:
-        who = cached_whoami()
-        if who is not None:
-            hub_repo_id = f"{who['name']}/{hub_repo_id}"
-        # else: no auth — fall back to the literal bare-id lookup below rather
-        # than raising; get_hub_status is documented to never raise, and an
-        # unauthenticated caller has no namespace to qualify with anyway.
 
     api = shared_hf_api()
     try:
@@ -264,7 +307,7 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
         # Cache only the definitive, stable answers; "absent" can flip to local
         # without a hub-status invalidation, so leave it uncached (like "unknown").
         if status in ("on_hub", "local_only"):
-            _HUB_STATUS_CACHE[repo_id] = (status, url)
+            _HUB_STATUS_CACHE[hub_repo_id] = (status, url)
     return {"repo_id": repo_id, "status": status, "url": url}
 
 

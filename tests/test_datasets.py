@@ -527,8 +527,7 @@ def test_get_hub_status_bare_id_falls_back_when_unauthenticated() -> None:
 
 
 def test_get_hub_status_cache_hit_preserves_resolved_url() -> None:
-    """The cache is keyed by the bare repo_id (matching invalidate_hub_status
-    callers), but must remember the resolved URL from the first lookup so a
+    """The cache must remember the resolved URL from the first lookup so a
     cache hit doesn't regress to the unqualified (wrong) URL."""
     from makermodslab import datasets as ds
 
@@ -545,6 +544,91 @@ def test_get_hub_status_cache_hit_preserves_resolved_url() -> None:
     assert first == second
     assert second["url"] == "https://huggingface.co/datasets/makermods/makermods_logo_20260805_152059"
     fake_api.repo_exists.assert_called_once()
+
+
+def test_get_hub_status_rechecks_after_login() -> None:
+    """A status fetched BEFORE the user logs in must not pin the answer.
+
+    The app has an in-app login (handle_hf_login), so the very first hub-status
+    fetch often runs unauthenticated: no namespace to qualify with, so the bare
+    lookup 404s and the dataset reads "local_only". That answer is only valid
+    for "no token"; keying the cache by the resolved id means the post-login
+    call (which resolves to "<namespace>/<id>") misses and re-checks. Keying by
+    the bare id instead left an already-uploaded dataset reading "Local only"
+    for the process lifetime — re-offering upload, and making the cloud
+    preflight in JobRegistry.start refuse it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    # Literal lookup, like the real HfApi.repo_exists: only the namespaced id.
+    fake_api.repo_exists.side_effect = lambda rid, repo_type=None: rid == "makermods/logo_2026"
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        with patch("makermodslab.datasets.cached_whoami", return_value=None):
+            assert ds.get_hub_status("logo_2026")["status"] == "local_only"
+        with patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}):
+            after_login = ds.get_hub_status("logo_2026")
+
+    assert after_login["status"] == "on_hub"
+    assert after_login["url"] == "https://huggingface.co/datasets/makermods/logo_2026"
+    assert [c.args[0] for c in fake_api.repo_exists.call_args_list] == [
+        "logo_2026",
+        "makermods/logo_2026",
+    ]
+
+
+def test_get_hub_status_does_not_serve_another_accounts_answer() -> None:
+    """The resolved id depends on WHO is logged in, and the token can change
+    mid-process (an in-app login as a different account). A cached answer for
+    one namespace must never be served to the next one — alice would otherwise
+    see "Uploaded to HuggingFace" linking to makermods' repo."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda rid, repo_type=None: rid == "makermods/logo_2026"
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        with patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}):
+            assert ds.get_hub_status("logo_2026")["status"] == "on_hub"
+        with patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice"}):
+            as_alice = ds.get_hub_status("logo_2026")
+
+    assert as_alice["status"] == "local_only"
+    assert as_alice["url"] is None
+
+
+def test_invalidate_hub_status_drops_namespaced_entry_for_bare_id() -> None:
+    """Callers invalidate with the id they hold — for a locally-recorded
+    dataset that's the bare one (see UploadManager) — while the cache is keyed
+    by the resolved "<namespace>/<id>". The bare invalidation must drop that
+    resolved entry too, or a successful upload wouldn't flip the card."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "makermods"}),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        assert ds.get_hub_status("logo_2026")["status"] == "local_only"
+        assert "makermods/logo_2026" in ds._HUB_STATUS_CACHE
+
+        # Simulate a successful upload: repo now exists, cache invalidated by
+        # the bare id the UploadManager holds.
+        ds.invalidate_hub_status("logo_2026")
+        assert ds._HUB_STATUS_CACHE == {}
+        fake_api.repo_exists.return_value = True
+        assert ds.get_hub_status("logo_2026")["status"] == "on_hub"
+
+    assert fake_api.repo_exists.call_count == 2
 
 
 def test_hub_status_endpoint(client: TestClient) -> None:
