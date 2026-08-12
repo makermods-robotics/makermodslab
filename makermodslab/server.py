@@ -702,7 +702,8 @@ def datasets_episode_delete(body: DatasetEpisodeDeleteBody):
     "Upload to Hub" to push the edited version manually. Refuses (409) if
     the dataset is being recorded, merged, uploaded, or trained on locally,
     or another episode-delete is already in progress for it; 400 if the
-    index is invalid or it's the dataset's only episode."""
+    index is invalid or it's the dataset's only episode; 507 if there isn't
+    enough free disk space for the rewrite."""
     try:
         return dataset_browser.delete_local_episode(body.repo_id, body.episode_index)
     except dataset_browser.DatasetEpisodeDeleteError as exc:

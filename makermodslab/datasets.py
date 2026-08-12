@@ -1314,6 +1314,9 @@ class DatasetEpisodeDeleteError(Exception):
         self.message = message
 
 
+_DISK_PREFLIGHT_MARGIN = 1.1  # 10% headroom over the dataset's on-disk size
+
+
 def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
     """Delete one episode from a locally-cached dataset.
 
@@ -1327,9 +1330,10 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
     Raises DatasetEpisodeDeleteError (status + message) when: the dataset
     isn't found locally (404), it's busy — recording / merge / upload /
     local training (409), the dataset can't be loaded, the index is out of
-    range, or it's the dataset's only episode (400), or the rewrite/swap
-    itself fails (500, rolling back to the original directory when
-    possible).
+    range, or it's the dataset's only episode (400), there isn't enough free
+    disk space for the rewrite (507, checked up front against the dataset's
+    current on-disk size), or the rewrite/swap itself fails (500, rolling
+    back to the original directory when possible).
     """
     target = _resolve_local_dataset_path(repo_id)
     if target is None:
@@ -1369,6 +1373,20 @@ def delete_local_episode(repo_id: str, episode_index: int) -> dict[str, Any]:
         if total_episodes <= 1:
             raise DatasetEpisodeDeleteError(
                 400, "This is the dataset's only episode — delete the whole dataset instead."
+            )
+
+        # delete_episodes builds an entirely new copy before the swap, so free
+        # space briefly has to hold both the original and the rewrite at once —
+        # check that up front rather than hitting a mid-re-encode ENOSPC that
+        # would otherwise surface as a generic 500 with no useful message.
+        dataset_size = _dir_size_bytes(target)
+        free_space = shutil.disk_usage(target.parent).free
+        needed = int(dataset_size * _DISK_PREFLIGHT_MARGIN)
+        if free_space < needed:
+            raise DatasetEpisodeDeleteError(
+                507,
+                "Not enough free disk space to delete this episode — rewriting the dataset needs "
+                f"about {needed / 1e9:.1f} GB free, but only {free_space / 1e9:.1f} GB is available.",
             )
 
         tmp_dir = target.parent / f".{target.name}.delete-tmp-{uuid.uuid4().hex[:8]}"

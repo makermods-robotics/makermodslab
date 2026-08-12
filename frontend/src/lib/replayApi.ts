@@ -202,7 +202,8 @@ export async function listEpisodes(
  * touches a Hub copy. Rewrites the dataset via the backend's atomic
  * directory swap, so this can take a moment for a shared-video-file episode.
  * Throws ApiError (400 invalid index / dataset's only episode, 404 not
- * local, 409 busy) with the backend message in `.detail`.
+ * local, 409 busy, 507 not enough free disk space) with the backend message
+ * in `.detail`.
  * POST /datasets/episode-delete. */
 export async function deleteEpisode(
   baseUrl: string,

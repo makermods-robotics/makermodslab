@@ -935,6 +935,31 @@ def _stub_delete_episodes_success(new_total: int, *, marker: bytes = b"new-data"
     return _fake
 
 
+def test_delete_episode_insufficient_disk_space_507s(tmp_lerobot_home: Path) -> None:
+    """Not enough free space for the rewrite is caught up front — a clear 507,
+    not a mid-re-encode ENOSPC surfacing as a generic 500."""
+    from makermodslab.datasets import DatasetEpisodeDeleteError, delete_local_episode
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+    fake_usage = MagicMock(free=10)  # far below any real dataset's on-disk size
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch("makermodslab.datasets.shutil.disk_usage", return_value=fake_usage),
+        patch("makermodslab.datasets.delete_episodes") as delete_episodes_mock,
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        delete_local_episode("makermods/three", 1)
+
+    assert exc.value.status == 507
+    delete_episodes_mock.assert_not_called()
+    # Original directory is completely untouched.
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+    leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
+    assert leftovers == []
+
+
 def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> None:
     """The live directory ends up as whatever lerobot's delete_episodes wrote
     into output_dir, the temp/backup dirs are cleaned up, and the listing
