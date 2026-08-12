@@ -1127,7 +1127,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     a best-effort basis.
 
     Raises DatasetRenameError (with an HTTP status + message) on: a bad
-    new_name, a source that isn't a local dataset, a target that already
+    repo_id or new_name, a source that isn't a local dataset, a target that already
     exists (locally or on the Hub), a failed attempt to confirm the user's Hub
     identity while a token IS present (the unauthenticated case above is
     distinct and never errors), the dataset being actively used (recording /
@@ -1135,6 +1135,13 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     Hub-existence answer for BOTH ids so the info card re-checks after the
     move.
     """
+    # Validate the SOURCE id too, the way record and merge do at creation.
+    # Without this a malformed id (`a/b/c`) is a fully valid local directory
+    # path and would rename to an equally malformed one, silently.
+    ok, reason = validate_dataset_repo_id(repo_id)
+    if not ok:
+        raise DatasetRenameError(400, reason)
+
     ok, reason = validate_dataset_name(new_name)
     if not ok:
         raise DatasetRenameError(400, reason)

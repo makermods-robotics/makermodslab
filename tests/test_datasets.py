@@ -579,6 +579,31 @@ def test_rename_rejects_invalid_name(tmp_lerobot_home: Path) -> None:
     assert (tmp_lerobot_home / "makermods" / "src").exists()
 
 
+def test_rename_rejects_malformed_source_repo_id(tmp_lerobot_home: Path) -> None:
+    """The SOURCE id is validated too, the same way record and merge validate
+    at creation (validate_dataset_repo_id). A nested id like `a/b/c` is not a
+    Hub id at all -- reject it on shape before doing anything else, rather
+    than silently renaming it to another equally malformed local path."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "a/b/c", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("a/b/c", "d")
+
+    # 400, not 404: the id is rejected on its shape, before the cache is even
+    # consulted — and no Hub round-trip is spent on an id the Hub can't hold.
+    assert exc.value.status == 400
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "a" / "b" / "c").exists()
+
+
 def test_rename_missing_source_404s(tmp_lerobot_home: Path) -> None:
     from makermodslab.datasets import DatasetRenameError, rename_local_dataset
 
