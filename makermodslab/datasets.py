@@ -1325,7 +1325,7 @@ def _dataset_in_use(repo_id: str) -> str | None:
     """If `repo_id`'s directory is in use by a running operation, return a
     legible reason to refuse a rename; else None.
 
-    Checks the five ways a dataset dir can be actively read/written:
+    Checks the six ways a dataset dir can be actively read/written:
       * recording — the active session's (timestamp-stamped) repo id, OR the
         base name the user typed (recording stamps ``name`` → ``name_<ts>``,
         so a rename of the base while a session writes ``name_<ts>`` would
@@ -1335,7 +1335,12 @@ def _dataset_in_use(repo_id: str) -> str | None:
         deleting the directory mid-push would corrupt the upload);
       * local training — any running local job whose config trains on it;
       * episode delete — a background episode-delete rewriting this
-        directory (see _delete_status above).
+        directory (see _delete_status above);
+      * episode undo — a background episode-undo rewriting this directory
+        (see _undo_status above). Without this, a second episode-delete (or
+        a rename) could start mid-undo and race _episode_undo_worker's
+        target -> backup_dir -> target swap, which is two separate renames
+        with no atomicity between them.
 
     Read-only imports; each module owns its own state. Kept deliberately
     simple: a false "in use" is safer than yanking a directory mid-write.
@@ -1363,6 +1368,15 @@ def _dataset_in_use(repo_id: str) -> str | None:
             and _delete_status["repo_id"] == repo_id
         ):
             return "An episode is being deleted from this dataset right now. Wait for it to finish."
+
+    # Episode undo: datasets.py owns this state directly (see above).
+    with _dataset_guard_lock:
+        if (
+            _undo_status is not None
+            and _undo_status["state"] == "running"
+            and _undo_status["repo_id"] == repo_id
+        ):
+            return "A deleted episode is being restored to this dataset right now. Wait for it to finish."
 
     # Merge: merge.py exposes a MergeManager singleton with state + output id.
     from . import merge as _merge

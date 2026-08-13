@@ -788,6 +788,26 @@ def test_dataset_in_use_reports_episode_delete_in_progress() -> None:
         ds._delete_status = None
 
 
+def test_dataset_in_use_reports_episode_undo_in_progress() -> None:
+    """_dataset_in_use (used by rename, whole-dataset delete, episode-delete's
+    own busy-check, and upload-start) refuses a dataset that's mid-episode-undo,
+    so those operations can't race _episode_undo_worker's non-atomic
+    target -> backup_dir -> target swap."""
+    from makermodslab import datasets as ds
+
+    ds._undo_status = {
+        "state": "running",
+        "repo_id": "makermods/mid-undo-swap",
+        "trash_id": "deadbeef",
+        "message": "Restoring…",
+        "result": None,
+    }
+    try:
+        assert ds._dataset_in_use("makermods/mid-undo-swap") is not None
+    finally:
+        ds._undo_status = None
+
+
 def test_delete_episode_and_upload_start_cannot_interleave(tmp_lerobot_home: Path) -> None:
     """TOCTOU regression test (PR #54 review, C2): start_episode_delete's busy
     CHECK (_dataset_in_use) and its CLAIM (_delete_status = {...}) must be
