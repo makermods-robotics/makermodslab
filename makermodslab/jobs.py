@@ -2660,6 +2660,27 @@ class JobSourceOfQueuedRunError(Exception):
         super().__init__(f"{job_id} holds the checkpoint {len(queued_ids)} queued run(s) will train from.")
 
 
+class JobRemovalFailedError(Exception):
+    """Raised when a job's `job.json` could not be removed.
+
+    The record is LEFT EXACTLY AS IT WAS when this fires — in memory, on disk,
+    in whatever state the caller found it. Removal is durable or it does not
+    happen: a record dropped from memory while its `job.json` survives is read
+    straight back by the next restart, so the run REAPPEARS. For a cancelled
+    queued run that is the sharp case — it comes back in the queue and trains,
+    the one outcome a cancel exists to prevent — but a deleted run returning to
+    the history is the same failure with a smaller blast radius.
+
+    Reporting the failure and keeping the record lets the user retry against a
+    state that still matches what they see.
+    """
+
+    def __init__(self, job_id: str, reason: OSError) -> None:
+        self.job_id = job_id
+        self.reason = reason
+        super().__init__(f"Could not remove {job_id}'s record from disk: {reason}")
+
+
 class JobHasChildrenError(Exception):
     """Raised when delete() is called on a run something else resumed from.
 
@@ -4370,9 +4391,8 @@ class JobRegistry:
         instead of hours of lost work.
 
         The intent is registered under the lock BEFORE any signal or cancel
-        leaves this process, so the watchdog can never finalise a stop it
-        doesn't know about — the reason every Stop press used to land in
-        history as `failed`.
+        leaves this process, so the watchdog can never finalise a stop it does
+        not know about and file a deliberate stop as `failed`.
 
         Intent alone does not decide the outcome: the runner still gets to
         report that it finished on its own, or that it was already dead when we
@@ -4429,7 +4449,10 @@ class JobRegistry:
                 dependents = self._queued_dependents_of(record)
                 if dependents:
                     raise JobSourceOfQueuedRunError(job_id, dependents)
-                self._forget_locked(job_id)
+                # Disk first, then memory — see `_remove_locked`. A cancel that
+                # only reached memory comes back as a queued run on the next
+                # restart and trains.
+                self._remove_locked(job_id)
                 cancelled = record
             else:
                 cancelled = None
@@ -4440,8 +4463,7 @@ class JobRegistry:
                     raise JobNotRunningError(job_id)
                 self._stop_requested.add(job_id)
         if cancelled is not None:
-            with contextlib.suppress(FileNotFoundError):
-                shutil.rmtree(_job_dir(self._output_root, job_id))
+            self._discard_job_dir(job_id)
             self._notify_change()
             return cancelled
         runner.stop()
@@ -4639,16 +4661,63 @@ class JobRegistry:
     def _forget_locked(self, job_id: str) -> None:
         """Drop every in-memory trace of a job. CALLER HOLDS `self._lock`.
 
-        Shared by `delete()` and by `stop()`'s cancel-a-queued-run path, so the
-        two cannot drift apart about what "gone" means. The caller removes the
-        job DIRECTORY afterwards, outside the lock (rmtree is filesystem I/O and
-        has no business inside the critical section).
+        In-memory only: this makes a job invisible, not deleted, and nothing it
+        does survives a restart. Its one caller is `_remove_locked`, which takes
+        `job.json` first so the durable half can never be skipped; the job
+        DIRECTORY goes later via `_discard_job_dir`, outside the lock (rmtree is
+        filesystem I/O and has no business in a critical section).
         """
         self._records.pop(job_id, None)
         self._runners.pop(job_id, None)
         self._last_persist_at.pop(job_id, None)
         self._stop_requested.discard(job_id)
         self._prepare_threads.pop(job_id, None)
+
+    def _remove_locked(self, job_id: str) -> None:
+        """Remove a job from DISK and then from memory. CALLER HOLDS `self._lock`.
+
+        The order is the point. `job.json` is the only trace of a job that
+        outlives the process, so it goes first: forgetting the record and
+        unlinking afterwards means any failure but "already gone" leaves a
+        job.json on disk with no record behind it, and `_load_from_disk` reads
+        it straight back on the next restart. A cancelled queued run returns to
+        the queue and TRAINS; a deleted run returns to the history.
+
+        Raises `JobRemovalFailedError` with the record untouched if the unlink
+        fails, so a caller that cannot finish reports a state the user can still
+        act on. Both `delete()` and `stop()`'s cancel path go through here, so
+        the two cannot drift apart about what "gone" means.
+
+        One unlink of a local file, the same class of I/O `_persist` already
+        does inside this critical section — and done under the lock so no reader
+        can observe a record whose file is already gone.
+        """
+        try:
+            _job_meta_path(self._output_root, job_id).unlink()
+        except FileNotFoundError:
+            pass  # Already gone: the removal is durable by definition.
+        except OSError as exc:
+            raise JobRemovalFailedError(job_id, exc) from exc
+        self._forget_locked(job_id)
+
+    def _discard_job_dir(self, job_id: str) -> None:
+        """Delete a removed job's directory. Call OUTSIDE the lock.
+
+        Best effort, and deliberately not fatal: `_remove_locked` has already
+        taken `job.json`, so nothing left here can bring the run back. What
+        survives a failure is a directory the loader skips, which is not a
+        reason to fail an operation that has already taken effect.
+        """
+        try:
+            shutil.rmtree(_job_dir(self._output_root, job_id))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception(
+                "Removed %s, but could not delete its directory. The run is gone and "
+                "cannot come back; the leftover directory is inert.",
+                job_id,
+            )
 
     def delete(self, job_id: str) -> None:
         with self._lock:
@@ -4671,9 +4740,10 @@ class JobRegistry:
             dependents = self._queued_dependents_of(record)
             if dependents:
                 raise JobSourceOfQueuedRunError(job_id, dependents)
-            self._forget_locked(job_id)
-        with contextlib.suppress(FileNotFoundError):
-            shutil.rmtree(_job_dir(self._output_root, job_id))
+            # Disk first, then memory — see `_remove_locked`. A delete that only
+            # reached memory comes back in the history on the next restart.
+            self._remove_locked(job_id)
+        self._discard_job_dir(job_id)
         self._notify_change()
 
     def shutdown(self) -> None:
@@ -5640,6 +5710,7 @@ __all__ = [
     "PreparingJobRunner",
     "JobRegistry",
     "make_snapshot_progress_tqdm",
+    "JobRemovalFailedError",
     "JobNotFoundError",
     "JobSourceOfQueuedRunError",
     "JobStateChangedError",

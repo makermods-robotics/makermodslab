@@ -71,6 +71,7 @@ from .jobs import (
     JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
+    JobRemovalFailedError,
     JobSourceOfQueuedRunError,
     JobStateChangedError,
     JobTarget,
@@ -1330,12 +1331,6 @@ async def create_training_job(req: Request):
             # malformed request for this server's configuration, not a conflict
             # with some other state — nothing is holding the dataset; it simply
             # isn't here and can't be fetched.
-            #
-            # (This used to be justified instead by startTrainingJob rewriting
-            # EVERY 409 into "Another training is already running", which would
-            # have masked the message. That rewrite is gone — the local mutex it
-            # served was replaced by the queue — so the reasoning above is what
-            # holds the 400 in place now. The conclusion is unchanged.)
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -1996,6 +1991,19 @@ def stop_job(job_id: str, expect_state: str | None = None):
                 "from. Cancel those first."
             ),
         ) from exc
+    except JobRemovalFailedError as exc:
+        # 500, not 409: nothing about the request was wrong. Say plainly that
+        # the run is untouched, because the alternative reading — "cancel
+        # half-worked" — is what would make a user walk away from a run that is
+        # still going to train.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not cancel job {job_id!r}: {exc.reason}. The run is still queued "
+                "and will still start when the slot frees — nothing was removed, so it is "
+                "safe to try again."
+            ),
+        ) from exc
 
 
 @app.delete("/jobs/{job_id}", status_code=204)
@@ -2030,6 +2038,17 @@ def delete_job(job_id: str):
             detail=(
                 f"Job {job_id!r} holds the checkpoint queued run(s) {waiting} will train "
                 "from. Cancel them first, or wait for them to finish."
+            ),
+        ) from exc
+    except JobRemovalFailedError as exc:
+        # 500, not 409: nothing about the request was wrong. Say that the run is
+        # untouched, because the alternative reading — "delete half-worked" — is
+        # what would leave a user surprised to see it again after a restart.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not delete job {job_id!r}: {exc.reason}. The run is untouched and "
+                "still in your history — nothing was removed, so it is safe to try again."
             ),
         ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job

@@ -6447,6 +6447,131 @@ def test_stop_on_a_queued_job_removes_it(tmp_path) -> None:
     assert "b" not in _quiet_registry(tmp_path)._records
 
 
+def test_a_cancel_that_cannot_reach_disk_leaves_the_run_alone(monkeypatch, tmp_path) -> None:
+    """A cancel is durable or it does not happen.
+
+    `job.json` is the only trace that outlives the process, so if it cannot be
+    removed the record must STAY — in memory, in the queue, and on disk. The
+    order this protects against is drop-then-unlink: that leaves a `queued`
+    job.json with no record behind it, and the next restart loads it back into
+    the queue and trains a run the user cancelled."""
+    from makermodslab.jobs import JobRemovalFailedError
+
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    _inject_queued(reg, "a", seq=10, persist=True)
+    _inject_queued(reg, "b", seq=20, persist=True)
+    meta = tmp_path / "root" / "b" / "job.json"
+    assert meta.exists()
+
+    real_unlink = Path.unlink
+
+    def refuse_this_one(self, *args, **kwargs):
+        if self == meta:
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse_this_one)
+
+    with pytest.raises(JobRemovalFailedError):
+        reg.stop("b")
+
+    # Untouched, so what the user is looking at is still true.
+    assert reg.get("b").state == "queued"
+    assert [r.id for r in reg._queued_records()] == ["a", "b"]
+    assert meta.exists()
+    # And a restart still finds it queued — not lost, not duplicated.
+    assert _quiet_registry(tmp_path).get("b").state == "queued"
+
+
+def test_a_cancel_stands_even_if_the_directory_will_not_delete(monkeypatch, tmp_path) -> None:
+    """Once `job.json` is gone the cancel has happened and cannot be undone by
+    anything left on disk, so a failing rmtree must not fail the request. What
+    survives is an empty directory the loader skips."""
+    from makermodslab.jobs import JobNotFoundError
+
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    _inject_queued(reg, "a", seq=10, persist=True)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("makermodslab.jobs.shutil.rmtree", refuse)
+
+    removed = reg.stop("a")
+
+    assert removed.id == "a"
+    with pytest.raises(JobNotFoundError):
+        reg.get("a")
+    # The durable half went first, so the leftover directory is inert.
+    assert not (tmp_path / "root" / "a" / "job.json").exists()
+    assert "a" not in _quiet_registry(tmp_path)._records
+
+
+def _inject_done(reg, job_id: str):
+    """A finished record, persisted — the shape `delete()` is normally given."""
+    record = _inject_queued(reg, job_id, seq=0)
+    record.state = "done"
+    record.queue_seq = 0
+    record.ended_at = 1.0
+    with reg._lock:
+        reg._write_meta(record)
+    return record
+
+
+def test_a_delete_that_cannot_reach_disk_leaves_the_run_alone(monkeypatch, tmp_path) -> None:
+    """`delete()` is durable on the same terms as a cancel.
+
+    Milder than the queued case — what comes back is a finished run in the
+    history, not one that starts training — but it is the same failure, so it
+    goes through the same `_remove_locked` and gets the same guarantee."""
+    from makermodslab.jobs import JobRemovalFailedError
+
+    reg = _quiet_registry(tmp_path)
+    _inject_done(reg, "old")
+    meta = tmp_path / "root" / "old" / "job.json"
+    assert meta.exists()
+
+    real_unlink = Path.unlink
+
+    def refuse_this_one(self, *args, **kwargs):
+        if self == meta:
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse_this_one)
+
+    with pytest.raises(JobRemovalFailedError):
+        reg.delete("old")
+
+    # Untouched, so the history the user is looking at is still true.
+    assert reg.get("old").state == "done"
+    assert meta.exists()
+    assert _quiet_registry(tmp_path).get("old").state == "done"
+
+
+def test_a_delete_stands_even_if_the_directory_will_not_delete(monkeypatch, tmp_path) -> None:
+    """Once `job.json` is gone the delete has happened, so a failing rmtree must
+    not fail the request."""
+    from makermodslab.jobs import JobNotFoundError
+
+    reg = _quiet_registry(tmp_path)
+    _inject_done(reg, "old")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("makermodslab.jobs.shutil.rmtree", refuse)
+
+    reg.delete("old")
+
+    with pytest.raises(JobNotFoundError):
+        reg.get("old")
+    assert not (tmp_path / "root" / "old" / "job.json").exists()
+    assert "old" not in _quiet_registry(tmp_path)._records
+
+
 def test_drain_queue_is_a_no_op_while_the_local_slot_is_busy(tmp_path) -> None:
     """The whole point of the queue: while a local run holds the slot, nothing
     behind it starts, however many ticks go by."""
