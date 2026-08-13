@@ -88,8 +88,15 @@ _CONNECT_RETRY_DELAY_S = 0.25
 # Bound on how long stop_and_wait() waits for the worker to actually finish
 # releasing the arm before forcing an immediate release — mirrors
 # teleoperate.py's _STOP_AND_WAIT_TIMEOUT_S shape (RETURN_CEILING_S is
-# rest_pose.py's own poll-loop ceiling).
-_STOP_AND_WAIT_TIMEOUT_S = RETURN_CEILING_S + 5.0
+# rest_pose.py's own poll-loop ceiling), but budgets TWO returns rather than
+# one: unlike teleoperation, a SIGTERM landing during replay's ease-in can
+# owe the ease-in's own RETURN_CEILING_S-bounded return-to-episode-start AND
+# THEN the stopping-phase's RETURN_CEILING_S-bounded return-to-session-start
+# in series (see _replay_worker's ease-in fall-through). The abort_event fix
+# makes the ease-in leg near-instant in the common case, but this is the
+# last-resort guard for precisely the case where something didn't abort as
+# designed — size it for the worst case, not the common one.
+_STOP_AND_WAIT_TIMEOUT_S = 2 * RETURN_CEILING_S + 5.0
 
 
 class ReplayRequest(BaseModel):
@@ -108,6 +115,11 @@ replay_active: bool = False
 replay_thread: threading.Thread | None = None
 _state_lock = threading.Lock()
 _replay_started_at: float | None = None
+# Module-scoped (not local to _replay_worker) so handle_stop_replay can
+# actually signal it — a stop_event that only the worker itself could see or
+# set left a stop pressed during the ease-in with nothing to notice it. Reset
+# at the start of every new session (see handle_start_replay).
+_stop_event = threading.Event()
 # {phase, episode_index, elapsed_s, duration_s, error, hint} — see
 # handle_replay_status. phase is one of: idle | easing_in | playing |
 # stopping | done | error.
@@ -236,6 +248,7 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 }
 
         replay_active = True
+        _stop_event.clear()
         _replay_started_at = time.time()
         _replay_meta = {
             "phase": "easing_in",
@@ -368,10 +381,9 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
     action_names = action_series["action_names"]
     timestamps = action_series["timestamps"]
     frames = action_series["values"]
-    stop_event = threading.Event()
 
     def _stop_check() -> bool:
-        return not replay_active or stop_event.is_set()
+        return not replay_active or _stop_event.is_set()
 
     start_pose = capture_rest_pose(robot.bus, normalize=False)
 
@@ -381,7 +393,7 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
             arrived, reason = return_to_rest_pose(
                 robot.bus,
                 _bus_keyed(frame0, robot.bus),
-                abort_event=stop_event,
+                abort_event=_stop_event,
                 label="follower arm",
                 normalize=True,
                 tolerance=EASE_ARRIVE_TOLERANCE,
@@ -400,86 +412,101 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
                         f"The arm didn't settle at this episode's starting position ({reason}). "
                         "Try again, or reposition it closer first."
                     )
-                return
-            if reason == "cut-short" or _stop_check():
-                return
-
-            # The ease-in stamps RETURN_POS_SPEED into every motor's RAM
-            # Goal_Velocity and clears it again in its own finally — but that
-            # restore is best-effort, so a single dropped serial write leaves a
-            # 400 profile cap throttling the ENTIRE playback (slow but
-            # accurate-looking, with nothing in the UI to say why). Re-clear and
-            # verify here so playback can never inherit the ease-in's cap.
-            _ensure_uncapped(robot, "follower arm")
-
-            with _state_lock:
-                _replay_meta["phase"] = "playing"
-
-            t0 = time.monotonic()
-            skipped = 0
-            last_i = len(timestamps) - 1
-            for i, (ts, values) in enumerate(zip(timestamps, frames, strict=True)):
-                if _stop_check():
-                    break
-                target_t = t0 + ts
-                now = time.monotonic()
-                # Falling behind (a slow bus read, a GC pause, a serial retry)
-                # used to make every overdue frame fire back-to-back with no
-                # wait, streaming far-apart setpoints at uncapped speed — the
-                # arm lurches through them instead of following the recorded
-                # path. Drop stale frames instead: the arm is then always
-                # driven to the setpoint that matches wall-clock time. The
-                # final frame is never dropped, so the episode still ends on
-                # its recorded pose.
-                if now > target_t + _MAX_FRAME_LAG_S and i != last_i:
-                    skipped += 1
-                    continue
-                while True:
-                    now = time.monotonic()
-                    if now >= target_t or _stop_check():
-                        break
-                    time.sleep(min(0.01, target_t - now))
-                if _stop_check():
-                    break
-
-                action = dict(zip(action_names, values, strict=True))
-                robot.send_action(action)
+                # Fall through to the graceful return below instead of
+                # returning here — an ease-in that didn't arrive still left
+                # the arm mid-air under torque, and the drop straight to
+                # force_disable_torque in `finally` is exactly what the return
+                # below exists to avoid.
+            elif reason == "cut-short" or _stop_check():
+                # A stop landed during (or right as) the ease-in — skip
+                # playback and fall through to the same graceful return every
+                # other stop path uses, instead of dropping the arm wherever
+                # the ease-in left it.
+                pass
+            else:
+                # The ease-in stamps RETURN_POS_SPEED into every motor's RAM
+                # Goal_Velocity and clears it again in its own finally — but that
+                # restore is best-effort, so a single dropped serial write leaves a
+                # 400 profile cap throttling the ENTIRE playback (slow but
+                # accurate-looking, with nothing in the UI to say why). Re-clear and
+                # verify here so playback can never inherit the ease-in's cap.
+                _ensure_uncapped(robot, "follower arm")
 
                 with _state_lock:
-                    _replay_meta["elapsed_s"] = time.monotonic() - t0
+                    _replay_meta["phase"] = "playing"
 
-                if websocket_manager is not None and getattr(websocket_manager, "active_connections", None):
-                    try:
-                        observation = robot.get_observation()
-                        websocket_manager.broadcast_joint_data_sync(
-                            {"type": "replay_joint_update", "joints": observation, "timestamp": time.time()}
-                        )
-                    except Exception as e:
-                        logger.warning(f"Could not broadcast replay joint feedback: {e}")
+                t0 = time.monotonic()
+                skipped = 0
+                last_i = len(timestamps) - 1
+                for i, (ts, values) in enumerate(zip(timestamps, frames, strict=True)):
+                    if _stop_check():
+                        break
+                    target_t = t0 + ts
+                    now = time.monotonic()
+                    # Falling behind (a slow bus read, a GC pause, a serial retry)
+                    # used to make every overdue frame fire back-to-back with no
+                    # wait, streaming far-apart setpoints at uncapped speed — the
+                    # arm lurches through them instead of following the recorded
+                    # path. Drop stale frames instead: the arm is then always
+                    # driven to the setpoint that matches wall-clock time. The
+                    # final frame is never dropped, so the episode still ends on
+                    # its recorded pose.
+                    if now > target_t + _MAX_FRAME_LAG_S and i != last_i:
+                        skipped += 1
+                        continue
+                    while True:
+                        now = time.monotonic()
+                        if now >= target_t or _stop_check():
+                            break
+                        time.sleep(min(0.01, target_t - now))
+                    if _stop_check():
+                        break
 
-            played = time.monotonic() - t0
-            if skipped:
-                logger.warning(
-                    "Replay dropped %d/%d frames to stay in real time (played %.2fs vs %.2fs recorded) "
-                    "— the control loop could not keep up",
-                    skipped,
-                    len(timestamps),
-                    played,
-                    timestamps[-1],
-                )
-            else:
-                logger.info(
-                    "Replay played %d frames in %.2fs (recorded %.2fs)",
-                    len(timestamps),
-                    played,
-                    timestamps[-1],
-                )
-            with _state_lock:
-                _replay_meta["frames_dropped"] = skipped
-                _replay_meta["played_s"] = played
+                    action = dict(zip(action_names, values, strict=True))
+                    robot.send_action(action)
+
+                    with _state_lock:
+                        _replay_meta["elapsed_s"] = time.monotonic() - t0
+
+                    if websocket_manager is not None and getattr(
+                        websocket_manager, "active_connections", None
+                    ):
+                        try:
+                            observation = robot.get_observation()
+                            websocket_manager.broadcast_joint_data_sync(
+                                {
+                                    "type": "replay_joint_update",
+                                    "joints": observation,
+                                    "timestamp": time.time(),
+                                }
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not broadcast replay joint feedback: {e}")
+
+                played = time.monotonic() - t0
+                if skipped:
+                    logger.warning(
+                        "Replay dropped %d/%d frames to stay in real time (played %.2fs vs %.2fs recorded) "
+                        "— the control loop could not keep up",
+                        skipped,
+                        len(timestamps),
+                        played,
+                        timestamps[-1],
+                    )
+                else:
+                    logger.info(
+                        "Replay played %d frames in %.2fs (recorded %.2fs)",
+                        len(timestamps),
+                        played,
+                        timestamps[-1],
+                    )
+                with _state_lock:
+                    _replay_meta["frames_dropped"] = skipped
+                    _replay_meta["played_s"] = played
 
         with _state_lock:
-            _replay_meta["phase"] = "stopping"
+            if _replay_meta.get("phase") != "error":
+                _replay_meta["phase"] = "stopping"
         return_to_rest_pose(robot.bus, start_pose, label="follower arm")
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
@@ -528,6 +555,7 @@ def handle_stop_replay() -> dict[str, Any]:
         if not replay_active:
             return {"success": False, "status_code": 409, "message": "No replay is active"}
         replay_active = False
+        _stop_event.set()
         _replay_meta["phase"] = "stopping"
     return {"success": True, "message": "Replay stopping"}
 

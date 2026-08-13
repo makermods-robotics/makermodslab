@@ -521,6 +521,91 @@ def test_connect_follower_gives_up_after_the_retry_budget(monkeypatch) -> None:
     assert robot.configure_calls == replay._CONNECT_ATTEMPTS
 
 
+# --- stop during ease-in must abort promptly and still return gently --------
+#
+# stop_event used to be local to _replay_worker, so handle_stop_replay (which
+# only flipped the module-level replay_active flag) had no way to signal it.
+# The ease-in's poll loop only checks abort_event.is_set(), so a stop pressed
+# during ease-in went unnoticed until the ease-in finished on its own — and
+# even then, the early return skipped the graceful return-to-start and fell
+# straight into torque release, dropping the arm wherever the ease-in left it.
+
+
+def test_stop_during_ease_in_signals_the_same_abort_event_and_still_returns_gently(
+    monkeypatch,
+) -> None:
+    from makermodslab import replay
+
+    monkeypatch.setattr(replay, "replay_active", True)
+
+    calls = []
+
+    class _Bus:
+        motors = {"shoulder_pan": None}
+
+        def disconnect(self, disable_torque=False):
+            pass
+
+    class _Robot:
+        bus = _Bus()
+
+    def fake_capture_rest_pose(bus, normalize=False):
+        return {"shoulder_pan": 10}
+
+    def fake_return_to_rest_pose(
+        bus, target, abort_event=None, label="arm", normalize=False, tolerance=None, stall_min_progress=None
+    ):
+        calls.append({"target": dict(target), "normalize": normalize})
+        if normalize:
+            # This is the ease-in call — simulate a user pressing Stop while
+            # it's in flight, the way handle_stop_replay would from another
+            # thread/request.
+            assert abort_event is not None
+            assert not abort_event.is_set()
+            replay.handle_stop_replay()
+            assert abort_event.is_set(), (
+                "handle_stop_replay() must signal the SAME event the ease-in is "
+                "polling, or a stop pressed during ease-in goes unnoticed until "
+                "the ease-in finishes on its own"
+            )
+            return False, "cut-short"
+        return True, "returned: max delta 0 ticks ()"
+
+    monkeypatch.setattr(replay, "capture_rest_pose", fake_capture_rest_pose)
+    monkeypatch.setattr(replay, "return_to_rest_pose", fake_return_to_rest_pose)
+    monkeypatch.setattr(replay, "force_disable_torque", lambda robot, label: None)
+
+    action_series = {
+        "action_names": ["shoulder_pan.pos"],
+        "timestamps": [0.0],
+        "values": [[10.0]],
+    }
+
+    replay._replay_worker(_Robot(), action_series, None)
+
+    assert len(calls) == 2, "a stop during ease-in must still trigger the graceful stopping return"
+    assert calls[1]["normalize"] is False
+    assert calls[1]["target"] == {"shoulder_pan": 10}  # returns to the pose captured at session start
+
+
+# --- shutdown budget must cover two returns, not one ------------------------
+#
+# Unlike teleoperate.py/record.py, a SIGTERM landing during replay's ease-in
+# can owe the RETURN_CEILING_S-bounded ease-in itself AND THEN the
+# RETURN_CEILING_S-bounded stopping-phase return (see the ease-in fall-through
+# above) — two returns in series, not one. _STOP_AND_WAIT_TIMEOUT_S was copied
+# from teleoperate.py's single-return budget and must be sized for replay's
+# actual worst case, or shutdown can give up and exit with the arm still
+# energized.
+
+
+def test_stop_and_wait_timeout_budgets_two_returns_not_one() -> None:
+    from makermodslab.replay import _STOP_AND_WAIT_TIMEOUT_S
+    from makermodslab.rest_pose import RETURN_CEILING_S
+
+    assert _STOP_AND_WAIT_TIMEOUT_S >= 2 * RETURN_CEILING_S + 5.0
+
+
 def test_replay_status_elapsed_freezes_once_the_session_ends(monkeypatch) -> None:
     """A finished run used to keep ticking upward, so a dead session read live."""
     import time as _time
