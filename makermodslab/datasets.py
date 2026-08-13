@@ -854,7 +854,7 @@ def reap_expired_trash(root: Path) -> None:
             continue
         try:
             deleted_at = datetime.fromisoformat(manifest["deleted_at"])
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue
         age = (now - deleted_at).total_seconds()
         if age <= TRASH_RETENTION_SECONDS:
@@ -897,7 +897,7 @@ def list_deleted_episodes(repo_id: str) -> list[dict[str, Any]]:
                     "duration_s": manifest["duration_s"],
                 }
             )
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             # Malformed manifest (missing required field or invalid deleted_at).
             # Skip this entry rather than raising, matching _read_trash_manifest's
             # degrade-to-None contract and the "trash bookkeeping must never raise"

@@ -3314,7 +3314,12 @@ def test_reap_expired_trash_keeps_entries_within_retention(tmp_lerobot_home: Pat
 def test_list_local_datasets_reaps_trash_without_process_restart(tmp_lerobot_home: Path) -> None:
     """Unlike the once-per-process crash-recovery sweep, trash reaping must
     fire on every call — a long-lived server process outlives the 24h
-    window many times over."""
+    window many times over.
+
+    This test verifies the every-call behavior by: (1) creating fresh trash,
+    (2) confirming the first list_local_datasets() call leaves it intact, (3)
+    backdating it past retention, (4) confirming a second call reaps it. This
+    distinguishes "reaps every call" from "reaps only once"."""
     from datetime import UTC, datetime, timedelta
 
     from makermodslab.datasets import (
@@ -3329,14 +3334,102 @@ def test_list_local_datasets_reaps_trash_without_process_restart(tmp_lerobot_hom
     trash_dir, manifest_path, _ = _new_trash_paths(target)
     trash_dir.mkdir()
     _write_trash_manifest(manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0)
+
+    # First call: trash is fresh, should survive.
+    list_local_datasets()
+    assert trash_dir.exists(), "Fresh trash should not be reaped on first call"
+    assert manifest_path.exists()
+
+    # Backdate the manifest past the retention window.
     manifest = json.loads(manifest_path.read_text())
     stale = datetime.now(UTC) - timedelta(seconds=TRASH_RETENTION_SECONDS + 60)
     manifest["deleted_at"] = stale.isoformat()
     manifest_path.write_text(json.dumps(manifest))
 
-    list_local_datasets()  # first call already swept once-per-process crash recovery
-    assert not trash_dir.exists()
-
-    # Second call, well past process start, still reaps — no once-only gate.
+    # Second call: trash is now stale, should be reaped.
     list_local_datasets()
+    assert not trash_dir.exists(), "Stale trash should be reaped on second call, not just at startup"
     assert not manifest_path.exists()
+
+
+def test_reap_expired_trash_skips_malformed_manifests(tmp_lerobot_home: Path) -> None:
+    """reap_expired_trash never raises on malformed trash manifests (missing
+    required fields, invalid JSON values, or non-string deleted_at); it silently
+    skips them instead. This matches _read_trash_manifest's degrade-to-None
+    contract and the "trash bookkeeping must never raise" constraint."""
+    from datetime import UTC, datetime, timedelta
+
+    from makermodslab.datasets import (
+        TRASH_RETENTION_SECONDS,
+        _new_trash_paths,
+        _write_trash_manifest,
+        reap_expired_trash,
+    )
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+
+    # Write one valid stale manifest that should be reaped.
+    valid_trash_dir, valid_manifest, _ = _new_trash_paths(target)
+    valid_trash_dir.mkdir()
+    _write_trash_manifest(
+        valid_manifest, kind="episode", repo_id="pusht", episode_index=0, length=10, duration_s=1.0
+    )
+    manifest = json.loads(valid_manifest.read_text())
+    stale = datetime.now(UTC) - timedelta(seconds=TRASH_RETENTION_SECONDS + 60)
+    manifest["deleted_at"] = stale.isoformat()
+    valid_manifest.write_text(json.dumps(manifest))
+
+    # Write one manifest with non-string deleted_at (raises TypeError on fromisoformat).
+    _, malformed_manifest1, _ = _new_trash_paths(target)
+    malformed_manifest1.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 1,
+                "length": 5,
+                "duration_s": 0.5,
+                "deleted_at": 12345,  # Non-string — will raise TypeError
+            }
+        )
+    )
+
+    # Write one manifest missing "deleted_at" (raises KeyError).
+    _, malformed_manifest2, _ = _new_trash_paths(target)
+    malformed_manifest2.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 2,
+                "length": 5,
+                "duration_s": 0.5,
+                # Missing "deleted_at" — will raise KeyError
+            }
+        )
+    )
+
+    # Write one manifest with malformed "deleted_at" string (raises ValueError).
+    _, malformed_manifest3, _ = _new_trash_paths(target)
+    malformed_manifest3.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 3,
+                "length": 5,
+                "duration_s": 0.5,
+                "deleted_at": "not-a-valid-iso-date",  # Will raise ValueError
+            }
+        )
+    )
+
+    # reap_expired_trash must not raise and must remove only the valid stale entry.
+    reap_expired_trash(tmp_lerobot_home)
+    assert not valid_trash_dir.exists(), "Valid stale entry should be reaped"
+    assert not valid_manifest.exists()
+    # Malformed manifests should be skipped without raising.
+    assert malformed_manifest1.exists()
+    assert malformed_manifest2.exists()
+    assert malformed_manifest3.exists()
