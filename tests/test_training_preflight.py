@@ -89,9 +89,7 @@ def test_offline_but_available_locally_not_rejected_by_guard(
     assert resp.status_code == 201
 
 
-def test_online_hub_only_not_rejected_by_guard(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_online_hub_only_not_rejected_by_guard(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Online (not offline) + hub-only dataset => guard is skipped entirely;
     is_dataset_available_locally is never even consulted."""
     monkeypatch.setattr(server_mod, "hf_hub_offline", lambda: False)
@@ -155,9 +153,7 @@ def _make_flat_dataset(root: Path, repo_id: str) -> None:
     (d / "meta" / "info.json").write_text(json.dumps({"total_episodes": 1}))
 
 
-def test_availability_true_for_flat_layout(
-    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_availability_true_for_flat_layout(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A locally recorded (flat-layout) dataset counts as available without any
     hub-cache probe."""
 
@@ -176,9 +172,7 @@ def test_availability_true_for_hub_snapshot_cache(
     """A dataset present only in a hub snapshot cache (not the flat layout) still
     counts as available — verified via huggingface_hub's cache lookup."""
     # No flat dataset created; simulate a cache hit (real path string returned).
-    monkeypatch.setattr(
-        datasets_mod, "try_to_load_from_cache", lambda *a, **k: "/cache/.../meta/info.json"
-    )
+    monkeypatch.setattr(datasets_mod, "try_to_load_from_cache", lambda *a, **k: "/cache/.../meta/info.json")
 
     assert datasets_mod.is_dataset_available_locally(DATASET_ID) is True
 

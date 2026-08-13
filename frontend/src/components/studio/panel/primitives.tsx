@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertTriangle, CheckCircle, ChevronDown } from "lucide-react";
+import { AlertTriangle, ChevronDown } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Collapsible,
@@ -141,22 +141,19 @@ export const AdvancedSection: React.FC<{
 );
 
 /**
- * The robot-readiness line that opens the Collect and Deploy forms. One
+ * The robot-readiness warning that opens the Collect and Deploy forms. One
  * implementation of a block the two panels used to render differently (Collect
  * hand-rolled amber divs, Deploy used <Alert> with warn tokens) — the caller
- * owns the copy, this owns the look. Rendered without an eyebrow: it reports
+ * owns the copy, this owns the look. Warnings only: a ready robot renders
+ * nothing, because the robot menu already names the selection and a green
+ * "ready" line just restates it. Rendered without an eyebrow: it reports
  * state, it isn't a parameter.
  */
 export const RobotStatus: React.FC<{
   ready: boolean;
   children: React.ReactNode;
 }> = ({ ready, children }) =>
-  ready ? (
-    <div className="flex items-center gap-2 text-sm">
-      <CheckCircle className="h-4 w-4 shrink-0 text-ok" />
-      {children}
-    </div>
-  ) : (
+  ready ? null : (
     <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
       <AlertTriangle className="h-4 w-4" />
       <AlertDescription>{children}</AlertDescription>

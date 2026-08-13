@@ -48,22 +48,37 @@ def test_resume_request_emits_minimal_argv() -> None:
         resume=True,
         config_path="/runs/abc/checkpoints/5000/pretrained_model/train_config.json",
         steps=20000,
+        num_workers=12,
+        batch_size=64,
+        seed=7,
     )
     cmd = build_training_command(req, output_dir="/tmp/new")
 
     # config_path MUST be the "--config_path=<path>" form: lerobot's own
     # pre-parser ignores the space-separated form.
     cfg_args = [a for a in cmd if a.startswith("--config_path=")]
-    assert cfg_args == [
-        "--config_path=/runs/abc/checkpoints/5000/pretrained_model/train_config.json"
-    ]
+    assert cfg_args == ["--config_path=/runs/abc/checkpoints/5000/pretrained_model/train_config.json"]
     assert "--config_path" not in cmd  # not the two-token form
     assert _arg_value(cmd, "--resume") == "true"
     assert _arg_value(cmd, "--output_dir") == "/tmp/new"
     assert _arg_value(cmd, "--steps") == "20000"
+    assert _arg_value(cmd, "--log_freq") == str(req.log_freq)
+    assert _arg_value(cmd, "--save_freq") == str(req.save_freq)
+    # num_workers is a HOST-capacity knob, not an experiment property (the
+    # resumed run's flavor can differ from the parent's), so it stays editable
+    # on a continuation and must actually reach the CLI.
+    assert _arg_value(cmd, "--num_workers") == "12"
     # Inherited from the checkpoint — must not be re-specified on the CLI.
     assert "--dataset.repo_id" not in cmd
     assert "--policy.type" not in cmd
+    assert "--batch_size" not in cmd
+    assert "--seed" not in cmd
+    assert "--policy.device" not in cmd
+    assert "--policy.use_amp" not in cmd
+    assert "--optimizer.type" not in cmd
+    # Optimizer state comes from the checkpoint on a resume — see
+    # test_resume_emits_no_optimizer_flags for the full assertion.
+    assert not any(tok.startswith("--policy.optimizer_") for tok in cmd)
 
 
 def test_optional_dataset_fields_only_present_when_set() -> None:
@@ -136,8 +151,18 @@ def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
     assert "--policy.tags" not in off
 
 
-def test_resume_push_to_hub_emits_public_and_tags() -> None:
-    """The resume branch must also make a pushed policy public + tagged."""
+def test_resume_push_to_hub_emits_public_but_never_tags() -> None:
+    """The resume branch makes a pushed policy public but must NOT re-pass tags.
+
+    Regression test for MT24. With --config_path present, lerobot parses through
+    draccus.parse(cls, config_file, args=cli_args), which merges each CLI
+    override into the config dict as a RAW STRING before decoding it against the
+    field type — so `--policy.tags '[a,b,c]'` reaches list[str] decoding as the
+    literal string and raises DecodingError, killing the run at startup. The
+    checkpoint's own train_config.json already carries policy.tags, so dropping
+    the flag loses nothing. The fresh-run branch still emits it (argparse splits
+    the bracket form there) — covered by the test above.
+    """
     from makermodslab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(
@@ -151,7 +176,7 @@ def test_resume_push_to_hub_emits_public_and_tags() -> None:
 
     assert _arg_value(cmd, "--policy.push_to_hub") == "true"
     assert _arg_value(cmd, "--policy.private") == "false"
-    assert _arg_value(cmd, "--policy.tags") == "[makermods,openbooth,MakerModsLab]"
+    assert "--policy.tags" not in cmd
 
 
 def test_seed_omitted_when_none() -> None:
@@ -171,14 +196,10 @@ def test_explicit_device_passes_through() -> None:
     unchanged for backward compatibility."""
     from makermodslab.train import TrainingRequest, build_training_command
 
-    cmd = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="cuda"), "/tmp/out"
-    )
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="cuda"), "/tmp/out")
     assert _arg_value(cmd, "--policy.device") == "cuda"
 
-    cmd_cpu = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="cpu"), "/tmp/out"
-    )
+    cmd_cpu = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="cpu"), "/tmp/out")
     assert _arg_value(cmd_cpu, "--policy.device") == "cpu"
 
 
@@ -192,16 +213,12 @@ def test_auto_device_resolves_to_concrete_backend(monkeypatch) -> None:
     # No GPU available -> cpu.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
-    cmd = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
-    )
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out")
     assert _arg_value(cmd, "--policy.device") == "cpu"
 
     # CUDA available -> cuda.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    cmd_cuda = build_training_command(
-        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
-    )
+    cmd_cuda = build_training_command(TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out")
     assert _arg_value(cmd_cuda, "--policy.device") == "cuda"
 
 
@@ -227,6 +244,195 @@ def test_training_request_validates_required_field() -> None:
 
     with pytest.raises(ValidationError):
         TrainingRequest()  # dataset_repo_id is required
+
+
+# ---------------------------------------------------------------------------
+# Optimizer knobs. The form always runs with use_policy_training_preset true,
+# and lerobot then REPLACES the optimizer with the policy's preset
+# (TrainPipelineConfig.validate, configs/train.py:249-253), so `--optimizer.*`
+# is inert. The knobs must ride on the POLICY config the preset is built from,
+# and only where that policy actually declares them (draccus fails at CLI parse
+# on an unknown --policy.<field>). See MT43.
+# ---------------------------------------------------------------------------
+
+
+def test_optimizer_knobs_ride_on_policy_config() -> None:
+    """lr + weight_decay reach argv as --policy.optimizer_* for a policy (act)
+    that declares both."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="x",
+        policy_type="act",
+        optimizer_lr=1e-4,
+        optimizer_weight_decay=0.01,
+    )
+    cmd = build_training_command(req, "/tmp/out")
+
+    assert _arg_value(cmd, "--policy.optimizer_lr") == "0.0001"
+    assert _arg_value(cmd, "--policy.optimizer_weight_decay") == "0.01"
+
+
+def test_optimizer_knobs_absent_when_unset() -> None:
+    """A knob the user left blank must not be forced onto argv — the policy
+    preset's own default has to win."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x", policy_type="act"), "/tmp/out")
+
+    assert "--policy.optimizer_lr" not in cmd
+    assert "--policy.optimizer_weight_decay" not in cmd
+    assert "--policy.optimizer_grad_clip_norm" not in cmd
+
+
+def test_grad_clip_gated_on_policy_support() -> None:
+    """smolvla declares optimizer_grad_clip_norm; act does NOT. Passing it to
+    act would make draccus die at parse time, so it must be dropped even though
+    the user set a value."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    smolvla = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_type="smolvla", optimizer_grad_clip_norm=5.0),
+        "/tmp/out",
+    )
+    assert _arg_value(smolvla, "--policy.optimizer_grad_clip_norm") == "5.0"
+
+    act = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_type="act", optimizer_grad_clip_norm=5.0),
+        "/tmp/out",
+    )
+    assert "--policy.optimizer_grad_clip_norm" not in act
+    # ...and dropping it must not disturb the knobs act DOES support.
+    assert "--policy.type" in act
+
+
+def test_grad_clip_and_weight_decay_supported_for_pi05() -> None:
+    """pi05's PreTrainedConfig declares the same optimizer_lr/weight_decay/
+    grad_clip_norm trio as pi0 (verified by dataclass introspection against the
+    pinned lerobot) — it must not be treated more restrictively than pi0."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(
+            dataset_repo_id="x",
+            policy_type="pi05",
+            optimizer_lr=2.5e-5,
+            optimizer_weight_decay=0.01,
+            optimizer_grad_clip_norm=1.0,
+        ),
+        "/tmp/out",
+    )
+
+    assert _arg_value(cmd, "--policy.optimizer_lr") == "2.5e-05"
+    assert _arg_value(cmd, "--policy.optimizer_weight_decay") == "0.01"
+    assert _arg_value(cmd, "--policy.optimizer_grad_clip_norm") == "1.0"
+
+
+def test_weight_decay_gated_for_tdmpc() -> None:
+    """tdmpc declares only optimizer_lr — weight_decay must be dropped."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(
+            dataset_repo_id="x",
+            policy_type="tdmpc",
+            optimizer_lr=3e-4,
+            optimizer_weight_decay=0.01,
+            optimizer_grad_clip_norm=5.0,
+        ),
+        "/tmp/out",
+    )
+
+    assert _arg_value(cmd, "--policy.optimizer_lr") == "0.0003"
+    assert "--policy.optimizer_weight_decay" not in cmd
+    assert "--policy.optimizer_grad_clip_norm" not in cmd
+
+
+def test_gaussian_actor_takes_no_optimizer_knobs() -> None:
+    """gaussian_actor's preset is a MultiAdamConfig built from per-group
+    settings; its config declares none of the three scalar knobs."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(
+            dataset_repo_id="x",
+            policy_type="gaussian_actor",
+            optimizer_lr=1e-4,
+            optimizer_weight_decay=0.01,
+            optimizer_grad_clip_norm=5.0,
+        ),
+        "/tmp/out",
+    )
+
+    assert not any(tok.startswith("--policy.optimizer_") for tok in cmd)
+
+
+def test_unknown_policy_type_falls_back_to_lr_only() -> None:
+    """A policy type absent from the capability table (form addition ahead of
+    the table, or an old persisted config) gets the conservative subset."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(
+            dataset_repo_id="x",
+            policy_type="some_future_policy",
+            optimizer_lr=1e-4,
+            optimizer_weight_decay=0.01,
+            optimizer_grad_clip_norm=5.0,
+        ),
+        "/tmp/out",
+    )
+
+    assert _arg_value(cmd, "--policy.optimizer_lr") == "0.0001"
+    assert "--policy.optimizer_weight_decay" not in cmd
+    assert "--policy.optimizer_grad_clip_norm" not in cmd
+
+
+@pytest.mark.parametrize(
+    "policy_type", ["act", "diffusion", "pi0", "smolvla", "tdmpc", "vqbet", "pi0_fast", "pi05"]
+)
+def test_no_optimizer_namespace_flag_is_ever_emitted(policy_type: str) -> None:
+    """The `--optimizer.*` namespace is dead under the training preset. Nothing
+    the builder emits may land there — including the optimizer TYPE, which the
+    policy preset fixes and the CLI cannot override."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="x",
+        policy_type=policy_type,
+        optimizer_type="sgd",
+        optimizer_lr=1e-4,
+        optimizer_weight_decay=0.01,
+        optimizer_grad_clip_norm=5.0,
+    )
+    cmd = build_training_command(req, "/tmp/out")
+
+    assert not any(tok.startswith("--optimizer.") for tok in cmd)
+    assert "sgd" not in cmd
+    # The preset is what makes --optimizer.* inert; assert it's actually on.
+    assert _arg_value(cmd, "--use_policy_training_preset") == "true"
+
+
+def test_resume_emits_no_optimizer_flags() -> None:
+    """On resume lerobot SKIPS the preset overwrite (the `not self.resume`
+    guard) and restores optimizer state from the checkpoint. Re-specifying the
+    knobs would fight that, so neither namespace may appear."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="x",
+        policy_type="smolvla",
+        resume=True,
+        config_path="/runs/abc/checkpoints/5000/pretrained_model/train_config.json",
+        optimizer_type="sgd",
+        optimizer_lr=1e-4,
+        optimizer_weight_decay=0.01,
+        optimizer_grad_clip_norm=5.0,
+    )
+    cmd = build_training_command(req, "/tmp/new")
+
+    assert not any(tok.startswith("--optimizer.") for tok in cmd)
+    assert not any(tok.startswith("--policy.optimizer_") for tok in cmd)
 
 
 # ---------------------------------------------------------------------------

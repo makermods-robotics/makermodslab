@@ -31,8 +31,22 @@ export function findJobForModel(
   // mirrors the backend's find_imported and JobsSection's trackedRepoIds).
   const repo = (model.hf_repo_id ?? "").toLowerCase();
   if (repo) {
-    const byRepo = jobs.find((j) => j.hf_repo_id?.toLowerCase() === repo);
-    if (byRepo) return byRepo;
+    // SEVERAL records can share one repo: a cloud resume reuses its parent's
+    // output repo, so an N-deep chain is N records pointing at the same
+    // weights. First-match took whichever the registry listed first — often a
+    // failed early link, whose checkpoint list is not the finished model's.
+    // Rank as the backend does (models.py `_job_outranks`): a run that reached
+    // "done" published the final policy at the repo root and wins; among
+    // equals the later-started run (the deepest link of the chain) wins.
+    return jobs
+      .filter((j) => j.hf_repo_id?.toLowerCase() === repo)
+      .reduce<JobRecord | null>((best, j) => {
+        if (!best) return j;
+        const jDone = j.state === "done";
+        const bestDone = best.state === "done";
+        if (jDone !== bestDone) return jDone ? j : best;
+        return j.started_at > best.started_at ? j : best;
+      }, null);
   }
   return null;
 }

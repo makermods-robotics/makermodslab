@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 
@@ -42,21 +43,64 @@ def test_recording_status_handler_exposes_state_fields() -> None:
     assert "available_controls" in result
 
 
+def test_record_log_captures_teleoperate_teardown_warnings() -> None:
+    """force_disconnect_partial's teardown warnings (a leaked bus, a stuck
+    camera) are logged through makermodslab.teleoperate's logger, not this
+    module's — without it in _RECORD_LOG_LOGGER_NAMES they never reach the
+    Record page's log panel, only the server console.
+    """
+    import logging
+
+    from makermodslab.record import (
+        _attach_record_log_handler,
+        _detach_record_log_handler_locked,
+        handle_recording_log,
+    )
+
+    teleop_logger = logging.getLogger("makermodslab.teleoperate")
+    _attach_record_log_handler()
+    try:
+        teleop_logger.warning("Could not release robot bus on COM_FOLLOWER: wedged")
+    finally:
+        import makermodslab.record as record_module
+
+        with record_module._record_log_lock:
+            _detach_record_log_handler_locked()
+
+    assert "Could not release robot bus on COM_FOLLOWER" in handle_recording_log()["logs"]
+
+
 def test_recording_status_surfaces_preparing_substeps(monkeypatch) -> None:
     """record_with_web_events refines the coarse "preparing" window into named
-    substeps ("connecting_robot", "connecting_teleop") by writing current_phase.
-    The status handler must pass those through verbatim so the UI can name the
-    substep — verified here without touching hardware by driving the module
-    global the worker sets."""
+    substeps ("connecting_robot", "connecting_teleop", "reconnecting_robot")
+    by writing current_phase. The status handler must pass those through
+    verbatim so the UI can name the substep — verified here without touching
+    hardware by driving the module global the worker sets."""
     from makermodslab import record
 
-    for substep in ("connecting_robot", "connecting_teleop"):
+    for substep in ("connecting_robot", "connecting_teleop", "reconnecting_robot"):
         monkeypatch.setattr(record, "current_phase", substep)
         # An active session with no config still surfaces current_phase.
         result = record.handle_recording_status()
         assert result["current_phase"] == substep
         # A preparing substep is not a completed/errored session.
         assert result["session_ended"] is False
+
+
+def test_recording_status_surfaces_connect_retry_attempt(monkeypatch) -> None:
+    """During the "reconnecting_robot" backoff substep, the UI needs which
+    attempt is in flight (and the ceiling) to show "retrying (2/3)…" instead
+    of a static label for the whole multi-attempt window.
+    """
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "current_phase", "reconnecting_robot")
+    monkeypatch.setattr(record, "connect_retry_attempt", 2)
+
+    result = record.handle_recording_status()
+
+    assert result["connect_retry_attempt"] == 2
+    assert result["connect_retry_max"] == record._CONNECT_ATTEMPTS
 
 
 class _FakeWorker:
@@ -189,10 +233,14 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
         follower_config="follower",
         dataset_repo_id="user/dataset",
         single_task="pick up the cube",
-        cameras={"wrist": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}},
     )
 
-    config = record.create_record_config(request)
+    # Cameras come from the robot record, resolved by the caller; passing them
+    # in explicitly is the same path handle_start_recording takes.
+    config = record.create_record_config(
+        request,
+        cameras={"wrist": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}},
+    )
     assert config.robot.cameras["wrist"].backend == Cv2Backends.DSHOW
 
 
@@ -231,7 +279,9 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
         single_task="pick up the cube",
     )
 
-    config = record.create_record_config(request)
+    # No cameras for this session — passed explicitly so the bimanual assembly
+    # is exercised without needing a "mybot" record on disk.
+    config = record.create_record_config(request, cameras={})
     assert isinstance(config.robot, BiSOFollowerConfig)
     assert isinstance(config.teleop, BiSOLeaderConfig)
     # BiSO id + calibration_dir come from the staging helper (base = robot name).
@@ -318,6 +368,124 @@ def test_build_camera_configs_skips_non_opencv_type() -> None:
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
 
     assert configs == {}
+
+
+def test_is_transient_camera_error_markers_pinned_against_lerobot_source() -> None:
+    """Pins the marker set against lerobot's *actual* raise sites, not
+    hand-typed copies of them — a `str.__contains__` over a literal tuple
+    can't fail on its own, so the thing worth testing is whether upstream
+    still emits these strings, not whether the tuple matches itself. If
+    lerobot rewords one of these RuntimeErrors, this test goes red instead of
+    the retry silently stopping firing.
+
+    "failed to set capture_" is deliberately NOT pinned here — it's excluded
+    from `_is_transient_camera_error` on purpose (see its docstring)."""
+    import inspect
+
+    from lerobot.cameras.opencv import camera_opencv
+
+    source = inspect.getsource(camera_opencv)
+
+    assert "failed to set fps={self.fps} ({actual_fps=})" in source
+    assert "do not match configured width={self.capture_width} or height={self.capture_height}" in source
+    assert "Timed out waiting for frame from camera {self}" in source
+    assert "read thread is not running." in source
+
+
+def test_do_not_match_configured_is_unreachable_from_connect() -> None:
+    """Pins WHY "read thread is not running" has to be in the marker set.
+
+    The wrong-native-format error is raised by `_postprocess_image`, which is
+    called only from `_read_loop` — i.e. inside the camera's background
+    thread, where `connect()` can never see it. After 12 consecutive
+    mismatches that loop dies, and the next `async_read` raises "read thread
+    is not running" instead. If upstream ever moves the size check onto the
+    synchronous path, this test goes red and the docstring's "do not expect it
+    to fire" caveat (and this whole marker) should be revisited.
+    """
+    import inspect
+
+    from lerobot.cameras.opencv import camera_opencv
+
+    source = inspect.getsource(camera_opencv)
+    postprocess_callers = [
+        line.strip() for line in source.splitlines() if "_postprocess_image(" in line and "def " not in line
+    ]
+    assert len(postprocess_callers) == 1, postprocess_callers
+    # ...and that single call site is inside the background read loop.
+    read_loop = inspect.getsource(camera_opencv.OpenCVCamera._read_loop)
+    assert "_postprocess_image(" in read_loop
+
+
+def test_is_transient_camera_error_matches_existing_markers() -> None:
+    from makermodslab.record import _is_transient_camera_error
+
+    assert _is_transient_camera_error("OpenCVCamera(0) failed to set fps=30 (actual_fps=5.0).")
+    # 640x360 landed where 640x480 was configured — width differs, height
+    # doesn't (the previous ordering here had the two swapped).
+    assert _is_transient_camera_error(
+        "OpenCVCamera(0) frame width=360 or height=480 do not match configured width=640 or height=480."
+    )
+    assert _is_transient_camera_error(
+        "Timed out waiting for frame from camera OpenCVCamera(0) after 200 ms. Read thread alive: True."
+    )
+    # The frame-dead session once its background reader has given up — this is
+    # what the caller actually sees for the wrong-native-format case.
+    assert _is_transient_camera_error("OpenCVCamera(0) read thread is not running.")
+
+
+def test_is_transient_camera_error_false_for_unrelated_errors() -> None:
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error("Could not connect on port '/dev/ttyUSB0'.")
+    assert not _is_transient_camera_error("Failed to open OpenCVCamera(97).")
+
+
+def test_is_transient_camera_error_false_for_capture_size_mismatch() -> None:
+    """`friendly_hint()` (utils/errors.py) classifies "failed to set capture_"
+    as a permanent misconfiguration ("camera doesn't support the configured
+    resolution — click Auto"). Retrying it wastes the backoff telling the
+    operator the same thing three times."""
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+    )
+
+
+def test_every_retryable_camera_marker_that_can_be_permanent_has_a_hint() -> None:
+    """The invariant the two classifiers have to share.
+
+    A marker in `_is_transient_camera_error` that can ALSO be a permanent
+    misconfiguration costs the operator the full backoff before failing — so
+    the message they're finally shown must at least tell them what to do.
+    "failed to set fps" is exactly that case (an operator can type an fps the
+    device can't do, in the same settings panel as the resolution), and it
+    used to be the one camera misconfiguration that got retried and then
+    surfaced with no guidance at all."""
+    from makermodslab.utils.errors import friendly_hint
+
+    fps_hint = friendly_hint("OpenCVCamera(0) failed to set fps=60 (actual_fps=30.0).")
+    assert fps_hint is not None
+    assert "Auto" in fps_hint
+    # The resolution sibling still gets its own, distinct wording.
+    size_hint = friendly_hint(
+        "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+    )
+    assert size_hint is not None and size_hint != fps_hint
+
+
+def test_is_transient_camera_error_false_for_fourcc_mismatch() -> None:
+    """lerobot logs a fourcc mismatch as a warning (camera_opencv.py's
+    `_validate_fourcc`) rather than raising — it never reaches this
+    classifier as an exception message. Not retried, but for a different
+    reason than the negative cases above: excluded by construction, not by
+    policy."""
+    from makermodslab.record import _is_transient_camera_error
+
+    assert not _is_transient_camera_error(
+        "OpenCVCamera(0) failed to set fourcc=MJPG (actual=YUYV, success=False)."
+    )
 
 
 def _make_dataset_dir(cache, repo_id: str, total_episodes: int):
@@ -1013,6 +1181,12 @@ def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
         assert status["session_ended"] is True
         assert status["discarded_empty"] is True
         assert not (tmp_lerobot_home / status["dataset_repo_id"]).exists()
+        # saved_episodes still reports what was recorded before the quit, even
+        # though the dataset directory itself was deleted — the two are
+        # independent facts in the status payload. This pins backend behavior
+        # only: the quit/discard exit path doesn't currently pass this count
+        # along to the UI.
+        assert status["saved_episodes"] == 2
     finally:
         record.discard_requested = False  # don't leak the armed flag into later tests
 
@@ -1057,7 +1231,7 @@ def test_record_start_clears_stale_release_state_from_previous_double_stop(
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
 
     # Fail fast AFTER the locked reset, before any hardware is touched.
-    def _boom(request):
+    def _boom(request, cameras=None):
         raise RuntimeError("stop before hardware")
 
     monkeypatch.setattr(record, "create_record_config", _boom)
@@ -1130,6 +1304,8 @@ def _run_record_session(
     num_episodes: int = 1,
     reset_time_s: int = 10,
     record_loop_side_effect=None,
+    connect_side_effect=None,
+    teleop=None,
 ):
     """Drive record_with_web_events with every lerobot dependency mocked so no
     real hardware, dataset, or record_loop runs. Returns the spy call log for
@@ -1159,7 +1335,7 @@ def _run_record_session(
     # lerobot symbols resolved at call time inside record_with_web_events.
     monkeypatch.setattr("lerobot.robots.make_robot_from_config", lambda cfg: robot, raising=False)
     monkeypatch.setattr(
-        "lerobot.teleoperators.make_teleoperator_from_config", lambda cfg: None, raising=False
+        "lerobot.teleoperators.make_teleoperator_from_config", lambda cfg: teleop, raising=False
     )
     monkeypatch.setattr(
         "lerobot.processor.make_default_processors", lambda: (None, None, None), raising=False
@@ -1203,8 +1379,18 @@ def _run_record_session(
 
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", _FakeDataset, raising=False)
 
-    # robot.connect(calibrate=False) is called on the double.
-    robot.connect = lambda **kwargs: None  # type: ignore[attr-defined]
+    # robot.connect(calibrate=False) is called on the double. connect_side_effect
+    # (when given) is called with the 1-based attempt number and may raise, which
+    # is how the connect-retry tests below drive the failure paths.
+    if connect_side_effect is None:
+        robot.connect = lambda **kwargs: None  # type: ignore[attr-defined]
+    else:
+        connect_attempts = itertools.count(1)
+
+        def _connect(**kwargs):
+            connect_side_effect(next(connect_attempts))
+
+        robot.connect = _connect  # type: ignore[attr-defined]
     robot.name = "so101"  # type: ignore[attr-defined]
     robot.cameras = {}  # type: ignore[attr-defined]
     robot.action_features = {}  # type: ignore[attr-defined]
@@ -1224,8 +1410,9 @@ def _run_record_session(
             video=False,
         )
     )
-    # No teleop device: keep the return path follower-only and simple.
-    cfg.teleop = None
+    if teleop is None:
+        # No teleop device: keep the return path follower-only and simple.
+        cfg.teleop = None
 
     web_events = {
         "exit_early": False,
@@ -1684,6 +1871,66 @@ def test_delete_dataset_refused_mid_upload(tmp_lerobot_home, monkeypatch: pytest
     assert (tmp_lerobot_home / repo_id).exists()
 
 
+def test_delete_dataset_invalidates_hub_status(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful delete drops the cached Hub-existence answer too, not just
+    the listing cache — otherwise a dataset previously checked and cached as
+    "local_only" would keep reporting that forever after its local copy is
+    gone, instead of flipping to "absent"."""
+    import json
+    from unittest.mock import patch
+
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    # handle_delete_dataset resolves HF_LEROBOT_HOME via a lerobot constant
+    # that's frozen at first import, not re-read from the env var per call —
+    # tmp_lerobot_home's monkeypatch.setenv alone doesn't reach it, so point
+    # it at the tmp dir directly (test-only; not a production code path).
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    repo_id = "tester/to_delete"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    with patch("makermodslab.record.invalidate_hub_status") as inval:
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+
+    assert result["success"] is True
+    inval.assert_called_once_with(repo_id)
+    assert not (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_clears_stale_local_only_hub_status(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end reproduction of the actual bug: a dataset checked once
+    (caching "local_only") and then deleted must report "absent" on the next
+    check — not keep serving the stale, now-wrong cached answer."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab import datasets as ds
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    repo_id = "tester/stale_check"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text('{"total_episodes": 1}')
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False  # never uploaded
+    with ds._HUB_STATUS_LOCK:
+        ds._HUB_STATUS_CACHE.clear()
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.get_hub_status(repo_id)["status"] == "local_only"
+
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+        assert result["success"] is True
+
+        assert ds.get_hub_status(repo_id)["status"] == "absent"
+
+
 def test_delete_dataset_refused_mid_recording(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
     """Deleting a dataset an active recording session is writing is refused —
     the delete guard now runs the full _dataset_in_use check, not just the
@@ -1781,17 +2028,22 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     assert result["message"].endswith("Stop it first.")
 
 
-def _stub_recording_request():
+def _stub_recording_request(**overrides):
+    """Minimal RecordingRequest for exercising handle_start_recording's
+    precondition checks — none of these reach real hardware. Pass keyword
+    overrides to vary a single field (e.g. an invalid dataset_repo_id)."""
     import makermodslab.record as record
 
-    return record.RecordingRequest(
-        leader_port="/dev/leader",
-        follower_port="/dev/follower",
-        leader_config="leader",
-        follower_config="follower",
-        dataset_repo_id="tester/ds",
-        single_task="pick",
-    )
+    fields = {
+        "leader_port": "/dev/leader",
+        "follower_port": "/dev/follower",
+        "leader_config": "leader",
+        "follower_config": "follower",
+        "dataset_repo_id": "tester/ds",
+        "single_task": "pick",
+    }
+    fields.update(overrides)
+    return record.RecordingRequest(**fields)
 
 
 def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1805,6 +2057,7 @@ def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.Mon
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "Calibration is currently active. Stop it first.",
     }
 
@@ -1818,6 +2071,7 @@ def test_start_recording_blocked_when_auto_calibration_active(monkeypatch: pytes
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "Auto-calibration is currently active. Stop it first.",
     }
 
@@ -1831,6 +2085,7 @@ def test_start_recording_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPa
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
     }
 
@@ -1869,7 +2124,7 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
 
     # Fail fast AFTER the stamp point (create_record_config runs right after),
     # before any hardware is touched.
-    def _boom(request):
+    def _boom(request, cameras=None):
         raise RuntimeError("stop before hardware")
 
     monkeypatch.setattr(record, "create_record_config", _boom)
@@ -1892,6 +2147,242 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
     assert _start(resume=True) == "tester/existing_ds"
     monkeypatch.setattr(record, "recording_active", False)  # release the claim
     assert re.fullmatch(r"tester/existing_ds_\d{8}_\d{6}", _start(resume=False))
+
+
+# ---------------------------------------------------------------------------
+# R2 regression: every rejection branch inside handle_start_recording's
+# `with _state_lock:` block must carry a "status_code" the route layer can
+# turn into a real HTTPException (409 conflict / 400 bad request), instead of
+# a plain dict that FastAPI would default to HTTP 200 for. See
+# tests/test_server.py for the route-level (actual HTTP status) coverage.
+# ---------------------------------------------------------------------------
+
+
+def test_start_recording_rejects_with_409_when_recording_already_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "already active" in result["message"]
+
+
+def test_start_recording_rejects_with_409_while_previous_session_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The "releasing" variant of the recording_active conflict is still a 409
+    (a client should retry shortly), not a 400."""
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "releasing", True)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "still releasing" in result["message"]
+
+
+def test_start_recording_rejects_with_409_when_teleoperation_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "Teleoperation is currently active" in result["message"]
+
+
+def test_start_recording_rejects_with_409_when_inference_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "Inference is currently active" in result["message"]
+
+
+def test_start_recording_rejects_with_400_for_invalid_dataset_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request(dataset_repo_id="too/many/slashes"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "'/'" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# Session cameras come from the ROBOT RECORD named by the request, never from
+# the request itself. The resolution helpers are covered in
+# tests/test_utils_config.py; these are the start-path rejection branches.
+# ---------------------------------------------------------------------------
+
+
+def _idle_mutexes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+
+def test_start_recording_rejects_with_400_when_the_robot_record_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A named robot with no record on disk must 400 — recording camera-less
+    because the name was wrong throws away a whole session's video silently."""
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    _idle_mutexes(monkeypatch)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(tmp_lerobot_home / "robots"))
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name="ghost"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "ghost" in result["message"]
+    # The rejection happens BEFORE the active flag is claimed.
+    assert record.recording_active is False
+
+
+def test_start_recording_rejects_with_400_on_duplicate_camera_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Keying the session cameras by name would drop one of a duplicate pair —
+    a camera missing from every episode. Refuse the start instead."""
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    _idle_mutexes(monkeypatch)
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        "twins",
+        {
+            "cameras": [
+                {"name": "wrist", "type": "opencv", "camera_index": 0, "width": 640, "height": 480},
+                {"name": "wrist", "type": "opencv", "camera_index": 1, "width": 640, "height": 480},
+            ]
+        },
+        allow_create=True,
+    )
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name="twins"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "wrist" in result["message"]
+    assert record.recording_active is False
+
+
+def test_start_recording_ignores_a_stale_cameras_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """An older frontend still posts `cameras`. The field is gone from the
+    model, so pydantic drops it — the request must not carry it forward."""
+    import makermodslab.record as record
+
+    request = record.RecordingRequest(
+        leader_port="/dev/leader",
+        follower_port="/dev/follower",
+        leader_config="leader",
+        follower_config="follower",
+        dataset_repo_id="tester/ds",
+        single_task="pick",
+        cameras={"wrist": {"type": "opencv", "camera_index": 0}},
+    )
+
+    assert not hasattr(request, "cameras")
+
+
+def test_create_record_config_resolves_cameras_from_the_robot_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Called without an explicit set, the config builder reads the record —
+    the request has no camera payload to fall back on."""
+    import makermodslab.record as record
+    from makermodslab.utils import config as cfg
+
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        "lab1",
+        {
+            "cameras": [
+                {
+                    "id": "camera_1",
+                    "name": "wrist",
+                    "type": "opencv",
+                    "camera_index": 0,
+                    "device_id": "browser-id",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                }
+            ]
+        },
+        allow_create=True,
+    )
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+
+    config = record.create_record_config(
+        _stub_recording_request(robot_name="lab1", dataset_repo_id="tester/ds")
+    )
+
+    assert list(config.robot.cameras) == ["wrist"]
+    assert config.robot.cameras["wrist"].width == 640
 
 
 # ---------------------------------------------------------------------------
@@ -1992,7 +2483,7 @@ def _start_session_with_fake_work(monkeypatch: pytest.MonkeyPatch, fake_work):
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
     monkeypatch.setattr(rollout, "inference_active", False)
-    monkeypatch.setattr(record, "create_record_config", lambda request: None)
+    monkeypatch.setattr(record, "create_record_config", lambda request, cameras=None: None)
     monkeypatch.setattr(record, "record_with_web_events", fake_work)
 
     result = record.handle_start_recording(
@@ -2074,6 +2565,12 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
     assert status["outcome"] == "ok"
     assert status["error"] is None
     assert status["hint"] is None
+    # Regression (R5): the worker's finally block used to zero saved_episodes
+    # the instant it flipped recording_active False, and handle_recording_status
+    # only ever echoed saved_episodes while recording_active was True — so the
+    # terminal status silently reported nothing saved even though 2 episodes
+    # were recorded.
+    assert status["saved_episodes"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -2203,3 +2700,176 @@ def test_stop_and_wait_lets_an_already_in_progress_release_finish_gracefully(
     assert finished_gracefully.is_set(), "an already-in-progress graceful return was aborted early"
     assert not forced.is_set(), "stop_and_wait force-released a session already mid graceful return"
     worker.join(timeout=2.0)
+
+
+def test_recording_status_reports_saved_episodes_at_session_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal status must keep reporting saved_episodes once the session
+    has ended — the frontend's exit handoff (RecordingSessionDialog) reads this
+    field to tell the user, and the upload flow, how many episodes exist."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "current_phase", "completed")
+    monkeypatch.setattr(record, "saved_episodes", 5)
+
+    status = record.handle_recording_status()
+
+    assert status["session_ended"] is True
+    assert status["saved_episodes"] == 5
+
+
+# --- connect-retry loop: teardown, phase, and retry counter -----------------
+#
+# These drive record_with_web_events end to end (via _run_record_session) so
+# they fail when the production logic is deleted, rather than asserting on a
+# monkeypatched global. Each spies on force_disconnect_partial and snapshots
+# the phase globals *at the moment of the teardown*, which is the ordering the
+# UI depends on.
+
+_TRANSIENT = "failed to set fps=30 (actual_fps=5.0)"
+_TERMINAL = "Could not connect on port COM_FOLLOWER"
+
+
+def _spy_teardowns(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Replace record.force_disconnect_partial with a spy that records the
+    label and the phase globals as they stood when the teardown ran."""
+    import makermodslab.record as record
+
+    seen: list[dict] = []
+
+    def _spy(device, label="device"):
+        seen.append(
+            {
+                "label": label,
+                "phase": record.current_phase,
+                "attempt": record.connect_retry_attempt,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(record, "force_disconnect_partial", _spy)
+    monkeypatch.setattr(record.time, "sleep", lambda *_a, **_k: None)
+    return seen
+
+
+def test_transient_connect_failure_retries_inside_the_reconnecting_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The retry substep must be entered BEFORE the component-wise teardown,
+    not just around the backoff sleep. The teardown is the slow part (each
+    wedged camera's disconnect joins a read thread waiting out a frame
+    timeout), so if the phase flipped after it the operator would stare at a
+    static "Connecting arm & cameras…" for exactly the window the substep
+    exists to explain."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    def _connect(attempt: int) -> None:
+        if attempt == 1:
+            raise RuntimeError(_TRANSIENT)
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), connect_side_effect=_connect)
+
+    assert error is None  # attempt 2 connected, session ran normally
+    assert len(seen) == 1  # exactly one failed attempt was torn down
+    # The ordering this test exists for: phase and counter are already set when
+    # the teardown runs.
+    assert seen[0]["phase"] == "reconnecting_robot"
+    assert seen[0]["attempt"] == 2  # the attempt about to run, not the failed one
+    assert seen[0]["label"] == "robot"
+    # ...and the counter is back to its documented "0 unless retrying" resting
+    # state once the connect succeeds.
+    assert record.connect_retry_attempt == 0
+
+
+def test_transient_connect_failure_gives_up_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A camera that never recovers is retried _CONNECT_ATTEMPTS times, torn
+    down after every one of them (including the last, so a terminal failure
+    can't leak the bus and camera read threads into the rest of the process),
+    and then re-raised."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    def _connect(attempt: int) -> None:
+        raise RuntimeError(_TRANSIENT)
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), connect_side_effect=_connect)
+
+    assert isinstance(error, RuntimeError) and _TRANSIENT in str(error)
+    assert len(seen) == record._CONNECT_ATTEMPTS
+    # Retrying attempts announce themselves; the final one is a plain failure,
+    # so it must NOT claim a retry is in flight.
+    assert [s["attempt"] for s in seen] == [2, 3, 0]
+    assert [s["phase"] for s in seen] == [
+        "reconnecting_robot",
+        "reconnecting_robot",
+        "connecting_robot",
+    ]
+    assert record.connect_retry_attempt == 0
+
+
+def test_non_transient_connect_failure_tears_down_without_retrying(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A wrong-port/unplugged failure isn't camera turbulence: no retry, no
+    backoff, no "camera hiccup" label — but the teardown still runs, because
+    the port may have opened before the handshake failed."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    def _connect(attempt: int) -> None:
+        raise RuntimeError(_TERMINAL)
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), connect_side_effect=_connect)
+
+    assert isinstance(error, RuntimeError) and _TERMINAL in str(error)
+    assert len(seen) == 1  # one attempt, no retry
+    assert seen[0]["phase"] == "connecting_robot"
+    assert seen[0]["attempt"] == 0
+    assert record.connect_retry_attempt == 0
+
+
+def test_teleop_connect_failure_releases_both_devices(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The follower connected fine a moment earlier, so a leader failure must
+    release BOTH — otherwise the follower's bus and camera read threads stay
+    open for the rest of the process and the next session dies on the leak."""
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    seen = _spy_teardowns(monkeypatch)
+
+    class _FailingTeleop:
+        def connect(self, **kwargs):
+            raise RuntimeError("leader bus did not answer")
+
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    _, _robot, error, _ = _run_record_session(monkeypatch, _RecRobot(bus), teleop=_FailingTeleop())
+
+    assert isinstance(error, RuntimeError) and "leader bus" in str(error)
+    # Both devices released, follower first.
+    assert [s["label"] for s in seen] == ["robot", "teleop"]

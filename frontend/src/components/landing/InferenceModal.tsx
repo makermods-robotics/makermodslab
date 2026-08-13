@@ -3,6 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { AdvancedSection } from "@/components/studio/panel/primitives";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -31,11 +34,10 @@ import {
 } from "@/lib/checkpointsApi";
 import { startInference } from "@/lib/inferenceApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import {
-  AvailableCamera,
-  useAvailableCameras,
-} from "@/hooks/useAvailableCameras";
+import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
+import type { CameraConfig } from "@/components/recording/CameraConfiguration";
+import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
 
 interface Props {
   open: boolean;
@@ -45,9 +47,11 @@ interface Props {
   initialStep: number | null;
 }
 
-const DEFAULT_FPS = 30;
+/** Coefficient of the original ACT paper's exponential weighting (see
+ * lerobot's ACTTemporalEnsembler). Offered as the starting point when the user
+ * switches temporal ensembling on. */
+const DEFAULT_TEMPORAL_ENSEMBLE_COEFF = 0.01;
 
-const cameraKey = (cam: AvailableCamera) => String(cam.index);
 
 /** Small preview for verifying which physical camera a role binds to.
  *
@@ -167,16 +171,31 @@ const InferenceModal: React.FC<Props> = ({
   const [selectedStep, setSelectedStep] = useState<number | null>(initialStep);
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
+  // Inference engine A/B. "sync" is the server default and the historical
+  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
+  // ACT temporal ensembling — see DeployPanel, which carries the same pair.
+  // (on, coeff) rather than `number | null` so clearing the field mid-edit
+  // doesn't silently switch the feature off.
+  const [temporalEnsemble, setTemporalEnsemble] = useState(false);
+  const [temporalEnsembleCoeff, setTemporalEnsembleCoeff] = useState<
+    number | undefined
+  >(DEFAULT_TEMPORAL_ENSEMBLE_COEFF);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [policyConfig, setPolicyConfig] = useState<PolicyConfigSummary | null>(null);
   const [policyConfigLoading, setPolicyConfigLoading] = useState(false);
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(null);
 
-  // Per camera DISPLAY name → user-selected physical camera key (the raw cv2
-  // index string). Keyed by the stripped display name (== requestKey), not the
-  // checkpoint feature key — see `cameraMappings` / the CameraMapping doc for
-  // the round-trip.
+  // Per camera DISPLAY name → the NAME of one of the selected robot's cameras.
+  // Keyed by the stripped display name (== requestKey), not the checkpoint
+  // feature key — see `cameraMappings` / the CameraMapping doc for the
+  // round-trip. Sent verbatim as the request's `camera_bindings`: only the name
+  // pairing travels, and the server reads which device and how to open it out
+  // of the robot record (see makermodslab/utils/config.py bind_robot_cameras).
+  // Capture resolution is the exception — forwarded from the checkpoint as
+  // `camera_dims`, because the rollout doesn't resize frames.
   const [cameraBindings, setCameraBindings] = useState<Record<string, string | null>>({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
 
@@ -194,12 +213,27 @@ const InferenceModal: React.FC<Props> = ({
     [policyConfig, isBimanual],
   );
 
-  const liveCameraByKey = React.useCallback(
-    (key: string | null | undefined) =>
-      key == null
-        ? undefined
-        : availableCameras.find((cam) => cameraKey(cam) === key),
-    [availableCameras],
+  const robotCameras: CameraConfig[] = React.useMemo(
+    () => robot?.cameras ?? [],
+    [robot],
+  );
+
+  /** The robot's camera a binding names, or undefined once the record no
+   * longer has it (camera removed in Robot settings, or another robot). */
+  const recordCameraByName = React.useCallback(
+    (name: string | null | undefined) =>
+      name == null ? undefined : robotCameras.find((cam) => cam.name === name),
+    [robotCameras],
+  );
+
+  /** Bound AND physically present — a stored camera_index goes stale on
+   * replug, so presence is judged by unique_id against the live enumeration. */
+  const cameraIsReady = React.useCallback(
+    (name: string | null | undefined) => {
+      const cam = recordCameraByName(name);
+      return cam != null && isCameraConnected(cam, availableCameras);
+    },
+    [recordCameraByName, availableCameras],
   );
 
   // Re-arm Start on reopen. The success path closes the modal with
@@ -274,56 +308,44 @@ const InferenceModal: React.FC<Props> = ({
   // If the selected robot has cameras whose names match a policy-expected
   // camera, auto-bind them. Match against the DISPLAY name (the bare name the
   // user chose at record time — that's what the robot record stores), not the
-  // `left_`-prefixed checkpoint feature. Prefer the stored browser device_id,
-  // then the saved camera_index fallback.
+  // `left_`-prefixed checkpoint feature. No device enumeration is involved: the
+  // binding names a RECORD camera, and the record is what the server resolves.
   useEffect(() => {
-    if (!policyConfig) return;
-    const robotCams = robot?.cameras ?? [];
-    if (robotCams.length === 0 || availableCameras.length === 0) return;
+    if (!policyConfig || robotCameras.length === 0) return;
     setCameraBindings((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const m of cameraMap) {
         if (next[m.requestKey] != null) continue;
-        const robotCam = robotCams.find(
+        const robotCam = robotCameras.find(
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
-        if (!robotCam) continue;
-        // Resolve by unique_id first: it names the physical device exactly.
-        // device_id is a coin flip when two cameras share a name (the browser
-        // match is by localizedName), and camera_index goes stale on replug —
-        // both are fallbacks for records saved before unique_id was stored.
-        const live =
-          (robotCam.unique_id
-            ? availableCameras.find((c) => c.uniqueId === robotCam.unique_id)
-            : undefined) ??
-          (robotCam.device_id
-            ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
-            : undefined) ??
-          availableCameras.find((c) => c.index === robotCam.camera_index);
-        if (live) {
-          next[m.requestKey] = cameraKey(live);
+        if (robotCam) {
+          next[m.requestKey] = robotCam.name;
           changed = true;
         }
       }
       return changed ? next : prev;
     });
-  }, [policyConfig, robot, availableCameras, cameraMap]);
+  }, [policyConfig, robotCameras, cameraMap]);
 
+  // Drop a binding the robot record no longer backs (camera removed in Robot
+  // settings, or another robot selected). A merely UNPLUGGED camera keeps its
+  // binding — the tile says disconnected and Start stays disabled.
   useEffect(() => {
-    if (!policyConfig || availableCameras.length === 0) return;
+    if (!policyConfig) return;
     setCameraBindings((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const [name, key] of Object.entries(prev)) {
-        if (key != null && !liveCameraByKey(key)) {
+      for (const [name, boundTo] of Object.entries(prev)) {
+        if (boundTo != null && !recordCameraByName(boundTo)) {
           next[name] = null;
           changed = true;
         }
       }
       return changed ? next : prev;
     });
-  }, [policyConfig, availableCameras, liveCameraByKey]);
+  }, [policyConfig, recordCameraByName]);
 
   const selectedRef =
     selectedStep != null
@@ -356,12 +378,23 @@ const InferenceModal: React.FC<Props> = ({
     checkpointArms != null &&
     checkpointIsBimanual !== isBimanual;
 
-  const allCamerasBound = cameraMap.every(
-    (m) => liveCameraByKey(cameraBindings[m.requestKey]) != null,
+  const allCamerasBound = cameraMap.every((m) =>
+    cameraIsReady(cameraBindings[m.requestKey]),
   );
 
   // Inference drives the follower(s) only — gate on follower_ready, not
   // is_clean, so a robot with no leader setup can still run a policy.
+  // Temporal ensembling is an ACT config field — no other policy type has it,
+  // and passing --policy.temporal_ensemble_coeff to one would fail the
+  // rollout's config parse. Show the control only for ACT checkpoints.
+  const isAct = policyConfig?.policy_type === "act";
+  // Empty field or a non-positive number: the backend rejects it (weights are
+  // exp(-coeff * i)), so block Start rather than round-trip a 400.
+  const temporalEnsembleInvalid =
+    isAct &&
+    temporalEnsemble &&
+    (temporalEnsembleCoeff === undefined || temporalEnsembleCoeff <= 0);
+
   const canStart =
     !!robot &&
     robot.follower_ready &&
@@ -369,6 +402,7 @@ const InferenceModal: React.FC<Props> = ({
     selectedRef != null &&
     !!policyConfig &&
     allCamerasBound &&
+    !temporalEnsembleInvalid &&
     !submitting;
 
   const handleStart = async () => {
@@ -384,31 +418,25 @@ const InferenceModal: React.FC<Props> = ({
     // same camera index via OpenCV without colliding on the device.
     setSubmitting(true);
     await new Promise((r) => setTimeout(r, 300));
-    // Emit camera dict keys under the DISPLAY/request name (bare in bimanual
-    // mode). The rollout hands these to the BiSO left_arm_config, which
-    // re-prefixes with `left_` — reconstructing the checkpoint's `left_<name>`
-    // feature. Resolution still comes from the checkpoint feature's dims.
-    const cameraDict: Record<string, {
-      type: string;
-      camera_index?: number;
-      width: number;
-      height: number;
-      fps?: number;
-      fourcc?: string;
-    }> = {};
+    // Emit binding keys under the DISPLAY/request name (bare in bimanual
+    // mode). The rollout hands the resolved cameras to the BiSO
+    // left_arm_config, which re-prefixes with `left_` — reconstructing the
+    // checkpoint's `left_<name>` feature. The VALUES are robot-record camera
+    // names; every setting behind them is read server-side from the record.
+    const cameraBindingPayload: Record<string, string> = {};
+    // ...except capture RESOLUTION, which comes from the checkpoint: lerobot's
+    // rollout doesn't resize frames to the policy's input shape, so the camera
+    // must capture at the size the policy was trained on. Forwarded the same
+    // way `checkpoint_state_dim` is.
+    const cameraDimsPayload: Record<string, { width: number; height: number }> = {};
     for (const m of cameraMap) {
-      const key = cameraBindings[m.requestKey];
-      if (key == null) continue;
-      const live = liveCameraByKey(key);
-      if (!live) continue;
+      const boundTo = cameraBindings[m.requestKey];
+      if (boundTo == null || !recordCameraByName(boundTo)) continue;
+      cameraBindingPayload[m.requestKey] = boundTo;
       const dims = policyConfig.image_features[m.feature];
-      cameraDict[m.requestKey] = {
-        type: "opencv",
-        camera_index: live.index,
-        width: dims.width,
-        height: dims.height,
-        fps: DEFAULT_FPS,
-      };
+      if (dims?.width && dims?.height) {
+        cameraDimsPayload[m.requestKey] = { width: dims.width, height: dims.height };
+      }
     }
     try {
       // The POST now returns immediately (it only validates cheaply, then the
@@ -421,7 +449,8 @@ const InferenceModal: React.FC<Props> = ({
         follower_config: robot.follower_config,
         policy_ref: selectedRef,
         task,
-        cameras: cameraDict,
+        camera_bindings: cameraBindingPayload,
+        camera_dims: cameraDimsPayload,
         duration_s: durationS,
         // Bimanual: forward the mode + right-arm follower so the server builds a
         // `bi_so_follower` command staging both follower calibrations. In single
@@ -435,6 +464,11 @@ const InferenceModal: React.FC<Props> = ({
         // same arm-count guard authoritatively (null when the checkpoint omits
         // observation.state — the server then defers to its shape check).
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+        inference_engine: inferenceEngine,
+        // ACT-only, and only while the switch is on — otherwise omitted so the
+        // checkpoint's own (ensembling-off) config stands.
+        temporal_ensemble_coeff:
+          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
       });
       onOpenChange(false);
       openInferenceSession();
@@ -518,8 +552,12 @@ const InferenceModal: React.FC<Props> = ({
             ) : (
               <CheckpointDropdown
                 checkpoints={checkpoints}
-                selectedStep={selectedStep}
-                onChange={setSelectedStep}
+                // Single-job list: steps are unique here, so the step maps
+                // 1:1 onto the checkpoint's identifying ref.
+                selectedRef={
+                  checkpoints.find((c) => c.step === selectedStep)?.ref ?? null
+                }
+                onChange={(c) => setSelectedStep(c.step)}
               />
             )}
             {robotCheckpointArmMismatch ? (
@@ -583,6 +621,33 @@ const InferenceModal: React.FC<Props> = ({
                 className=""
               />
             </div>
+            <div className="space-y-2">
+              <Label
+                htmlFor="inference-engine"
+                className="text-sm font-medium text-muted-foreground"
+              >
+                Inference engine
+              </Label>
+              <Select
+                value={inferenceEngine}
+                onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
+              >
+                <SelectTrigger id="inference-engine">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="sync">Sync (default)</SelectItem>
+                  <SelectItem value="rtc">
+                    RTC — experimental, smoother control
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {inferenceEngine === "rtc"
+                  ? "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result."
+                  : "One policy forward per control step. The arm pauses briefly between action chunks."}
+              </p>
+            </div>
           </div>
 
           <div className="space-y-4">
@@ -608,13 +673,18 @@ const InferenceModal: React.FC<Props> = ({
             ) : (
               <div className="space-y-3">
                 <p className="text-xs text-muted-foreground">
-                  Bind a physical camera to each name the policy was trained
-                  with. Resolution comes from the checkpoint.
+                  Bind one of this robot's cameras to each name the policy was
+                  trained with. Which camera and how it's opened come from the
+                  robot (edit in Robot settings); the capture resolution comes
+                  from the checkpoint.
                 </p>
                 {cameraMap.map((m) => {
                   const dims = policyConfig.image_features[m.feature];
                   const value = cameraBindings[m.requestKey];
-                  const selectedCamera = liveCameraByKey(value);
+                  const boundCamera = recordCameraByName(value);
+                  const connected =
+                    boundCamera != null &&
+                    isCameraConnected(boundCamera, availableCameras);
                   return (
                     <div key={m.requestKey} className="flex items-center gap-3">
                       <div className="flex-1">
@@ -622,8 +692,22 @@ const InferenceModal: React.FC<Props> = ({
                           {m.display}
                         </Label>
                         <p className="text-xs text-muted-foreground">
-                          {dims.width}×{dims.height}
+                          Captures at {dims.width}×{dims.height} — the policy's
+                          resolution
                         </p>
+                        {boundCamera &&
+                        (boundCamera.width !== dims.width ||
+                          boundCamera.height !== dims.height) ? (
+                          <p className="text-xs text-muted-foreground">
+                            ({boundCamera.name} is set to {boundCamera.width}×
+                            {boundCamera.height} in Robot settings)
+                          </p>
+                        ) : null}
+                        {boundCamera && !connected ? (
+                          <p className="text-xs text-destructive">
+                            Disconnected — reconnect it before starting
+                          </p>
+                        ) : null}
                       </div>
                       <Select
                         value={value ?? undefined}
@@ -633,17 +717,15 @@ const InferenceModal: React.FC<Props> = ({
                           <SelectValue placeholder="Select a camera" />
                         </SelectTrigger>
                         <SelectContent>
-                          {availableCameras.length === 0 ? (
+                          {robotCameras.length === 0 ? (
                             <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                              No cameras detected
+                              This robot has no cameras — add them in Robot
+                              settings
                             </div>
                           ) : (
-                            availableCameras.map((cam) => (
-                              <SelectItem
-                                key={cameraKey(cam)}
-                                value={cameraKey(cam)}
-                              >
-                                #{cam.index} — {cam.name}
+                            robotCameras.map((cam) => (
+                              <SelectItem key={cam.name} value={cam.name}>
+                                {cam.name} — {cam.width}×{cam.height}
                               </SelectItem>
                             ))
                           )}
@@ -652,8 +734,12 @@ const InferenceModal: React.FC<Props> = ({
                       {/* Backend preview at the exact cv2 index this role
                           binds to, so the tile can't disagree with the run. */}
                       <CameraThumbnail
-                        cameraIndex={selectedCamera?.index}
-                        uniqueId={selectedCamera?.uniqueId}
+                        cameraIndex={
+                          boundCamera && connected
+                            ? resolveCameraIndex(boundCamera, availableCameras)
+                            : undefined
+                        }
+                        uniqueId={boundCamera?.unique_id}
                         paused={submitting}
                       />
                     </div>
@@ -662,6 +748,74 @@ const InferenceModal: React.FC<Props> = ({
               </div>
             )}
           </div>
+
+          {/* Advanced parameters — the shared AdvancedSection, same trigger and
+              inner eyebrow/label/help-text rhythm as the Train form's
+              AdvancedCard and the Deploy panel. ACT-only: temporal ensembling
+              is an ACT config field, so for every other policy type the block
+              has nothing to hold and stays hidden. ----------------------- */}
+          {isAct ? (
+            <AdvancedSection
+              open={advancedOpen}
+              onOpenChange={setAdvancedOpen}
+              summary="Temporal ensembling for ACT"
+            >
+              <div className="space-y-6">
+                <section className="space-y-3">
+                  <h4 className="eyebrow">Action selection</h4>
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="temporal-ensemble"
+                      checked={temporalEnsemble}
+                      onCheckedChange={setTemporalEnsemble}
+                      className="data-[state=checked]:bg-primary"
+                    />
+                    <Label htmlFor="temporal-ensemble">
+                      Temporal ensembling
+                    </Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Averages the overlapping action chunks the policy predicts
+                    at each step instead of executing one chunk open-loop —
+                    smoother motion, but the policy runs every control step, so
+                    it is slower.
+                  </p>
+                  {temporalEnsemble ? (
+                    <div className="space-y-2">
+                      <Label htmlFor="temporal-ensemble-coeff">
+                        Ensemble coefficient
+                      </Label>
+                      <NumberInput
+                        id="temporal-ensemble-coeff"
+                        integer={false}
+                        step="0.001"
+                        min={0}
+                        value={temporalEnsembleCoeff}
+                        onChange={setTemporalEnsembleCoeff}
+                        placeholder={`${DEFAULT_TEMPORAL_ENSEMBLE_COEFF} (ACT paper default)`}
+                        aria-invalid={temporalEnsembleInvalid}
+                        className={cn(
+                          "w-40",
+                          temporalEnsembleInvalid && "border-destructive",
+                        )}
+                      />
+                      {temporalEnsembleInvalid ? (
+                        <p className="text-xs text-destructive">
+                          Enter a number greater than 0.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Weights are exp(-coeff × age): higher favours the
+                          newest prediction, lower averages more evenly. The
+                          ACT paper uses {DEFAULT_TEMPORAL_ENSEMBLE_COEFF}.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+                </section>
+              </div>
+            </AdvancedSection>
+          ) : null}
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center pt-4">
             <Button

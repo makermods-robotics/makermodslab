@@ -3,16 +3,13 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { AdvancedSection } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
-import { ConfigComponentProps } from "../types";
+import {
+  ConfigComponentProps,
+  POLICY_TYPE_OPTIONS,
+  RESUME_INHERITED_NOTE,
+} from "../types";
 import { useApi } from "@/contexts/ApiContext";
 import { isValidTimeout } from "@/lib/jobTimeout";
 
@@ -47,13 +44,62 @@ const OPTIMIZER_LABELS: Record<string, string> = {
   multi_adam: "Multi Adam",
 };
 
+type OptimizerKnob = "lr" | "weight_decay" | "grad_clip_norm";
+
+/**
+ * Which optimizer knobs each policy actually exposes — the mirror of
+ * `_POLICY_OPTIMIZER_FIELDS` in makermodslab/train.py. Keep the two in sync.
+ *
+ * Training always runs with the policy training preset on, so lerobot rebuilds
+ * the optimizer from the POLICY config's own `optimizer_*` fields and discards
+ * anything sent to the `--optimizer.*` namespace. The backend therefore emits
+ * `--policy.optimizer_<knob>`, and only for knobs the selected policy declares
+ * (an unknown one makes the CLI parser reject the run outright). A knob missing
+ * here would silently do nothing, so the input is hidden rather than shown as a
+ * control that can't take effect.
+ *
+ * This can NOT be derived from /policy-optimizer-defaults: that endpoint
+ * reports the preset OBJECT's fields, and both AdamW and Adam presets carry a
+ * grad_clip_norm regardless of whether the policy exposes a knob for it.
+ */
+const POLICY_OPTIMIZER_KNOBS: Record<string, readonly OptimizerKnob[]> = {
+  act: ["lr", "weight_decay"],
+  diffusion: ["lr", "weight_decay"],
+  pi0: ["lr", "weight_decay", "grad_clip_norm"],
+  smolvla: ["lr", "weight_decay", "grad_clip_norm"],
+  tdmpc: ["lr"],
+  vqbet: ["lr", "weight_decay"],
+  pi0_fast: ["lr", "weight_decay", "grad_clip_norm"],
+  // Its preset is a MultiAdam built from per-group settings — no scalar knobs.
+  gaussian_actor: [],
+};
+
+// Matches the backend's fallback for a policy type absent from the table.
+const DEFAULT_OPTIMIZER_KNOBS: readonly OptimizerKnob[] = ["lr"];
+
+const policyShortLabel = (value: string): string =>
+  POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.label || value;
+
 /** Advanced-parameters section of the training form. Uses the shared
  * AdvancedSection, so its trigger is the same eyebrow-level control as the
  * Collect form's "Advanced parameters" instead of a heavier heading that
- * outranked the sections above it. */
+ * outranked the sections above it.
+ *
+ * On a resume the first three sections (policy preset, training, optimizer) are
+ * inherited wholesale from the checkpoint — build_training_command's resume
+ * branch emits none of --policy.use_amp / --seed / --policy.optimizer_* (and
+ * lerobot restores optimizer state from the checkpoint itself) — so they get
+ * ONE section-level read-only treatment rather than a per-field repetition.
+ * "Data loading", "Logging & checkpointing" and the cloud "Job timeout" below
+ * stay live: --num_workers / --log_freq / --save_freq are on the resume argv,
+ * and the timeout is a run_job submission parameter that never reaches lerobot
+ * at all. Worker count sits outside the inherited block on purpose — it is a
+ * host-capacity knob (like the cloud flavor), not part of the experiment, and a
+ * continuation can land on different hardware than the parent run. */
 const AdvancedCard: React.FC<ConfigComponentProps> = ({
   config,
   updateConfig,
+  resumeLocked,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -92,6 +138,14 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
     ? OPTIMIZER_LABELS[d.optimizer] ?? d.optimizer
     : null;
 
+  // The optimizer CLASS is fixed by the policy preset and cannot be overridden
+  // from the CLI, so it is shown, not chosen. Which scalar knobs remain
+  // adjustable is likewise a property of the policy.
+  const knobs =
+    POLICY_OPTIMIZER_KNOBS[config.policy_type] ?? DEFAULT_OPTIMIZER_KNOBS;
+  const has = (k: OptimizerKnob) => knobs.includes(k);
+  const policyLabel = policyShortLabel(config.policy_type);
+
   // Cloud-only "Job timeout": the raw string drives both the input and the
   // (mirror-of-backend) inline validity check. Blank = HF Jobs default (2h).
   const isCloud = config.target.runner === "hf_cloud";
@@ -106,36 +160,138 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
       summary="Optimizer, learning rate, log frequency, checkpoints, and more"
     >
       <div className="space-y-6">
-        {/* Policy */}
-        <section className="space-y-3">
-          <SectionHeading>Policy preset</SectionHeading>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="policy_use_amp"
-              checked={config.policy_use_amp}
-              onCheckedChange={(checked) =>
-                updateConfig("policy_use_amp", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="policy_use_amp">
-              Use automatic mixed precision
-            </Label>
-          </div>
-        </section>
-
-        {/* Training */}
-        <section className="space-y-3">
-          <SectionHeading>Training</SectionHeading>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="seed">Random seed</Label>
-              <NumberInput
-                id="seed"
-                value={config.seed}
-                onChange={(v) => updateConfig("seed", v)}
+        {/* Policy preset + Training + Optimizer. On a resume these are one
+            inherited block, so the explanation sits once at its head. */}
+        <div
+          className={cn(
+            "space-y-6",
+            resumeLocked && "rounded-md border border-border bg-muted/30 p-4",
+          )}
+        >
+          {resumeLocked && (
+            <p className="text-xs text-muted-foreground">
+              {RESUME_INHERITED_NOTE}
+            </p>
+          )}
+          {/* Policy */}
+          <section className="space-y-3">
+            <SectionHeading>Policy preset</SectionHeading>
+            <div className="flex items-center gap-3">
+              <Switch
+                id="policy_use_amp"
+                checked={config.policy_use_amp}
+                onCheckedChange={(checked) =>
+                  updateConfig("policy_use_amp", checked)
+                }
+                disabled={resumeLocked}
+                className="data-[state=checked]:bg-primary"
               />
+              <Label htmlFor="policy_use_amp">
+                Use automatic mixed precision
+              </Label>
             </div>
+          </section>
+
+          {/* Training */}
+          <section className="space-y-3">
+            <SectionHeading>Training</SectionHeading>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="seed">Random seed</Label>
+                <NumberInput
+                  id="seed"
+                  value={config.seed}
+                  onChange={(v) => updateConfig("seed", v)}
+                  disabled={resumeLocked}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Optimizer */}
+          <section className="space-y-3">
+            <SectionHeading>Optimizer</SectionHeading>
+            <div className="space-y-2">
+              <Label>Optimizer</Label>
+              <p className="text-sm">
+                {defaultOptimizerLabel ?? "Set by the policy preset"}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {defaultOptimizerLabel
+                  ? `Set by the ${policyLabel} policy preset — the optimizer class isn't adjustable.`
+                  : "The policy preset picks the optimizer class; it isn't adjustable."}
+              </p>
+            </div>
+            {knobs.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                The {policyLabel} preset builds its optimizer from per-parameter-group
+                settings, so there are no learning-rate or weight-decay knobs to set here.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                {has("lr") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="optimizer_lr">Learning rate</Label>
+                    <NumberInput
+                      id="optimizer_lr"
+                      integer={false}
+                      step="0.0001"
+                      value={config.optimizer_lr}
+                      onChange={(v) => updateConfig("optimizer_lr", v)}
+                      placeholder={lrPlaceholder}
+                      disabled={resumeLocked}
+                    />
+                  </div>
+                )}
+                {has("weight_decay") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="optimizer_weight_decay">Weight decay</Label>
+                    <NumberInput
+                      id="optimizer_weight_decay"
+                      integer={false}
+                      step="0.0001"
+                      value={config.optimizer_weight_decay}
+                      onChange={(v) => updateConfig("optimizer_weight_decay", v)}
+                      placeholder={wdPlaceholder}
+                      disabled={resumeLocked}
+                    />
+                  </div>
+                )}
+                {has("grad_clip_norm") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="optimizer_grad_clip_norm">
+                      Gradient clipping
+                    </Label>
+                    <NumberInput
+                      id="optimizer_grad_clip_norm"
+                      integer={false}
+                      step="0.0001"
+                      value={config.optimizer_grad_clip_norm}
+                      onChange={(v) =>
+                        updateConfig("optimizer_grad_clip_norm", v)
+                      }
+                      placeholder={gradPlaceholder}
+                      disabled={resumeLocked}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+            {knobs.length > 0 && !has("grad_clip_norm") && (
+              <p className="text-xs text-muted-foreground">
+                The {policyLabel} policy exposes no gradient-clipping setting
+                {has("weight_decay") ? "" : " or weight decay"}.
+              </p>
+            )}
+          </section>
+        </div>
+
+        {/* Data loading. Outside the inherited block above even on a resume:
+            --num_workers IS on the resume argv, and the host it runs on can
+            differ from the parent run's. */}
+        <section className="space-y-3">
+          <SectionHeading>Data loading</SectionHeading>
+          <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="num_workers">Number of workers</Label>
               <NumberInput
@@ -145,70 +301,9 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
                   if (v !== undefined) updateConfig("num_workers", v);
                 }}
               />
-            </div>
-          </div>
-        </section>
-
-        {/* Optimizer */}
-        <section className="space-y-3">
-          <SectionHeading>Optimizer</SectionHeading>
-          <div className="space-y-2">
-            <Label htmlFor="optimizer_type">Optimizer</Label>
-            <Select
-              value={config.optimizer_type || "adam"}
-              onValueChange={(value) => updateConfig("optimizer_type", value)}
-            >
-              <SelectTrigger id="optimizer_type">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="adam">Adam</SelectItem>
-                <SelectItem value="adamw">AdamW</SelectItem>
-                <SelectItem value="sgd">SGD</SelectItem>
-                <SelectItem value="multi_adam">Multi Adam</SelectItem>
-              </SelectContent>
-            </Select>
-            {defaultOptimizerLabel && (
               <p className="text-xs text-muted-foreground">
-                Policy default: {defaultOptimizerLabel}
+                DataLoader processes feeding the GPU.
               </p>
-            )}
-          </div>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <div className="space-y-2">
-              <Label htmlFor="optimizer_lr">Learning rate</Label>
-              <NumberInput
-                id="optimizer_lr"
-                integer={false}
-                step="0.0001"
-                value={config.optimizer_lr}
-                onChange={(v) => updateConfig("optimizer_lr", v)}
-                placeholder={lrPlaceholder}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="optimizer_weight_decay">Weight decay</Label>
-              <NumberInput
-                id="optimizer_weight_decay"
-                integer={false}
-                step="0.0001"
-                value={config.optimizer_weight_decay}
-                onChange={(v) => updateConfig("optimizer_weight_decay", v)}
-                placeholder={wdPlaceholder}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="optimizer_grad_clip_norm">
-                Gradient clipping
-              </Label>
-              <NumberInput
-                id="optimizer_grad_clip_norm"
-                integer={false}
-                step="0.0001"
-                value={config.optimizer_grad_clip_norm}
-                onChange={(v) => updateConfig("optimizer_grad_clip_norm", v)}
-                placeholder={gradPlaceholder}
-              />
             </div>
           </div>
         </section>
@@ -254,26 +349,6 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
               )}
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="save_checkpoint"
-              checked={config.save_checkpoint}
-              onCheckedChange={(checked) =>
-                updateConfig("save_checkpoint", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="save_checkpoint">Save checkpoints</Label>
-          </div>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="resume"
-              checked={config.resume}
-              onCheckedChange={(checked) => updateConfig("resume", checked)}
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="resume">Resume from checkpoint</Label>
-          </div>
         </section>
 
         {/* Cloud (HF Jobs) */}
@@ -307,23 +382,6 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
           </section>
         )}
 
-        {/* Misc */}
-        <section className="space-y-3">
-          <SectionHeading>Misc</SectionHeading>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="use_policy_training_preset"
-              checked={config.use_policy_training_preset}
-              onCheckedChange={(checked) =>
-                updateConfig("use_policy_training_preset", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="use_policy_training_preset">
-              Use policy training preset
-            </Label>
-          </div>
-        </section>
       </div>
     </AdvancedSection>
   );

@@ -71,8 +71,13 @@ const CollectPanel: React.FC = () => {
     resetTimeS,
     streamingEncoding,
     pushToHub,
-    cameras,
   } = collectForm;
+
+  // The session's cameras ARE the selected robot's cameras — the backend
+  // resolves them from the robot record and the start request carries none.
+  // Read straight off the record so the panel can't show (or hold on to) a set
+  // the server wouldn't use; edits live in the robot settings dialog.
+  const cameras = selectedRecord?.cameras ?? [];
 
   // The record-new form slides open in place; the library folds to its header
   // while the form is open (still expandable by hand).
@@ -102,20 +107,6 @@ const CollectPanel: React.FC = () => {
   };
 
   const releaseStreamsRef = useRef<(() => void) | null>(null);
-
-  // Seed the camera config from the selected robot whenever the robot changes
-  // (mirrors the old openRecordingModal seeding). Keyed on the robot name so a
-  // user's in-form camera edits aren't clobbered on every render — the marker
-  // persists in the draft so a panel remount doesn't re-seed either.
-  useEffect(() => {
-    const name = selectedRecord?.name ?? null;
-    if (name !== collectForm.camerasSeededFor) {
-      updateCollectForm({
-        camerasSeededFor: name,
-        cameras: selectedRecord ? [...(selectedRecord.cameras ?? [])] : [],
-      });
-    }
-  }, [selectedRecord, collectForm.camerasSeededFor, updateCollectForm]);
 
   // Release camera streams when the panel unmounts (e.g. navigating to the
   // recording session), so cv2 can grab the devices exclusively.
@@ -206,33 +197,6 @@ const CollectPanel: React.FC = () => {
       });
     }
 
-    const cameraDict = cameras.reduce(
-      (acc, cam) => {
-        acc[cam.name] = {
-          type: cam.type,
-          camera_index: cam.camera_index,
-          width: cam.width,
-          height: cam.height,
-          fps: cam.fps,
-          ...(cam.fourcc ? { fourcc: cam.fourcc } : {}),
-          ...(cam.backend ? { backend: cam.backend } : {}),
-        };
-        return acc;
-      },
-      {} as Record<
-        string,
-        {
-          type: string;
-          camera_index?: number;
-          width: number;
-          height: number;
-          fps?: number;
-          fourcc?: string;
-          backend?: string;
-        }
-      >,
-    );
-
     const recordingConfig = {
       leader_port: robot.leader_port,
       follower_port: robot.follower_port,
@@ -244,8 +208,10 @@ const CollectPanel: React.FC = () => {
       right_follower_port: robot.right_follower_port,
       right_leader_config: robot.right_leader_config,
       right_follower_config: robot.right_follower_config,
-      // Robot name → BiSO staging base id (bimanual). Names the per-session
-      // staging dir; does not affect which calibration drives which arm.
+      // Robot name → the record the backend resolves this session's CAMERAS
+      // from (the request carries no camera payload). Bimanual also uses it as
+      // the BiSO staging base id, naming the per-session staging dir; it does
+      // not affect which calibration drives which arm.
       robot_name: robot.name,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
@@ -257,7 +223,8 @@ const CollectPanel: React.FC = () => {
       push_to_hub: false,
       resume: false,
       streaming_encoding: streamingEncoding,
-      cameras: cameraDict,
+      // No `cameras` here on purpose: the backend resolves this session's
+      // cameras from the robot record named above.
     };
 
     setActiveRecording(recordingConfig);
@@ -326,8 +293,6 @@ const CollectPanel: React.FC = () => {
             }
             pushToHub={pushToHub}
             setPushToHub={(v) => updateCollectForm({ pushToHub: v })}
-            cameras={cameras}
-            setCameras={(v) => updateCollectForm({ cameras: v })}
             releaseStreamsRef={releaseStreamsRef}
           />
         </CollapsibleContent>

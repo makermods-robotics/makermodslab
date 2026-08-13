@@ -11,10 +11,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import MetaRows from "@/components/library/MetaRows";
+import { middleEllipsis } from "@/lib/modelNames";
 import { HubModel, deleteHubModel } from "@/lib/jobsApi";
 import { ApiError } from "@/lib/apiClient";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
+import { useTruncationTitle } from "@/hooks/useTruncationTitle";
 import {
   ExternalLink,
   Lock,
@@ -167,9 +169,24 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [acting, setActing] = useState<"inference" | "finetune" | null>(null);
   const url = `https://huggingface.co/${model.repo_id}`;
-  const shortName = model.repo_id.includes("/")
-    ? model.repo_id.split("/").slice(1).join("/")
-    : model.repo_id;
+  // Same title rule as the imported card next to it in the grid: namespace off
+  // (the subtitle below repeats the full repo id), and shortened from the
+  // middle rather than the end, since an uploaded repo's tail is its timestamp
+  // — the only thing separating two uploads of the same task.
+  const shortName = middleEllipsis(
+    model.repo_id.includes("/")
+      ? model.repo_id.split("/").slice(1).join("/")
+      : model.repo_id,
+  );
+  // Both of this title's shortenings are the caller's own — the namespace peel
+  // and middleEllipsis — so the flag is just "is what we render the whole repo
+  // id?"; the div's `truncate` on top of that is measured on hover. An
+  // unnamespaced repo whose name fits is therefore the one case with no title,
+  // and correctly so: the text on screen already IS the repo id.
+  const nameHover = useTruncationTitle(
+    model.repo_id,
+    shortName !== model.repo_id,
+  );
 
   const runAction = async (
     e: React.MouseEvent,
@@ -230,7 +247,7 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
         <div>
           <div
             className="text-foreground font-semibold truncate flex items-center gap-1.5"
-            title={model.repo_id}
+            {...nameHover}
           >
             {model.private ? (
               <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" />

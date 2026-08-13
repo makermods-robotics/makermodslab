@@ -204,7 +204,9 @@ def test_start_calibration_check_and_claim_is_atomic(
         assert release_stall.wait(timeout=5), "test setup: release never signalled"
         return None
 
-    monkeypatch.setattr("makermodslab.calibrate.calibration_dir_for_device", _stalling_calibration_dir_for_device)
+    monkeypatch.setattr(
+        "makermodslab.calibrate.calibration_dir_for_device", _stalling_calibration_dir_for_device
+    )
 
     request = CalibrationRequest(device_type="robot", port="/dev/null", config_file="race", overwrite=True)
     results: dict[str, dict] = {}
@@ -231,6 +233,28 @@ def test_start_calibration_check_and_claim_is_atomic(
     assert outcomes == [False, True], (
         f"expected exactly one of the two concurrent starts to win, got {results}"
     )
+
+
+def test_start_calibration_resets_calibration_committed(monkeypatch, tmp_lerobot_home) -> None:
+    """The manager is a long-lived singleton reused across sessions, so a
+    stale True left over from a prior successful run must not survive into a
+    new one — otherwise _cleanup_device would treat this run's own cancelled
+    attempt as already committed and skip the homing-offset/position-limit
+    rollback entirely."""
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
+
+    mgr = CalibrationManager()
+    # Avoid spawning the real hardware-touching worker; only the
+    # check-and-claim / reset path is under test here.
+    monkeypatch.setattr(mgr, "_calibration_worker", lambda request: None)
+    mgr._calibration_committed = True  # leftover from a prior successful run
+
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+
+    assert result["success"] is True
+    assert mgr._calibration_committed is False
 
 
 def test_find_off_center_joints_passes_centered_ranges() -> None:
@@ -269,3 +293,173 @@ def test_find_off_center_joints_tolerance_boundary() -> None:
     assert find_off_center_joints({"elbow_flex": (1447, 3447)}) == []
     # Midpoint 2448 deviates by 401 — just over the line.
     assert find_off_center_joints({"elbow_flex": (1448, 3448)}) == ["elbow_flex"]
+
+
+class _FakeBus:
+    """Records register writes; enough surface for _cleanup_device."""
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, str, int]] = []
+
+    def write(self, register: str, motor: str, value: int) -> None:
+        self.writes.append((register, motor, value))
+
+
+class _BrokenBus(_FakeBus):
+    """Every write raises, simulating a bus that's already gone unreachable."""
+
+    def write(self, register: str, motor: str, value: int) -> None:
+        raise RuntimeError("bus unreachable")
+
+
+class _PartiallyBrokenBus(_FakeBus):
+    """Only the named motor's writes fail; every other motor succeeds."""
+
+    def __init__(self, failing_motor: str) -> None:
+        super().__init__()
+        self._failing_motor = failing_motor
+
+    def write(self, register: str, motor: str, value: int) -> None:
+        if motor == self._failing_motor:
+            raise RuntimeError(f"bus rejected write for {motor}")
+        super().write(register, motor, value)
+
+
+class _FakeDevice:
+    def __init__(self, bus) -> None:
+        self.bus = bus
+        self.disconnected = False
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def test_cleanup_device_restores_homing_offsets_when_not_committed() -> None:
+    """Regression for C2: _step_homing writes new Homing_Offset values to the
+    servo's EEPROM immediately (step 1), well before _complete_calibration
+    ever saves the on-disk calibration file (step 3). A calibration cancelled
+    or errored in between used to leave the servo permanently diverged from
+    the last-saved file — the next session's arm-identity fingerprint check
+    (see makermodslab/arm_identity.py) would then either hard-refuse to start or
+    silently decode positions against a stale offset. _cleanup_device must
+    restore the pre-calibration baseline whenever the run never committed."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {"shoulder_pan": 15, "wrist_roll": -42}
+    mgr._calibration_committed = False  # cancelled/errored before saving
+
+    mgr._cleanup_device()
+
+    assert ("Homing_Offset", "shoulder_pan", 15) in bus.writes
+    assert ("Homing_Offset", "wrist_roll", -42) in bus.writes
+    assert device.disconnected is True
+    assert mgr.device is None
+
+
+def test_cleanup_device_restores_position_limits_when_not_committed() -> None:
+    """Regression: reset_calibration() (called by _step_homing) doesn't just
+    zero Homing_Offset — it also zeroes Min_Position_Limit and maxes out
+    Max_Position_Limit for every motor on the bus. A cancelled run must roll
+    those back too, or the next session's arm-identity check still sees a
+    servo diverged from the saved calibration file, just via a different
+    pair of registers."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {"shoulder_pan": 15}
+    mgr._original_min_position_limits = {"shoulder_pan": 120}
+    mgr._original_max_position_limits = {"shoulder_pan": 3980}
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()
+
+    assert ("Min_Position_Limit", "shoulder_pan", 120) in bus.writes
+    assert ("Max_Position_Limit", "shoulder_pan", 3980) in bus.writes
+    assert device.disconnected is True
+
+
+def test_cleanup_device_restores_remaining_motors_after_one_write_fails() -> None:
+    """One motor's restore write failing must not abort the writes still
+    queued for the remaining motors — the old single try/except around the
+    whole loop meant one bad write left every motor after it in iteration
+    order still diverged: a partially-rolled-back arm, which is worse than a
+    fully-diverged one because it's much harder to notice and diagnose."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _PartiallyBrokenBus(failing_motor="elbow_flex")
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {
+        "shoulder_pan": 15,
+        "elbow_flex": 7,
+        "wrist_roll": -42,
+    }
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()  # must not raise despite elbow_flex's write failing
+
+    assert ("Homing_Offset", "shoulder_pan", 15) in bus.writes
+    assert ("Homing_Offset", "wrist_roll", -42) in bus.writes
+    assert not any(write[1] == "elbow_flex" for write in bus.writes)
+    assert device.disconnected is True
+    assert mgr.device is None
+
+
+def test_cleanup_device_does_not_restore_once_calibration_committed() -> None:
+    """A calibration that reached _complete_calibration (file saved to disk)
+    must not have its final homing offsets touched during cleanup — EEPROM
+    and the file already agree at that point."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    mgr.device = _FakeDevice(bus)
+    mgr._original_homing_offsets = {"shoulder_pan": 15}
+    mgr._calibration_committed = True
+
+    mgr._cleanup_device()
+
+    assert bus.writes == []
+
+
+def test_cleanup_device_skips_restore_when_no_baseline_was_captured() -> None:
+    """If the baseline read itself failed (device unreachable at connect
+    time), there's nothing to roll back to — cleanup must not crash or invent
+    a value."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    mgr.device = _FakeDevice(bus)
+    mgr._original_homing_offsets = {}
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()  # must not raise
+
+    assert bus.writes == []
+
+
+def test_cleanup_device_still_disconnects_if_restore_write_fails() -> None:
+    """A failed rollback write (e.g. the bus just dropped) must be logged, not
+    swallowed silently and not allowed to block the device disconnect."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _BrokenBus()
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {"shoulder_pan": 15}
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()  # must not raise despite the write failing
+
+    assert device.disconnected is True
+    assert mgr.device is None

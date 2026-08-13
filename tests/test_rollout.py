@@ -23,8 +23,17 @@ from __future__ import annotations
 
 import io
 import threading
+from pathlib import Path
 
 import pytest
+
+from makermodslab.eval_protocol import (
+    CMD_EPISODE,
+    CMD_QUIT,
+    CMD_STOP,
+    REASON_DURATION,
+    REASON_STOPPED,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +50,7 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rollout, "_inference_cancel", None)
     monkeypatch.setattr(rollout, "_last_result", None)
     monkeypatch.setattr(rollout, "_inference_startup_thread", None)
+    monkeypatch.setattr(rollout, "_eval_session", None)
 
 
 class _SyncThread:
@@ -90,7 +100,8 @@ def test_inference_request_has_expected_defaults() -> None:
         policy_ref="user/repo@checkpoints/000050",
     )
     assert req.task == ""
-    assert req.cameras == {}
+    assert req.camera_bindings == {}
+    assert req.camera_dims == {}
     assert req.duration_s == 60
 
 
@@ -129,6 +140,35 @@ def test_inference_request_accepts_bimanual_block() -> None:
     assert req.right_follower_config == "right_cal"
     assert req.robot_name == "dual_arm"
     assert req.checkpoint_state_dim == 12
+
+
+def test_inference_request_defaults_to_sync_engine() -> None:
+    """Absent an explicit choice the request pins lerobot's own default, so
+    adding the A/B knob can't change what an existing caller gets."""
+    from makermodslab.rollout import InferenceRequest
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+    )
+    assert req.inference_engine == "sync"
+
+
+def test_inference_request_rejects_unknown_engine() -> None:
+    """The field is a Literal, so a typo is a 422 at the API edge rather than a
+    draccus parse crash inside the rollout subprocess."""
+    from pydantic import ValidationError
+
+    from makermodslab.rollout import InferenceRequest
+
+    with pytest.raises(ValidationError):
+        InferenceRequest(
+            follower_port="/dev/ttyUSB0",
+            follower_config="robot_a",
+            policy_ref="user/repo@checkpoints/000050",
+            inference_engine="async",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +330,222 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
     assert "allow_patterns" not in seen
     assert seen["ignore_patterns"] == ["checkpoints/**", "training_state/**"]
     assert result == str(fake_root)
+
+
+# ---------------------------------------------------------------------------
+# Hub ref → MakerMods Lab's own models store (design-debt F6).
+#
+# The Models page downloads with `local_dir=<makermodslab_models>/<repo_id>`, which
+# huggingface_hub keeps entirely outside the shared hub cache — so a model the
+# user already pulled there used to be downloaded a SECOND time on first
+# inference. _resolve_policy_path now checks the local store first, but ONLY
+# when the hub cache holds nothing for the repo (with a cache entry,
+# snapshot_download is the revision-aware, self-deduping path and must win).
+# No network anywhere: snapshot_download is monkeypatched to explode.
+# ---------------------------------------------------------------------------
+
+_FAKE_POLICY_CONFIG = '{"type": "act"}'
+
+
+def _seed_models_store(
+    monkeypatch,
+    tmp_path,
+    repo_id: str,
+    *,
+    step: str | None = None,
+    flat: bool = False,
+    weights: bool = True,
+):
+    """Point models._local_models_root at a tmp dir and populate one repo in it.
+
+    `step` writes a `checkpoints/<step>/pretrained_model` tree (what a training
+    repo download looks like); `flat` writes a root config (what a `@root` repo
+    looks like). Both may be set, to build the ambiguous tree the `@root` branch
+    deliberately refuses. Returns the repo dir, RESOLVED — _downloaded_model_dir
+    resolves, and tmp_path is behind a symlink on macOS.
+
+    `weights=False` reproduces an INTERRUPTED local_dir download: config plus the
+    pre/post-processor safetensors, but no `model.safetensors`. That is the exact
+    shape that bit the user — note it does contain `.safetensors` files, so any
+    check looking merely for "some safetensors" would still be fooled.
+    """
+    import makermodslab.models as m
+
+    store = tmp_path / "makermodslab_models"
+    monkeypatch.setattr(m, "_local_models_root", lambda: store)
+    repo_dir = store / repo_id
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    def _populate(d):
+        (d / "config.json").write_text(_FAKE_POLICY_CONFIG)
+        (d / "train_config.json").write_text(_FAKE_POLICY_CONFIG)
+        # Processor weights land early in a download and are NOT policy weights.
+        (d / "preprocessor.safetensors").write_text("processor")
+        (d / "postprocessor.safetensors").write_text("processor")
+        if weights:
+            (d / "model.safetensors").write_text("weights")
+
+    if step is not None:
+        pretrained = repo_dir / "checkpoints" / step / "pretrained_model"
+        pretrained.mkdir(parents=True)
+        _populate(pretrained)
+    if flat:
+        _populate(repo_dir)
+    return repo_dir.resolve()
+
+
+def _seed_hub_cache(monkeypatch, tmp_path, *, cached_repo: str | None = None, with_snapshot: bool = True):
+    """Redirect HF_HUB_CACHE at a tmp dir, optionally holding one model repo."""
+    from huggingface_hub import constants as hf_constants
+    from huggingface_hub.file_download import repo_folder_name
+
+    cache = tmp_path / "hub"
+    cache.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(cache))
+    if cached_repo is not None:
+        snapshots = cache / repo_folder_name(repo_id=cached_repo, repo_type="model") / "snapshots"
+        snapshots.mkdir(parents=True)
+        if with_snapshot:
+            (snapshots / "deadbeef").mkdir()
+    return cache
+
+
+def _explode_snapshot_download(monkeypatch) -> None:
+    """Any snapshot_download call in these tests is the bug under test."""
+
+    def _boom(**kwargs):
+        raise AssertionError(f"snapshot_download must not be called: {kwargs}")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+
+
+def test_resolve_policy_path_uses_local_store_for_checkpoint_ref(monkeypatch, tmp_path) -> None:
+    """A `@checkpoints/<step>` ref whose repo is already in the local models
+    store (and nowhere in the hub cache) resolves with zero network."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert result == str(repo_dir / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_resolve_policy_path_uses_local_store_for_root_ref(monkeypatch, tmp_path) -> None:
+    """Same for a flat `@root` repo — the store's repo dir IS the pretrained
+    dir, so it is returned verbatim."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/flat", flat=True)
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    assert rollout._resolve_policy_path("user/flat@root") == str(repo_dir)
+
+
+def test_resolve_policy_path_local_store_hit_leaves_phase_untouched(monkeypatch, tmp_path) -> None:
+    """Nothing is fetched, so the UI must not be told it is downloading a model
+    — the same contract the plain local-dir branch has."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+
+    rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_resolve_policy_path_prefers_hub_when_repo_is_cached(monkeypatch, tmp_path) -> None:
+    """With the repo in the hub cache, snapshot_download is the right call even
+    though a local-store copy exists: it is revision-aware and only pulls what
+    changed, so the user stays on `main` instead of being pinned to a possibly
+    stale local copy."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/repo")
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    seen: dict = {}
+
+    def fake_snapshot_download(**kwargs):
+        seen.update(kwargs)
+        return str(fake_root)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert seen["repo_id"] == "user/repo"
+    assert result == str(fake_root / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_resolve_policy_path_downloads_when_requested_step_is_missing(monkeypatch, tmp_path) -> None:
+    """The local store has the repo but not the step the user picked — that is a
+    miss, not a substitution: fall through to the Hub."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kw: str(fake_root))
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000100")
+
+    assert result == str(fake_root / "checkpoints" / "000100" / "pretrained_model")
+
+
+def test_local_store_root_ref_refuses_a_checkpoints_tree(monkeypatch, tmp_path) -> None:
+    """`@root` means "the repo root IS the pretrained_model". A local copy that
+    resolves to a checkpoints sub-tree is a DIFFERENT tree than the Hub path
+    would return, so the shortcut declines rather than substituting it."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/repo", None) is None
+
+
+def test_local_store_declines_unknown_repo(monkeypatch, tmp_path) -> None:
+    """Nothing in the store for this repo → no shortcut."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("someone/else", "000050") is None
+
+
+def test_local_store_refuses_traversal_repo_id(monkeypatch, tmp_path) -> None:
+    """`policy_ref` is user input and the hub-ref regex accepts any `[^@]+`, so
+    a repo id that escapes the models root must never resolve (the guard comes
+    from models._downloaded_model_dir)."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("../../etc", None) is None
+
+
+def test_hub_cache_has_repo_reads_the_on_disk_layout(monkeypatch, tmp_path) -> None:
+    """A repo dir whose snapshots/ is empty (an interrupted or wiped entry) has
+    nothing to dedupe against, so it counts as absent."""
+    from makermodslab import rollout
+
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/repo")
+    assert rollout._hub_cache_has_repo("user/repo") is True
+    assert rollout._hub_cache_has_repo("user/other") is False
+
+    _seed_hub_cache(monkeypatch, tmp_path / "b", cached_repo="user/repo", with_snapshot=False)
+    assert rollout._hub_cache_has_repo("user/repo") is False
 
 
 def test_format_cameras_arg_empty_yields_empty_braces() -> None:
@@ -491,9 +747,77 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     assert "--strategy.type=base" in cmd
 
 
+def test_rollout_cli_args_emits_sync_engine_by_default() -> None:
+    """`inference` is a draccus ChoiceRegistry field defaulting to sync
+    upstream; we name it explicitly so an upstream flip can't silently change
+    which engine drives the arm."""
+    from makermodslab.rollout import _rollout_cli_args
+
+    args = _rollout_cli_args(_stub_request(), "/tmp/pretrained_model", [])
+    assert "--inference.type=sync" in args
+
+
+def test_rollout_cli_args_forwards_the_engine_to_both_front_ends() -> None:
+    """_rollout_cli_args is shared by the single-episode command and the eval
+    runner — guard against the eval path drifting away from the rollout path."""
+    from makermodslab.rollout import (
+        InferenceRequest,
+        _build_eval_runner_cmd,
+        _build_rollout_cmd,
+    )
+
+    request = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        inference_engine="rtc",
+        eval_episodes=5,
+    )
+    single = _build_rollout_cmd(request, "/tmp/pretrained_model", [])
+    evalrun = _build_eval_runner_cmd(request, "/tmp/pretrained_model", [])
+    assert "--inference.type=rtc" in single
+    assert "--inference.type=rtc" in evalrun
+    assert "--inference.type=sync" not in single
+    assert "--inference.type=sync" not in evalrun
+
+
 # ---------------------------------------------------------------------------
-# --robot.* arg construction — single vs bimanual (pure, no I/O)
+# --robot.* arg construction — single vs bimanual
+#
+# Cameras are no longer carried on the request: it names a robot record and
+# binds each policy-expected camera name to one of that record's cameras, so
+# the camera-bearing cases need a record on disk (via `_robot_record_with_cam`).
 # ---------------------------------------------------------------------------
+
+
+def _robot_record_with_cam(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Write a one-camera robot record into a redirected ROBOTS_PATH.
+
+    ROBOTS_PATH is a module-level constant not covered by `tmp_lerobot_home`
+    (same pattern as tests/test_utils_config.py's autouse fixture)."""
+    from makermodslab.utils import config as cfg
+
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        name,
+        {
+            "cameras": [
+                {
+                    "id": "camera_1",
+                    "name": "wrist",
+                    "type": "opencv",
+                    "camera_index": 0,
+                    "device_id": "browser-device-id",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                }
+            ]
+        },
+        allow_create=True,
+    )
 
 
 def _bimanual_request():
@@ -521,18 +845,56 @@ def test_single_robot_args_uses_so101_follower_type() -> None:
     assert not any(a.startswith("--robot.cameras=") for a in args)
 
 
-def test_single_robot_args_appends_cameras_when_present() -> None:
+def test_single_robot_args_appends_bound_record_cameras(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The binding names a RECORD camera ("wrist"); the CLI arg is keyed by the
+    POLICY-expected name ("front") and carries the record's own settings."""
     from makermodslab.rollout import InferenceRequest, _single_robot_args
 
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
     req = InferenceRequest(
         follower_port="/dev/ttyUSB0",
         follower_config="robot_a",
         policy_ref="user/repo@checkpoints/000050",
-        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+        robot_name="solo",
+        camera_bindings={"front": "wrist"},
     )
     args = _single_robot_args(req, "robot_a")
     cam_arg = next(a for a in args if a.startswith("--robot.cameras="))
     assert "front:" in cam_arg
+    assert "wrist" not in cam_arg
+    assert "index_or_path: 0" in cam_arg
+    assert "width: 640" in cam_arg
+    # Record-keeping keys never reach lerobot's config parser, and neither does
+    # the record's own device identity (lerobot has no `unique_id` field).
+    assert "device_id" not in cam_arg
+    assert "id:" not in cam_arg
+    assert "unique_id" not in cam_arg
+
+
+def test_single_robot_args_captures_at_the_checkpoints_resolution(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollout pipeline doesn't resize frames to the policy's input shape,
+    so `camera_dims` (from the checkpoint) must win over the record's own
+    configured size — while identity still comes from the record."""
+    from makermodslab.rollout import InferenceRequest, _single_robot_args
+
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        robot_name="solo",
+        camera_bindings={"front": "wrist"},
+        camera_dims={"front": {"width": 320, "height": 240}},
+    )
+    cam_arg = next(a for a in _single_robot_args(req, "robot_a") if a.startswith("--robot.cameras="))
+
+    assert "width: 320" in cam_arg
+    assert "height: 240" in cam_arg
+    assert "width: 640" not in cam_arg
     assert "index_or_path: 0" in cam_arg
 
 
@@ -547,9 +909,12 @@ def test_bimanual_robot_args_uses_bi_so_follower_with_both_ports() -> None:
     assert "--robot.right_arm_config.port=/dev/right" in args
 
 
-def test_bimanual_robot_args_puts_cameras_on_left_arm_only() -> None:
+def test_bimanual_robot_args_puts_cameras_on_left_arm_only(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from makermodslab.rollout import InferenceRequest, _bimanual_robot_args
 
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "dual_arm")
     req = InferenceRequest(
         follower_port="/dev/left",
         follower_config="left_cal",
@@ -557,7 +922,8 @@ def test_bimanual_robot_args_puts_cameras_on_left_arm_only() -> None:
         mode="bimanual",
         right_follower_port="/dev/right",
         right_follower_config="right_cal",
-        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+        robot_name="dual_arm",
+        camera_bindings={"front": "wrist"},
     )
     args = _bimanual_robot_args(req, "dual_arm", "/staging/follower")
     assert any(a.startswith("--robot.left_arm_config.cameras=") for a in args)
@@ -575,6 +941,73 @@ def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
     assert "--robot.type=so101_follower" in cmd
     assert "--return_to_initial_position=true" in cmd
     assert "--duration=60" in cmd
+
+
+def test_build_rollout_cmd_omits_temporal_ensemble_when_unset() -> None:
+    """Default (None) must leave the checkpoint's own config untouched — no
+    --policy.temporal_ensemble_coeff, and crucially no n_action_steps override
+    that would silently re-tune a policy the user didn't ask to change."""
+    from makermodslab.rollout import _build_rollout_cmd
+
+    cmd = _build_rollout_cmd(_stub_request(), "/local/pretrained_model", [])
+    assert not any(a.startswith("--policy.temporal_ensemble_coeff=") for a in cmd)
+    assert not any(a.startswith("--policy.n_action_steps=") for a in cmd)
+
+
+def test_build_rollout_cmd_pins_n_action_steps_with_temporal_ensemble() -> None:
+    """ACT raises NotImplementedError when temporal_ensemble_coeff is set with
+    n_action_steps > 1 (checkpoints ship 100), so the two flags must always
+    travel together."""
+    from makermodslab.rollout import InferenceRequest, _build_rollout_cmd
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        temporal_ensemble_coeff=0.01,
+    )
+    cmd = _build_rollout_cmd(req, "/local/pretrained_model", [])
+    assert "--policy.temporal_ensemble_coeff=0.01" in cmd
+    assert "--policy.n_action_steps=1" in cmd
+
+
+def test_eval_runner_cmd_carries_temporal_ensemble_flags() -> None:
+    """The flags live in the shared _rollout_cli_args, so evaluation mode's
+    separate entry point gets them too — a run scored over N episodes must use
+    the same action selection the single-rollout path would."""
+    from makermodslab.rollout import InferenceRequest, _build_eval_runner_cmd
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        eval_episodes=5,
+        temporal_ensemble_coeff=0.01,
+    )
+    cmd = _build_eval_runner_cmd(req, "/local/pretrained_model", [])
+    assert "makermodslab.eval_runner" in cmd
+    assert "--policy.temporal_ensemble_coeff=0.01" in cmd
+    assert "--policy.n_action_steps=1" in cmd
+
+
+def test_handle_start_inference_rejects_non_positive_ensemble_coeff() -> None:
+    """Weights are exp(-coeff * i): 0 weights the whole chunk equally and a
+    negative coefficient makes the STALEST prediction dominate. Reject before
+    the arm moves under it — and release the session slot on the way out."""
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest, handle_start_inference
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        temporal_ensemble_coeff=0,
+    )
+    result = handle_start_inference(req)
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "temporal_ensemble_coeff" in result["message"]
+    assert rollout.inference_active is False
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +1065,73 @@ def test_handle_start_inference_arm_count_guard_releases_slot() -> None:
     )
     rollout.handle_start_inference(req)
     assert rollout.inference_active is False
+
+
+# ---------------------------------------------------------------------------
+# handle_start_inference — camera bindings resolve against the ROBOT RECORD
+# (cheap: one JSON read, no hardware, no subprocess). The pure resolution
+# helpers are covered in tests/test_utils_config.py.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_start_inference_rejects_a_binding_with_no_robot() -> None:
+    """Bindings name a record camera, so they're meaningless without a record."""
+    from makermodslab import rollout
+
+    req = rollout.InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        camera_bindings={"front": "wrist"},
+    )
+    result = rollout.handle_start_inference(req)
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "No robot selected" in result["message"]
+    # A rejected start must not wedge the slot.
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_rejects_a_binding_to_an_unknown_camera(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 400 names what the robot actually has, so the panel can say which
+    camera to pick — this is the whole point of resolving server-side."""
+    from makermodslab import rollout
+
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
+    req = rollout.InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        robot_name="solo",
+        camera_bindings={"front": "gone"},
+    )
+    result = rollout.handle_start_inference(req)
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "'gone'" in result["message"]
+    assert "wrist" in result["message"]
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_ignores_a_stale_cameras_payload() -> None:
+    """An older frontend still posts full `cameras` configs. The field is gone
+    from the model, so pydantic drops them rather than letting a request-side
+    camera set drive the run."""
+    from makermodslab import rollout
+
+    req = rollout.InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+    )
+
+    assert not hasattr(req, "cameras")
+    assert req.camera_bindings == {}
 
 
 def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypatch, tmp_path) -> None:
@@ -1152,6 +1652,117 @@ def test_friendly_hint_maps_common_failures() -> None:
     assert friendly_hint(None) is None
 
 
+def test_is_out_of_memory_matches_every_allocator_backend() -> None:
+    """The wording differs per backend, so each one is keyed separately."""
+    from makermodslab.utils.errors import is_out_of_memory
+
+    for text in (
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+        "RuntimeError: HIP out of memory. Tried to allocate 512.00 MiB",
+        "RuntimeError: MPS backend out of memory (MPS allocated: 9.06 GB)",
+        "RuntimeError: CUDA error: out of memory",
+        "RuntimeError: [enforce fail] DefaultCPUAllocator: can't allocate memory: you tried to allocate",
+    ):
+        assert is_out_of_memory(text), text
+    assert not is_out_of_memory("RuntimeError: shape mismatch")
+    assert not is_out_of_memory("")
+    assert not is_out_of_memory(None)
+
+
+def test_is_out_of_memory_ignores_a_bare_killed() -> None:
+    """ "Killed" alone is not evidence: the host OOM killer prints nothing, and
+    plenty of benign lines contain the word. That case is recognised from the
+    exit code instead (see jobs._oom_failure_reason)."""
+    from makermodslab.utils.errors import is_out_of_memory
+
+    assert not is_out_of_memory("Killed")
+    assert not is_out_of_memory("stop requested: killed the training subprocess")
+
+
+def test_friendly_hint_names_the_three_oom_remedies() -> None:
+    from makermodslab.utils.errors import friendly_hint
+
+    hint = (friendly_hint("torch.OutOfMemoryError: CUDA out of memory.") or "").lower()
+    assert "mixed precision" in hint
+    assert "batch size" in hint
+    assert "larger gpu" in hint
+
+
+def test_friendly_hint_servo_bus_error_is_not_a_download_failure() -> None:
+    """A servo that stops answering must read as an ARM problem.
+
+    lerobot's motors bus raises every serial failure as `ConnectionError`, and
+    the type name itself contains "connect" — keying the Hub-download hint on
+    that token labelled arm-side startup crashes "couldn't download the model"
+    (observed 2026-08-03: a `Failed to write 'Lock' ... [TxRxResult] Incorrect
+    status packet!` at robot.connect() reported as a failed model download)."""
+    from makermodslab.utils.errors import friendly_hint
+
+    for text in (
+        "ConnectionError: Failed to write 'Lock' on id_=3 with '1' after 1 tries. "
+        "[TxRxResult] Incorrect status packet!",
+        "Failed to start inference: ConnectionError: Failed to sync read 'Present_Position' "
+        "on ids=[1, 2, 3] after 1 tries. [TxRxResult] There is no status packet!",
+    ):
+        hint = friendly_hint(text) or ""
+        assert "motor" in hint.lower()
+        assert "download" not in hint.lower()
+
+
+def test_friendly_hint_still_names_real_download_failures() -> None:
+    """The other side of the tightening: a genuine fetch failure keeps its Hub
+    hint. Download-step failures reach here with rollout's own
+    "Failed to download the model: …" prefix (see _inference_startup_thread)."""
+    from makermodslab.utils.errors import friendly_hint
+
+    network = friendly_hint(
+        "Failed to download the model: (MaxRetryError(\"HTTPSConnectionPool(host='huggingface.co', "
+        'port=443): Max retries exceeded with url: /api/models/user/repo"))'
+    )
+    assert network is not None and "download the model" in network.lower()
+    # No hub host in the text at all — rollout's prefix is what identifies it.
+    offline = friendly_hint(
+        "Failed to download the model: An error happened while trying to locate the file on the Hub "
+        "and we cannot find the requested files in the local cache. Please check your connection."
+    )
+    assert offline is not None and "download the model" in offline.lower()
+    missing = friendly_hint(
+        "Failed to download the model: RepositoryNotFoundError: 404 Client Error. "
+        "Repository Not Found for url: https://huggingface.co/api/models/user/repo"
+    )
+    assert missing is not None and "hub" in missing.lower()
+    full = friendly_hint("Failed to download the model: OSError: [Errno 28] No space left on device")
+    assert full is not None and "disk space" in full.lower()
+
+
+def test_friendly_hint_for_capture_size_mismatch_also_suggests_restart() -> None:
+    """Hardware-confirmed 2026-07-31: a camera reporting the wrong
+    width/height on connect is not always a genuine capability mismatch —
+    twice on the bench, the SAME camera kept failing with this identical
+    error for 15+ seconds and across a retry with no unplugging involved,
+    and only restarting the makermodslab process (not reconfiguring the camera)
+    cleared it. Sending the user to "click Auto" alone, with no escalation
+    path, is a dead end when the session is actually wedged rather than
+    misconfigured — the hint must mention restarting as the fallback."""
+    from makermodslab.utils.errors import friendly_hint
+
+    hint = (
+        friendly_hint(
+            "OpenCVCamera(0) failed to set capture_width=640 (actual_width=1920, width_success=True)."
+        )
+        or ""
+    )
+    assert "restart" in hint.lower()
+
+    height_hint = (
+        friendly_hint(
+            "OpenCVCamera(0) failed to set capture_height=480 (actual_height=1080, height_success=True)."
+        )
+        or ""
+    )
+    assert "restart" in height_hint.lower()
+
+
 def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:
     from makermodslab.rollout import _extract_error_from_log
 
@@ -1404,3 +2015,1210 @@ def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_p
 
     assert rollout.PHASE_DOWNLOADING_MODEL not in phases
     assert rollout._inference_proc is not None
+
+
+# ---------------------------------------------------------------------------
+# Multi-episode EVALUATION mode
+#
+# Pure helpers (clamping, accuracy math, verdict classification, protocol
+# parsing), the request schema, the status-payload shape, the orchestrator state
+# machine driven over a fake runner pipe, and the idle/mutex branches of the two
+# new endpoints. Nothing here spawns a process or touches hardware: the eval
+# runner is never executed, only stood in for. Per CLAUDE.md the subprocess
+# happy path stays untested — what IS tested is the bookkeeping either side of
+# it, which is where the verdicts and the crash containment live.
+# ---------------------------------------------------------------------------
+
+
+class _ExitedProc:
+    """A `subprocess.Popen` stand-in that has already exited with `rc`."""
+
+    def __init__(self, rc: int = 0) -> None:
+        self.returncode = rc
+        self.pid = 4242
+        # A dead process has no usable command pipe — writing to it is exactly
+        # how the orchestrator discovers the runner is gone.
+        self.stdin = None
+
+    def poll(self) -> int:
+        return self.returncode
+
+
+class _CommandPipe:
+    """A subprocess `stdin` that records the command lines written to it."""
+
+    def __init__(self, sink: list[str]) -> None:
+        self._sink = sink
+
+    def write(self, data: bytes) -> None:
+        self._sink.append(data.decode().strip())
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeRunner:
+    """A live `makermodslab.eval_runner` subprocess stand-in.
+
+    Unlike `_ExitedProc` it is ALIVE (`poll()` → None) and stays alive across
+    episodes, which is the property the redesign turns on: a live process no
+    longer implies a live episode, so the tests drive episode boundaries through
+    the protocol handlers rather than by pretending a process exited. Every
+    command the orchestrator sends lands in `.commands`."""
+
+    def __init__(self, rc: int | None = None) -> None:
+        self.pid = 4242
+        self.returncode = rc
+        self.commands: list[str] = []
+        self.stdin = _CommandPipe(self.commands)
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+def _eval_request(episodes: int = 3):
+    from makermodslab.rollout import InferenceRequest
+
+    return InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        eval_episodes=episodes,
+    )
+
+
+def _arm_eval_session(
+    monkeypatch,
+    rollout,
+    episodes: int = 3,
+    *,
+    running: bool = True,
+    proc=None,
+):
+    """Put the module into a mid-eval state with a live runner.
+
+    `running` is whether an EPISODE is in flight, which is now independent of
+    whether the runner process is up — pass `proc=None` for the (recoverable)
+    state left behind by a runner that died."""
+    session = rollout._EvalSession(request=_eval_request(episodes), episodes_total=episodes)
+    session.policy_path = "/tmp/policy"
+    session.robot_args = ["--robot.type=so101_follower"]
+    session.episode_running = running
+    monkeypatch.setattr(rollout, "_eval_session", session)
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_started_at", 1000.0)
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", 1005.0 if running else None)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {
+            "phase": rollout.PHASE_RUNNING if running else rollout.PHASE_RESETTING,
+            "policy_ref": "user/repo@checkpoints/000050",
+            "duration_s": 60,
+        },
+    )
+    monkeypatch.setattr(rollout, "_inference_proc", _FakeRunner() if (proc is None and running) else proc)
+    return session
+
+
+def test_eval_episodes_defaults_to_one() -> None:
+    """The historical single-rollout request is unchanged: no eval fields set."""
+    from makermodslab.rollout import InferenceRequest
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+    )
+    assert req.eval_episodes == 1
+
+
+def test_inference_request_accepts_eval_episodes() -> None:
+    assert _eval_request(10).eval_episodes == 10
+
+
+def test_clamp_eval_episodes_bounds_and_fallbacks() -> None:
+    from makermodslab.rollout import MAX_EVAL_EPISODES, clamp_eval_episodes
+
+    assert clamp_eval_episodes(1) == 1
+    assert clamp_eval_episodes(10) == 10
+    assert clamp_eval_episodes(0) == 1
+    assert clamp_eval_episodes(-5) == 1
+    assert clamp_eval_episodes(MAX_EVAL_EPISODES) == MAX_EVAL_EPISODES
+    assert clamp_eval_episodes(10_000) == MAX_EVAL_EPISODES
+    # Junk degrades to a single episode rather than raising out of the POST.
+    assert clamp_eval_episodes(None) == 1
+    assert clamp_eval_episodes("nope") == 1
+
+
+def test_eval_accuracy_scores_successes_over_scored_episodes() -> None:
+    from makermodslab.rollout import eval_accuracy
+
+    assert eval_accuracy(["success", "success", "failure", "failure"]) == 0.5
+    assert eval_accuracy(["success"]) == 1.0
+    assert eval_accuracy(["failure", "failure"]) == 0.0
+
+
+def test_eval_accuracy_excludes_errored_episodes_from_the_denominator() -> None:
+    """A serial glitch must not poison the number: an errored episode counts
+    neither for nor against the policy."""
+    from makermodslab.rollout import eval_accuracy
+
+    # 1 success, 1 failure, 2 crashes -> 1/2, not 1/4.
+    assert eval_accuracy(["success", "failure", "error", "error"]) == 0.5
+
+
+def test_eval_accuracy_is_none_when_nothing_scoreable() -> None:
+    from makermodslab.rollout import eval_accuracy
+
+    assert eval_accuracy([]) is None
+    assert eval_accuracy(["error", "error"]) is None
+
+
+def test_classify_episode_early_stop_is_a_success_whatever_the_exit_code() -> None:
+    """We terminated the subprocess ourselves, so its exit code is our own
+    SIGTERM and says nothing about the run."""
+    from makermodslab.rollout import EPISODE_SUCCESS, classify_episode
+
+    assert classify_episode(-15, True, True, None) == EPISODE_SUCCESS
+    assert classify_episode(0, True, True, None) == EPISODE_SUCCESS
+    assert classify_episode(1, True, True, "RuntimeError: boom") == EPISODE_SUCCESS
+
+
+def test_classify_episode_clean_timeout_is_a_failure() -> None:
+    from makermodslab.rollout import EPISODE_FAILURE, classify_episode
+
+    assert classify_episode(0, False, True, None) == EPISODE_FAILURE
+
+
+def test_classify_episode_cleanup_warning_is_a_failure_not_an_error() -> None:
+    """The rollout ran its full duration and only teardown was noisy — the
+    episode legitimately timed out, so it's a failure, not a crash."""
+    from makermodslab.rollout import EPISODE_FAILURE, classify_episode
+
+    # "overload" is one of errors.CLEANUP_MARKERS — a gripper still holding an
+    # object when torque is released at teardown.
+    verdict = classify_episode(1, False, True, "RuntimeError: motor 6 overload during shutdown")
+    assert verdict == EPISODE_FAILURE
+
+
+def test_classify_episode_crash_is_an_error() -> None:
+    from makermodslab.rollout import EPISODE_ERROR, classify_episode
+
+    assert classify_episode(1, False, False, "DeviceNotConnectedError: bus is gone") == EPISODE_ERROR
+
+
+def test_eval_fields_are_null_shaped_for_a_single_episode_run() -> None:
+    """The status shape stays stable: a plain run reports eval_mode False with
+    null companions rather than omitting the keys."""
+    from makermodslab.rollout import _eval_fields
+
+    fields = _eval_fields(None)
+    assert fields["eval_mode"] is False
+    assert fields["episode_index"] is None
+    assert fields["episodes_total"] is None
+    assert fields["episode_results"] is None
+    assert fields["accuracy"] is None
+
+
+def test_idle_status_reports_single_episode_shape() -> None:
+    from makermodslab.rollout import handle_inference_status
+
+    result = handle_inference_status()
+    assert result["eval_mode"] is False
+    assert result["episodes_total"] is None
+    assert result["accuracy"] is None
+
+
+def test_start_inference_seeds_the_eval_session(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(rollout, "_run_inference_startup", lambda *a, **k: None)
+    monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+
+    result = rollout.handle_start_inference(_eval_request(5))
+    assert result["success"] is True
+    assert rollout._eval_session is not None
+    assert rollout._eval_session.episodes_total == 5
+    assert rollout._eval_session.episode_index == 1
+    status = rollout.handle_inference_status()
+    assert status["eval_mode"] is True
+    assert status["episodes_total"] == 5
+    assert status["episode_index"] == 1
+    assert status["episode_results"] == []
+    assert status["accuracy"] is None
+
+
+def test_start_inference_with_one_episode_leaves_eval_session_none(monkeypatch) -> None:
+    """eval_episodes=1 must be bit-for-bit the historical flow."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(rollout, "_run_inference_startup", lambda *a, **k: None)
+    monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+
+    rollout.handle_start_inference(_eval_request(1))
+    assert rollout._eval_session is None
+    assert rollout.handle_inference_status()["eval_mode"] is False
+
+
+def test_start_inference_clamps_the_requested_episode_count(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(rollout, "_run_inference_startup", lambda *a, **k: None)
+    monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+
+    rollout.handle_start_inference(_eval_request(10_000))
+    assert rollout._eval_session.episodes_total == rollout.MAX_EVAL_EPISODES
+
+
+def test_start_inference_guard_failure_clears_the_eval_session(monkeypatch) -> None:
+    """A rejected start must not leave eval bookkeeping behind for the next run."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: False)
+    result = rollout.handle_start_inference(_eval_request(4))
+    assert result["success"] is False
+    assert rollout._eval_session is None
+    assert rollout.inference_active is False
+
+
+def test_episode_timeout_parks_the_session_in_the_reset_phase(monkeypatch) -> None:
+    """An episode that runs out its duration scores a FAILURE and keeps the
+    session — and its hold on the inference slot, the cameras AND the loaded
+    policy — alive for the reset."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+    rollout._on_episode_ended(REASON_DURATION)
+    status = rollout.handle_inference_status()
+
+    assert status["phase"] == rollout.PHASE_RESETTING
+    assert status["inference_active"] is True
+    assert status["episode_results"] == ["failure"]
+    assert status["episode_index"] == 2
+    assert status["accuracy"] is None
+    # The slot stays claimed through the reset — recording/teleop stay blocked.
+    assert rollout.inference_active is True
+    # And so does the runner: the whole point is that the next episode does not
+    # re-pay the policy load. It is only told to QUIT once the session is over.
+    assert rollout._inference_proc is runner
+    assert runner.commands == []
+
+
+def test_early_stop_scores_the_episode_a_success(monkeypatch) -> None:
+    """The success button asks the runner to end the episode — no signal, no
+    kill — and the verdict lands when the runner reports the end."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+
+    assert rollout.handle_stop_episode()["success"] is True
+    assert runner.commands == [CMD_STOP]
+    assert session.stop_requested is True
+    # Still running until the runner says otherwise — nothing was scored yet.
+    assert session.results == []
+
+    rollout._on_episode_ended(REASON_STOPPED)
+    status = rollout.handle_inference_status()
+
+    assert status["episode_results"] == ["success"]
+    assert status["phase"] == rollout.PHASE_RESETTING
+    # The flag is one-shot: the next episode starts unstopped.
+    assert session.stop_requested is False
+
+
+def test_episode_end_reason_stopped_scores_a_success_without_the_flag(monkeypatch) -> None:
+    """The reason IS the STOP we sent, so it stands on its own — a lost flag
+    can't turn the user's success into a timeout."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    rollout._on_episode_ended(REASON_STOPPED)
+    assert rollout.handle_inference_status()["episode_results"] == ["success"]
+
+
+def test_episode_end_with_no_episode_in_flight_is_ignored(monkeypatch) -> None:
+    """A duplicate/late end line must not append a phantom verdict."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    rollout._on_episode_ended(REASON_DURATION)
+    assert session.results == []
+
+
+def test_crashed_runner_parks_the_episode_with_the_error_visible(monkeypatch) -> None:
+    """A crash is neither success nor failure: the in-flight episode is scored
+    `error` and the session parks in the reset phase with the error on show, so
+    the user can continue (paying one reload) or abort."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(
+        rollout,
+        "_extract_error_from_log",
+        lambda p: "DeviceNotConnectedError: could not connect to the follower bus",
+    )
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
+
+    rollout._handle_runner_exit(runner, 1)
+
+    status = rollout.handle_inference_status()
+    assert status["episode_results"] == ["error"]
+    assert status["phase"] == rollout.PHASE_RESETTING
+    assert status["inference_active"] is True
+    assert "DeviceNotConnectedError" in status["error"]
+    # The existing error taxonomy still applies to an episode-level crash.
+    assert status["hint"]
+    # The dead runner is dropped, which is what makes the continue respawn.
+    assert rollout._inference_proc is None
+
+
+def test_crashed_runner_prefers_its_own_error_line(monkeypatch) -> None:
+    """The runner's ERROR event is the exception itself; log mining is a
+    heuristic over a traceback, so the event wins when both exist."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_extract_error_from_log", lambda p: "mined from the log tail")
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+
+    rollout._on_runner_error("RuntimeError: the gripper stalled")
+    rollout._handle_runner_exit(runner, 1)
+
+    assert rollout.handle_inference_status()["error"] == "RuntimeError: the gripper stalled"
+
+
+def test_runner_death_during_a_reset_keeps_the_session_recoverable(monkeypatch) -> None:
+    """Nothing to score — but the user has to learn that continuing now costs a
+    reload, and the tally must survive."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_extract_error_from_log", lambda p: "OSError: the port vanished")
+    session = _arm_eval_session(monkeypatch, rollout, episodes=4, running=False, proc=_FakeRunner())
+    session.results.extend(["success", "failure"])
+    runner = rollout._inference_proc
+
+    rollout._handle_runner_exit(runner, 1)
+    status = rollout.handle_inference_status()
+
+    assert status["episode_results"] == ["success", "failure"]  # no phantom verdict
+    assert status["phase"] == rollout.PHASE_RESETTING
+    assert status["inference_active"] is True
+    assert "OSError" in status["error"]
+    assert rollout._inference_proc is None
+
+
+def test_expected_runner_exit_after_quit_is_not_scored(monkeypatch) -> None:
+    """An abort asks the runner to quit; that exit must not be read as a crash
+    and score the episode the abort deliberately left unscored."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+    session.quitting = True
+
+    rollout._handle_runner_exit(runner, 0)
+    assert session.results == []
+
+
+def test_last_episode_finishes_the_session_with_accuracy(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+    session.results.extend(["success", "success"])
+    rollout._on_episode_ended(REASON_DURATION)
+    status = rollout.handle_inference_status()
+
+    assert status["phase"] == rollout.PHASE_FINISHED
+    assert status["inference_active"] is False
+    assert status["exited"] is True
+    assert status["episode_results"] == ["success", "success", "failure"]
+    assert status["episodes_total"] == 3
+    assert status["episode_index"] == 3
+    assert status["accuracy"] == pytest.approx(2 / 3, rel=1e-3)
+    # The slot is released for the next session.
+    assert rollout.inference_active is False
+    assert rollout._eval_session is None
+    # And the runner is sent home rather than left holding the bus and cameras.
+    assert runner.commands == [CMD_QUIT]
+
+
+def test_finished_eval_payload_is_idempotent_across_polls(monkeypatch) -> None:
+    """Several surfaces poll concurrently; the summary must survive every one."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=2)
+    session.results.append("success")
+    rollout._on_episode_ended(REASON_DURATION)
+    first = rollout.handle_inference_status()
+    second = rollout.handle_inference_status()
+    third = rollout.handle_inference_status()
+
+    assert first["accuracy"] == second["accuracy"] == third["accuracy"] == 0.5
+    assert second["episode_results"] == third["episode_results"] == ["success", "failure"]
+    assert third["phase"] == rollout.PHASE_FINISHED
+
+
+def test_accuracy_excludes_errors_in_the_finished_payload(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    session.results.extend(["success", "error"])
+    rollout._on_episode_ended(REASON_DURATION)
+    status = rollout.handle_inference_status()
+
+    assert status["episode_results"] == ["success", "error", "failure"]
+    # 1 success out of 2 scored episodes, not out of 3.
+    assert status["accuracy"] == 0.5
+
+
+def test_stop_episode_when_idle_returns_409() -> None:
+    from makermodslab.rollout import handle_stop_episode
+
+    result = handle_stop_episode()
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+def test_stop_episode_refuses_outside_eval_mode(monkeypatch) -> None:
+    """A single-episode run has no tally to record a success into."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _ExitedProc(0))
+    result = rollout.handle_stop_episode()
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+def test_stop_episode_refuses_while_parked_in_a_reset(monkeypatch) -> None:
+    """The runner is still ALIVE between episodes, so a live process is no
+    longer proof an episode is running — `episode_running` is."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    result = rollout.handle_stop_episode()
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+def test_stop_episode_reports_a_dead_runner_instead_of_claiming_success(monkeypatch) -> None:
+    """A success can't be recorded against a runner that isn't there to end the
+    episode — the crash path will score it an error instead."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3, proc=_ExitedProc(1))
+    result = rollout.handle_stop_episode()
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+def test_next_episode_when_idle_returns_409() -> None:
+    from makermodslab.rollout import handle_next_episode
+
+    result = handle_next_episode()
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+def test_next_episode_refuses_while_an_episode_is_still_running(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    # Phase is `running`, not `resetting` — there is nothing to continue from.
+    result = rollout.handle_next_episode()
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+def test_next_episode_on_a_live_runner_costs_one_command(monkeypatch) -> None:
+    """The headline of the redesign: continuing does NOT spawn anything. The
+    policy is still resident and the bus and cameras are still open, so the
+    whole cost is one line on the runner's stdin."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    runner = rollout._inference_proc
+    session.results.append("failure")
+    session.error = "old crash"
+    session.hint = "old hint"
+
+    def _explode(*a, **k):
+        raise AssertionError("continuing must not spawn a process")
+
+    monkeypatch.setattr(rollout, "_launch_eval_runner", _explode)
+    monkeypatch.setattr(rollout, "_launch_rollout_subprocess", _explode)
+
+    result = rollout.handle_next_episode()
+    assert result["success"] is True
+    assert runner.commands == [CMD_EPISODE]
+    assert rollout._inference_proc is runner
+    # The previous episode's crash banner is cleared on continue.
+    assert session.error is None
+    assert session.hint is None
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+    # Both timers restart so the dialog clocks the EPISODE, not the session.
+    assert rollout._inference_rollout_started_at is None
+
+
+def test_next_episode_respawns_a_dead_runner_and_carries_the_tally(monkeypatch) -> None:
+    """Crash containment: a runner that died costs ONE reload, not the session.
+    The resolved policy path and preflighted `--robot.*` args are reused
+    verbatim — no re-download, no second arm-identity pass — and the tally so
+    far is carried forward."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=None)
+    session.results.append("error")
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    launched = {}
+
+    def _fake_launch(request, policy_path, robot_args):
+        launched["policy_path"] = policy_path
+        launched["robot_args"] = robot_args
+        proc = _FakeRunner()
+        proc.stdout = _EmptyStdout()
+        return proc, io.StringIO(), __import__("pathlib").Path("/tmp/ep2.log")
+
+    monkeypatch.setattr(rollout, "_launch_eval_runner", _fake_launch)
+    # The pump would otherwise reap the fake proc and fire crash containment.
+    monkeypatch.setattr(rollout, "_handle_runner_exit", lambda proc, rc: None)
+
+    result = rollout.handle_next_episode()
+    assert result["success"] is True
+    assert launched["policy_path"] == "/tmp/policy"
+    assert launched["robot_args"] == ["--robot.type=so101_follower"]
+    assert session.results == ["error"]
+    # The episode is PENDING, not started: the respawned runner has to finish
+    # loading first, and its READY is what issues the command.
+    assert session.episode_pending is True
+    assert rollout._inference_meta["log_path"] == "/tmp/ep2.log"
+
+
+def test_runner_ready_issues_the_pending_episode(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    runner = rollout._inference_proc
+    session.episode_pending = True
+
+    rollout._on_runner_ready()
+    assert runner.commands == [CMD_EPISODE]
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_runner_ready_stays_idle_when_no_episode_is_pending(monkeypatch) -> None:
+    """A READY from a respawn the user hasn't continued from — or one that lands
+    after an abort — must not put the arm in motion."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    runner = rollout._inference_proc
+    session.episode_pending = False
+    rollout._on_runner_ready()
+    assert runner.commands == []
+
+    session.episode_pending = True
+    session.quitting = True
+    rollout._on_runner_ready()
+    assert runner.commands == []
+
+
+def test_episode_started_flips_the_phase_to_running(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    session.episode_pending = True
+
+    rollout._on_episode_started()
+    assert session.episode_running is True
+    assert session.episode_pending is False
+    assert rollout._inference_meta["phase"] == rollout.PHASE_RUNNING
+    assert rollout._inference_rollout_started_at is not None
+
+
+def test_stop_inference_quits_the_runner_instead_of_signalling_it(monkeypatch) -> None:
+    """Abort mid-episode: the runner is asked to wind down so the follower still
+    eases home, and the in-flight episode stays deliberately unscored."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=5)
+    session.results.extend(["success", "failure"])
+    runner = rollout._inference_proc
+    quit_calls = []
+    monkeypatch.setattr(rollout, "_quit_runner", lambda proc: quit_calls.append(proc))
+
+    result = rollout.handle_stop_inference()
+    assert result["success"] is True
+    assert quit_calls == [runner]
+    assert session.quitting is True
+
+    status = rollout.handle_inference_status()
+    assert status["phase"] == rollout.PHASE_ABORTED
+    assert status["episode_results"] == ["success", "failure"]  # the cut episode isn't scored
+    assert status["accuracy"] is None
+
+
+def test_stop_inference_aborts_an_eval_parked_in_a_reset(monkeypatch) -> None:
+    """Abort reports the partial tally and deliberately claims NO accuracy."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=5, running=False, proc=None)
+    session.results.extend(["success", "failure"])
+
+    result = rollout.handle_stop_inference()
+    assert result["success"] is True
+
+    status = rollout.handle_inference_status()
+    assert status["phase"] == rollout.PHASE_ABORTED
+    assert status["inference_active"] is False
+    assert status["episode_results"] == ["success", "failure"]
+    assert status["episodes_total"] == 5
+    assert status["accuracy"] is None
+    assert rollout._eval_session is None
+
+
+def test_stop_inference_still_ends_a_single_run_the_old_way(monkeypatch) -> None:
+    """No eval session -> the historical idle-with-no-payload teardown."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_DOWNLOADING_MODEL})
+
+    result = rollout.handle_stop_inference()
+    assert result["success"] is True
+    assert rollout.inference_active is False
+    assert rollout._last_result is None
+
+
+# ---------------------------------------------------------------------------
+# Eval-runner line protocol + argv (makermodslab/eval_protocol.py)
+#
+# Pure string handling, no process anywhere near it. The runner itself is NEVER
+# executed by the suite — it drives real servos.
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_round_trips_an_event_and_its_payload() -> None:
+    from makermodslab.eval_protocol import format_event, parse_event
+
+    line = format_event("EPISODE_ENDED", "reason=duration")
+    assert parse_event(line) == ("EPISODE_ENDED", "reason=duration")
+    assert parse_event(format_event("READY")) == ("READY", "")
+
+
+def test_protocol_collapses_a_multiline_payload_onto_one_line() -> None:
+    """A traceback in an ERROR payload must not split one event across several
+    lines — the reader is line-oriented and would read the tail as junk."""
+    from makermodslab.eval_protocol import format_event, parse_event
+
+    line = format_event("ERROR", "RuntimeError: boom\n  File 'x.py', line 3\n")
+    assert "\n" not in line
+    event, payload = parse_event(line)
+    assert event == "ERROR"
+    assert payload.startswith("RuntimeError: boom")
+
+
+def test_protocol_ignores_ordinary_log_lines() -> None:
+    from makermodslab.eval_protocol import parse_event
+
+    assert parse_event("INFO 2026-07-31 Connecting robot (so101_follower)...\n") is None
+    assert parse_event("") is None
+
+
+def test_protocol_finds_an_event_appended_to_a_log_line() -> None:
+    """The runner's logging handler shares the pipe; a record flushed without
+    its newline must not swallow the event behind it."""
+    from makermodslab.eval_protocol import parse_event
+
+    assert parse_event("INFO some log MAKERMODSLAB-EVAL EPISODE_STARTED") == ("EPISODE_STARTED", "")
+
+
+def test_protocol_reason_parsing_is_conservative() -> None:
+    """An unrecognised (or renamed) reason yields "" rather than a guess: the
+    orchestrator must not score an episode off a reason it doesn't understand."""
+    from makermodslab.eval_protocol import parse_episode_end_reason
+
+    assert parse_episode_end_reason("reason=stopped") == "stopped"
+    assert parse_episode_end_reason("elapsed=30 reason=duration") == "duration"
+    assert parse_episode_end_reason("") == ""
+    assert parse_episode_end_reason("something-else") == ""
+
+
+def test_unknown_episode_end_reason_scores_a_failure_not_a_success(monkeypatch) -> None:
+    """Degrade the way the pre-runner code did — an episode that ended without
+    the user calling it a success is a failure — rather than inventing a verdict."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    rollout._on_episode_ended("")
+    assert rollout.handle_inference_status()["episode_results"] == ["failure"]
+
+
+def test_eval_runner_and_rollout_argv_share_every_flag() -> None:
+    """One flag list, two entry points. A flag added for the single-episode path
+    must never be missing from the eval runner's."""
+    from makermodslab.rollout import _build_eval_runner_cmd, _build_rollout_cmd
+
+    request = _eval_request(4)
+    args = ("/local/pretrained_model", ["--robot.type=so101_follower", "--robot.port=/dev/ttyUSB0"])
+    rollout_cmd = _build_rollout_cmd(request, *args)
+    runner_cmd = _build_eval_runner_cmd(request, *args)
+
+    assert rollout_cmd[1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert runner_cmd[1:3] == ["-m", "makermodslab.eval_runner"]
+    assert rollout_cmd[3:] == runner_cmd[3:]
+    assert "--return_to_initial_position=true" in runner_cmd
+    assert "--strategy.type=base" in runner_cmd
+
+
+def test_eval_start_spawns_the_runner_with_stdin_left_open(monkeypatch, tmp_path) -> None:
+    """Eval mode gets ONE long-lived runner whose stdin is the command channel;
+    the single-episode path still gets `lerobot-rollout` with stdin closed."""
+    from makermodslab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name: name)
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+    monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(rollout, "_pump_runner_stdout", lambda proc, log: None)
+
+    captured: dict = {}
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.written = b""
+            self.closed = False
+
+        def write(self, data: bytes) -> None:
+            self.written += data
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeProc:
+        pid = 9999
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = _EmptyStdout()
+            captured["stdin"] = self.stdin
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+
+    assert rollout.handle_start_inference(_eval_request(6))["success"] is True
+    assert captured["cmd"][1:3] == ["-m", "makermodslab.eval_runner"]
+    # The command channel has to stay open — closing it is what a one-shot
+    # rollout does, and it would make every later EPISODE unsendable.
+    assert captured["stdin"].closed is False
+    assert captured["stdin"].written == b"\n"
+    # Episode 1 is pending: it is issued when the runner reports READY, after
+    # the one-time policy load.
+    assert rollout._eval_session.episode_pending is True
+    assert rollout._eval_session.episode_running is False
+
+
+def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path) -> None:
+    """`eval_episodes == 1` is untouched by the redesign: same module, and stdin
+    closed straight after the calibration seed."""
+    from makermodslab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name: name)
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+    monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    captured: dict = {}
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.written = b""
+            self.closed = False
+
+        def write(self, data: bytes) -> None:
+            self.written += data
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeProc:
+        pid = 9999
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = _EmptyStdout()
+            captured["stdin"] = self.stdin
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+
+    assert rollout.handle_start_inference(_eval_request(1))["success"] is True
+    assert captured["cmd"][1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert captured["stdin"].closed is True
+    assert rollout._eval_session is None
+
+
+def test_runner_death_before_the_first_episode_fails_the_session(monkeypatch) -> None:
+    """A bad policy path / missing camera / busy bus kills the runner before any
+    episode starts. That is a startup failure, not an evaluation with one bad
+    episode — parking in a reset would offer a continue that can only fail the
+    same way."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_extract_error_from_log", lambda p: "FileNotFoundError: no such checkpoint")
+    session = _arm_eval_session(monkeypatch, rollout, episodes=4, running=False, proc=_FakeRunner())
+    session.episode_pending = True
+    runner = rollout._inference_proc
+
+    rollout._handle_runner_exit(runner, 1)
+
+    status = rollout.handle_inference_status()
+    assert status["phase"] == rollout.PHASE_ERROR
+    assert status["outcome"] == "failed"
+    assert status["inference_active"] is False
+    assert "FileNotFoundError" in status["error"]
+    assert rollout._eval_session is None
+    # Idempotent, like every other terminal payload.
+    assert rollout.handle_inference_status()["phase"] == rollout.PHASE_ERROR
+
+
+# ---------------------------------------------------------------------------
+# /inference-log identity: the endpoint may only ever serve a log this PROCESS
+# opened, and must say whose it is.
+#
+# The old resolver fell back to "newest *.log in inference_logs" whenever the
+# active meta had no path — true during a new session's pre-spawn phases, and
+# after a run that failed before spawning. Both windows served an earlier run's
+# log unlabelled. Live incident: a run that failed in _prepare_robot on a
+# calibration error produced no log at all, and the user was shown a three-day-old
+# RTC run's output, concluding their sync run was executing RTC code.
+# ---------------------------------------------------------------------------
+
+
+def _seed_log_dir(monkeypatch, tmp_path, *, stale_text: str = "STALE RTC RUN") -> Path:
+    """An inference_logs dir holding an old log from some previous run."""
+    log_dir = tmp_path / "inference_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stale = log_dir / "1000.log"
+    stale.write_text(stale_text + "\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    return stale
+
+
+def test_inference_log_ignores_stale_files_during_startup(monkeypatch, tmp_path) -> None:
+    """THE INCIDENT: a session in its pre-spawn phases has no log of its own.
+
+    `log_path` is only committed once the subprocess is launched, so during the
+    download/preflight window the endpoint must report nothing rather than the
+    newest file on disk.
+    """
+    from makermodslab import rollout
+
+    stale = _seed_log_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_DOWNLOADING_MODEL})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    result = rollout.handle_inference_log()
+
+    assert result["belongs_to"] is None
+    assert result["logs"] == "" and result["log_path"] is None
+    assert stale.is_file(), "the stale file is still there — it is simply not ours to show"
+
+
+def test_inference_log_after_a_startup_failure_is_empty(monkeypatch, tmp_path) -> None:
+    """A run that failed BEFORE spawning never opened a log.
+
+    `_fail_startup` wipes the meta, so nothing points anywhere — and the previous
+    run's file must not fill the gap. This is the shape of the live incident: the
+    user's calibration error produced no log, and they were shown someone else's.
+    """
+    from makermodslab import rollout
+
+    _seed_log_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    result = rollout.handle_inference_log()
+
+    assert result == {"logs": "", "log_path": None, "belongs_to": None}
+
+
+def test_inference_log_serves_the_active_sessions_own_log(monkeypatch, tmp_path) -> None:
+    from makermodslab import rollout
+
+    _seed_log_dir(monkeypatch, tmp_path)
+    mine = tmp_path / "inference_logs" / "2000.log"
+    mine.write_text("MY RUN\n")
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"log_path": str(mine)})
+    monkeypatch.setattr(rollout, "_last_log_path", str(mine))
+
+    result = rollout.handle_inference_log()
+
+    assert result["belongs_to"] == "active"
+    assert "MY RUN" in result["logs"]
+
+
+def test_inference_log_serves_a_finished_run_as_last_run(monkeypatch, tmp_path) -> None:
+    """The legitimate case the glob fallback existed for, now explicit.
+
+    A finished run's log stays readable — `_go_idle_locked` clears the meta but
+    not `_last_log_path` — and is labelled so the UI can say it is not live.
+    """
+    from makermodslab import rollout
+
+    _seed_log_dir(monkeypatch, tmp_path)
+    mine = tmp_path / "inference_logs" / "2000.log"
+    mine.write_text("MY FINISHED RUN\n")
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_last_log_path", str(mine))
+
+    result = rollout.handle_inference_log()
+
+    assert result["belongs_to"] == "last_run"
+    assert "MY FINISHED RUN" in result["logs"]
+    assert result["log_path"] == str(mine)
+
+
+def test_inference_log_never_globs_the_directory(monkeypatch, tmp_path) -> None:
+    """The fallback is gone, not merely deprioritised.
+
+    Pinned directly: with a populated log dir and no session state at all, the
+    answer is None. If someone reintroduces a "be helpful, show the newest file"
+    shortcut, this fails.
+    """
+    from makermodslab import rollout
+
+    log_dir = tmp_path / "inference_logs"
+    log_dir.mkdir(parents=True)
+    for name in ("1000.log", "2000.log", "3000.log"):
+        (log_dir / name).write_text(f"run {name}\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    assert rollout._resolve_inference_log_path() == (None, None)
+
+
+def test_inference_log_does_not_serve_a_previous_runs_log_to_a_new_session(monkeypatch, tmp_path) -> None:
+    """A new claim clears the pointer, so run N+1 cannot inherit run N's log."""
+    from makermodslab import rollout
+
+    previous = tmp_path / "inference_logs" / "2000.log"
+    previous.parent.mkdir(parents=True)
+    previous.write_text("PREVIOUS RUN\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(rollout, "_last_log_path", str(previous))
+
+    # What handle_start_inference does when it claims the slot.
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    result = rollout.handle_inference_log()
+    assert result["belongs_to"] is None and result["logs"] == ""
+
+
+def test_start_inference_clears_the_previous_runs_log_pointer(monkeypatch, tmp_path) -> None:
+    """The clear happens in the real claim path, not just in test setup.
+
+    Driven through `handle_start_inference` so the lifecycle wiring itself is
+    covered; the start is failed immediately after the claim (arm-count mismatch)
+    so nothing spawns.
+    """
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest
+
+    monkeypatch.setattr(rollout, "_last_log_path", "/tmp/some-previous-run.log")
+    monkeypatch.setattr(rollout, "_arm_count_mismatch", lambda mode, dim: "nope")
+
+    # Built inline rather than via a shared helper so this case stays
+    # self-contained on this branch.
+    request = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        checkpoint_state_dim=12,
+    )
+    result = rollout.handle_start_inference(request)
+
+    assert result["success"] is False
+    assert rollout._last_log_path is None, "a new claim must not inherit the previous run's log"
+
+
+# ---------------------------------------------------------------------------
+# F6 store entries must hold LOADABLE WEIGHTS, not just a config.
+#
+# Live incident: the user's sock ACT model had a 68 KB store entry — an
+# interrupted local_dir download with config.json, train_config.json and both
+# processor safetensors, but no model.safetensors. F6's short-circuit served it,
+# and lerobot died with FileNotFoundError on the weights. Pre-F6 the hub path
+# would have downloaded and worked, so the short-circuit converted a silent
+# partial into a hard failure.
+# ---------------------------------------------------------------------------
+
+
+def test_local_store_refuses_a_weightless_checkpoint_ref(monkeypatch, tmp_path) -> None:
+    """The incident, at the `@checkpoints/<step>` branch that hit it."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050", weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/repo", "000050") is None, (
+        "a store entry with a config but no model.safetensors must fall through to the "
+        "download instead of being served as a usable checkpoint"
+    )
+
+
+def test_local_store_refuses_a_weightless_root_ref(monkeypatch, tmp_path) -> None:
+    """Same for the flat `@root` shape."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/flat", flat=True, weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/flat", None) is None
+
+
+def test_weightless_store_entry_falls_through_to_the_hub(monkeypatch, tmp_path) -> None:
+    """End-to-end: the partial entry must not break inference, just be skipped.
+
+    This is the behaviour the incident should have had — resolve via the Hub, as
+    it did before F6 existed.
+    """
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050", weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kw: str(fake_root))
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert result == str(fake_root / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_processor_safetensors_alone_do_not_count_as_weights(monkeypatch, tmp_path) -> None:
+    """The trap, pinned explicitly.
+
+    The broken tree DOES contain .safetensors files (pre/post-processor), so a
+    check for "any safetensors present" would have served it just the same. The
+    requirement is the POLICY weights specifically.
+    """
+    from makermodslab import models
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", flat=True, weights=False)
+    repo_dir = tmp_path / "makermodslab_models" / "user" / "repo"
+
+    assert list(repo_dir.glob("*.safetensors")), "fixture precondition: safetensors ARE present"
+    assert models._has_loadable_weights(repo_dir) is False
+    assert models._resolve_pretrained_dir(repo_dir) is None
+
+
+def test_complete_store_entry_is_still_served(monkeypatch, tmp_path) -> None:
+    """Control: the fix must not stop F6 serving a COMPLETE local copy."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    assert rollout._local_store_policy_path("user/repo", "000050") == str(
+        repo_dir / "checkpoints" / "000050" / "pretrained_model"
+    )
+
+
+def test_adapter_shaped_checkpoint_counts_as_loadable(tmp_path) -> None:
+    """A PEFT/LoRA adapter dir has no model.safetensors and is still loadable.
+
+    `make_policy`'s use_peft branch reads the adapter config and calls
+    `PeftModel.from_pretrained(policy, dir)`, pulling the BASE weights from the
+    adapter config's `base_model_name_or_path` — so requiring model.safetensors
+    unconditionally would make the user's pi05 LoRA repos vanish.
+    """
+    from makermodslab import models
+
+    d = tmp_path / "adapter"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "adapter_config.json").write_text('{"base_model_name_or_path": "lerobot/pi05"}')
+    (d / "adapter_model.safetensors").write_text("lora")
+
+    assert models._has_loadable_weights(d) is True
+    assert models._resolve_pretrained_dir(d) == d
+
+
+def test_partial_adapter_dir_is_not_loadable(tmp_path) -> None:
+    """Half an adapter is not an adapter: PeftConfig.from_pretrained needs the
+    config, and there is nothing to load without the adapter weights."""
+    from makermodslab import models
+
+    d = tmp_path / "half_adapter"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "adapter_model.safetensors").write_text("lora")  # no adapter_config.json
+
+    assert models._has_loadable_weights(d) is False
+
+
+def test_sharded_weights_are_not_accepted(tmp_path) -> None:
+    """The pinned lerobot cannot load sharded weights from a local dir.
+
+    `from_pretrained` joins SAFETENSORS_SINGLE_FILE and opens it — there is no
+    index-file branch — and the save side pins max_shard_size above the total so
+    output stays one file. Accepting shards would recreate this very bug: a tree
+    we call usable that lerobot then fails to open.
+    """
+    from makermodslab import models
+
+    d = tmp_path / "sharded"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "model-00001-of-00002.safetensors").write_text("shard")
+    (d / "model-00002-of-00002.safetensors").write_text("shard")
+    (d / "model.safetensors.index.json").write_text("{}")
+
+    assert models._has_loadable_weights(d) is False

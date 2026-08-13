@@ -22,6 +22,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
   flavors,
   hardwareLoading,
   policyLocked,
+  resumeLocked,
 }) => {
   return (
     // Order matters: Policy answers "what am I training" and so belongs with
@@ -39,9 +40,18 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
         authenticated={authenticated}
         flavors={flavors}
         loading={hardwareLoading}
+        resumeLocked={resumeLocked}
       />
-      <EssentialsCard config={config} updateConfig={updateConfig} />
-      <AdvancedCard config={config} updateConfig={updateConfig} />
+      <EssentialsCard
+        config={config}
+        updateConfig={updateConfig}
+        resumeLocked={resumeLocked}
+      />
+      <AdvancedCard
+        config={config}
+        updateConfig={updateConfig}
+        resumeLocked={resumeLocked}
+      />
     </div>
   );
 };

@@ -10,17 +10,33 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ConfigComponentProps } from "../types";
+import { cn } from "@/lib/utils";
+import {
+  ConfigComponentProps,
+  RESUME_INHERITED_NOTE,
+  RESUME_INHERITED_SHORT,
+} from "../types";
 import WandbInstallDialog from "../WandbInstallDialog";
 import { useApi } from "@/contexts/ApiContext";
 
 /** The run's headline settings — steps, batch size, name, and W&B logging.
  * Flat: each control carries its own <Label> and the section has no eyebrow
  * heading, so nothing sits above a single field restating it. The policy
- * select lives in PolicyField, which renders earlier in the form. */
+ * select lives in PolicyField, which renders earlier in the form.
+ *
+ * On a resume, `steps` stays editable (the resume branch passes --steps, and
+ * raising it is the whole point of a continuation) while `batch_size` does not
+ * — lerobot takes it from the checkpoint's train_config.json. The whole W&B
+ * group is locked for the same reason: the resume branch emits no --wandb.*, so
+ * lerobot logs (or doesn't) exactly as the parent run's config said. The one
+ * live effect the toggle keeps is a bad one — HfCloudJobRunner reads
+ * `wandb_enable` when assembling job secrets and 400s on a missing
+ * WANDB_API_KEY, so leaving it enabled could only ever block a launch without
+ * turning any logging on. */
 const EssentialsCard: React.FC<ConfigComponentProps> = ({
   config,
   updateConfig,
+  resumeLocked,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [wandbDialogOpen, setWandbDialogOpen] = useState(false);
@@ -51,6 +67,24 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
     }
   };
 
+  // The step this continuation starts FROM, beside the name it continues.
+  // Requested here specifically: the name is what the user recognises the run
+  // by, and the starting step is the one number that says which attempt this
+  // is — the two belong together.
+  //
+  // Training steps (above) is the TARGET; this is the floor. A resume turns on
+  // the gap between them, so neither number means much alone.
+  //
+  // Step 0 is the whole-repo/single-model sentinel, not a real training step
+  // (see CheckpointDropdown) — it and a missing step both read as "latest",
+  // the same word the checkpoint picker uses for it.
+  const resumeStep = config.resume_from_step;
+  const resumedFrom = !resumeLocked
+    ? null
+    : resumeStep
+      ? `from step ${resumeStep.toLocaleString()}`
+      : "from latest checkpoint";
+
   return (
     <section className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
@@ -73,12 +107,25 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
             onChange={(v) => {
               if (v !== undefined) updateConfig("batch_size", v);
             }}
+            disabled={resumeLocked}
           />
+          {resumeLocked && (
+            <p className="text-xs text-muted-foreground">
+              {RESUME_INHERITED_SHORT}
+            </p>
+          )}
         </div>
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="job_name">Run name</Label>
+        <div className="flex items-baseline gap-2">
+          <Label htmlFor="job_name">Run name</Label>
+          {resumedFrom ? (
+            <span className="truncate text-xs font-normal text-muted-foreground">
+              {resumedFrom}
+            </span>
+          ) : null}
+        </div>
         <Input
           id="job_name"
           value={config.job_name || ""}
@@ -92,86 +139,106 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
         </p>
       </div>
 
-      <div className="flex items-center gap-3">
-        <Switch
-          id="wandb_enable"
-          checked={config.wandb_enable}
-          onCheckedChange={handleWandbToggle}
-          className="data-[state=checked]:bg-primary"
-        />
-        <Label htmlFor="wandb_enable">Log to Weights &amp; Biases</Label>
-      </div>
-
-      <WandbInstallDialog
-        open={wandbDialogOpen}
-        onOpenChange={setWandbDialogOpen}
-        installHint={wandbInstallHint}
-      />
-
-      {config.wandb_enable && (
-        <div className="space-y-4 border-l-2 border-border pl-4">
-          <div className="space-y-2">
-            <Label htmlFor="wandb_project">W&amp;B project name</Label>
-            <Input
-              id="wandb_project"
-              value={config.wandb_project || ""}
-              onChange={(e) =>
-                updateConfig("wandb_project", e.target.value || undefined)
-              }
-              placeholder="my-robotics-project"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="wandb_entity">W&amp;B entity (optional)</Label>
-            <Input
-              id="wandb_entity"
-              value={config.wandb_entity || ""}
-              onChange={(e) =>
-                updateConfig("wandb_entity", e.target.value || undefined)
-              }
-              placeholder="your-username"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="wandb_notes">W&amp;B notes (optional)</Label>
-            <Input
-              id="wandb_notes"
-              value={config.wandb_notes || ""}
-              onChange={(e) =>
-                updateConfig("wandb_notes", e.target.value || undefined)
-              }
-              placeholder="Training run notes..."
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="wandb_mode">W&amp;B mode</Label>
-            <Select
-              value={config.wandb_mode || "online"}
-              onValueChange={(value) => updateConfig("wandb_mode", value)}
-            >
-              <SelectTrigger id="wandb_mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="online">Online</SelectItem>
-                <SelectItem value="offline">Offline</SelectItem>
-                <SelectItem value="disabled">Disabled</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="wandb_disable_artifact"
-              checked={config.wandb_disable_artifact}
-              onCheckedChange={(checked) =>
-                updateConfig("wandb_disable_artifact", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="wandb_disable_artifact">Disable artifacts</Label>
-          </div>
+      {/* W&B is one inherited group on a resume, so it gets a single
+          section-level treatment like Advanced's locked sections. */}
+      <div
+        className={cn(
+          "space-y-4",
+          resumeLocked && "rounded-md border border-border bg-muted/30 p-4",
+        )}
+      >
+        {resumeLocked && (
+          <p className="text-xs text-muted-foreground">
+            {RESUME_INHERITED_NOTE}
+          </p>
+        )}
+        <div className="flex items-center gap-3">
+          <Switch
+            id="wandb_enable"
+            checked={config.wandb_enable}
+            onCheckedChange={handleWandbToggle}
+            disabled={resumeLocked}
+            className="data-[state=checked]:bg-primary"
+          />
+          <Label htmlFor="wandb_enable">Log to Weights &amp; Biases</Label>
         </div>
-      )}
+
+        <WandbInstallDialog
+          open={wandbDialogOpen}
+          onOpenChange={setWandbDialogOpen}
+          installHint={wandbInstallHint}
+        />
+
+        {config.wandb_enable && (
+          <div className="space-y-4 border-l-2 border-border pl-4">
+            <div className="space-y-2">
+              <Label htmlFor="wandb_project">W&amp;B project name</Label>
+              <Input
+                id="wandb_project"
+                value={config.wandb_project || ""}
+                onChange={(e) =>
+                  updateConfig("wandb_project", e.target.value || undefined)
+                }
+                placeholder="my-robotics-project"
+                disabled={resumeLocked}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="wandb_entity">W&amp;B entity (optional)</Label>
+              <Input
+                id="wandb_entity"
+                value={config.wandb_entity || ""}
+                onChange={(e) =>
+                  updateConfig("wandb_entity", e.target.value || undefined)
+                }
+                placeholder="your-username"
+                disabled={resumeLocked}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="wandb_notes">W&amp;B notes (optional)</Label>
+              <Input
+                id="wandb_notes"
+                value={config.wandb_notes || ""}
+                onChange={(e) =>
+                  updateConfig("wandb_notes", e.target.value || undefined)
+                }
+                placeholder="Training run notes..."
+                disabled={resumeLocked}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="wandb_mode">W&amp;B mode</Label>
+              <Select
+                value={config.wandb_mode || "online"}
+                onValueChange={(value) => updateConfig("wandb_mode", value)}
+                disabled={resumeLocked}
+              >
+                <SelectTrigger id="wandb_mode">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="online">Online</SelectItem>
+                  <SelectItem value="offline">Offline</SelectItem>
+                  <SelectItem value="disabled">Disabled</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch
+                id="wandb_disable_artifact"
+                checked={config.wandb_disable_artifact}
+                onCheckedChange={(checked) =>
+                  updateConfig("wandb_disable_artifact", checked)
+                }
+                disabled={resumeLocked}
+                className="data-[state=checked]:bg-primary"
+              />
+              <Label htmlFor="wandb_disable_artifact">Disable artifacts</Label>
+            </div>
+          </div>
+        )}
+      </div>
     </section>
   );
 };

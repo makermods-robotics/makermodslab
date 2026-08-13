@@ -309,7 +309,7 @@ def _run_prod(lan: bool = False):
         logger.error("   Run `npm run build` in frontend/ first, or use `makermodslab --dev`.")
         sys.exit(1)
 
-    host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104
+    host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104  # nosec B104 — binds all interfaces only behind the explicit --lan opt-in; loopback otherwise
     _ensure_port_available("Backend", BACKEND_PORT, host)
     if lan:
         logger.info("🚀 Starting MakerMods Lab on http://0.0.0.0:%d (LAN) ...", BACKEND_PORT)

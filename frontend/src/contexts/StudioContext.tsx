@@ -5,7 +5,7 @@ import React, {
   useMemo,
   useState,
 } from "react";
-import type { CameraConfig } from "@/components/recording/CameraConfiguration";
+import type { ResumeSeed } from "@/components/training/TrainingConfigurator";
 
 export type StudioPanel = "collect" | "train" | "deploy";
 
@@ -24,11 +24,11 @@ export interface CollectFormState {
    * session ends (via the background UploadManager, not the recorder's
    * blocking in-session push). Consumed by CollectHandoff. */
   pushToHub: boolean;
-  cameras: CameraConfig[];
-  /** Robot name the cameras were last seeded from (null = seeded with no
-   * robot; undefined = never seeded). Kept here so a panel remount doesn't
-   * re-seed and clobber the user's camera edits. */
-  camerasSeededFor: string | null | undefined;
+  // Cameras are deliberately NOT part of this draft. A session records the
+  // selected robot's cameras, resolved server-side from the robot record, so a
+  // session-local editable copy could only diverge from what actually runs —
+  // its edits were never written back and never sent. The Collect panel now
+  // shows the record's cameras read-only; they're edited in Robot settings.
 }
 
 const DEFAULT_COLLECT_FORM: CollectFormState = {
@@ -40,8 +40,6 @@ const DEFAULT_COLLECT_FORM: CollectFormState = {
   resetTimeS: 15,
   streamingEncoding: true,
   pushToHub: true,
-  cameras: [],
-  camerasSeededFor: undefined,
 };
 
 /** Pre-fills the Deploy panel when a skill card / job row says "Run on robot".
@@ -53,11 +51,22 @@ export interface DeployPrefill {
   step?: number;
 }
 
-/** Pre-fills the Train panel: fine-tune base and/or a preselected dataset.
+/** Pre-fills the Train panel: fine-tune base, resume seed, and/or a
+ * preselected dataset.
+ *
  * A local skill's fine-tune base is a job registry id (`baseJobId`); a Hub
  * skill's is a repo id (`baseModelRepoId`) that the panel lazy-imports. Set
  * exactly one of the two. `baseStep` optionally pins the checkpoint to
- * fine-tune from (the card's dropdown choice); omitted ⇒ latest. */
+ * fine-tune from (the card's dropdown choice); omitted ⇒ latest.
+ *
+ * `resume` is the sibling of that pair for Continue / Resume-cloud, and is
+ * mutually exclusive with them — a run is either continued or used as a
+ * fine-tune base, never both. It differs in kind from the base fields on
+ * purpose: a fine-tune base is a *reference* the panel still has to resolve
+ * (import the Hub repo, read the policy type, list checkpoints), whereas a
+ * resume seed is already complete at the call site, which holds the parent's
+ * persisted `config`. So this carries the finished ResumeSeed rather than a
+ * job id for the panel to look up. */
 export interface TrainPrefill {
   baseModelRepoId?: string;
   baseJobId?: string;
@@ -66,6 +75,8 @@ export interface TrainPrefill {
    * the models listing doesn't carry this id. */
   baseName?: string;
   datasetRepoId?: string;
+  /** Built by buildResumeSeed — see components/jobs/resumeSeed.ts. */
+  resume?: ResumeSeed;
 }
 
 interface StudioContextValue {

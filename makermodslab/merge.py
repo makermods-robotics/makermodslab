@@ -50,9 +50,7 @@ from .utils.config import validate_dataset_repo_id
 
 
 def _lerobot_cache_root() -> Path:
-    return Path(
-        os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")
-    ).expanduser()
+    return Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
 
 
 def _merge_logs_dir() -> Path:
@@ -200,7 +198,7 @@ def _merge_source_problem(repo_ids: list[str]) -> str | None:
             missing = _hub_repo_missing(repo_id)
             if missing is True:
                 return (
-                    f'Dataset "{repo_id}" wasn\'t found — it isn\'t in your local '
+                    f"Dataset \"{repo_id}\" wasn't found — it isn't in your local "
                     "cache or on the Hugging Face Hub. Check the name (or log in "
                     "if it's a private dataset)."
                 )
@@ -472,14 +470,12 @@ def _source_for_path(text: str, source_repo_ids: list[str], cache_root: Path) ->
         prefix = str(cache_root / repo_id)
         idx = text.find(prefix)
         if idx != -1:
-            tail = text[idx + len(prefix):].lstrip("/").split()[0].rstrip("'\"),.")
+            tail = text[idx + len(prefix) :].lstrip("/").split()[0].rstrip("'\"),.")
             return repo_id, tail or "(unknown file)"
     return None
 
 
-def _cli_friendly_error(
-    exc: Exception, source_repo_ids: list[str], cache_root: Path
-) -> str:
+def _cli_friendly_error(exc: Exception, source_repo_ids: list[str], cache_root: Path) -> str:
     """Turn a raw aggregation exception into a one/two-sentence message.
 
     Reliable net for corruption / not-found that the in-process preflight can't
@@ -512,7 +508,7 @@ def _cli_friendly_error(
         if hit is not None:
             repo_id = hit[0]
             return (
-                f'Dataset "{repo_id}" wasn\'t found — it isn\'t in your local '
+                f"Dataset \"{repo_id}\" wasn't found — it isn't in your local "
                 "cache or on the Hugging Face Hub. Check the name (or log in if "
                 "it's a private dataset)."
             )

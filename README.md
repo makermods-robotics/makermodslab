@@ -105,8 +105,8 @@ Opinionated extensions on top of the core workflow above.
 Not letting a wiring mistake break a servo:
 
 - 🛡️ **Arm-identity guard** — fingerprints each arm's EEPROM before energizing, so a swapped leader/follower port is caught rather than driven.
-- ✋ **Hand-motion port detection** — hit *Detect* and swing an arm's base to identify its serial port with no motor power. The legacy gripper-wiggle method is still available.
-- 🛑 **Graceful stops** — teleop and auto-calibration freeze, return to the start pose, then release torque. Hit *Stop* twice for an instant release.
+- ✋ **Hand-motion port detection** — hit _Detect_ and swing an arm's base to identify its serial port with no motor power. The legacy gripper-wiggle method is still available.
+- 🛑 **Graceful stops** — teleop and auto-calibration freeze, return to the start pose, then release torque. Hit _Stop_ twice for an instant release.
 - 🔋 **Motor power limiting** — cap per-robot motor power, with a live supply-voltage readout and session power telemetry.
 
 ### Robots & calibration
@@ -140,30 +140,16 @@ Not letting a wiring mistake break a servo:
 
 ## Contribute
 
-PRs welcome. Do the editable install from [Quick Start](#quick-start), then add the
-dev extra — it brings in ruff, pre-commit, and everything the test suite needs:
+PRs welcome. Setup, the hot-reload dev loop, and the checks a PR has to pass are all in
+**[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
+The short version:
 
 ```bash
-uv pip install -e ".[dev]"
+uv pip install -e ".[dev]"   # ruff, pre-commit, pytest
+pre-commit install           # wires the git hook — please don't skip this
+makermodslab --dev           # Vite on :8080, uvicorn --reload on :8000
 ```
-
-Work in hot-reload mode:
-
-```bash
-makermodslab --dev
-```
-
-Vite on `:8080`, uvicorn `--reload` on `:8000` — frontend and backend edits reload live.
-
-Before opening a PR, run what CI runs:
-
-```bash
-pytest                                  # Python suite
-ruff check && ruff format --check       # Python lint + format
-cd frontend && npm run lint && npx tsc --noEmit && npm run build
-```
-
-Leave `frontend/dist/` alone — CI rebuilds and commits it on merge to `main`.
 
 ## Team
 

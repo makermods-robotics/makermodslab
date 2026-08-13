@@ -106,9 +106,7 @@ def test_merge_rejects_output_matching_a_source() -> None:
     from makermodslab.merge import MergeManager, MergeRequest
 
     mgr = MergeManager()
-    res = mgr.start(
-        MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/one")
-    )
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/one"))
     assert res["started"] is False
     assert mgr.state == "idle"
 
@@ -117,9 +115,7 @@ def test_merge_rejects_blank_output() -> None:
     from makermodslab.merge import MergeManager, MergeRequest
 
     mgr = MergeManager()
-    res = mgr.start(
-        MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="  ")
-    )
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="  "))
     assert res["started"] is False
     assert mgr.state == "idle"
 
@@ -142,11 +138,7 @@ def test_merge_rejects_existing_output(tmp_lerobot_home: Path) -> None:
     (tmp_lerobot_home / "makermods" / "socks").mkdir(parents=True)
 
     mgr = MergeManager()
-    res = mgr.start(
-        MergeRequest(
-            source_repo_ids=["a/one", "a/two"], output_repo_id="makermods/socks"
-        )
-    )
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="makermods/socks"))
     assert res["started"] is False
     assert "already exists" in res["message"]
     assert "makermods/socks" in res["message"]
@@ -158,9 +150,7 @@ def test_cli_friendly_error_maps_file_exists(tmp_lerobot_home: Path) -> None:
 
     # Belt-and-suspenders: a subprocess-side FileExistsError (race) becomes a
     # friendly line rather than a raw `[Errno 17] File exists` traceback.
-    exc = FileExistsError(
-        17, "File exists", str(tmp_lerobot_home / "makermods" / "socks")
-    )
+    exc = FileExistsError(17, "File exists", str(tmp_lerobot_home / "makermods" / "socks"))
     msg = _cli_friendly_error(exc, ["a/one", "a/two"], tmp_lerobot_home)
     assert "already exists" in msg
     assert "Errno 17" not in msg
@@ -203,21 +193,15 @@ def _fake_aggregate_partial(output_root: Path):
     return _aggregate
 
 
-def test_run_cli_cleans_up_partial_output_on_failure(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_run_cli_cleans_up_partial_output_on_failure(tmp_lerobot_home: Path, monkeypatch) -> None:
     from makermodslab import merge
 
     output = "makermods/socks"
     output_root = tmp_lerobot_home / "makermods" / "socks"
 
     # No network: sources resolve to their (never-read) local roots.
-    monkeypatch.setattr(
-        merge, "_ensure_local_source", lambda repo_id, cache_root: cache_root / repo_id
-    )
-    monkeypatch.setattr(
-        merge, "aggregate_datasets", _fake_aggregate_partial(output_root)
-    )
+    monkeypatch.setattr(merge, "_ensure_local_source", lambda repo_id, cache_root: cache_root / repo_id)
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate_partial(output_root))
 
     rc = merge._run_cli([output, "a/one", "a/two"])
     assert rc == 1
@@ -225,9 +209,7 @@ def test_run_cli_cleans_up_partial_output_on_failure(
     assert not output_root.exists()
 
 
-def test_run_cli_leaves_preexisting_output_on_failure(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_run_cli_leaves_preexisting_output_on_failure(tmp_lerobot_home: Path, monkeypatch) -> None:
     from makermodslab import merge
 
     output = "makermods/socks"
@@ -237,12 +219,8 @@ def test_run_cli_leaves_preexisting_output_on_failure(
     output_root.mkdir(parents=True)
     (output_root / "sentinel.txt").write_text("keep me")
 
-    monkeypatch.setattr(
-        merge, "_ensure_local_source", lambda repo_id, cache_root: cache_root / repo_id
-    )
-    monkeypatch.setattr(
-        merge, "aggregate_datasets", _fake_aggregate_partial(output_root)
-    )
+    monkeypatch.setattr(merge, "_ensure_local_source", lambda repo_id, cache_root: cache_root / repo_id)
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate_partial(output_root))
 
     rc = merge._run_cli([output, "a/one", "a/two"])
     assert rc == 1
@@ -314,9 +292,7 @@ def test_merge_source_problem_missing_data_parquet(tmp_lerobot_home: Path) -> No
     assert "incomplete" in msg.lower() or "corrupt" in msg.lower()
 
 
-def test_merge_source_problem_not_found_on_hub(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_merge_source_problem_not_found_on_hub(tmp_lerobot_home: Path, monkeypatch) -> None:
     from unittest.mock import MagicMock
 
     from huggingface_hub.utils import RepositoryNotFoundError
@@ -336,9 +312,7 @@ def test_merge_source_problem_not_found_on_hub(
     assert "hub" in msg.lower()
 
 
-def test_merge_source_problem_offline_does_not_block(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_merge_source_problem_offline_does_not_block(tmp_lerobot_home: Path, monkeypatch) -> None:
     from makermodslab import merge
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")

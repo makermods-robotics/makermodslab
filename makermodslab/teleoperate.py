@@ -25,6 +25,7 @@ from lerobot.robots.bi_so_follower import BiSOFollower
 from lerobot.robots.so_follower import SO101Follower
 from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
+from lerobot.utils.errors import DeviceNotConnectedError
 
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
@@ -439,6 +440,44 @@ def _device_ports(device) -> str:
     return ", ".join(ports) if ports else "unknown port"
 
 
+def _bus_has_a_responding_motor(bus) -> bool:
+    """True when at least one motor on ``bus`` answers a ping.
+
+    Used only to choose the *wording* of the alarm after the torque-disable
+    pass below has already failed on every motor on this bus — it never gates
+    whether that pass runs. A degraded-but-recoverable bus (a brownout that
+    recovers, EMI, a long cable, the moments right after the control loop died
+    on a comms error) can fail every zero-retry ping while a retried write
+    would have landed, so the probe must not be allowed to veto the write.
+
+    ``is_connected`` can't stand in for this: it's literally
+    ``port_handler.is_open`` (lerobot ``motors_bus.py``), and
+    ``MotorsBus._connect`` calls ``openPort()`` *before* ``_handshake()`` and
+    does not close the port when the handshake fails — so an unpowered,
+    browned-out, or wrong-baud arm leaves ``is_connected`` True on a bus that
+    no motor is listening on.
+
+    ``ping`` is the right probe: it is a read (so it works whatever the torque
+    state is) and it returns ``None`` rather than raising on comm failure.
+    Short-circuits on the first motor that answers.
+
+    Defaults to True (assume the bus is alive, keep the loud alarm) for
+    anything that can't be probed: a bus with no ``motors``, a bus without a
+    ``ping`` method, or a test double that models neither.
+    """
+    motors = getattr(bus, "motors", None) or {}
+    ping = getattr(bus, "ping", None)
+    if not motors or not callable(ping):
+        return True
+    for motor in motors:
+        try:
+            if ping(motor) is not None:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def force_disable_torque(device, label: str = "device") -> list[str]:
     """Explicitly disable torque on every motor of a device, motor by motor.
 
@@ -454,6 +493,16 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
     """
     problems: list[str] = []
     for bus in _device_buses(device):
+        # A bus whose port never opened at all (the device node was missing or
+        # busy, so openPort() itself raised) has nothing to disable — writing
+        # to a closed port just produces a false "TORQUE MAY STILL BE ENABLED"
+        # alarm. Note this covers *only* that case: is_connected is
+        # port_handler.is_open, so it stays True when the port opened and the
+        # handshake then failed. The unpowered/wrong-baud arm is caught by the
+        # liveness probe below, not here. Test doubles that don't model
+        # connection state default to True so torque-only tests are unaffected.
+        if not getattr(bus, "is_connected", True):
+            continue
         # The Dynamixel SDK port handler can be left flagged "in use" after a
         # failed read/write in the control loop. LeRobot's normal
         # bus.disconnect() clears this before disabling torque; mirror that here
@@ -465,6 +514,12 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
                 port_handler.clearPort()
             with contextlib.suppress(Exception):
                 port_handler.is_using = False
+        port = getattr(bus, "port", None) or "unknown port"
+        # Always attempt the disable, whatever the liveness probe below would
+        # say: a degraded-but-recoverable bus can fail every zero-retry ping
+        # while the retried write here still lands, and skipping the write on
+        # a failed probe would leave a genuinely energized arm rigid. The
+        # probe is only consulted after a failure, to pick the wording.
         failed: list[str] = []
         for motor in getattr(bus, "motors", None) or {}:
             try:
@@ -472,12 +527,27 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
             except Exception as e:
                 failed.append(f"{motor}: {e}")
         if failed:
-            port = getattr(bus, "port", None) or "unknown port"
-            message = (
-                f"TORQUE MAY STILL BE ENABLED on {port} ({label}; failed motors — {'; '.join(failed)}). "
-                "The arm can stay rigid; unplug its power to release it."
-            )
-            logger.error(message)
+            if _bus_has_a_responding_motor(bus):
+                # Something is listening, so the failed writes are a real
+                # "this joint may stay rigid" condition.
+                message = (
+                    f"TORQUE MAY STILL BE ENABLED on {port} ({label}; failed motors — {'; '.join(failed)}). "
+                    "The arm can stay rigid; unplug its power to release it."
+                )
+                logger.error(message)
+            else:
+                # Nothing on this bus is listening: the port opened but no
+                # motor answers (arm unpowered, browned-out servos, wrong
+                # baud, or a valid-but-wrong serial device). Reporting that as
+                # "TORQUE MAY STILL BE ENABLED — unplug its power" is actively
+                # misleading on an arm that has no power. Say what was
+                # actually observed, and keep the rigid-arm advice as a
+                # conditional rather than an assertion.
+                message = (
+                    f"No motor answered on {port} ({label}) — the torque disable failed on every motor. "
+                    "Check the arm's power and USB cable. If the arm is rigid, unplug its power to release it."
+                )
+                logger.warning(message)
             problems.append(message)
     return problems
 
@@ -528,6 +598,102 @@ def _cleanup_after_setup_failure(
         if error:
             problems.append(error)
     return " ".join(problems) if problems else None
+
+
+def force_disconnect_partial(device, label: str = "device") -> list[str]:
+    """Release a device that may be only *partially* connected.
+
+    ``device.disconnect()`` is unusable after a failed ``connect()``. lerobot
+    guards it with ``@check_if_not_connected``, and a robot's ``is_connected``
+    is all-or-nothing (``bus.is_connected and all(cam.is_connected ...)``), so
+    when ``connect()`` opens the bus and then dies on a camera, the cameras
+    *after* the failing one in iteration order were never opened — the guard
+    sees ``is_connected == False`` and ``disconnect()`` raises
+    ``DeviceNotConnectedError`` immediately, releasing **nothing**. The bus
+    stays open and every already-opened camera keeps its background read thread
+    running, holding the OS device busy for the rest of the process. The next
+    connect attempt then dies on the leaked bus with the misleading
+    "FeetechMotorsBus is already connected", and its cameras time out against
+    the leaked read threads — the failure is self-perpetuating until restart
+    (diagnosed 2026-07-29 on the front/wrist rig).
+
+    Go component by component instead, each independently guarded, so a broken
+    camera can't strand the bus and vice versa. Safe on a fully connected,
+    partially connected, or already disconnected device.
+
+    Torque, motor-by-motor, before any of that: on a camera failure torque was
+    never enabled (configure() runs after the cameras), but a failure later in
+    connect() can leave it on. lerobot's bus.disconnect() does disable torque
+    itself, but — same reasoning as force_disable_torque's docstring — one
+    motor's failed write there aborts the disable for every motor after it on
+    that bus, leaving them energized *and* skipping closePort(). So
+    force_disable_torque disables each motor independently first, and the
+    disconnect() below is then called with disable_torque=False: the work is
+    already done, and re-running it only reintroduces the abort-before-close
+    failure mode. Same ordering as _cleanup_after_setup_failure uses for the
+    same "torque may already be enabled after an incomplete setup" situation.
+    force_disable_torque skips any bus whose port never opened and any bus
+    where no motor answers a ping, so this is safe to call unconditionally.
+
+    Returns the list of problem descriptions, empty when teardown was clean,
+    so callers can surface a partial teardown instead of silently discarding
+    it. Note this is the raw list, unlike _cleanup_after_setup_failure, which
+    joins its problems into a single ``str | None`` for its one caller —
+    leaving them separate here lets a caller count, filter, or join them as
+    it needs.
+    """
+    problems: list[str] = []
+    if device is None:
+        return problems
+    problems += force_disable_torque(device, label)
+    # Cameras next: they're the usual point of failure, and their read threads
+    # are what keep the device busy for the next attempt. ``.cameras`` covers
+    # both sides on a bimanual BiSO device (it merges the sub-arms' dicts).
+    for name, cam in (getattr(device, "cameras", None) or {}).items():
+        try:
+            cam.disconnect()
+        except DeviceNotConnectedError:
+            pass  # never opened (or already released) — nothing to do
+        except Exception as e:
+            message = f"Could not release {label} camera {name}: {e}"
+            logger.warning(message)
+            problems.append(message)
+    for bus in _device_buses(device):
+        try:
+            # disable_torque=False: force_disable_torque above already
+            # disabled every motor independently, and lerobot's default
+            # disconnect(disable_torque=True) would re-run the same pass with
+            # num_retry=5 — where the *first* unresponsive motor raises before
+            # closePort(), leaking the port and appending a second, misleading
+            # "could not release the bus" problem about a bus we then close by
+            # hand below. Same reasoning and same call as rollout.py,
+            # motor_power.py, identify.py and auto_calibrate.py.
+            if getattr(bus, "is_connected", True):
+                bus.disconnect(disable_torque=False)
+        except Exception as e:
+            port = getattr(bus, "port", None) or "unknown port"
+            message = f"Could not release {label} bus on {port}: {e}"
+            logger.warning(message)
+            problems.append(message)
+            # Last resort (same fallback utils/devices.py's
+            # _force_close_device_resources uses): force the port handle
+            # closed so a failed disconnect can't leave it open until process
+            # exit. Scoped per-bus (not delegated to that device-level
+            # helper) so bimanual sub-arm buses each get their own fallback.
+            port_handler = getattr(bus, "port_handler", None)
+            if port_handler is not None:
+                with contextlib.suppress(Exception):
+                    port_handler.clearPort()
+                with contextlib.suppress(Exception):
+                    port_handler.is_using = False
+                try:
+                    port_handler.closePort()
+                    logger.info(f"Force-closed {label} bus port on {port} after disconnect failure")
+                except Exception as close_exc:
+                    close_message = f"Failed to force-close {label} bus port on {port}: {close_exc}"
+                    logger.warning(close_message)
+                    problems.append(close_message)
+    return problems
 
 
 def _connect_bimanual(request: TeleoperateRequest):

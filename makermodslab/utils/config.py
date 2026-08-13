@@ -471,6 +471,175 @@ def rename_robot_record(old_name: str, new_name: str) -> tuple[bool, str]:
     return True, ""
 
 
+# ---------------------------------------------------------------------------
+# Session cameras — resolved from the robot record, never from the request
+# ---------------------------------------------------------------------------
+#
+# The robot record is the single source of truth for which cameras a session
+# opens. Recording and inference used to carry their own camera dicts in the
+# start request, so a session could run against a camera set that no longer
+# matched (or never matched) the saved robot — and edits made on the panel were
+# silently discarded. Both flows now name a robot and let the server resolve
+# the cameras; cameras are edited in one place only (the robot settings dialog).
+
+
+class CameraResolutionError(ValueError):
+    """A session's cameras could not be resolved from its robot record.
+
+    Carries a user-facing message: the route layer turns it into a 400 with
+    this text, so it must say what to fix and where (robot settings), not name
+    internals.
+    """
+
+
+# The subset of a stored camera entry a SESSION needs. `id`/`device_id`/`name`
+# are record-keeping and UI concerns: `name` becomes the dict key, and the other
+# two must not leak into the camera config (rollout's `--robot.cameras=` CLI
+# serializer forwards every key it is handed straight to lerobot's
+# OpenCVCameraConfig, which would reject them).
+_SESSION_CAMERA_KEYS = (
+    "type",
+    "camera_index",
+    "unique_id",
+    "width",
+    "height",
+    "fps",
+    "fourcc",
+    "backend",
+)
+
+
+def session_camera_config(entry: dict) -> dict:
+    """One stored camera entry → the per-camera dict a session consumes.
+
+    That shape is what `record._build_camera_configs` and
+    `rollout._format_cameras_arg` already take (both of which keep their own
+    hardening: platform backend pin and the MJPG fourcc default).
+
+    Keys the entry doesn't carry are omitted rather than sent as None, so the
+    consumers' own defaults still apply. `type` defaults to "opencv" — records
+    written before the field existed have no other kind of camera.
+    """
+    config = {key: entry[key] for key in _SESSION_CAMERA_KEYS if entry.get(key) is not None}
+    config.setdefault("type", "opencv")
+    return config
+
+
+def record_cameras_by_name(cameras: list) -> dict[str, dict]:
+    """Every camera of a robot record, keyed by its name.
+
+    Names are the record's own user-facing labels and become the dataset's
+    camera keys (recording) or the binding targets (inference), so a duplicate
+    is ambiguous rather than merely untidy: keying a dict by name would
+    silently drop one of the two. Raises CameraResolutionError instead.
+    Non-dict entries in a hand-edited record are skipped.
+    """
+    by_name: dict[str, dict] = {}
+    for entry in cameras or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise CameraResolutionError(
+                "A camera in this robot's configuration has no name. "
+                "Open Robot settings and name it before starting."
+            )
+        if name in by_name:
+            raise CameraResolutionError(
+                f"This robot has two cameras named '{name}'. "
+                "Rename one in Robot settings so each camera is unambiguous."
+            )
+        by_name[name] = session_camera_config(entry)
+    return by_name
+
+
+def load_robot_cameras(robot_name: str) -> dict[str, dict]:
+    """The named robot record's cameras, keyed by camera name.
+
+    A blank name means a camera-less session ({}) — recording without cameras
+    is legitimate. A NON-blank name that doesn't resolve to a record on disk
+    raises: recording camera-less because the robot name was wrong is a silent
+    data loss (a whole session with no video), so it must fail loudly.
+    """
+    name = (robot_name or "").strip()
+    if not name:
+        return {}
+    record = get_robot_record(name) if is_valid_robot_name(name) else None
+    if record is None:
+        raise CameraResolutionError(
+            f"No saved configuration found for robot '{name}'. "
+            "Select an existing robot (or save this one in Robot settings) before starting."
+        )
+    return record_cameras_by_name(record.get("cameras") or [])
+
+
+def _positive_int(value: object) -> int | None:
+    """`value` as a usable pixel dimension, or None. bool is excluded (it is an
+    int subclass, and `True` as a width is always a bug, never a 1-pixel frame)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def bind_robot_cameras(
+    robot_name: str,
+    bindings: dict[str, str],
+    dims: dict[str, dict] | None = None,
+) -> dict[str, dict]:
+    """Resolve {policy-expected camera name: robot-record camera name} bindings
+    into the session camera dict, keyed by the POLICY-expected names.
+
+    Inference needs the checkpoint's own camera names, which rarely match the
+    labels on the robot — hence the indirection. The request carries only the
+    name pairing; the camera's IDENTITY and transport settings (index,
+    unique_id, fps, fourcc, backend) come from the record.
+
+    CAPTURE RESOLUTION is the one exception, supplied by `dims`
+    ({policy camera name: {"width": w, "height": h}}, from the checkpoint's
+    image_features). lerobot's standard rollout pipeline does NOT resize frames
+    to the policy's input shape — only the HIL path has a resize processor — so
+    the frames a policy sees at deployment must be captured at the resolution it
+    was trained on. Taking width/height from the robot record instead would
+    silently change policy behaviour whenever the record's configured capture
+    size differs from the checkpoint's. Overlaid per camera and only for sane
+    positive values, so a checkpoint that omits image dims (or an older client
+    that sends none) gracefully falls back to the record's own width/height.
+
+    Empty bindings mean a camera-less policy ({}). Raises
+    CameraResolutionError when no robot is named, when the record is missing,
+    or when a binding points at a camera the record doesn't have (the message
+    lists what it does have).
+    """
+    if not bindings:
+        return {}
+    if not (robot_name or "").strip():
+        raise CameraResolutionError(
+            "No robot selected, so the bound cameras can't be resolved. Select a robot before starting."
+        )
+    available = load_robot_cameras(robot_name)
+    resolved: dict[str, dict] = {}
+    for policy_name, camera_name in bindings.items():
+        key = str(camera_name or "").strip()
+        entry = available.get(key)
+        if entry is None:
+            listing = ", ".join(sorted(available)) if available else "none"
+            raise CameraResolutionError(
+                f"This robot has no camera named '{key}' (bound to '{policy_name}'). "
+                f"Cameras on this robot: {listing}. Fix the binding, or add the camera in Robot settings."
+            )
+        config = dict(entry)
+        override = (dims or {}).get(policy_name) or {}
+        width = _positive_int(override.get("width"))
+        height = _positive_int(override.get("height"))
+        # Both or neither: a half-applied override would capture at a mixed
+        # policy/record aspect, which is worse than either source alone.
+        if width is not None and height is not None:
+            config["width"] = width
+            config["height"] = height
+        resolved[policy_name] = config
+    return resolved
+
+
 def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     """
     A record is 'clean' when every operational field for its mode is populated AND

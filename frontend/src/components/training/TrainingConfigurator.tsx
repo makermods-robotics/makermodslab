@@ -12,6 +12,7 @@ import TrainingExtraGate from "@/components/training/TrainingExtraGate";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import HfAuthBanner from "@/components/landing/HfAuthBanner";
 import LocalDatasetCloudNotice from "@/components/training/config/LocalDatasetCloudNotice";
+import LocalCheckpointCloudNotice from "@/components/training/config/LocalCheckpointCloudNotice";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -35,19 +36,50 @@ import { getDatasetInfo } from "@/lib/replayApi";
 // Passed by the "Continue" button on a completed local job, or the "Resume"
 // button on a cloud run that ended before its step target.
 export type ResumeSeed = {
+  // The run being CONTINUED — the lineage edge. Always the leaf the user
+  // clicked, never the checkpoint's owner, so chains stay linear (see
+  // buildResumeSeed).
   jobId: string;
   step: number | null; // null ⇒ resume from the latest checkpoint
+  // CHAIN REWIND provenance: the ancestor whose storage holds the chosen
+  // checkpoint, when it isn't the leaf's own. Undefined ⇒ the leaf owns it.
+  // Never the edge — only where the bytes are read from.
+  checkpointJobId?: string;
   name: string;
   datasetRepoId: string;
   policyType: string;
   sourceSteps: number; // the source run's configured total, for a sane prefill
   logFreq?: number; // the source run's log cadence, to preserve on resume
   saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
-  // Cloud resume: the parent run's runner + flavor. A local Continue omits
-  // these (runner defaults to "local"). When "hf_cloud", the launched run
-  // targets the same flavor and continues into the parent's Hub output repo.
+  // The parent run's runner + flavor. A resume DEFAULTS to the parent's runner
+  // but may cross to the other one (F7), so `runner` is the form's starting
+  // point AND its record of where the parent actually ran — which is what tells
+  // the form that continuing on the cloud has to upload a local checkpoint
+  // first. Omitted ⇒ treated as "local". When "hf_cloud", the launched run
+  // targets the same flavor and continues into the parent's Hub output repo;
+  // `flavor` stays editable, since which GPU the continuation rents is a real
+  // per-launch choice.
   runner?: "local" | "hf_cloud";
   flavor?: string;
+  // Cloud resume: the parent run's HF Jobs timeout. Omitting it let the form
+  // render blank, which `configToRequest` sends as undefined and the runner
+  // resolves to HF_JOB_TIMEOUT ("24h") — silently capping the continuation of a
+  // run that had already proved it needs a longer budget. See NEW-12.
+  hfJobTimeout?: string;
+  // The remaining hyperparameters. lerobot rebuilds these from the checkpoint's
+  // train_config.json on resume (build_training_command's resume branch emits
+  // none of them), so carrying them forward does NOT change what trains — it
+  // stops the form from *displaying* fresh-run defaults for a continuation, and
+  // keeps the new JobRecord's persisted config truthful about the run's shape.
+  batchSize?: number;
+  seed?: number;
+  numWorkers?: number;
+  policyDevice?: string;
+  policyUseAmp?: boolean;
+  optimizerType?: string;
+  optimizerLr?: number;
+  optimizerWeightDecay?: number;
+  optimizerGradClipNorm?: number;
 };
 
 // Passed by the "Fine-tune" button on an imported model. A fine-tune is a
@@ -58,7 +90,21 @@ export type FinetuneSeed = {
   step: number | null; // null ⇒ latest checkpoint of the source
   name: string;
   policyType: string;
+  // Where the CHOSEN checkpoint's bytes live — the checkpoint's own `source`
+  // field, straight from the job's checkpoint listing. It is exactly the fact
+  // the backend keys on: a "local" checkpoint resolves to an absolute path on
+  // this machine, which a pod cannot read, so fine-tuning it on the cloud has
+  // to stage its weights to the Hub first (and asks for that consent).
+  // Undefined ⇒ unknown (a stale deep-link seed built before this field), which
+  // shows no notice and leaves the backend's 400 as the backstop.
+  checkpointSource?: "local" | "hub";
 };
+
+/** Which local→cloud transfer a launch needs, if any. "resume" moves the whole
+ * checkpoint of the run being continued (weights AND optimizer state);
+ * "finetune" moves only the base checkpoint's weights, since a fine-tune starts
+ * a fresh optimizer and never reads the rest. */
+export type CheckpointUploadKind = "resume" | "finetune" | null;
 
 interface TrainingConfiguratorProps {
   /** Controlled policy type (chosen upstream — the panel policy grid or the
@@ -83,7 +129,19 @@ interface TrainingConfiguratorProps {
   actionsContainer?: HTMLElement | null;
 }
 
-function configToRequest(c: TrainingConfig): TrainingRequest {
+// PI0.5 is a 4B-parameter VLA — a real cloud run OOM'd an 80GB A100 on step 1
+// at the standard batch_size=8 in full precision. Every other policy keeps the
+// historical off default; only PI0.5 needs mixed precision to fit.
+const POLICY_DEFAULT_USE_AMP: Record<string, boolean> = {
+  pi05: true,
+};
+const defaultUseAmp = (policyType: string): boolean =>
+  POLICY_DEFAULT_USE_AMP[policyType] ?? false;
+
+function configToRequest(
+  c: TrainingConfig,
+  checkpointUploadKind: CheckpointUploadKind,
+): TrainingRequest {
   // The backend's TrainingRequest has more optional fields; the form covers
   // the user-meaningful subset.
   return {
@@ -101,6 +159,18 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
     resume: c.resume,
     resume_from_job_id: c.resume_from_job_id,
     resume_from_step: c.resume_from_step,
+    resume_from_checkpoint_job_id: c.resume_from_checkpoint_job_id,
+    // Consent, not a mode: sent only for the combinations that have to push
+    // bytes to the Hub (a checkpoint only this machine has, needed by a run on
+    // cloud compute), and the backend refuses those without it. Left undefined
+    // otherwise so no other launch carries an upload permission it has no use
+    // for. One field per MODE rather than one shared flag, because they consent
+    // to different disclosures: the whole checkpoint of the run being continued,
+    // versus the base model's weights.
+    upload_resume_checkpoint:
+      checkpointUploadKind === "resume" ? true : undefined,
+    upload_finetune_checkpoint:
+      checkpointUploadKind === "finetune" ? true : undefined,
     finetune_from_job_id: c.finetune_from_job_id,
     finetune_from_step: c.finetune_from_step,
     wandb_enable: c.wandb_enable,
@@ -155,9 +225,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const { openJobMonitor } = useStudio();
 
   const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
-    // A cloud resume inherits the parent run's target so the continuation runs
-    // on the same flavor and pushes into the same Hub repo; everything else
-    // defaults to a fresh local run.
+    // A resume DEFAULTS to the parent run's runner — a cloud one so the
+    // continuation runs on the same flavor and pushes into the same Hub repo, a
+    // local one so it reads the parent's on-disk checkpoint. The Compute
+    // control stays editable: either cross-runner direction works now (F7), it
+    // just moves the checkpoint first — down from the Hub for a cloud→local
+    // continuation, up to it for a local→cloud one. Everything else defaults to
+    // a fresh local run.
     target:
       resumeSeed?.runner === "hf_cloud"
         ? { runner: "hf_cloud", flavor: resumeSeed.flavor }
@@ -166,32 +240,64 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     dataset_repo_id: "",
     policy_type: "act",
     job_name: "",
-    // On resume, everything but steps is inherited from the checkpoint's
-    // train_config.json; prefill steps above the source's total so the
-    // continuation actually trains further. Fine-tune is a fresh run, so it
-    // uses the normal fresh default.
-    steps: resumeSeed ? resumeSeed.sourceSteps * 2 : 10000,
-    batch_size: 8,
-    seed: 1000,
-    num_workers: 4,
+    // On resume the fields below are PREFILLED from the parent run's persisted
+    // config (via ResumeSeed) rather than left at fresh-run defaults — see the
+    // ResumeSeed comments for which of them lerobot actually honours. Prefill,
+    // don't lock: every one stays editable, since extending steps or raising the
+    // timeout on a continuation is exactly what the form is for. `steps` is
+    // inherited as-is like the rest, so resuming an interrupted run defaults to
+    // FINISHING its original target (one that died at step 4,814 of 15,000
+    // resumes toward 15,000); raise it by hand to train past that. Resuming a
+    // run that already reached its target therefore prefills steps equal to the
+    // checkpoint's step — `resumeStepError` below blocks Start until the user
+    // raises it, as does the backend. Fine-tune is a fresh run, so it uses the
+    // normal fresh defaults throughout.
+    steps: resumeSeed ? resumeSeed.sourceSteps : 10000,
+    batch_size: resumeSeed?.batchSize ?? 8,
+    seed: resumeSeed?.seed ?? 1000,
+    num_workers: resumeSeed?.numWorkers ?? 4,
     log_freq: resumeSeed?.logFreq ?? 50,
     save_freq: resumeSeed?.saveFreq ?? 1000,
+    // Always on, no longer user-settable. Turning checkpointing off produced a
+    // run whose only artifact was a log: with no checkpoint there is nothing to
+    // continue, fine-tune, download or deploy, so every follow-up action on the
+    // job card went dead. The request field stays — lerobot still needs the
+    // flag — it just isn't a choice the form offers.
     save_checkpoint: true,
+    // Derived from the entry point, never from a control: a ResumeSeed means
+    // the user arrived via Continue / Resume on a job card, and that is the
+    // only way a resume can be coherent. The backend resolves resume_from_* into
+    // the checkpoint's config_path, and refuses `resume` without a source.
     // Fine-tune is NOT a resume — it's a fresh run whose weights are seeded from
     // the source checkpoint. resume stays false; the backend resolves
     // finetune_from_* into --policy.pretrained_path.
     resume: !!resumeSeed,
     resume_from_job_id: resumeSeed?.jobId,
     resume_from_step: resumeSeed?.step ?? undefined,
+    resume_from_checkpoint_job_id: resumeSeed?.checkpointJobId,
     finetune_from_job_id: finetuneSeed?.jobId,
     finetune_from_step: finetuneSeed?.step ?? undefined,
     wandb_enable: false,
     wandb_mode: "online",
     wandb_disable_artifact: false,
-    policy_device: "auto",
-    policy_use_amp: false,
-    optimizer_type: "adam",
+    policy_device: resumeSeed?.policyDevice ?? "auto",
+    // A resume prefills the parent run's own AMP setting (it may not match
+    // today's per-policy default); a fresh run gets the per-policy default.
+    policy_use_amp: resumeSeed?.policyUseAmp ?? defaultUseAmp(policyType),
+    optimizer_type: resumeSeed?.optimizerType ?? "adam",
+    optimizer_lr: resumeSeed?.optimizerLr,
+    optimizer_weight_decay: resumeSeed?.optimizerWeightDecay,
+    optimizer_grad_clip_norm: resumeSeed?.optimizerGradClipNorm,
+    // Always on, no longer user-settable. lerobot rejects the config outright
+    // when the preset is off and no scheduler is supplied ("Optimizer and
+    // Scheduler must be set when the policy presets are not used") — and this
+    // form never emits a --scheduler.* flag, so `false` could only ever produce
+    // a run that died at config validation. The request field stays.
     use_policy_training_preset: true,
+    // Cloud-only. Prefilled from the parent so a Continue keeps its budget
+    // instead of silently falling back to the runner's 24h default; the field
+    // stays editable so the user can raise it for a longer tail.
+    hf_job_timeout: resumeSeed?.hfJobTimeout,
   });
 
   // The config the form actually reads: internal state overlaid with the
@@ -224,6 +330,29 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const [hardwareLoading, setHardwareLoading] = useState(true);
   // HF_HUB_OFFLINE on the backend: Hub writes (incl. dataset upload) disabled.
   const [offline, setOffline] = useState<boolean>(false);
+
+  // Whether the user has hand-toggled the AMP switch this session — once they
+  // have, their choice wins over the per-policy default below, same as any
+  // other form field the policy dropdown doesn't reset.
+  const ampTouchedRef = useRef(false);
+
+  // The policy dropdown lives inside this same mounted form (PolicyField ->
+  // updateConfig("policy_type", ...) -> onPolicyTypeChange), so switching
+  // architecture does not remount the component or re-run the useState
+  // initializer above. Re-apply the per-policy AMP default whenever the
+  // selection changes, unless the user already touched the switch by hand.
+  // A resumeSeed's policyType is locked (see policyLocked below), so this
+  // never fires from a real dropdown change during a resume — but effects
+  // still run once on mount, which would otherwise stomp the parent run's own
+  // prefilled AMP value with today's per-policy default the instant the form
+  // opens. Skip entirely when resuming.
+  useEffect(() => {
+    if (ampTouchedRef.current || resumeSeed) return;
+    setTrainingConfig((prev) => ({
+      ...prev,
+      policy_use_amp: defaultUseAmp(policyType),
+    }));
+  }, [policyType, resumeSeed]);
 
   useEffect(() => {
     fetchWithHeaders(`${baseUrl}/system/training-extra`)
@@ -278,6 +407,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
     if (key === "dataset_repo_id") return;
+    if (key === "policy_use_amp") ampTouchedRef.current = true;
     setTrainingConfig((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -294,6 +424,27 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   // — the backend preflight is the belt-and-braces catch for that case.
   const datasetLocalOnly = selectedDatasetItem?.source === "local";
   const needsUpload = isCloud && datasetLocalOnly;
+
+  // A checkpoint this machine alone holds, needed by a run that will happen on
+  // a pod that can't read this disk — so it has to be uploaded to a private Hub
+  // repo before the job is submitted (F7). Two ways in, and which one it is
+  // decides what moves and which consent field carries it:
+  //
+  //   * "resume" — the parent ran locally and the continuation was retargeted
+  //     at the cloud. Derived from the SEED's runner rather than the config,
+  //     because the config's `target` is the user's live choice while the seed
+  //     is the only record of where the parent actually ran.
+  //   * "finetune" — the chosen base checkpoint is a local one. Read off the
+  //     seed's `checkpointSource`, which is the checkpoint's own `source` field
+  //     — exactly what the backend keys on. Undefined (a stale deep-link seed)
+  //     is treated as no-notice; the backend's 400 is the backstop.
+  const checkpointUploadKind: CheckpointUploadKind =
+    resumeSeed != null && resumeSeed.runner !== "hf_cloud" && isCloud
+      ? "resume"
+      : finetuneSeed?.checkpointSource === "local" && isCloud
+        ? "finetune"
+        : null;
+  const needsCheckpointUpload = checkpointUploadKind != null;
 
   // Approximate on-disk size for the notice (cheap detail endpoint; local only).
   const [datasetSizeBytes, setDatasetSizeBytes] = useState<number | null>(null);
@@ -325,7 +476,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       const job = await startTrainingJob(
         baseUrl,
         fetchWithHeaders,
-        configToRequest(config),
+        configToRequest(config, checkpointUploadKind),
       );
       toast({ title: "Training Started", description: job.name });
       onStarted?.(job.id);
@@ -352,6 +503,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     baseUrl,
     fetchWithHeaders,
     config,
+    checkpointUploadKind,
     toast,
     navigate,
     location.pathname,
@@ -393,8 +545,8 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       return;
     }
 
-    // Pre-flight: smolvla/pi0/diffusion need an optional package installed
-    // locally. Catch it here with a one-click installer instead of a buried
+    // Pre-flight: smolvla/pi0/pi0_fast/pi05/diffusion need an optional package
+    // installed locally. Catch it here with a one-click installer instead of a buried
     // ImportError after the job has already started. Cloud jobs run in their
     // own environment, so the local package is irrelevant — skip the check.
     if (config.target.runner === "local") {
@@ -474,6 +626,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   // in offline mode, in which case uploads are impossible and Start is a hard
   // block. (needsUpload is already gated on isCloud.)
   const uploadBlockedOffline = needsUpload && offline;
+  // A local run continued on the cloud has to push its checkpoint to the Hub
+  // first, which offline mode makes impossible — a hard block, exactly like the
+  // dataset case above.
+  const checkpointUploadBlockedOffline = needsCheckpointUpload && offline;
   const startDisabled =
     isStarting ||
     uploading ||
@@ -482,6 +638,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
     uploadBlockedOffline ||
+    checkpointUploadBlockedOffline ||
     resumeStepError != null;
   const startTooltip = localBlocked
     ? "Another local training is already running"
@@ -491,7 +648,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         ? "Select a hardware flavor"
         : uploadBlockedOffline
           ? "Offline mode is on — the dataset can't be uploaded to the Hub"
-          : undefined;
+          : checkpointUploadBlockedOffline
+            ? "Offline mode is on — the checkpoint can't be uploaded to the Hub"
+            : undefined;
 
   return (
     <div className="w-full">
@@ -505,11 +664,25 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               : " from its latest checkpoint"}
           </div>
           <p className="mt-1 text-muted-foreground">
-            The dataset, policy, batch size, and optimizer are inherited from the
-            checkpoint — only <span className="font-medium">Steps</span> applies
-            here. Set it above the resumed step to train further (prefilled to{" "}
+            Settings are prefilled from that run and stay editable. The dataset,
+            policy, batch size, and optimizer are rebuilt from the checkpoint
+            itself, so changing them here won't affect the continuation — but{" "}
+            <span className="font-medium">Steps</span>, the checkpoint cadence
+            {isCloud ? ", and the job timeout" : ""} all apply. Set Steps above
+            the resumed step to train further (prefilled to{" "}
             {config.steps.toLocaleString()}).
           </p>
+          {isCloud ? (
+            <p className="mt-1 text-muted-foreground">
+              Job timeout:{" "}
+              <span className="font-medium">
+                {config.hf_job_timeout?.trim()
+                  ? config.hf_job_timeout
+                  : "24h (default)"}
+              </span>{" "}
+              — a continuation needs at least as long as the tail it has left.
+            </p>
+          ) : null}
         </div>
       ) : null}
       {finetuneSeed ? (
@@ -535,6 +708,12 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         flavors={flavors}
         hardwareLoading={hardwareLoading}
         policyLocked={finetuneSeed != null || resumeSeed != null}
+        // On a resume, lerobot rebuilds every hyperparameter but the
+        // continuation essentials from the checkpoint's train_config.json, so
+        // those controls render read-only rather than accepting edits the run
+        // will discard. configToRequest still sends the form's values, keeping
+        // the new JobRecord's persisted config truthful about what was asked.
+        resumeLocked={resumeSeed != null}
       />
       {needsUpload ? (
         <div className="mt-6">
@@ -544,6 +723,29 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
             offline={offline}
             uploading={uploading}
             errorMessage={uploadError}
+          />
+        </div>
+      ) : null}
+      {/* Compute is editable on a resume now (F7), so the user can retarget a
+          local run's continuation at the cloud. That direction moves the
+          parent's checkpoint to the Hub first, which is a disclosure — hence a
+          notice before the click, and a Start button that says "Upload". */}
+      {checkpointUploadKind === "resume" && resumeSeed ? (
+        <div className="mt-6">
+          <LocalCheckpointCloudNotice
+            mode="resume"
+            runName={resumeSeed.name}
+            step={resumeSeed.step}
+            offline={offline}
+          />
+        </div>
+      ) : checkpointUploadKind === "finetune" && finetuneSeed ? (
+        <div className="mt-6">
+          <LocalCheckpointCloudNotice
+            mode="finetune"
+            runName={finetuneSeed.name}
+            step={finetuneSeed.step}
+            offline={offline}
           />
         </div>
       ) : null}
@@ -566,24 +768,37 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               disabled={startDisabled}
               className="w-full gap-2"
             >
+              {/* Icon sizing/spacing is left to the Button's own `gap-2` and
+                  `[&_svg]:size-4`, exactly as Collect's "Start recording" and
+                  Run's "Start inference" do — an extra `mr-2` here doubled the
+                  icon gap, so the label shifted the moment the studio panel
+                  swapped its disabled stand-in for this button. */}
               {uploading ? (
                 <>
-                  <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Uploading…
+                  <Loader2 className="h-4 w-4 animate-spin" /> Uploading…
                 </>
               ) : isStarting ? (
                 <>
-                  <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Starting…
+                  <Loader2 className="h-4 w-4 animate-spin" /> Starting…
                 </>
               ) : (
                 <>
-                  <Play className="w-5 h-5 mr-2" />{" "}
+                  <Play className="h-4 w-4" />{" "}
                   {/* Sentence case, matching the disabled stand-in in
                       TrainPanel and Collect's / Run's Start buttons — these
                       used to flip to Title Case the moment the form opened. */}
                   {resumeSeed
-                    ? "Continue training"
+                    ? needsCheckpointUpload
+                      ? "Upload & continue training"
+                      : "Continue training"
                     : finetuneSeed
-                      ? "Start fine-tuning"
+                      ? // A local base fine-tuned on the cloud has to push its
+                        // weights first, so the button says what the click
+                        // actually does — the same promise the resume branch
+                        // above makes.
+                        needsCheckpointUpload
+                        ? "Upload & start training"
+                        : "Start fine-tuning"
                       : needsUpload
                         ? "Upload & start training"
                         : "Start training"}
@@ -624,6 +839,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           packageName={policyExtra.packageName}
           installTarget={policyExtra.installTarget}
           installHint={policyExtra.installHint}
+          purpose="training"
         />
       )}
     </div>

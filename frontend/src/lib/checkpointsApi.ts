@@ -19,6 +19,28 @@ export interface PolicyConfigSummary {
   action_dim: number | null;
 }
 
+/** Collapse checkpoint entries that point at the same underlying checkpoint.
+ *
+ * A cloud resume reuses its parent's output repo, so when a card merges the
+ * checkpoint lists of a run and its ancestors, every checkpoint in the shared
+ * repo is listed once per run — identical `ref`, identical step. The `ref`
+ * encodes the checkpoint's true identity (owning repo/path plus step), so it
+ * is the dedupe key; entries with the same step but different refs (two runs
+ * that each saved a step N in their own repo) are distinct and all kept.
+ * Keeps the first occurrence, so with the caller's this-run-before-ancestors
+ * ordering the surviving entry is attributed to the nearest run in the
+ * lineage. */
+export function dedupeCheckpointEntries<T extends { ckpt: JobCheckpoint }>(
+  entries: T[],
+): T[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    if (seen.has(entry.ckpt.ref)) return false;
+    seen.add(entry.ckpt.ref);
+    return true;
+  });
+}
+
 export async function listJobCheckpoints(
   baseUrl: string,
   fetcher: Fetcher,

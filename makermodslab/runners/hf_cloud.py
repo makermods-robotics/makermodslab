@@ -153,6 +153,34 @@ def _install_plan(spec, python, uv_path, has_pip, has_ensurepip):
     return None, []
 
 
+def _checkpoint_step_ready(step_dir):
+    """Whether `step_dir` (a lerobot checkpoints/<step>/ directory) has been
+    fully written and is safe to upload.
+
+    Reads lerobot's own completion signal instead of reconstructing its
+    internal write order. `checkpoints/last` is a relative symlink that
+    lerobot_train.py points at a step directory via update_last_checkpoint()
+    (lerobot/common/train_utils.py) strictly *after* save_checkpoint() has
+    returned for that step — so the link having advanced to (or past) this
+    step number is proof every file under step_dir is already on disk. The
+    `<=` (not `==`) covers two checkpoints completing inside one poll window.
+    See test_lerobot_last_checkpoint_symlink_matches_our_readiness_check for
+    the upstream contract this assumes.
+
+    Pure and self-contained (stdlib only) so its source can be inlined
+    verbatim into WRAPPER_SOURCE the same way _install_plan is, keeping the
+    in-container check and the unit-tested implementation identical.
+    """
+    import os
+
+    try:
+        target = os.readlink(step_dir.parent / "last")
+    except OSError:
+        return False
+    target = os.path.basename(target.rstrip("/"))
+    return target.isdigit() and step_dir.name.isdigit() and int(step_dir.name) <= int(target)
+
+
 def _cloud_device(flavor: str) -> str:
     """HF Jobs flavors are NVIDIA GPU boxes except the cpu-* tiers."""
     return "cpu" if flavor.startswith("cpu") else "cuda"
@@ -178,10 +206,37 @@ def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
             "source checkpoint's train_config.json lives on this machine, not in "
             "the container. Resume a cloud run from its Hub output instead."
         )
+    # MT42, stated as an invariant rather than a hope: a cloud run that CALLS
+    # itself a resume must name the Hub checkpoint it continues from. Without
+    # one, build_training_command falls through to its fresh-run branch and the
+    # pod starts a brand-new run at step 0 while every UI surface reports a
+    # continuation. Refuse instead — the registry only reaches this point after
+    # the checkpoint is confirmed on the Hub (its own resume resolvers), so this
+    # can only fire for a request that bypassed them.
+    if config.resume and not config.resume_from_hub_repo:
+        raise ValueError(
+            "This cloud run is marked as a continuation but names no Hub checkpoint "
+            "to continue from, so it would silently start over at step 0. Resume "
+            "from a run's checkpoint via Continue rather than setting resume by hand."
+        )
+    # A fine-tune base is allowed to be a HUB ref — either a bare repo id (whose
+    # root lerobot resolves itself) or the step-suffixed 'repo@checkpoints/<step>'
+    # form, which the wrapper materializes pod-side before launching the trainer
+    # (the twin of the resume download above). What cannot work is a host path:
+    # the container has no view of this machine's disk.
+    #
+    # Belt-and-braces since F7's fine-tune quadrant landed: a local base picked
+    # in the UI never arrives here as a path any more — JobRegistry.start stages
+    # its weights to a private Hub repo (with the user's consent) and rewrites
+    # the request to the resulting ref before the runner is reached. Only a
+    # request that bypasses the registry can still trip this, so the message
+    # names both ways out rather than claiming the case is unsupported.
     if config.policy_pretrained_path and Path(config.policy_pretrained_path).is_absolute():
         raise ValueError(
-            "Fine-tuning a cloud job from a local checkpoint isn't supported — "
-            "push the source model to the Hub and fine-tune from the Hub copy."
+            "A cloud job can't fine-tune from a checkpoint on this machine — the "
+            "container has no view of this disk. Launch it from the training form, "
+            "which offers to upload the base checkpoint to a private Hub repo first, "
+            "or push the source model to the Hub and fine-tune from the Hub copy."
         )
     # The container resolves the dataset from the Hub by repo_id; a host-local
     # dataset root doesn't exist there.
@@ -211,9 +266,11 @@ _CONTAINER_TRAIN_CONFIG_NAME = "train_config.json"
 #
 # Sent verbatim as the value of `python -c '...'`. Wrapper-side arguments
 # (the pinned lerobot spec) come before `--`; anything after `--` is
-# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ placeholder is
-# replaced with _install_plan's own source below, so the wrapper's installer
-# choice is the exact function the unit tests exercise.
+# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ and
+# __CHECKPOINT_READY_SOURCE__ placeholders are replaced with _install_plan's
+# and _checkpoint_step_ready's own source below, so the wrapper's installer
+# choice and checkpoint-completeness check are the exact functions the unit
+# tests exercise.
 _WRAPPER_TEMPLATE = r'''
 import importlib.util
 import os, re, shlex, shutil, sys, threading, subprocess
@@ -221,6 +278,8 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 __INSTALL_PLAN_SOURCE__
+
+__CHECKPOINT_READY_SOURCE__
 
 argv = sys.argv[1:]
 if "--" not in argv:
@@ -249,6 +308,23 @@ def _arg(name):
         if tok.startswith(name + "="):
             return tok.split("=", 1)[1]
     return None
+
+
+def _set_arg(name, value):
+    """Rewrite --name=foo / --name foo in trainer_argv in place. False if absent.
+
+    Mutates the list the trainer is launched with (Popen receives it directly),
+    which is how a Hub ref that only this pod can resolve becomes a real path.
+    Both spellings are handled because the value is written back in whichever
+    form the argv builder used."""
+    for i, tok in enumerate(trainer_argv):
+        if tok == name and i + 1 < len(trainer_argv):
+            trainer_argv[i + 1] = value
+            return True
+        if tok.startswith(name + "="):
+            trainer_argv[i] = name + "=" + value
+            return True
+    return False
 
 
 output_dir = _arg("--output_dir")
@@ -289,6 +365,10 @@ except Exception as exc:
     print(f"[wrapper] create_repo failed: {exc}", flush=True)
 
 seen = set()
+# Per-step count of consecutive not-ready polls, so a stalled gate (or a
+# genuinely slow write) surfaces in the log instead of looking identical to
+# "no checkpoint yet" for the whole run.
+waits = {}
 
 # Resume: download the parent checkpoint tree (pretrained_model/ +
 # training_state/) into <output_dir>/checkpoints/<step_dir>/ so lerobot's own
@@ -316,14 +396,67 @@ if resume_from:
         # copytree from the snapshot cache (symlinked files) into a real tree the
         # trainer can read/rewrite; resolve symlinks so lerobot sees plain files.
         shutil.copytree(src, dest, symlinks=False)
-        if not (dest / "training_state").is_dir():
-            print("[wrapper] resume checkpoint has no training_state/; cannot resume", flush=True)
+        # A bare training_state/ is_dir() check would pass a checkpoint that
+        # was itself partially uploaded before this fix existed (the exact
+        # bug this watcher fixes). There is no checkpoints/last symlink to
+        # check here — it lives beside the run's local output dir and is
+        # never pushed to the Hub — so check the files a resume actually
+        # needs directly instead.
+        has_weights = any((dest / "pretrained_model").glob("*.safetensors"))
+        has_training_state = (
+            (dest / "training_state" / "training_step.json").is_file()
+            and (dest / "training_state" / "rng_state.safetensors").is_file()
+        )
+        if not (has_weights and has_training_state):
+            print(
+                f"[wrapper] resume checkpoint at {dest} is incomplete "
+                f"(weights: {has_weights}, training_state: {has_training_state}); cannot resume",
+                flush=True,
+            )
             sys.exit(1)
         seen.add(step_dir)
         print(f"[wrapper] resume checkpoint ready at {dest}", flush=True)
     except Exception as exc:
         print(f"[wrapper] resume download failed: {exc}", flush=True)
         sys.exit(1)
+
+# Fine-tune from a specific Hub step: --policy.pretrained_path may carry the
+# ref 'repo@checkpoints/<step_dir>' instead of a path, because lerobot's
+# pretrained_path addresses a local dir or a repo ROOT and cannot express a
+# sub-path. Materialize it here — the pod-side twin of the host-side
+# jobs.localize_pretrained_path — and rewrite the argv to the real directory.
+# A bare repo id is left ALONE: lerobot resolves a repo root itself, and that
+# flow already works.
+#
+# Downloaded into the snapshot cache and used from there, NOT copied under
+# --output_dir like the resume tree: fine-tuning only READS these weights, and
+# anything under <output_dir>/checkpoints/ would be picked up by the uploader
+# below and republished as if this run had produced it.
+pretrained_ref = _arg("--policy.pretrained_path")
+if pretrained_ref:
+    m = re.match(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$", pretrained_ref)
+    if m:
+        src_repo, step_dir = m.group("repo"), m.group("step_dir")
+        print(f"[wrapper] fine-tuning: downloading {src_repo}@checkpoints/{step_dir}", flush=True)
+        try:
+            from huggingface_hub import snapshot_download
+
+            local_root = snapshot_download(
+                repo_id=src_repo,
+                repo_type="model",
+                allow_patterns=[f"checkpoints/{step_dir}/pretrained_model/*"],
+            )
+            base_dir = Path(local_root) / "checkpoints" / step_dir / "pretrained_model"
+            if not (base_dir / "config.json").is_file():
+                print(f"[wrapper] fine-tune base has no config.json at {base_dir}", flush=True)
+                sys.exit(1)
+            if not _set_arg("--policy.pretrained_path", str(base_dir)):
+                print("[wrapper] could not rewrite --policy.pretrained_path", flush=True)
+                sys.exit(1)
+            print(f"[wrapper] fine-tune base ready at {base_dir}", flush=True)
+        except Exception as exc:
+            print(f"[wrapper] fine-tune base download failed: {exc}", flush=True)
+            sys.exit(1)
 
 stop_event = threading.Event()
 
@@ -337,10 +470,22 @@ def _scan_and_upload():
     for entry in entries:
         if not re.fullmatch(r"\d+", entry.name):
             continue
-        config_json = entry / "pretrained_model" / "config.json"
-        if not config_json.is_file():
-            continue
         if entry.name in seen:
+            continue
+        # config.json can exist while the rest of the step is still being
+        # written. See _checkpoint_step_ready.
+        if not _checkpoint_step_ready(entry):
+            waits[entry.name] = waits.get(entry.name, 0) + 1
+            if waits[entry.name] in (1, 20, 80):  # ~15s, ~5min, ~20min at the 15s poll interval
+                try:
+                    last_target = os.readlink(root / "last")
+                except OSError:
+                    last_target = None
+                print(
+                    f"[wrapper] checkpoint {entry.name} not complete yet "
+                    f"(poll {waits[entry.name]}); checkpoints/last -> {last_target}",
+                    flush=True,
+                )
             continue
         try:
             api.upload_folder(
@@ -348,11 +493,18 @@ def _scan_and_upload():
                 repo_id=repo_id,
                 path_in_repo=f"checkpoints/{entry.name}",
                 commit_message=f"checkpoint {entry.name}",
+                # safetensors writes through a .tmpXXXX file and renames; one
+                # caught mid-rename has landed on the Hub before.
+                ignore_patterns=[".tmp*", "**/.tmp*"],
             )
             seen.add(entry.name)
+            waits.pop(entry.name, None)
             print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
         except Exception as exc:
+            # NOT added to `seen`: sealing a step whose upload failed (or only
+            # partly landed) is what made incomplete Hub checkpoints permanent.
             print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
+            continue
 
 
 def _watch():
@@ -389,13 +541,29 @@ print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
-WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
+    "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
+).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
 
-# HF Jobs' platform default timeout has killed legitimate runs that pushed
-# the model successfully but were still uploading auxiliary files. 2h covers
-# our typical ACT/SmolVLA runs on t4-small with comfortable headroom. This is
-# the FALLBACK: used only when the request carries no explicit hf_job_timeout.
-HF_JOB_TIMEOUT = "2h"
+# HF Jobs' platform default timeout has killed legitimate runs that pushed the
+# model successfully but were still uploading auxiliary files — that is why a
+# generous fallback exists at all. 24h is calibrated on measured a10g-small
+# throughput from real completed runs: SmolVLA at batch 64 is 2.24 s/step
+# (n=12,890), so 15k steps ≈ 8.8h; ACT at batch 8 is 0.162 s/step (n=2,873),
+# so 100k steps ≈ 4.5h (per-step cost is near-linear in batch size — batch 16
+# measured 0.299 s/step). That leaves ~2.7x headroom on the longest run we have
+# actually observed. The previous 2h sat below *every* real run and silently
+# truncated paid GPU time mid-training.
+#
+# This is the FALLBACK: used only when the request carries no explicit
+# hf_job_timeout (that path goes through parse_hf_duration instead). The axis
+# you trade when changing this is coverage vs runaway-billing exposure — a
+# larger value protects longer legitimate runs but also raises the ceiling on
+# what a HUNG job can bill before the platform reaps it, which is why this is
+# 24h (one day) rather than 2d. Keep it a SINGLE-unit string: run_job parses it
+# as float(timeout[:-1]) * factor[timeout[-1]], so a compound form like "1d12h"
+# does not survive the trip.
+HF_JOB_TIMEOUT = "24h"
 
 
 def resolve_job_timeout(config: TrainingRequest) -> int | str:
@@ -413,6 +581,7 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
     if config.hf_job_timeout:
         return parse_hf_duration(config.hf_job_timeout)
     return HF_JOB_TIMEOUT
+
 
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and
@@ -464,10 +633,18 @@ class HfCloudJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         flavor: str,
+        resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._flavor = flavor
+        # Full step target for a resumed run, so the log parser can rebase the
+        # remaining-window tqdm bar onto the global step (see
+        # jobs.parse_metrics_into / jobs._resume_total_steps). Passed in rather
+        # than derived from `config` because reattach() has no config; both
+        # construction sites in jobs.py must supply it or a resumed cloud run
+        # reports resume-relative steps (e.g. 4251/11000 instead of 8251/15000).
+        self._resume_total = resume_total
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -528,12 +705,24 @@ class HfCloudJobRunner:
         # The mutated config is what gets persisted in JobRecord.config, so
         # the historical record reflects what actually ran.
         config.policy_push_to_hub = True
-        # Resume continues the SAME output repo as the parent run so the whole
-        # lineage lives in one place; a fresh run gets its own repo named after
-        # its unique job id slug (e.g. "act_dataset_2026-05-04_10-22-03").
+        # A fresh run gets its own repo named after its unique job id slug (e.g.
+        # "act_dataset_2026-05-04_10-22-03"); a continuation picks between that
+        # and the parent's repo — see the branch below.
         resume_directive: str | None = None
         if config.resume and config.resume_from_hub_repo:
-            config.policy_repo_id = config.resume_from_hub_repo
+            # Where this run PUBLISHES is not always where it resumes FROM. A
+            # cloud→cloud continuation keeps the parent's output repo so the
+            # lineage lives in one place. A local→cloud one (F7) resumes from a
+            # private staging repo that exists only to carry the local parent's
+            # uploaded checkpoint, so it publishes to its own repo instead —
+            # otherwise the staging repo would accumulate the child's
+            # checkpoints too and parent and child would again be
+            # indistinguishable inside one tree.
+            config.policy_repo_id = (
+                f"{username}/{job_id}"
+                if config.resume_from_uploaded_checkpoint
+                else config.resume_from_hub_repo
+            )
             step_dir = config.resume_from_hub_step or "last"
             # The wrapper downloads checkpoints/<step_dir>/ into this exact path;
             # lerobot's resume reads config_path.parent.parent as the checkpoint
@@ -699,7 +888,7 @@ class HfCloudJobRunner:
                         stripped = raw.rstrip()
                         if not stripped:
                             continue
-                        parse_metrics_into(stripped, self._metrics)
+                        parse_metrics_into(stripped, self._metrics, self._resume_total)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(stripped)
                             if url is not None:
@@ -757,12 +946,52 @@ class HfCloudJobRunner:
             return
         # Pre-set CANCELED so the watchdog finalises as canceled regardless
         # of whether the status poller observed a terminal stage first.
+        # (_set_terminal is idempotent, so a stage the poller already saw — a
+        # run that beat us to COMPLETED or ERROR — survives this and is what
+        # the registry classifies on.)
         self._set_terminal("CANCELED")
         try:
             self._api.cancel_job(job_id=self._hf_job_id)
         except Exception as exc:
             # Already-completed jobs may 404; that's fine.
             logger.info("cancel_job(%s) ignored: %s", self._hf_job_id, exc)
+            self._reconcile_stage_after_failed_cancel()
+
+    def _reconcile_stage_after_failed_cancel(self) -> None:
+        """Re-read the real stage when cancel_job refused.
+
+        The usual reason it refuses is that the job had ALREADY ended (404),
+        which means the CANCELED we pre-set above is a lie about a run that
+        finished on its own — and the whole point of tracking cancellation is
+        not to relabel those. The status poller can't fix it: pre-setting a
+        terminal stage stopped it.
+
+        So ask once, and adopt a terminal answer. Writes the fields directly
+        rather than going through the idempotent _set_terminal, since the value
+        being corrected is precisely the one it would refuse to overwrite.
+        Silent on any failure: an unreachable Hub leaves CANCELED standing,
+        which is the best available guess once our cancel is already out.
+        """
+        try:
+            info = self._api.inspect_job(job_id=self._hf_job_id)
+            status_obj = getattr(info, "status", None)
+            stage = getattr(status_obj, "stage", None) if status_obj is not None else None
+            if stage is None:
+                return
+            stage_str = str(stage).upper()
+            if stage_str not in _TERMINAL_STAGES or stage_str == self._terminal_status:
+                return
+            logger.info(
+                "Job %s had already reached %s before the cancel; recording that instead of CANCELED",
+                self._hf_job_id,
+                stage_str,
+            )
+            self._terminal_status = stage_str
+            msg = getattr(status_obj, "message", None)
+            if msg:
+                self._terminal_message = str(msg)
+        except Exception as exc:
+            logger.info("Could not reconcile stage for %s: %s", self._hf_job_id, exc)
 
     def is_running(self) -> bool:
         # Liveness is driven by _status_poll_loop's inspect_job calls.
@@ -792,6 +1021,16 @@ class HfCloudJobRunner:
 
     def wandb_run_url(self) -> str | None:
         return self._wandb_run_url
+
+    def terminal_stage(self) -> str | None:
+        """The platform's terminal stage, or None while the job is live.
+
+        Read by the registry watchdog in preference to returncode(), which
+        collapses every non-COMPLETED stage to 1 and so cannot tell a cancel
+        from a crash — the defect that filed every stopped cloud run as
+        `failed`. One of COMPLETED / CANCELED / ERROR / DELETED.
+        """
+        return self._terminal_status
 
     def terminal_message(self) -> str | None:
         """Status.message captured when the job reached a terminal stage.

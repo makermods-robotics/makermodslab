@@ -51,9 +51,15 @@ class CameraOpenError(RuntimeError):
 
 
 class _SharedCapture:
-    """One refcounted cv2.VideoCapture, shared by every client of an index."""
+    """One refcounted cv2.VideoCapture, shared by every client of a camera."""
 
-    def __init__(self, index: int) -> None:
+    def __init__(self, key: str | int, index: int) -> None:
+        # Registry key: the camera's AVFoundation uniqueID when identity is
+        # available, else the bare index (see CameraPreviewManager).
+        self.key = key
+        # The index cv2.VideoCapture() was called with. Kept for the open and
+        # for log lines about this handle — it is the honest description of
+        # what was opened, even after the device set renumbers underneath it.
         self.index = index
         self.cap: cv2.VideoCapture | None = None
         self.refcount = 0
@@ -69,28 +75,56 @@ class _SharedCapture:
 class CameraPreviewManager:
     """Refcounted, shared MJPEG streaming of the backend's cv2 cameras.
 
-    One cv2.VideoCapture per camera index, shared across all connected preview
+    One cv2.VideoCapture per camera, shared across all connected preview
     clients; the last client detaching releases the device. Recording and
     teleoperation always win: their start paths call :meth:`stop_all`, which
     tells every client generator to exit and force-releases any capture a
     stalled client would otherwise keep holding.
+
+    The registry is keyed by camera *identity* (AVFoundation uniqueID), not by
+    cv2 index, because an index is not a stable name for a device: the
+    in-process device list is live (camera_identity.pump_avfoundation_runloop),
+    so attaching a camera that sorts ahead of another renumbers it while a
+    capture bound to the old device is still open. Keyed by int, a client
+    asking for the newly-arrived camera at index 0 would be handed the handle
+    bound to the camera that *used* to be index 0 — the user would then
+    configure and name one camera while watching another's picture, and that
+    name lands in a robot record. Where identity is unavailable (non-macOS,
+    PyObjC missing, enumeration failure) the key falls back to the index,
+    preserving the original sharing behavior; on those platforms the device
+    list is not live-refreshed, so indices do not renumber underneath us.
+
+    What identity keying does NOT fix: a camera replugged into the SAME port
+    keeps its uniqueID, so a capture still registered across that replug is
+    handed back for the right device even though the handle behind it is dead
+    (``isOpened()`` stays True and its next read never returns). Identity
+    cannot see that — the uniqueID is present; only the device object behind
+    that particular handle has died — and this change does not address it. It
+    is a known, still-open gap. The key does one thing: it stops two
+    *different* physical cameras from colliding on one entry.
     """
 
     def __init__(self) -> None:
-        self._captures: dict[int, _SharedCapture] = {}
+        self._captures: dict[str | int, _SharedCapture] = {}
         # Guards the registry dict and the refcounts; never held during device
-        # I/O (open/read/release happen under the per-index lock instead).
+        # I/O (open/read/release happen under the per-camera lock instead).
         self._registry_lock = threading.Lock()
 
-    def open_stream(self, index: int):
-        """Open (or share) the capture for ``index`` and return a frame generator.
+    def open_stream(self, index: int, key: str | int | None = None):
+        """Open (or share) a camera's capture and return a frame generator.
+
+        ``index`` is what cv2 opens; ``key`` is the camera's identity, as
+        returned by :func:`camera_identity.identify_cv2_index` — the same
+        physical device shares one capture across every index it has been
+        known by. ``None`` means identity is unavailable, and the index itself
+        becomes the key.
 
         Raises :class:`CameraOpenError` when the device can't be opened. The
         generator yields ``multipart/x-mixed-replace`` JPEG parts (boundary
         ``frame``) at ~TARGET_FPS and drops its reference on exit — client
         disconnect, :meth:`stop_all`, or the device dying mid-stream.
         """
-        entry = self._acquire(index)
+        entry = self._acquire(index, index if key is None else key)
         return self._frames(entry)
 
     def stop_all(self, timeout: float = 1.0) -> None:
@@ -100,7 +134,7 @@ class CameraPreviewManager:
         frame, waits up to ``timeout`` seconds for them to detach, then
         force-releases anything still held — a client stalled mid-yield on a
         dead connection must not keep the device away from recording/teleop.
-        The force-release happens under the per-index lock, so it can never
+        The force-release happens under the per-camera lock, so it can never
         pull the capture out from under a thread inside cap.read().
         """
         with self._registry_lock:
@@ -113,7 +147,7 @@ class CameraPreviewManager:
         for entry in entries:
             while time.monotonic() < deadline:
                 with self._registry_lock:
-                    detached = self._captures.get(entry.index) is not entry
+                    detached = self._captures.get(entry.key) is not entry
                 if detached:
                     break
                 time.sleep(0.02)
@@ -128,15 +162,15 @@ class CameraPreviewManager:
             # Deregister so a lagging client's _release becomes a no-op and a
             # future preview starts from a fresh entry (fresh stop event).
             with self._registry_lock:
-                if self._captures.get(entry.index) is entry:
-                    del self._captures[entry.index]
+                if self._captures.get(entry.key) is entry:
+                    del self._captures[entry.key]
 
-    def _acquire(self, index: int) -> _SharedCapture:
+    def _acquire(self, index: int, key: str | int) -> _SharedCapture:
         with self._registry_lock:
-            entry = self._captures.get(index)
+            entry = self._captures.get(key)
             if entry is None:
-                entry = _SharedCapture(index)
-                self._captures[index] = entry
+                entry = _SharedCapture(key, index)
+                self._captures[key] = entry
             entry.refcount += 1
         try:
             with entry.lock:
@@ -149,6 +183,10 @@ class CameraPreviewManager:
                             "by another application."
                         )
                     entry.cap = cap
+                    # Keep entry.index describing the handle that actually
+                    # exists: this open may be a re-open of an entry created
+                    # when the device answered to a different index.
+                    entry.index = index
         except Exception:
             self._release(entry)
             raise
@@ -161,8 +199,8 @@ class CameraPreviewManager:
                 return
             # Last client: deregister before the (slow) device release so a new
             # client never latches onto a capture that is being torn down.
-            if self._captures.get(entry.index) is entry:
-                del self._captures[entry.index]
+            if self._captures.get(entry.key) is entry:
+                del self._captures[entry.key]
         with entry.lock:
             if entry.cap is not None:
                 entry.cap.release()

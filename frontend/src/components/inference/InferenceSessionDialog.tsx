@@ -1,15 +1,19 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Loader2, Square } from "lucide-react";
+import { CheckCircle2, Loader2, Play, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
+  EpisodeResult,
   InferenceStatus,
+  InferenceLogOwner,
   InferencePhase,
   getInferenceStatus,
   getInferenceLog,
+  startNextInferenceEpisode,
   stopInference,
+  stopInferenceEpisode,
 } from "@/lib/inferenceApi";
 import LogPanel from "@/components/LogPanel";
 import { formatBytes } from "@/lib/formatBytes";
@@ -33,7 +37,28 @@ const PHASE_META: Record<
   stopping: { label: "Stopping…", tone: "amber", pulse: true },
   stopped: { label: "Stopped", tone: "green", pulse: false },
   error: { label: "Error — see log", tone: "red", pulse: false },
+  resetting: { label: "Reset the scene", tone: "amber", pulse: false },
+  finished: { label: "Evaluation complete", tone: "green", pulse: false },
+  aborted: { label: "Evaluation aborted", tone: "amber", pulse: false },
 };
+
+// Per-episode verdict styling for the tally + the final per-episode list.
+const RESULT_META: Record<
+  EpisodeResult,
+  { label: string; dot: string; text: string }
+> = {
+  success: { label: "Success", dot: "bg-ok", text: "text-ok" },
+  failure: { label: "Failure", dot: "bg-muted-foreground", text: "text-muted-foreground" },
+  error: { label: "Error", dot: "bg-destructive", text: "text-destructive" },
+};
+
+function tally(results: EpisodeResult[]): Record<EpisodeResult, number> {
+  return {
+    success: results.filter((r) => r === "success").length,
+    failure: results.filter((r) => r === "failure").length,
+    error: results.filter((r) => r === "error").length,
+  };
+}
 
 const PHASE_DOT: Record<"amber" | "green" | "red", string> = {
   amber: "bg-warn",
@@ -81,7 +106,15 @@ const InferenceSessionDialog: React.FC<{
   const { toast } = useToast();
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [logs, setLogs] = useState("");
+  // Which run the fetched log belongs to. Never inferred from the text: the
+  // backend says so explicitly, because a log file on disk carries no evidence
+  // of which run wrote it.
+  const [logOwner, setLogOwner] = useState<InferenceLogOwner>(null);
   const [stopping, setStopping] = useState(false);
+  // Eval mode only: in-flight guards for the two per-episode controls, so a
+  // double-click can't fire "succeeded" or "next episode" twice.
+  const [endingEpisode, setEndingEpisode] = useState(false);
+  const [startingNext, setStartingNext] = useState(false);
   const exitedRef = useRef(false);
   // Independent flag: we may request a stop (safety net) before the run
   // is actually inactive. We must not flip exitedRef yet — that
@@ -143,7 +176,10 @@ const InferenceSessionDialog: React.FC<{
         // Best-effort: a log fetch failure must not disturb status handling.
         try {
           const log = await getInferenceLog(baseUrl, fetchWithHeaders);
-          if (!cancelled) setLogs(log.logs);
+          if (!cancelled) {
+            setLogs(log.logs);
+            setLogOwner(log.belongs_to);
+          }
         } catch {
           // Ignore; the next tick retries.
         }
@@ -166,6 +202,30 @@ const InferenceSessionDialog: React.FC<{
                 next.error?.split("\n").at(-1) ??
                 "See the inference log for details.",
               variant: failed ? "destructive" : undefined,
+              duration: 10000,
+            });
+            return;
+          }
+          // An evaluation that ran its course (or was aborted) ends on its
+          // SUMMARY, not by bouncing away: the accuracy and the per-episode
+          // list are the entire point of the run. Freeze here and let the user
+          // close. Checked after the failure branch above so a session-level
+          // startup failure still renders as an error, not a summary.
+          if (next.eval_mode && next.exited) {
+            markHandled();
+            exitedRef.current = true;
+            doneRef.current = true;
+            toast({
+              title:
+                next.phase === "aborted"
+                  ? "Evaluation aborted"
+                  : "Evaluation complete",
+              description:
+                next.phase === "aborted"
+                  ? "Partial results — no accuracy recorded."
+                  : next.accuracy != null
+                    ? `${Math.round(next.accuracy * 100)}% success rate.`
+                    : "No scoreable episodes.",
               duration: 10000,
             });
             return;
@@ -246,16 +306,72 @@ const InferenceSessionDialog: React.FC<{
     }
   };
 
+  // Eval mode: "the robot did the task". Ends THIS episode and scores it a
+  // success; the session stays up and moves into its reset phase. Deliberately
+  // not `handleStop` — that aborts the whole evaluation.
+  const handleEpisodeSuccess = async () => {
+    setEndingEpisode(true);
+    try {
+      await stopInferenceEpisode(baseUrl, fetchWithHeaders);
+      // The status poll picks up the reset phase and the updated tally.
+    } catch (e) {
+      toast({
+        title: "Couldn't end the episode",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setEndingEpisode(false);
+    }
+  };
+
+  const handleNextEpisode = async () => {
+    setStartingNext(true);
+    try {
+      await startNextInferenceEpisode(baseUrl, fetchWithHeaders);
+    } catch (e) {
+      toast({
+        title: "Couldn't start the next episode",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setStartingNext(false);
+    }
+  };
+
   // Dismissal is blocked while the run is (or may still be) live — before the
   // first status lands we treat the session as live, since the launcher just
-  // started it.
+  // started it. A reset between episodes counts as live: the session still owns
+  // the arm and the cameras.
   const live = status == null || status.inference_active === true;
 
   const setupElapsed = status?.elapsed_s ?? 0;
   const rolloutElapsed = status?.rollout_elapsed_s ?? 0;
   const duration = status?.duration_s ?? 0;
+  // --- Multi-episode evaluation --------------------------------------------
+  // `eval_mode` is the single flag to branch on: a plain run reports it false
+  // with null companions, so everything below collapses to the old behaviour.
+  const evalMode = status?.eval_mode === true;
+  const episodesTotal = status?.episodes_total ?? null;
+  const episodeIndex = status?.episode_index ?? null;
+  const results = (status?.episode_results ?? []) as EpisodeResult[];
+  const counts = tally(results);
+  const accuracy = status?.accuracy ?? null;
+  // Parked between episodes, waiting for the user to rearrange the scene.
+  const isResetting = evalMode && status?.phase === "resetting";
+  const evalFinished = evalMode && status?.phase === "finished";
+  const evalAborted = evalMode && status?.phase === "aborted";
+  const isEvalDone = evalFinished || evalAborted;
+  // A crashed episode parks in the reset phase carrying its error — the reset
+  // screen doubles as "this one broke, continue or abort?".
+  const episodeCrashed = isResetting && !!status?.error;
+
   const isSettingUp =
-    status != null && status.inference_active && status.rollout_started_at == null;
+    status != null &&
+    status.inference_active &&
+    !isResetting &&
+    status.rollout_started_at == null;
   const isRunning =
     status != null && status.inference_active && status.rollout_started_at != null;
 
@@ -267,6 +383,21 @@ const InferenceSessionDialog: React.FC<{
   const finishedWarn = isFinished && outcome === "ran_with_warning";
   const finishedFailed = isFinished && outcome === "failed";
   const showOutcome = finishedWarn || finishedFailed;
+  // What to put in the log panel. `logs` is only THIS run's output when the
+  // backend says the log belongs to the active session; a finished run's own log
+  // is equally fine to show once the session has ended. Anything else means this
+  // run has produced no output, and printing the text anyway is how a previous
+  // run's log gets read as the current one — a live incident, where a failed run
+  // showed a three-day-old run's output and the user concluded the wrong policy
+  // had executed.
+  const logIsThisRun =
+    logOwner === "active" || (logOwner === "last_run" && !status?.inference_active);
+  const logPlaceholder = finishedFailed
+    ? "This run failed before the rollout process started, so it produced no log — see the error above."
+    : "No log yet for this run — it hasn't started producing output.";
+  // The live timer/progress block is replaced by the reset screen between
+  // episodes and by the summary once an evaluation ends.
+  const showTimer = !isFinished && !isResetting;
 
   // When setting up: progress is uncertain — show a soft pulsing bar.
   // When rolling out: progress is rolloutElapsed / duration.
@@ -278,6 +409,12 @@ const InferenceSessionDialog: React.FC<{
     ? "red"
     : finishedWarn
     ? "amber"
+    : evalAborted
+    ? "amber"
+    : evalFinished
+    ? "green"
+    : isResetting
+    ? "amber"
     : isSettingUp
     ? "amber"
     : "green";
@@ -285,6 +422,12 @@ const InferenceSessionDialog: React.FC<{
     ? "FAILED"
     : finishedWarn
     ? "RAN WITH WARNING"
+    : evalAborted
+    ? "ABORTED"
+    : evalFinished
+    ? "EVALUATION COMPLETE"
+    : isResetting
+    ? "RESET THE SCENE"
     : isSettingUp
     ? "SETTING UP"
     : isRunning
@@ -357,7 +500,141 @@ const InferenceSessionDialog: React.FC<{
               </div>
             </div>
 
-            {!isFinished && (
+            {/* Evaluation header — which episode we're on, and the tally so
+                far. Rendered on every eval screen (running, reset, summary) so
+                the score is never more than a glance away. */}
+            {evalMode && (
+              <div className="mb-6 rounded-lg border border-border bg-muted/30 p-4">
+                <div className="flex items-baseline justify-between gap-4">
+                  <span className="text-sm font-semibold">
+                    {isEvalDone
+                      ? `${episodesTotal ?? results.length} episodes`
+                      : `Episode ${episodeIndex ?? 1} of ${episodesTotal ?? "?"}`}
+                  </span>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {results.length} done
+                  </span>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm tabular-nums">
+                  {(["success", "failure", "error"] as EpisodeResult[]).map(
+                    (key) => (
+                      <span key={key} className="flex items-center gap-1.5">
+                        <span
+                          className={`h-2 w-2 rounded-full ${RESULT_META[key].dot}`}
+                        />
+                        <span className={RESULT_META[key].text}>
+                          {RESULT_META[key].label}
+                        </span>
+                        <span className="font-semibold">{counts[key]}</span>
+                      </span>
+                    ),
+                  )}
+                </div>
+                {counts.error > 0 && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Errored episodes are excluded from the accuracy — a hardware
+                    hiccup isn't a policy failure.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Evaluation summary — the point of the whole run. */}
+            {isEvalDone && (
+              <div
+                className={`mb-6 rounded-lg border p-4 ${
+                  evalAborted
+                    ? "border-warn/40 bg-warn/10"
+                    : "border-ok/40 bg-ok/10"
+                }`}
+              >
+                {evalAborted ? (
+                  <p className="text-sm leading-relaxed text-warn">
+                    Aborted after {results.length} of {episodesTotal ?? "?"}{" "}
+                    episodes — no accuracy recorded for a partial run.
+                  </p>
+                ) : accuracy != null ? (
+                  <div className="text-center">
+                    <div className="text-5xl font-mono font-bold leading-none text-ok">
+                      {Math.round(accuracy * 100)}%
+                    </div>
+                    <div className="mt-2 text-sm text-muted-foreground tabular-nums">
+                      {counts.success} / {counts.success + counts.failure}{" "}
+                      episodes succeeded
+                      {counts.error > 0
+                        ? ` (${counts.error} excluded as errors)`
+                        : ""}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm leading-relaxed text-warn">
+                    No scoreable episodes — every episode errored, so there's no
+                    accuracy to report.
+                  </p>
+                )}
+                {results.length > 0 && (
+                  <ol className="mt-4 space-y-1 text-xs tabular-nums">
+                    {results.map((r, i) => (
+                      <li
+                        key={i}
+                        className="flex items-center gap-2 text-muted-foreground"
+                      >
+                        <span className="w-10 shrink-0">#{i + 1}</span>
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${RESULT_META[r].dot}`}
+                        />
+                        <span className={RESULT_META[r].text}>
+                          {RESULT_META[r].label}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            )}
+
+            {/* Reset between episodes — user-ended, no timer. */}
+            {isResetting && (
+              <div
+                className={`mb-6 rounded-lg border p-4 ${
+                  episodeCrashed
+                    ? "border-destructive/40 bg-destructive/10"
+                    : "border-warn/40 bg-warn/10"
+                }`}
+              >
+                {episodeCrashed ? (
+                  <>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-destructive">
+                      <span className="h-2 w-2 rounded-full bg-destructive" />
+                      Episode {results.length} crashed
+                    </div>
+                    <p className="mt-2 text-sm leading-relaxed text-destructive/90">
+                      It counts as neither a success nor a failure. Continue to
+                      run the next episode, or abort the evaluation.
+                    </p>
+                    {status.hint && (
+                      <p className="mt-2 text-sm leading-relaxed text-destructive/90">
+                        {status.hint}
+                      </p>
+                    )}
+                    {status.error && (
+                      <pre className="mt-3 max-h-40 overflow-auto rounded bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+                        {status.error}
+                      </pre>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm leading-relaxed text-warn">
+                    Episode {results.length} recorded as{" "}
+                    <strong>{RESULT_META[results.at(-1) ?? "failure"].label}</strong>
+                    . Rearrange the scene, then start the next episode — there's
+                    no timer, take as long as you need.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {showTimer && (
               <>
                 <div className="text-center mb-4">
                   <div
@@ -434,6 +711,57 @@ const InferenceSessionDialog: React.FC<{
               >
                 Close
               </Button>
+            ) : isResetting ? (
+              // Reset screen: continue is the primary action, abort stays
+              // available alongside it.
+              <div className="space-y-2">
+                <Button
+                  onClick={handleNextEpisode}
+                  disabled={startingNext}
+                  className="w-full font-semibold py-6 text-lg disabled:opacity-50"
+                >
+                  <Play className="w-5 h-5 mr-2" />
+                  {startingNext
+                    ? "Starting…"
+                    : `Start episode ${Math.min(
+                        results.length + 1,
+                        episodesTotal ?? results.length + 1,
+                      )}`}
+                </Button>
+                <Button
+                  onClick={handleStop}
+                  disabled={stopping}
+                  variant="outline"
+                  className="w-full font-semibold disabled:opacity-50"
+                >
+                  <Square className="w-4 h-4 mr-2" />
+                  {stopping ? "Aborting…" : "Abort evaluation"}
+                </Button>
+              </div>
+            ) : evalMode ? (
+              // Running an episode: calling it a success is the primary action,
+              // and it is NOT the same button as aborting the whole run.
+              <div className="space-y-2">
+                <Button
+                  onClick={handleEpisodeSuccess}
+                  disabled={!isRunning || endingEpisode}
+                  className="w-full font-semibold py-6 text-lg disabled:opacity-50"
+                >
+                  <CheckCircle2 className="w-5 h-5 mr-2" />
+                  {endingEpisode
+                    ? "Ending episode…"
+                    : "Task succeeded — end episode"}
+                </Button>
+                <Button
+                  onClick={handleStop}
+                  disabled={!status.inference_active || stopping}
+                  variant="outline"
+                  className="w-full font-semibold disabled:opacity-50"
+                >
+                  <Square className="w-4 h-4 mr-2" />
+                  {stopping ? "Aborting…" : "Abort evaluation"}
+                </Button>
+              </div>
             ) : (
               <Button
                 onClick={handleStop}
@@ -483,7 +811,7 @@ const InferenceSessionDialog: React.FC<{
 
             <div className="mt-4">
               <LogPanel
-                logs={logs}
+                logs={logIsThisRun ? logs : logPlaceholder}
                 title="Inference log"
                 defaultCollapsed
                 wrap={false}

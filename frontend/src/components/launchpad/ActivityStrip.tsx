@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { useApi } from "@/contexts/ApiContext";
@@ -25,10 +25,12 @@ const ActivityStrip: React.FC = () => {
   const { openJobMonitor } = useStudio();
   const [jobs, setJobs] = useState<JobRecord[]>([]);
 
+  // Returns the fetch so callers can sequence on it — the heal in
+  // applyProgress needs to know when its refetch has landed.
   const refresh = useCallback(() => {
     // Pull a generous slice so a running job isn't masked by newer records in
     // the started_at-desc ordering, then keep only what's live.
-    listJobs(baseUrl, fetchWithHeaders, 200)
+    return listJobs(baseUrl, fetchWithHeaders, 200)
       .then((j) => setJobs(j.filter((r) => r.state === "running")))
       .catch(() => setJobs([]));
   }, [baseUrl, fetchWithHeaders]);
@@ -37,21 +39,51 @@ const ActivityStrip: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  // Guards the reconciling refetch below — same pair, and same rationale, as
+  // JobsDataContext's: `healingRef` stops the ~1Hz ticks that land while a
+  // refetch is in flight from stacking up identical fetches, and `healedRef`
+  // caps each unknown id at one refetch so an id the refetch CAN'T produce
+  // doesn't refetch forever. /jobs is a capped page here too (200), so a long
+  // run buried under enough newer records is legitimately absent from the list
+  // while still reporting progress.
+  const healingRef = useRef(false);
+  const healedRef = useRef<Set<string>>(new Set());
+
   // Patch progress in place from the watchdog's ~1Hz snapshots (no refetch),
   // and drop any job that just left the running state.
-  const applyProgress = useCallback((snapshots: JobProgressSnapshot[]) => {
-    if (snapshots.length === 0) return;
-    setJobs((prev) => {
-      if (prev.length === 0) return prev;
-      const byId = new Map(snapshots.map((s) => [s.id, s]));
-      return prev
-        .map((j) => {
-          const s = byId.get(j.id);
-          return s ? { ...j, state: s.state, metrics: s.metrics } : j;
-        })
-        .filter((j) => j.state === "running");
-    });
-  }, []);
+  const applyProgress = useCallback(
+    (snapshots: JobProgressSnapshot[]) => {
+      if (snapshots.length === 0) return;
+      // A snapshot names a RUNNING job, so an id this strip doesn't hold is a
+      // live run it never learned about: the `jobs_changed` that announced it
+      // was missed (the broadcast is fire-and-forget, and a dead socket never
+      // fires onclose). Dropping it left a running job off the strip until the
+      // next mount. Refetch once instead — the watchdog re-announces every
+      // running job each tick, so this heals within about a second.
+      const known = new Set(jobs.map((j) => j.id));
+      const unseen = snapshots
+        .map((s) => s.id)
+        .filter((id) => !known.has(id) && !healedRef.current.has(id));
+      if (unseen.length > 0 && !healingRef.current) {
+        for (const id of unseen) healedRef.current.add(id);
+        healingRef.current = true;
+        refresh().finally(() => {
+          healingRef.current = false;
+        });
+      }
+      setJobs((prev) => {
+        if (prev.length === 0) return prev;
+        const byId = new Map(snapshots.map((s) => [s.id, s]));
+        return prev
+          .map((j) => {
+            const s = byId.get(j.id);
+            return s ? { ...j, state: s.state, metrics: s.metrics } : j;
+          })
+          .filter((j) => j.state === "running");
+      });
+    },
+    [jobs, refresh],
+  );
 
   useJobsChangedSignal(refresh, applyProgress);
 

@@ -39,9 +39,14 @@ function App() {
                         <Routes>
                           <Route path="/" element={<Launchpad />} />
                           <Route path="/teleoperation" element={<Teleoperation />} />
-                          {/* /training (no id) hosts the shared configurator
-                              for JobCard's Continue / Resume / Fine-tune
-                              navigations; /training/:jobId is the monitor. */}
+                          {/* /training (no id) hosts the shared configurator.
+                              Nothing in the app navigates here any more —
+                              Continue / Resume and Fine-tune all seed the
+                              studio Train panel's in-place form instead — but
+                              the route still honours `state.resume` /
+                              `state.finetune`, so deep links and stale
+                              bookmarks keep working. /training/:jobId is the
+                              monitor. */}
                           <Route path="/training" element={<Training />} />
                           <Route path="/training/:jobId" element={<Training />} />
                           {/* /inference is no longer a route — it's the

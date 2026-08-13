@@ -19,7 +19,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
-import { isCameraConnected } from "@/lib/cameraResolve";
+import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -184,6 +184,26 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       return;
     }
 
+    // Names must be unique within a robot: they key the session camera dict
+    // server-side (dataset feature keys when recording, binding targets when
+    // deploying), so two cameras sharing one would be ambiguous — the backend
+    // now refuses to start such a record rather than silently dropping one of
+    // them. Block it here, at the only place a name is ever assigned, so the
+    // user can't save a robot that fails at start. Compared case-insensitively
+    // because the inference auto-binder matches names that way.
+    const nameTaken = cameras.some(
+      (cam) =>
+        cam.name.trim().toLowerCase() === cameraName.trim().toLowerCase(),
+    );
+    if (nameTaken) {
+      toast({
+        title: "Name Already Used",
+        description: `Another camera on this robot is already named "${cameraName.trim()}". Pick a different name.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
     const newCamera: CameraConfig = {
       id: `camera_${Date.now()}`,
       name: cameraName.trim(),
@@ -331,15 +351,24 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                     <SelectValue placeholder="Select a name" />
                   </SelectTrigger>
                   <SelectContent className="bg-popover border-border">
-                    {CAMERA_NAME_PRESETS.map((name) => (
-                      <SelectItem
-                        key={name}
-                        value={name}
-                        className="text-foreground"
-                      >
-                        {name}
-                      </SelectItem>
-                    ))}
+                    {CAMERA_NAME_PRESETS.map((name) => {
+                      // Same treatment the camera dropdown gives an
+                      // already-added device: shown, labelled, not selectable.
+                      const nameTaken = cameras.some(
+                        (cam) => cam.name.trim().toLowerCase() === name,
+                      );
+                      return (
+                        <SelectItem
+                          key={name}
+                          value={name}
+                          className="text-foreground"
+                          disabled={nameTaken}
+                        >
+                          {name}
+                          {nameTaken && " · already used"}
+                        </SelectItem>
+                      );
+                    })}
                     <SelectItem
                       value={CAMERA_NAME_CUSTOM}
                       className="text-foreground"
@@ -616,6 +645,107 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
           </CollapsibleContent>
         </Collapsible>
       </div>
+    </div>
+  );
+};
+
+interface SessionCameraListProps {
+  /** The selected robot record's cameras, exactly as stored. */
+  cameras: CameraConfig[];
+  /** Filled with a function that drops every preview stream, so the caller can
+   * hand the devices to cv2 before a session starts (same contract as
+   * CameraConfiguration's prop of the same name). */
+  releaseStreamsRef?: React.MutableRefObject<(() => void) | null>;
+  /** Shown when the robot has no cameras. */
+  emptyLabel?: string;
+}
+
+/**
+ * READ-ONLY view of the cameras a session will open — name, settings, and a
+ * live preview per camera, with no add/remove/edit controls.
+ *
+ * Sessions no longer carry their own camera set: the backend resolves the
+ * cameras from the robot record named in the start request (see
+ * makermodslab/utils/config.py's load_robot_cameras / bind_robot_cameras). A
+ * per-session editable copy could only ever diverge from what actually runs —
+ * edits made here were silently discarded, and the panel could show a set the
+ * server would not use. Cameras are therefore edited in exactly one place, the
+ * robot settings dialog (which still renders the full CameraConfiguration
+ * above), and shown here only to confirm what is about to be recorded.
+ *
+ * Previews stream from the backend by cv2 index, re-anchored to each camera's
+ * unique_id against the live enumeration — a stored index goes stale on
+ * replug, and showing the wrong device is exactly the confusion this list
+ * exists to prevent.
+ */
+export const SessionCameraList: React.FC<SessionCameraListProps> = ({
+  cameras,
+  releaseStreamsRef,
+  emptyLabel = "No cameras on this robot.",
+}) => {
+  // Same handover as the editable component: pausing unmounts the streams AND
+  // stops the enumeration probe, so cv2 can open the devices exclusively.
+  const [streamsPaused, setStreamsPaused] = useState(false);
+  const { cameras: availableCameras } = useAvailableCameras({
+    enabled: !streamsPaused,
+  });
+
+  const releaseAllCameraStreams = useCallback(() => setStreamsPaused(true), []);
+  useEffect(() => {
+    if (releaseStreamsRef) {
+      releaseStreamsRef.current = releaseAllCameraStreams;
+    }
+  }, [releaseStreamsRef, releaseAllCameraStreams]);
+
+  return (
+    <div className="space-y-4">
+      {/* Cameras is a repeater, not a single labelled control, so it keeps an
+          eyebrow heading — matching the editable component. */}
+      <h3 className="eyebrow">Cameras</h3>
+      <p className="text-xs text-muted-foreground">
+        Cameras come from the selected robot. Add, remove, or adjust them in
+        Robot settings.
+      </p>
+
+      {cameras.length === 0 ? (
+        <div className="py-6 text-center text-muted-foreground">
+          <Camera className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
+          <p className="text-sm">{emptyLabel}</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {cameras.map((camera) => {
+            const connected = isCameraConnected(camera, availableCameras);
+            return (
+              <div
+                key={camera.id ?? camera.name}
+                className="overflow-hidden rounded-lg border border-border bg-card"
+              >
+                <CameraStreamBox
+                  cameraIndex={
+                    connected
+                      ? resolveCameraIndex(camera, availableCameras)
+                      : undefined
+                  }
+                  uniqueId={camera.unique_id}
+                  paused={streamsPaused}
+                  emptyLabel="Camera disconnected — reconnect it or check Robot settings"
+                />
+                <div className="space-y-0.5 p-3">
+                  <h5 className="truncate font-medium text-foreground">
+                    {camera.name}
+                  </h5>
+                  <p className="text-xs text-muted-foreground">
+                    {camera.width}×{camera.height}
+                    {camera.fps ? ` · ${camera.fps} fps` : ""}
+                    {camera.fourcc ? ` · ${camera.fourcc}` : ""}
+                  </p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

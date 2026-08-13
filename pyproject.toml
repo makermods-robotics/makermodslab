@@ -118,6 +118,18 @@ files.extend-exclude = [
     "frontend/.gitattributes",
 ]
 
+# Every entry below is a false positive, not a real misspelling. Keep this list
+# short and justified — a blanket ignore defeats the point of running typos.
+[tool.typos.default]
+extend-ignore-re = [
+    # Hyphenated "mis-" prefix (mis-group, mis-bind) reads as a misspelt "miss".
+    'mis-[a-z]+',
+    # Regex fragment inside a pytest.raises(match=...), not prose.
+    '\[Ff\]ine-tun',
+    # Short lambda params in a test stub: le = leader, fo = follower.
+    'lambda le, fo:',
+]
+
 [tool.bandit]
 exclude_dirs = ["tests"]
 skips = ["B101", "B110", "B112", "B311", "B404", "B603", "B607", "B615"]

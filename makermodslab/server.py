@@ -62,12 +62,14 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_identity import resolve_cv2_index
+from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
+    JobAlreadyContinuedError,
     JobAlreadyRunningError,
+    JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
     JobTarget,
@@ -106,7 +108,9 @@ from .rollout import (
     InferenceRequest,
     handle_inference_log,
     handle_inference_status,
+    handle_next_episode,
     handle_start_inference,
+    handle_stop_episode,
     handle_stop_inference,
 )
 
@@ -436,6 +440,7 @@ _POLICY_TYPE_TO_LEROBOT = {
     "act": "act",
     "diffusion": "diffusion",
     "pi0": "pi0",
+    "pi05": "pi05",
     "smolvla": "smolvla",
     "tdmpc": "tdmpc",
     "vqbet": "vqbet",
@@ -546,11 +551,42 @@ def start_inference(request: InferenceRequest):
 
 @app.post("/stop-inference")
 def stop_inference():
+    """Abort the whole session. In evaluation mode (eval_episodes > 1) this ends
+    the run wherever it is and reports the partial tally with NO accuracy — the
+    per-episode control is /inference-episode-stop."""
     result = handle_stop_inference()
     if not result.get("success"):
         raise HTTPException(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to stop inference"),
+        )
+    return result
+
+
+@app.post("/inference-episode-stop")
+def inference_episode_stop():
+    """Evaluation mode only: end the CURRENT episode early and score it a
+    SUCCESS ("the robot did the task"). The session stays up and moves into its
+    reset phase. 409 when no evaluation episode is running."""
+    result = handle_stop_episode()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to stop the episode"),
+        )
+    return result
+
+
+@app.post("/inference-next-episode")
+def inference_next_episode():
+    """Evaluation mode only: leave the reset phase and start the next episode.
+    The reset is user-ended (no auto-timer). 409 unless an evaluation is parked
+    waiting for a reset."""
+    result = handle_next_episode()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start the next episode"),
         )
     return result
 
@@ -564,8 +600,12 @@ def inference_status():
 def inference_log():
     """Tail of the active/most-recent rollout's log file (read-only, bounded).
 
-    Returns {logs, log_path}; empty logs (not an error) when no run has produced
-    output yet, so the frontend can poll unconditionally."""
+    Returns {logs, log_path, belongs_to}; empty logs (not an error) when no run
+    has produced output yet, so the frontend can poll unconditionally.
+
+    `belongs_to` is "active" (the running session's own log), "last_run" (the
+    most recent finished run of this server process) or null (nothing to show) —
+    the caller must not present a "last_run" log as the live session's output."""
     return handle_inference_log()
 
 
@@ -745,17 +785,25 @@ class DatasetRenameBody(BaseModel):
 
 @app.post("/datasets/rename")
 def datasets_rename(body: DatasetRenameBody):
-    """Rename a locally-cached dataset by moving its directory.
+    """Rename a locally-cached dataset by moving its directory, and its Hub
+    copy (if any) to match.
 
     `new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so
     `ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is
-    being recorded, merged, or trained on locally. Returns the new repo_id.
+    being recorded, merged, or trained on locally, or if the new name is
+    already taken (locally or on the Hub).
+
+    Returns `{success, repo_id, hub}`, where `hub` is `"renamed"` (the Hub copy
+    moved too), `"none"` (the Hub has no copy of this dataset), or `"skipped"`
+    (the Hub step didn't run — offline, logged out, or someone else's
+    namespace — so a Hub copy, if any, kept its old name). The caller needs
+    that distinction to avoid claiming a Hub rename that didn't happen.
     """
     try:
-        new_repo_id = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
+        result = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
     except dataset_browser.DatasetRenameError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
-    return {"success": True, "repo_id": new_repo_id}
+    return {"success": True, **result}
 
 
 class CustomDatasetRequest(BaseModel):
@@ -916,8 +964,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/start-recording")
 def start_recording(request: RecordingRequest):
-    """Start a dataset recording session"""
-    return handle_start_recording(request)
+    """Start a dataset recording session.
+
+    Refuses (409) if recording, teleoperation, inference, calibration,
+    auto-calibration, or a gripper wiggle is already active on this robot;
+    400 for a malformed dataset name."""
+    result = handle_start_recording(request)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start recording"),
+        )
+    return result
 
 
 @app.post("/stop-recording")
@@ -1167,6 +1225,42 @@ def models_import(request: ModelImportRequest):
 # ============================================================================
 
 
+def _job_label(job_id: str) -> str:
+    """A run named the way its row names it: `#46 'alias' (id)`.
+
+    For refusal messages that have to point at a *different* run than the one
+    the user acted on — "delete X first" is only actionable if X is findable in
+    the list. All three parts earn their place: the NUMBER is what the UI shows
+    and what a person can repeat back; the NAME is shared by every run on a
+    resume chain, so it locates the lineage but not the run; the ID is the
+    unambiguous one and the only one that survives a rename.
+
+    Degrades a part at a time — an unnumbered record (pre-backfill) or an
+    unnamed one just drops that piece, and an id the registry no longer holds
+    falls back to the bare id.
+    """
+    try:
+        record = job_registry.get(job_id)
+    except JobNotFoundError:
+        return repr(job_id)
+    name = (record.display_name or record.name or "").strip()
+    label = f"{name!r} ({job_id})" if name else repr(job_id)
+    return f"#{record.job_number} {label}" if record.job_number > 0 else label
+
+
+def _is_finished_run(job_id: str) -> bool:
+    """True when the run reached its target — i.e. holds finished training.
+
+    Used to keep refusal messages from casually recommending its deletion. An
+    unresolvable id reads as False: the message degrades to the plainer advice
+    rather than inventing a reason to keep something that may not exist.
+    """
+    try:
+        return job_registry.get(job_id).state == "done"
+    except JobNotFoundError:
+        return False
+
+
 @app.post("/jobs/training", status_code=201)
 async def create_training_job(req: Request):
     raw = await req.json()
@@ -1192,6 +1286,13 @@ async def create_training_job(req: Request):
     # Hard block (not a warning): when resuming, the total step count must be
     # strictly above the checkpoint's step — lerobot requires --steps be raised
     # above the resumed checkpoint, and steps == checkpoint would train nothing.
+    #
+    # This is the FAST half only, and cannot be the whole guard: it reads the
+    # request's `resume_from_step`, which is None whenever the caller picked
+    # "latest checkpoint" and left the step for the registry to resolve. Those
+    # requests walk straight past this. JobRegistry.start re-asks the same
+    # question at the bottom of its resume block, once the step is a number;
+    # that one is the authority, and it raises ValueError -> the 400 below.
     if cfg.resume_from_step is not None and cfg.steps <= cfg.resume_from_step:
         logger.warning(
             "Rejecting resume: steps (%d) <= checkpoint step (%d).",
@@ -1245,6 +1346,48 @@ async def create_training_job(req: Request):
         # dataset first (the browser flow does this automatically before
         # submitting, so this fires for non-UI callers).
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except JobAlreadyContinuedError as exc:
+        # Sticks only: the source already has a continuation, so a second one
+        # would fork it. 409 for the same reason the mid-chain delete refusal
+        # is a 409 — a conflict with existing state, not a malformed request —
+        # and routed here the same way, with the ids turned into a message at
+        # this layer rather than baked into the exception.
+        #
+        # The message has to TEACH the way out, because the way out is not
+        # obvious from the refusal — but which way out is honest depends on what
+        # is standing in the way, and getting that wrong is worse than saying
+        # nothing. Two shapes:
+        #
+        #  - ONE unfinished continuation (every lineage the sticks rule can
+        #    create): deleting it is cheap and correct, so say so.
+        #  - a LEGACY FORK, or a continuation that ran to completion: "delete
+        #    the continuation(s) first" is advice to throw away work. On the
+        #    user's own registry this fired for a parent whose two children
+        #    included a finished 30k run — the single run in that lineage
+        #    nobody should delete. Recommend fine-tune instead: it starts a
+        #    fresh schedule from the same weights, is not restricted to one per
+        #    run, and needs nothing deleted.
+        continued_by = ", ".join(_job_label(cid) for cid in exc.child_ids)
+        source = _job_label(exc.job_id)
+        finished = [_job_label(cid) for cid in exc.child_ids if _is_finished_run(cid)]
+        if len(exc.child_ids) == 1 and not finished:
+            remedy = f"A run can be continued once, so delete {continued_by} first, then resume {source}."
+        else:
+            cost = (
+                f", including the finished {'runs' if len(finished) > 1 else 'run'} {', '.join(finished)}"
+                if finished
+                else ""
+            )
+            remedy = (
+                f"A run can be continued once, so resuming {source} would mean first "
+                f"deleting {continued_by}{cost}. Fine-tune from {source}'s checkpoint "
+                "instead — that starts a fresh schedule from the same weights, needs "
+                "nothing deleted, and is not limited to one per run."
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=f"{source} was already continued by {continued_by}. {remedy}",
+        ) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1763,11 +1906,47 @@ def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    except JobHasChildrenError as exc:
+        # Mid-chain delete: name the runs that continue from this one so the
+        # user can work inwards from the tip instead of guessing.
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} was continued by {continued_by}, which would be left "
+                "pointing at a deleted run. Delete the continuation(s) first."
+            ),
+        ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job
     # would resurface in /jobs/hub as an untracked card on the next poll (the
     # HF Jobs API has no delete). Mark it dismissed so the removal sticks.
     if record.hf_job_id:
         add_dismissed_hub_job(record.hf_job_id)
+
+
+def _format_accelerator(accelerator) -> str | None:
+    """Render a JobHardwareInfo's accelerator as a label — 2× Nvidia A100 —
+    or None on a CPU flavor.
+
+    huggingface_hub returns this field as a JobAccelerator OBJECT (type, model,
+    quantity, vram, manufacturer), not a string. Forwarding it raw put a nested
+    dict on the wire under a field the frontend types as `string`, which the
+    hardware dropdown then interpolated into its label as "[object Object]".
+    Flattened here rather than in the frontend so `vram` — the one number that
+    says whether a policy will fit — survives as its own field instead of being
+    buried in a shape nothing declared.
+    """
+    if accelerator is None:
+        return None
+    quantity = str(getattr(accelerator, "quantity", "") or "").strip()
+    model = str(getattr(accelerator, "model", "") or "").strip()
+    manufacturer = str(getattr(accelerator, "manufacturer", "") or "").strip()
+    name = " ".join(part for part in (manufacturer, model) if part)
+    if not name:
+        # A future hub version could rename the fields out from under us; a
+        # plain str() still beats a dict the UI would render as [object Object].
+        return str(accelerator)
+    return f"{quantity}× {name}" if quantity and quantity != "1" else name
 
 
 @app.get("/jobs/runners/hardware")
@@ -1801,7 +1980,8 @@ def get_runners_hardware():
                 "pretty_name": h.pretty_name,
                 "cpu": h.cpu,
                 "ram": h.ram,
-                "accelerator": h.accelerator,
+                "accelerator": _format_accelerator(h.accelerator),
+                "vram": getattr(h.accelerator, "vram", None),
                 "unit_cost_usd": h.unit_cost_usd,
                 "unit_label": h.unit_label,
             }
@@ -2457,9 +2637,13 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
 
     ``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors
     the index to the physical device before opening: cv2 resolves indices
-    against this process's startup device snapshot, which diverges from the
+    against this process's device snapshot, which diverges from the
     fresh-subprocess enumeration after a replug — without the re-anchor the
     stream can silently show a different camera (see makermodslab/camera_identity.py).
+    The identity is also what the preview registry shares captures by, so the
+    resolver hands back both: the index to open and the key to file it under.
+    Keying by the bare index aliased two different cameras onto one handle
+    whenever the device set renumbered mid-session.
 
     Returns 409 while recording or inference is active (they own the cv2
     devices) and 503 when the camera can't be opened. Teleoperation drives the
@@ -2476,15 +2660,25 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
         )
-    resolved = resolve_cv2_index(unique_id, index)
-    if resolved is None:
+    identified = identify_cv2_index(unique_id, index)
+    if identified is None:
         raise HTTPException(
             status_code=503,
-            detail="Camera not visible to the server — it was plugged in after MakerMods Lab "
-            "started. Restart MakerMods Lab to use it.",
+            # Two causes reach here and the server cannot tell them apart
+            # without plumbing that would not change the remedy: the camera
+            # was attached after startup and this process never saw it, or
+            # macOS is denying MakerMods Lab camera access, in which case the
+            # enumeration truthfully reports nothing and cv2 could not open
+            # the device either. Naming both beats asserting the first and
+            # sending the user to a restart that cannot help.
+            detail="Camera not visible to the server — either it was plugged in after "
+            "MakerMods Lab started, or macOS is not granting MakerMods Lab camera access "
+            "(System Settings → Privacy & Security → Camera). Grant access if it is missing, "
+            "then restart MakerMods Lab.",
         )
+    resolved, key = identified
     try:
-        stream = camera_preview_manager.open_stream(resolved)
+        stream = camera_preview_manager.open_stream(resolved, key)
     except CameraOpenError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
@@ -2686,10 +2880,33 @@ def startup_event():
     warn_if_cuda_mismatch()
 
 
+# Strong reference so the loop's task set can't drop the pump mid-flight.
+_avf_pump_task: asyncio.Task | None = None
+
+
+@app.on_event("startup")
+async def start_avfoundation_pump():
+    """Keep the in-process camera list live on macOS (hotplug/replug).
+
+    Async handler on purpose: it runs inside the event loop (main thread),
+    which is where the pump must live — AVFoundation's device-cache updates
+    only drain on the main thread's runloop (see camera_identity). A sync
+    startup handler would run in the threadpool and couldn't schedule it.
+    No-op off macOS.
+    """
+    global _avf_pump_task
+    _avf_pump_task = asyncio.create_task(pump_avfoundation_runloop())
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
+
+    # Stop the AVFoundation pump first so its next tick can't interleave with
+    # shutdown (and so --reload restarts don't log a destroyed-pending-task).
+    if _avf_pump_task is not None:
+        _avf_pump_task.cancel()
 
     # Teleoperation and recording drive the follower(s) as background threads
     # INSIDE this process (teleoperation_thread / recording_thread); auto-

@@ -16,6 +16,7 @@ import {
   getJobLogs,
   getJobLogFile,
   jobDisplayName,
+  jobStateLabel,
   stopJob,
   deleteJob,
 } from "@/lib/jobsApi";
@@ -25,6 +26,43 @@ import { useStudio } from "@/contexts/StudioContext";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
+
+/**
+ * Log lines the pre-step status strip must never speak for.
+ *
+ * `objc[<pid>]: Class … is implemented in both …` is the macOS Objective-C
+ * runtime's duplicate-class warning, written to stderr by the dylibs pyav
+ * bundles (libavdevice/libavformat) the moment the trainer imports them — that
+ * is, squarely inside the `current_step === 0` window this strip exists to
+ * narrate. It is harmless, it says nothing about progress, and at two absolute
+ * dylib paths it is among the longest lines the run ever emits, which is what
+ * let it crowd the header.
+ *
+ * Deliberately anchored and narrow: the runtime's own `objc[1234]:` prefix and
+ * nothing else. Matching the body instead ("implemented in both", "duplicate")
+ * would reach wider than the thing being suppressed and could swallow a real
+ * failure that happens to use those words.
+ *
+ * This is DISPLAY SELECTION, not log rewriting — the line is still in the raw
+ * log pane below, which is where a diagnostic like this belongs.
+ */
+const STATUS_NOISE_RE = /^objc\[\d+\]:/;
+
+/**
+ * The newest log line worth showing as status, or null when there is none.
+ *
+ * Walks backwards to the first line that is neither blank nor noise, so a
+ * burst of objc warnings reveals the last real message underneath them rather
+ * than blanking the strip. Blank lines are skipped for the same reason they
+ * would be useless as status text.
+ */
+function newestStatusLine(logs: LogEntry[]): string | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const message = logs[i]?.message ?? "";
+    if (message.trim() && !STATUS_NOISE_RE.test(message)) return message;
+  }
+  return null;
+}
 
 function jobToStatus(
   job: JobRecord | null,
@@ -82,6 +120,11 @@ const TrainingJobDialog: React.FC<{
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  // Whether selectedStep was chosen BY THE USER (dropdown) rather than
+  // auto-seeded. An auto-seeded selection follows the newest checkpoint as
+  // saves land during training; a user's explicit pick stays put (until the
+  // checkpoint it names disappears, e.g. a deleted run).
+  const userPickedStepRef = useRef(false);
 
   // Seed logs from the persistent on-disk file once on mount, so closing and
   // reopening the dialog (or coming in fresh on a finished/interrupted job)
@@ -116,12 +159,19 @@ const TrainingJobDialog: React.FC<{
           if (cancelled) return;
           setCheckpoints(cks);
           if (cks.length > 0) {
+            // Backend list is step-ascending, so the last entry is newest.
             const latest = cks[cks.length - 1].step;
-            setSelectedStep((prev) =>
-              prev != null && cks.some((c) => c.step === prev) ? prev : latest,
-            );
+            setSelectedStep((prev) => {
+              const keepUserPick =
+                userPickedStepRef.current &&
+                prev != null &&
+                cks.some((c) => c.step === prev);
+              if (!keepUserPick) userPickedStepRef.current = false;
+              return keepUserPick ? prev : latest;
+            });
           } else {
             setSelectedStep(null);
+            userPickedStepRef.current = false;
           }
         })
         .catch(() => {
@@ -234,6 +284,18 @@ const TrainingJobDialog: React.FC<{
 
   const isRunning = job?.state === "running";
 
+  // Before the trainer's first metric tick the stats panel can only say
+  // "Training starting…" — which is wrong (and worryingly quiet) for the
+  // minutes a local fine-tune spends downloading its base checkpoint. The
+  // backend writes that progress into the job's log, so surface the newest line
+  // as a status strip until real steps arrive; it then gets out of the way.
+  // Newest USEFUL line — see newestStatusLine / STATUS_NOISE_RE: the trainer's
+  // start-up stderr is exactly what a blind tail would pick up here.
+  const preStepStatus =
+    isRunning && job.metrics.current_step === 0
+      ? newestStatusLine(logs)
+      : null;
+
   const backButton = (
     <Button
       variant="ghost"
@@ -321,8 +383,11 @@ const TrainingJobDialog: React.FC<{
                       {job.id}
                     </p>
                   ) : null}
+                  {/* The label, not the wire value: this line rendered the raw
+                      state, so a stopped run read "interrupted" here while the
+                      card behind the dialog called it something else. */}
                   <p className="text-xs text-muted-foreground">
-                    {job.state}
+                    {jobStateLabel(job.state)}
                     {job.error_message ? ` — ${job.error_message}` : ""}
                   </p>
                 </div>
@@ -343,6 +408,25 @@ const TrainingJobDialog: React.FC<{
               )}
             </div>
 
+            {/* One line, always — whatever the trainer prints. `truncate` on
+                its own is inert here: a flex item's `min-width` defaults to
+                `auto`, which for nowrap text resolves to the FULL text width,
+                so the span could never shrink and a long line escaped the box
+                instead of ellipsing inside it. `min-w-0 flex-1` is what makes
+                the clamp real, and it holds for any future long line, not just
+                objc's. `title` keeps the whole line one hover away. */}
+            {preStepStatus ? (
+              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                <span
+                  className="min-w-0 flex-1 truncate"
+                  title={preStepStatus}
+                >
+                  {preStepStatus}
+                </span>
+              </div>
+            ) : null}
+
             <MonitoringStats
               jobId={jobId}
               trainingStatus={jobToStatus(job, false)}
@@ -359,8 +443,16 @@ const TrainingJobDialog: React.FC<{
                 <>
                   <CheckpointDropdown
                     checkpoints={checkpoints}
-                    selectedStep={selectedStep}
-                    onChange={setSelectedStep}
+                    // Single-job list: steps are unique here, so the step
+                    // maps 1:1 onto the checkpoint's identifying ref.
+                    selectedRef={
+                      checkpoints.find((c) => c.step === selectedStep)?.ref ??
+                      null
+                    }
+                    onChange={(c) => {
+                      userPickedStepRef.current = true;
+                      setSelectedStep(c.step);
+                    }}
                   />
                   <Button
                     onClick={() => {

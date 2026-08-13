@@ -45,7 +45,7 @@ def open_folder_in_file_browser(path: str) -> None:
     if system == "Darwin":
         subprocess.Popen(["open", path])
     elif system == "Windows":
-        os.startfile(path)  # type: ignore[attr-defined]  # Windows-only
+        os.startfile(path)  # type: ignore[attr-defined]  # Windows-only  # nosec B606 — opens a folder we just created, no shell, no user input
     elif system == "Linux":
         subprocess.Popen(["xdg-open", path])
     else:
@@ -247,6 +247,7 @@ POLICY_EXTRAS: dict[str, tuple[str, str]] = {
     "smolvla": ("transformers", "lerobot[smolvla]"),
     "pi0": ("transformers", "lerobot[pi]"),
     "pi0_fast": ("transformers", "lerobot[pi]"),
+    "pi05": ("transformers", "lerobot[pi]"),
     "diffusion": ("diffusers", "lerobot[diffusion]"),
 }
 

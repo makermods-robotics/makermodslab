@@ -50,6 +50,61 @@ def test_invalidate_whoami_cache_clears_cached_value() -> None:
         assert spy.call_count == 2
 
 
+def test_cached_whoami_fail_on_error_swallows_by_default() -> None:
+    from makermodslab.utils import hf_auth
+
+    with (
+        patch("makermodslab.utils.hf_auth.get_token", return_value="hf_fake_token"),
+        patch.object(hf_auth._WHOAMI_API, "whoami", side_effect=RuntimeError("boom")),
+    ):
+        assert hf_auth.cached_whoami() is None
+
+
+def test_cached_whoami_fail_on_error_true_reraises_when_token_present() -> None:
+    """A token IS present but the whoami call fails — fail_on_error=True must
+    surface that as an exception instead of collapsing it into the same None
+    as "no token", so a caller gating a Hub mutation on identity can fail
+    closed on the transient case rather than treating it as logged-out."""
+    from makermodslab.utils import hf_auth
+
+    with (
+        patch("makermodslab.utils.hf_auth.get_token", return_value="hf_fake_token"),
+        patch.object(hf_auth._WHOAMI_API, "whoami", side_effect=RuntimeError("boom")),
+    ):
+        try:
+            hf_auth.cached_whoami(fail_on_error=True)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("expected cached_whoami(fail_on_error=True) to re-raise")
+
+
+def test_cached_whoami_fail_on_error_true_still_returns_none_without_a_token() -> None:
+    """No token is the genuinely unauthenticated case — fail_on_error must not
+    turn that into an error too, or a logged-out, never-uploaded rename would
+    start failing on a Hub error it can do nothing about."""
+    from makermodslab.utils import hf_auth
+
+    with patch("makermodslab.utils.hf_auth.get_token", return_value=None):
+        assert hf_auth.cached_whoami(fail_on_error=True) is None
+
+
+def test_canonical_writable_namespace_matches_case_insensitively() -> None:
+    from makermodslab.utils import hf_auth
+
+    info = {"name": "makermods", "orgs": [{"name": "myorg", "roleInGroup": "write"}]}
+    assert hf_auth.canonical_writable_namespace(info, "MyOrg") == "myorg"
+    assert hf_auth.canonical_writable_namespace(info, "MAKERMODS") == "makermods"
+
+
+def test_canonical_writable_namespace_returns_none_when_not_writable() -> None:
+    from makermodslab.utils import hf_auth
+
+    info = {"name": "makermods", "orgs": [{"name": "readonlyorg", "roleInGroup": "read"}]}
+    assert hf_auth.canonical_writable_namespace(info, "readonlyorg") is None
+    assert hf_auth.canonical_writable_namespace(info, "lerobot") is None
+
+
 def test_handle_hf_auth_status_returns_dict() -> None:
     from makermodslab.utils import hf_auth
 

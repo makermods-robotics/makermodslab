@@ -114,21 +114,31 @@ interface ArmSlot {
 // One card in the Device step's radio-card picker. Selecting a card sets
 // both deviceType and arm together, replacing what used to be two separate
 // dropdown picks. "Ready" (the check mark) mirrors robotSetupGap's
-// definition of a configured arm: a port AND a calibration config assigned.
+// definition of a configured arm: a port AND a calibration config assigned —
+// plus that port actually being plugged in right now (`portDetected`, which
+// the card can't work out itself; it lives outside the window's closure).
 const ArmSlotCard = ({
   slot,
   selected,
   port,
+  portDetected,
   configured,
   onSelect,
 }: {
   slot: ArmSlot;
   selected: boolean;
   port: string;
+  portDetected: boolean;
   configured: boolean;
   onSelect: () => void;
 }) => {
-  const ready = !!port && configured;
+  // A saved port that isn't currently detected outranks "ready": the arm may
+  // be unplugged (or moved to another port, or renamed by the OS), and a green
+  // check there reads as "connected, all good" when nothing is on that bus.
+  // Same rule the Port dropdown and the batch already apply — no detected
+  // port, no port.
+  const undetected = !!port && !portDetected;
+  const ready = !!port && portDetected && configured;
   return (
     <button
       type="button"
@@ -146,12 +156,26 @@ const ArmSlotCard = ({
         <span className="text-sm font-medium text-foreground">
           {slot.label}
         </span>
-        {ready && <CheckCircle className="h-4 w-4 shrink-0 text-ok" />}
+        {undetected ? (
+          <span
+            role="img"
+            aria-label="Saved port not currently detected"
+            title="Saved port not currently detected — plug in the arm and rescan"
+            className="shrink-0 text-warn"
+          >
+            <AlertTriangle aria-hidden className="h-4 w-4" />
+          </span>
+        ) : ready ? (
+          <CheckCircle className="h-4 w-4 shrink-0 text-ok" />
+        ) : null}
       </div>
+      {/* The path stays visible (it says WHICH port went missing); the warn
+          colour is what marks it as absent, matching the "no port assigned"
+          styling below. */}
       <p
         className={cn(
           "mt-0.5 truncate font-mono text-xs",
-          port ? "text-muted-foreground" : "text-warn/80",
+          port && !undetected ? "text-muted-foreground" : "text-warn/80",
         )}
       >
         {port || "no port assigned"}
@@ -398,12 +422,26 @@ const RobotConfigWindow = ({
     swapPort: string | null;
   } | null>(null);
   // --- Concurrent multi-arm auto-calibration ---
-  // Auto-calibration IS the multi-arm flow: the main "Auto-calibrate" button
-  // opens this picker, where the user ticks 1-4 arm slots and every one's
-  // hands-off auto-cal subprocess runs at the SAME TIME, each on its own port.
+  // The batch is the engine behind BOTH auto-calibration entry points. Header
+  // "Calibrate all" opens this picker, where the user ticks 1-4 arm slots and
+  // every one's hands-off auto-cal subprocess runs at the SAME TIME, each on
+  // its own port. A calibration-file row's "Auto-calibrate" runs the same
+  // batch with just that row's slot ticked and never shows the picker.
   // The manual step-by-step flow is untouched and stays available separately.
   const [batchAutoCalOpen, setBatchAutoCalOpen] = useState(false);
   const [batchAutoCalPromptOpen, setBatchAutoCalPromptOpen] = useState(false);
+  // "A finished run's results are still on screen." The status box used to
+  // render on (batchAutoCalOpen || batchAutoCal.active), which is fine for the
+  // multi-arm path — it leaves the picker open, so the box survives the run —
+  // but a row's single-arm "Auto-calibrate" deliberately closes the picker, so
+  // both terms went false in the same tick the run ended and the whole box
+  // unmounted: per-arm rows (the ONLY place a failure's error text surfaces,
+  // via their title tooltip), the completed/failed summary, and the logs all
+  // vanished, leaving nothing but a transient toast — worst exactly on
+  // failure. This flag is set the moment a run is (or becomes) active, so it's
+  // already true when `active` flips false, and the results stay up until the
+  // user dismisses them.
+  const [batchAutoCalResultsOpen, setBatchAutoCalResultsOpen] = useState(false);
   // Which arm slots are ticked. Each slot's port comes straight from its
   // assignment on the robot record; each slot's save name is the robot's own
   // default config for that slot (no per-arm name input).
@@ -420,6 +458,11 @@ const RobotConfigWindow = ({
   });
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
   const [portsLoading, setPortsLoading] = useState(false);
+  // False until the first scan has come back. `portsLoading` alone can't tell
+  // "no ports" from "haven't looked yet" — it's still false on the first paint,
+  // before the mount effect fires — and an empty availablePorts would flash a
+  // "port not detected" warning on every configured arm card.
+  const [portsScanned, setPortsScanned] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const releaseStreamsRef = useRef<(() => void) | null>(null);
   // Off by default so merely opening the settings window never grabs a camera.
@@ -560,6 +603,7 @@ const RobotConfigWindow = ({
       console.error("Failed to list ports:", e);
     } finally {
       setPortsLoading(false);
+      setPortsScanned(true);
     }
   }, [baseUrl, fetchWithHeaders]);
 
@@ -879,6 +923,15 @@ const RobotConfigWindow = ({
     [slotSavedPort, availablePorts],
   );
 
+  // What the Device cards show as "plugged in right now". Until the first scan
+  // lands nothing is known, so every slot reads as detected — otherwise opening
+  // the window would flash a warning on arms that are perfectly fine. A rescan
+  // keeps the previous list until it resolves, so only the first one needs this.
+  const slotPortDetected = useCallback(
+    (slot: ArmSlot) => !portsScanned || !!slotPort(slot),
+    [portsScanned, slotPort],
+  );
+
   // Single-arm picker: the selected port only counts if it's actually detected.
   // A saved-but-unplugged port is treated as no port — same rule as the batch
   // flow — so calibration can't start against an absent bus. `port` stays set to
@@ -893,11 +946,11 @@ const RobotConfigWindow = ({
   // all" shortcut below (nothing to select otherwise).
   const anyArmAvailable = armSlots.some((s) => !!slotPort(s));
 
-  // "Calibrate all" shortcut: a more visible duplicate of the multi-arm
-  // auto-calibration entry point (normally tucked behind a calibration-file
-  // row's "+"). Ticks every slot that has a detected port and opens the
-  // batch picker so the user can review the selection before confirming —
-  // it doesn't skip that confirmation, just the manual per-arm ticking.
+  // "Calibrate all": the multi-arm entry point. Ticks every slot that has a
+  // detected port and opens the batch picker so the user can review (and
+  // amend) the selection before confirming — it doesn't skip that
+  // confirmation, just the manual per-arm ticking. This is the ONLY path that
+  // shows the picker; the per-row button below is single-arm.
   const handleCalibrateAll = () => {
     const next: Record<string, boolean> = {};
     for (const slot of armSlots) {
@@ -906,6 +959,18 @@ const RobotConfigWindow = ({
     setBatchSelected(next);
     setBatchAutoCalOpen(true);
     setNewCalibFor((prev) => prev ?? (armSlots[0]?.cfgField as string) ?? null);
+  };
+
+  // A calibration-file row's "Auto-calibrate": the row stands for exactly one
+  // arm slot (rows and slots are 1:1 on cfgField in both modes), so this ticks
+  // that slot alone and goes straight to the same pre-start confirmation the
+  // picker uses — a batch of one, reusing all of its machinery (status panel,
+  // polling, stop, per-arm default save name, overwrite, motor_power). The
+  // multi-arm checkbox list stays closed on this path.
+  const handleAutoCalibrateSlot = (slot: ArmSlot) => {
+    setBatchSelected({ [slot.key]: true });
+    setBatchAutoCalOpen(false);
+    setBatchAutoCalPromptOpen(true);
   };
 
   // Resume the batch panel if a run is in progress (e.g. window reopened).
@@ -929,6 +994,16 @@ const RobotConfigWindow = ({
       }
     })();
   }, [baseUrl, fetchWithHeaders]);
+
+  // Arm the "keep the results on screen" flag for the whole life of a run,
+  // from whichever path started it — a row's Auto-calibrate, the multi-arm
+  // picker, or the resume-on-mount effect above finding one already going.
+  // Keying it off `active` rather than setting it at each call site means the
+  // flag is guaranteed to be true BEFORE the poll flips `active` to false, so
+  // the box never blinks out between the two renders.
+  useEffect(() => {
+    if (batchAutoCal.active) setBatchAutoCalResultsOpen(true);
+  }, [batchAutoCal.active]);
 
   // Poll batch status + logs while a run is active.
   useEffect(() => {
@@ -1449,8 +1524,9 @@ const RobotConfigWindow = ({
   // calibration-file row's + button is active. The controls and status form
   // the main vertical on the left; the (large) demo video sits beside them so
   // it doesn't push the controls down. The auto-calibration torque slider is
-  // tucked under an Advanced settings disclosure.
-  const newCalibrationPanel = (rowLabel: string) => (
+  // tucked under an Advanced settings disclosure. `rowSlot` is the arm slot
+  // the row stands for — what its "Auto-calibrate" button targets.
+  const newCalibrationPanel = (rowLabel: string, rowSlot?: ArmSlot) => (
     <div className="ml-6 mt-2 space-y-3 rounded-md border border-border bg-muted/20 p-3">
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold text-foreground">
@@ -1484,19 +1560,26 @@ const RobotConfigWindow = ({
               className="w-full"
             >
               <Square className="mr-2 h-4 w-4" />
-              Stop all auto-calibration
+              {batchAutoCal.total === 1
+                ? "Stop auto-calibration"
+                : "Stop all auto-calibration"}
             </Button>
           ) : (
             // Auto-calibrate is the default calibration mode: it's the
-            // primary action and opens the multi-arm picker below
-            // (single-arm robots see just their leader+follower slots
-            // there). Manual step-by-step calibration stays fully
-            // available as the secondary button.
+            // primary action and calibrates THIS row's arm only, straight
+            // through the batch's pre-start confirmation (the multi-arm
+            // picker is the header's "Calibrate all"). Manual step-by-step
+            // calibration stays fully available as the secondary button.
             <>
               <Button
-                onClick={() => setBatchAutoCalOpen(true)}
+                onClick={() => rowSlot && handleAutoCalibrateSlot(rowSlot)}
                 className="w-full"
-                disabled={!robotName}
+                disabled={!robotName || !rowSlot || !slotPort(rowSlot)}
+                title={
+                  rowSlot && slotPort(rowSlot)
+                    ? `Auto-calibrate ${rowSlot.label} on ${slotPort(rowSlot)} — the arm will move on its own`
+                    : "No detected port for this arm — assign or reconnect it above"
+                }
               >
                 <Wand2 className="mr-2 h-4 w-4" />
                 Auto-calibrate
@@ -1513,13 +1596,25 @@ const RobotConfigWindow = ({
             </>
           )}
 
-          {(batchAutoCalOpen || batchAutoCal.active) && (
+          {/* Picker + live status. The checkbox list is the multi-arm path
+              only (batchAutoCalOpen); a batch started from a row's own
+              "Auto-calibrate" leaves it closed and this box shows nothing but
+              progress, per-arm rows, and logs — the stop button sits above.
+              The third term keeps a FINISHED run's results up after `active`
+              goes false: on the row path the first two terms are both false by
+              then, which used to unmount the results (and the error tooltips)
+              the instant they became worth reading. Dismiss clears it. */}
+          {(batchAutoCalOpen ||
+            batchAutoCal.active ||
+            batchAutoCalResultsOpen) && (
             <div className="space-y-3 rounded-md border border-border bg-muted/30 p-3">
               <div className="flex items-center gap-2 text-sm font-medium text-foreground">
                 <Wand2 className="h-4 w-4" />
-                Multi-arm auto-calibration
+                {!batchAutoCalOpen && batchAutoCal.total === 1
+                  ? "Auto-calibration"
+                  : "Multi-arm auto-calibration"}
               </div>
-              {!batchAutoCal.active ? (
+              {batchAutoCalOpen && !batchAutoCal.active ? (
                 <>
                   <p className="text-xs text-muted-foreground">
                     Pick the arms to calibrate. Each runs its own hands-off
@@ -1591,7 +1686,13 @@ const RobotConfigWindow = ({
                       {selectedBatchSlots.length === 1 ? "" : "s"}
                     </Button>
                     <Button
-                      onClick={() => setBatchAutoCalOpen(false)}
+                      onClick={() => {
+                        setBatchAutoCalOpen(false);
+                        // Also drop any finished run's results, or the box
+                        // would stay up in results-only mode and Cancel
+                        // would look like it did nothing.
+                        setBatchAutoCalResultsOpen(false);
+                      }}
                       variant="outline"
                       className="shrink-0"
                     >
@@ -1599,13 +1700,16 @@ const RobotConfigWindow = ({
                     </Button>
                   </div>
                 </>
-              ) : (
+              ) : batchAutoCal.active ? (
                 <p className="text-xs text-muted-foreground">
                   {batchAutoCal.completed + batchAutoCal.failed} of{" "}
-                  {batchAutoCal.total} done — the arms are moving. Keep the
-                  workspace clear.
+                  {batchAutoCal.total} done —{" "}
+                  {batchAutoCal.total === 1
+                    ? "the arm is moving"
+                    : "the arms are moving"}
+                  . Keep the workspace clear.
                 </p>
-              )}
+              ) : null}
 
               {/* Per-arm status rows (running + terminal), shown live. */}
               {batchAutoCal.arms.length > 0 && (
@@ -1654,6 +1758,23 @@ const RobotConfigWindow = ({
                   {batchAutoCal.logs.slice(-120).map((line, i) => (
                     <div key={i}>{line}</div>
                   ))}
+                </div>
+              )}
+
+              {/* Results-only view (run finished, picker closed — the row
+                  path): nothing else here can close the box, so this is the
+                  way out. The multi-arm finished view reopens the picker
+                  instead and uses its Cancel, which clears the same flag. */}
+              {!batchAutoCal.active && !batchAutoCalOpen && (
+                <div className="flex justify-end">
+                  <Button
+                    onClick={() => setBatchAutoCalResultsOpen(false)}
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                  >
+                    Dismiss
+                  </Button>
                 </div>
               )}
             </div>
@@ -1984,6 +2105,7 @@ const RobotConfigWindow = ({
                             deviceType === slot.device && arm === slot.arm
                           }
                           port={draftPort(slot.portField)}
+                          portDetected={slotPortDetected(slot)}
                           configured={!!(robot?.[slot.cfgField] as string)}
                           onSelect={() => {
                             setDeviceType(slot.device);
@@ -2003,6 +2125,7 @@ const RobotConfigWindow = ({
                             deviceType === slot.device && arm === slot.arm
                           }
                           port={draftPort(slot.portField)}
+                          portDetected={slotPortDetected(slot)}
                           configured={!!(robot?.[slot.cfgField] as string)}
                           onSelect={() => {
                             setDeviceType(slot.device);
@@ -2024,6 +2147,7 @@ const RobotConfigWindow = ({
                       slot={slot}
                       selected={deviceType === slot.device}
                       port={draftPort(slot.portField)}
+                      portDetected={slotPortDetected(slot)}
                       configured={!!(robot?.[slot.cfgField] as string)}
                       onSelect={() => {
                         setDeviceType(slot.device);
@@ -2179,9 +2303,10 @@ const RobotConfigWindow = ({
             <section className="space-y-3 py-5">
               <div className="flex items-center gap-2">
                 <PanelHeader step="02" title="Calibration files" />
-                {/* More visible duplicate of the per-row "Auto-calibrate"
-                    entry point below — same batch flow, pre-selecting every
-                    detected arm instead of requiring per-arm ticking. */}
+                {/* The multi-arm entry point: same batch flow as a row's own
+                    "Auto-calibrate" (which does its arm alone), but
+                    pre-selecting every detected arm and opening the picker so
+                    the selection can be reviewed before confirming. */}
                 <Button
                   size="sm"
                   variant="outline"
@@ -2296,6 +2421,12 @@ const RobotConfigWindow = ({
                 )
                   ? "right"
                   : "left";
+                // The arm slot this row stands for — rows and slots are 1:1 on
+                // cfgField in both modes, so the panel's "Auto-calibrate" can
+                // target this row's arm and nothing else.
+                const rowSlot = armSlots.find(
+                  (s) => s.cfgField === row.cfgField,
+                );
                 const isNewCalibOpen = newCalibFor === row.cfgField;
                 return (
                   <div key={row.label}>
@@ -2351,7 +2482,7 @@ const RobotConfigWindow = ({
                     {/* Slides open in place, like the studio's entry forms. */}
                     <Collapsible open={isNewCalibOpen}>
                       <CollapsibleContent className={SLIDE}>
-                        {newCalibrationPanel(row.label)}
+                        {newCalibrationPanel(row.label, rowSlot)}
                       </CollapsibleContent>
                     </Collapsible>
                   </div>
@@ -2454,16 +2585,30 @@ const RobotConfigWindow = ({
         >
           <DialogContent>
             <DialogHeader>
+              {/* Same gate for both entry points; a row's "Auto-calibrate"
+                  makes the one-arm wording the common case. */}
               <DialogTitle>
-                Auto-calibrate multiple arms — they will move
+                {selectedBatchSlots.length === 1
+                  ? `Auto-calibrate ${selectedBatchSlots[0]?.label ?? "this arm"} — it will move`
+                  : "Auto-calibrate multiple arms — they will move"}
               </DialogTitle>
               <DialogDescription>
-                {selectedBatchSlots.length} arm
-                {selectedBatchSlots.length === 1 ? "" : "s"} will{" "}
-                <strong>move on their own under power</strong> at the same time
-                to find each joint's range. Clear the workspace and keep hands
-                away from every arm. Each arm replaces its own existing
-                calibration.
+                {selectedBatchSlots.length === 1 ? (
+                  <>
+                    This arm will <strong>move on its own under power</strong>{" "}
+                    to find each joint's range. Clear the workspace and keep
+                    hands away from it. It replaces its own existing
+                    calibration.
+                  </>
+                ) : (
+                  <>
+                    {selectedBatchSlots.length} arms will{" "}
+                    <strong>move on their own under power</strong> at the same
+                    time to find each joint's range. Clear the workspace and
+                    keep hands away from every arm. Each arm replaces its own
+                    existing calibration.
+                  </>
+                )}
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>

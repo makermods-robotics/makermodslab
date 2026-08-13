@@ -463,6 +463,7 @@ def test_policy_optimizer_defaults_reports_availability(client: TestClient) -> N
     assert data["available"]["act"] is True
     assert data["defaults"]["act"] is not None
     assert data["available"]["pi0_fast"] is True
+    assert data["available"]["pi05"] is True
     assert data["available"]["reward_classifier"] is False
     assert data["defaults"]["reward_classifier"] is None
 
@@ -879,6 +880,66 @@ def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None
     assert "No usable model" in resp.json()["detail"]
 
 
+_MINIMAL_RECORDING_REQUEST_BODY = {
+    "leader_port": "COM_LEADER",
+    "follower_port": "COM_FOLLOWER",
+    "leader_config": "leader",
+    "follower_config": "follower",
+    "dataset_repo_id": "tester/some_dataset",
+    "single_task": "pick",
+}
+
+
+def test_start_recording_route_returns_409_when_already_active(client, monkeypatch) -> None:
+    """R2 regression: a rejected /start-recording must surface as a real HTTP
+    status (so the frontend's `response.ok` check treats it as a failure),
+    not the HTTP 200 FastAPI would otherwise default every dict return to."""
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    resp = client.post("/start-recording", json=_MINIMAL_RECORDING_REQUEST_BODY)
+
+    assert resp.status_code == 409
+    assert "already active" in resp.json()["detail"]
+
+
+def test_start_recording_route_returns_409_when_teleoperation_active(client, monkeypatch) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    resp = client.post("/start-recording", json=_MINIMAL_RECORDING_REQUEST_BODY)
+
+    assert resp.status_code == 409
+    assert "Teleoperation is currently active" in resp.json()["detail"]
+
+
+def test_start_recording_route_returns_400_for_invalid_dataset_name(client, monkeypatch) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    body = dict(_MINIMAL_RECORDING_REQUEST_BODY, dataset_repo_id="too/many/slashes")
+    resp = client.post("/start-recording", json=body)
+
+    assert resp.status_code == 400
+    assert "'/'" in resp.json()["detail"]
+
+
 def test_rename_job_route_returns_updated_record(client, monkeypatch) -> None:
     from makermodslab import server
     from makermodslab.jobs import JobRecord
@@ -1271,3 +1332,36 @@ def test_recording_resume_route_calls_handler(client: TestClient, monkeypatch: p
     assert response.status_code == 200
     assert response.json()["success"] is True
     assert called.get("hit") is True
+
+
+def test_format_accelerator_flattens_the_hub_object() -> None:
+    """huggingface_hub hands us a JobAccelerator OBJECT here, not a string.
+
+    Forwarding it raw put a nested dict on the wire under a field the frontend
+    types as `string`, so the hardware picker rendered "[object Object]" for
+    every GPU flavor.
+    """
+    from huggingface_hub._jobs_api import JobAccelerator
+
+    from makermodslab.server import _format_accelerator
+
+    single = JobAccelerator(type="gpu", model="T4", quantity="1", vram="16 GB", manufacturer="Nvidia")
+    assert _format_accelerator(single) == "Nvidia T4"
+
+    multi = JobAccelerator(type="gpu", model="A100", quantity="4", vram="320 GB", manufacturer="Nvidia")
+    assert _format_accelerator(multi) == "4× Nvidia A100"
+
+    # cpu-* flavors carry no accelerator; the caller falls back to `cpu`.
+    assert _format_accelerator(None) is None
+
+
+def test_format_accelerator_survives_a_renamed_hub_field() -> None:
+    """A future hub version could rename the fields out from under us. Any
+    string still beats a dict the UI would render as [object Object]."""
+    from makermodslab.server import _format_accelerator
+
+    class _Unknown:
+        def __str__(self) -> str:
+            return "some-future-accelerator"
+
+    assert _format_accelerator(_Unknown()) == "some-future-accelerator"

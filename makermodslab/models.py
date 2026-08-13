@@ -36,14 +36,15 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import shutil
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from huggingface_hub import metadata_update, snapshot_download
+from huggingface_hub import constants as hf_constants, metadata_update, snapshot_download
+from huggingface_hub.file_download import repo_folder_name
+from huggingface_hub.utils import filter_repo_objects
 
 from .datasets import (
     DownloadManager,
@@ -52,6 +53,7 @@ from .datasets import (
     _lerobot_cache_root,
 )
 from .jobs import (
+    JobHasChildrenError,
     JobRecord,
     _list_local_checkpoints,
     _read_checkpoint_config,
@@ -64,6 +66,14 @@ from .utils.config import (
     with_makermodslab_tag,
 )
 from .utils.hf_auth import cached_whoami, hf_hub_offline, shared_hf_api
+from .utils.naming import (
+    KNOWN_POLICY_TYPES,
+    POLICY_TYPES_BY_LENGTH as _POLICY_TYPES_BY_LENGTH,
+    RUN_REPO_TIMESTAMP_RE,
+    dedupe_display_names,
+    imported_name_suffixes,
+    iso_time_suffixes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,29 +84,9 @@ _LOCAL_MODEL_SCAN_LIMIT = 500
 # A repo qualifies as a MakerMods Lab-relevant model if it carries the `lerobot` library
 # tag (what push_to_hub stamps) OR its name matches the MakerMods Lab run-repo pattern
 # (a "_<timestamp>" suffix). Same union as server.py's _list_author_models.
-_RUN_REPO_RE = re.compile(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
-
-# Canonical policy types lerobot can load — mirrors the registry in
-# lerobot/policies/factory.py (get_policy_class / make_policy_config). Defined
-# once here as the single source of truth for recognizing a Hub repo's policy
-# type from its tags / name / card; update alongside lerobot pin bumps.
-KNOWN_POLICY_TYPES = {
-    "tdmpc",
-    "diffusion",
-    "act",
-    "multi_task_dit",
-    "vqbet",
-    "pi0",
-    "pi05",
-    "gaussian_actor",
-    "smolvla",
-    "wall_x",
-    "pi0_fast",
-}
-
-# Longest-first for name-prefix matching, so a shorter type can never shadow a
-# longer one it prefixes (pi0 must not swallow a pi0_fast_... repo name).
-_POLICY_TYPES_BY_LENGTH = sorted(KNOWN_POLICY_TYPES, key=len, reverse=True)
+# The pattern itself now lives in utils/naming.py, which also derives titles from
+# it — one definition, so a repo that reads as generated to one reads so to both.
+_RUN_REPO_RE = RUN_REPO_TIMESTAMP_RE
 
 
 def _hub_policy_type(tags: list[str] | None, repo_name: str) -> str | None:
@@ -193,11 +183,19 @@ def _read_train_config(pretrained_dir: Path) -> dict[str, Any]:
 def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, Any]:
     """Build the listing row for one completed local run's final checkpoint.
 
-    policy_type / dataset / steps come from train_config.json where present, and
-    fall back to the registry record (config.policy_type, config.dataset_repo_id)
-    so a checkpoint missing its train_config still renders a usable row. The
-    checkpoint's actual step (its dir name) is the authoritative `steps` value;
-    train_config's `steps` is the run's target and is used only as a fallback."""
+    policy_type / dataset come from train_config.json where present, and fall
+    back to the registry record (config.policy_type, config.dataset_repo_id)
+    so a checkpoint missing its train_config still renders a usable row.
+
+    `steps` and `target_steps` are deliberately kept separate: `steps` is the
+    checkpoint's actual step (its dir name) — the authoritative count for what
+    was actually saved — while `target_steps` is the run's configured step
+    count (train_config.json's `steps`, falling back to the registry record's).
+    An "interrupted" run that stopped short of its target has `steps <
+    target_steps`; without both fields such a run is indistinguishable from
+    one that finished exactly at that checkpoint. `state` ("done" or
+    "interrupted", per the `list_local_models` gate) is carried for the same
+    reason — callers should not assume every row here trained to completion."""
     train_config = _read_train_config(pretrained_dir)
 
     policy = train_config.get("policy") or {}
@@ -206,12 +204,14 @@ def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, A
     dataset = train_config.get("dataset") or {}
     dataset_repo_id = dataset.get("repo_id") or record.config.dataset_repo_id or None
 
+    raw_target_steps = train_config.get("steps")
+    target_steps = raw_target_steps if isinstance(raw_target_steps, int) else record.config.steps
+
     # Prefer the checkpoint's real step (its dir name) over the config target.
     try:
         steps: int | None = int(pretrained_dir.parent.name)
     except (ValueError, TypeError):
-        raw_steps = train_config.get("steps")
-        steps = int(raw_steps) if isinstance(raw_steps, int) else None
+        steps = target_steps
 
     return {
         "id": record.id,
@@ -219,6 +219,8 @@ def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, A
         "policy_type": policy_type,
         "dataset": dataset_repo_id,
         "steps": steps,
+        "target_steps": target_steps,
+        "state": record.state,
         "path": str(pretrained_dir),
         "last_modified": _epoch_iso(record.ended_at or record.started_at),
         "hf_repo_id": record.hf_repo_id or None,
@@ -238,19 +240,26 @@ def _epoch_iso(ts: float | None) -> str | None:
 
 
 def list_local_models() -> list[dict[str, Any]]:
-    """Every COMPLETED local training run that produced a final checkpoint.
+    """Every local training run that produced a usable final checkpoint.
 
     Reads the job registry (never mutates it). A run qualifies iff it is a
-    `local` runner in state "done" AND has at least one valid on-disk checkpoint
-    — running / failed / interrupted runs and checkpoint-less runs are skipped
-    (a failed run may have died before its first save). Each row carries the
-    policy type, base dataset repo_id, step count, and the local checkpoint path,
-    read from the final checkpoint's train_config.json.
+    `local` runner in state "done" or "interrupted" AND has at least one
+    valid on-disk checkpoint. A "done" run with no checkpoint (crashed before
+    its first save) is skipped. An "interrupted" run (e.g. its exit couldn't
+    be confirmed after a server restart) whose checkpoint is on disk still
+    counts — that state is only a claim about how we found out, not about
+    whether the weights exist. A "failed" run is excluded even with a
+    checkpoint present: unlike "interrupted", its exit code is a confirmed
+    non-zero result, so listing it next to real models — indistinguishable,
+    selectable for inference or a Hub push — would misrepresent a known
+    failure as a usable one. Each row carries the policy type, base dataset
+    repo_id, step count, and the local checkpoint path, read from the final
+    checkpoint's train_config.json.
 
     Newest first (by the run's end/start time)."""
     out: list[dict[str, Any]] = []
     for record in job_registry.list(limit=_LOCAL_MODEL_SCAN_LIMIT):
-        if record.runner != "local" or record.state != "done":
+        if record.runner != "local" or record.state not in ("done", "interrupted"):
             continue
         pretrained_dir = _final_checkpoint_dir(record)
         if pretrained_dir is None:
@@ -262,18 +271,19 @@ def list_local_models() -> list[dict[str, Any]]:
 
 
 def _find_local_record(model_id: str) -> JobRecord | None:
-    """The completed local-run registry record for `model_id`, or None.
+    """The usable local-run registry record for `model_id`, or None.
 
-    None when the id is unknown, isn't a local run, isn't done, or left no
-    checkpoint — the same qualification `list_local_models` applies, so callers
-    (info / upload / delete) agree on what a "local model" is."""
+    None when the id is unknown, isn't a local run, isn't "done" or
+    "interrupted", or left no checkpoint — the same qualification
+    `list_local_models` applies, so callers (info / upload / delete) agree on
+    what a "local model" is."""
     from .jobs import JobNotFoundError
 
     try:
         record = job_registry.get(model_id)
     except JobNotFoundError:
         return None
-    if record.runner != "local" or record.state != "done":
+    if record.runner != "local" or record.state not in ("done", "interrupted"):
         return None
     if _final_checkpoint_dir(record) is None:
         return None
@@ -315,6 +325,53 @@ def _local_models_root() -> Path:
     return root
 
 
+# The weights file lerobot's loader actually opens, and the one alternative
+# layout it accepts. Derived from the PINNED lerobot (v0.6.0), not guessed:
+#
+#   * Standard policy — `PreTrainedPolicy.from_pretrained` on a LOCAL dir does
+#     exactly `os.path.join(model_id, SAFETENSORS_SINGLE_FILE)` and hands it
+#     straight to `_load_as_safetensor` (policies/pretrained.py:195-198).
+#     `SAFETENSORS_SINGLE_FILE` is huggingface_hub's "model.safetensors".
+#   * SHARDED weights are deliberately NOT accepted. That local-dir branch has no
+#     index-file handling at all, and the save side pins `max_shard_size` above
+#     the total size specifically "so the output stays a single
+#     `model.safetensors`" (pretrained.py:157-159). Treating
+#     `model-00001-of-...` as usable would recreate this very bug — a tree we
+#     call loadable that lerobot then fails to open.
+#   * ADAPTER (PEFT/LoRA) repos are accepted, because `make_policy` has a real
+#     branch for them: with `use_peft`, it reads `PeftConfig.from_pretrained(dir)`
+#     and calls `PeftModel.from_pretrained(policy, dir)` (policies/factory.py:
+#     616-638), loading the BASE weights from the adapter config's
+#     `base_model_name_or_path`. So an adapter dir is complete without
+#     `model.safetensors`; what it must have is PEFT's own pair.
+#
+# NOT sufficient, and the trap this exists to close: "some *.safetensors is
+# present". A policy checkpoint also ships pre/post-processor safetensors, so an
+# interrupted download can carry several .safetensors files and still have no
+# policy weights at all.
+_POLICY_WEIGHTS_FILE = "model.safetensors"
+_ADAPTER_WEIGHTS_FILES = ("adapter_config.json", "adapter_model.safetensors")
+
+
+def _has_loadable_weights(pretrained_dir: Path) -> bool:
+    """True when `pretrained_dir` holds weights lerobot can actually load.
+
+    A `config.json` alone proves only that a download STARTED. An interrupted
+    `local_dir` download leaves a tree that looks complete to a config-only check
+    — config.json, train_config.json, both processor safetensors — and then dies
+    with FileNotFoundError on `model.safetensors` the moment inference runs. That
+    happened live: a 68 KB store entry served by the F6 short-circuit turned a
+    silently-partial download into a hard crash, where the pre-F6 path would have
+    re-downloaded and worked.
+    """
+    try:
+        if (pretrained_dir / _POLICY_WEIGHTS_FILE).is_file():
+            return True
+        return all((pretrained_dir / name).is_file() for name in _ADAPTER_WEIGHTS_FILES)
+    except OSError:
+        return False
+
+
 def _resolve_pretrained_dir(path: Path) -> Path | None:
     """The pretrained_model dir inside a downloaded/imported checkpoint dir, or
     None when `path` isn't a usable policy checkpoint.
@@ -325,12 +382,31 @@ def _resolve_pretrained_dir(path: Path) -> Path | None:
     ``config.json`` (the shape ``upload_local_model`` pushes). The returned dir
     is EXACTLY what rollout._resolve_policy_path consumes verbatim for a local
     ref, so `path` rows built from it are directly usable for inference.
+
+    "Usable" requires the POLICY WEIGHTS, not just a config (see
+    `_has_loadable_weights`). This is the single definition every consumer shares
+    — the /models listing, `is_model_available_locally`, `_fetch_model_snapshot`'s
+    post-download validation, `_cleanup_partial_model`, `import_local_model` and
+    the F6 local-store short-circuit in rollout all ask this one question — so a
+    weights-less tree is uniformly invisible rather than usable-here-and-broken-
+    there. A partial download therefore drops out of the listing instead of being
+    offered and then crashing mid-run.
+
+    In the checkpoints layout the scan walks from the highest step DOWN and takes
+    the first checkpoint with weights: a checkpoint still being written by a live
+    training run must not hide the last complete one. The returned path names its
+    own step, so there is no risk of the UI labelling one step's weights as
+    another's.
     """
     try:
         checkpoints = _list_local_checkpoints(str(path))
+        for checkpoint in reversed(checkpoints):
+            candidate = Path(checkpoint.ref)
+            if _has_loadable_weights(candidate):
+                return candidate
         if checkpoints:
-            return Path(checkpoints[-1].ref)
-        if (path / "config.json").is_file():
+            return None
+        if (path / "config.json").is_file() and _has_loadable_weights(path):
             return path
     except OSError:
         return None
@@ -351,6 +427,41 @@ def _downloaded_model_dir(repo_id: str) -> Path | None:
     if not path.is_dir() or _resolve_pretrained_dir(path) is None:
         return None
     return path
+
+
+def _hub_cache_has_repo(repo_id: str) -> bool:
+    """True when the shared HF hub cache already holds a snapshot of `repo_id`.
+
+    The hub-cache twin of `_downloaded_model_dir` above: that one answers "is it
+    in OUR models store", this one "is it in the cache huggingface_hub itself
+    manages". Both callers of this are about not downloading the same bytes
+    twice — `_fetch_model_snapshot` below (serve a Models-page download from the
+    cache) and `rollout._local_store_policy_path` (the mirror image: serve
+    inference from our store when the cache is empty). It lives HERE, and
+    rollout imports it, so the two directions can never disagree about what
+    "already cached" means; models.py must not import from rollout (cycle).
+
+    huggingface_hub 1.21.0 has no public "is this repo cached at all?" call:
+    ``try_to_load_from_cache`` answers per FILE and per revision (so it says
+    "no" for a repo cached under a different revision), and ``scan_cache_dir``
+    walks the ENTIRE cache — every dataset too — to answer one question about
+    one repo. So probe the documented on-disk layout directly, which is exactly
+    the question we want: ``<HF_HUB_CACHE>/models--<user>--<repo>/snapshots/``.
+    A repo dir with no snapshot in it (an interrupted or wiped entry) counts as
+    absent. HF_HUB_CACHE is read off the module at call time, not bound at
+    import, so an env override (or a test) is honoured.
+
+    A malformed repo id answers "not cached" rather than raising: `policy_ref`
+    is user input and the hub-ref regex accepts any ``[^@]+``, so
+    `repo_folder_name`'s validation can reject it (HFValidationError is a
+    ValueError). Reporting False just routes it to snapshot_download, which
+    produces the canonical, already-handled error message for a bad repo id."""
+    try:
+        folder = Path(hf_constants.HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
+        snapshots = folder / "snapshots"
+        return snapshots.is_dir() and any(snapshots.iterdir())
+    except (OSError, ValueError):
+        return False
 
 
 def is_model_available_locally(repo_id: str) -> bool:
@@ -523,6 +634,193 @@ def list_hub_models() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _job_run_steps(record: JobRecord) -> int | None:
+    """How many steps the run behind a Hub repo actually trained.
+
+    A run that reached "done" trained to its configured target, and
+    `config.steps` is that target in GLOBAL steps even for a resumed run —
+    prefer it, because the metrics tail can stop short of the end (the last log
+    lines are parsed at log_freq granularity, and a terminal transition can drop
+    the final one). Otherwise the run stopped early, so the last step its metrics
+    observed is the honest number. None when neither is known: the row keeps the
+    listing's null rather than invent one.
+    """
+    if record.state == "done" and record.config.steps:
+        return record.config.steps
+    if record.metrics.current_step:
+        return record.metrics.current_step
+    return None
+
+
+def _job_outranks(candidate: JobRecord, incumbent: JobRecord) -> bool:
+    """Ranking used to pick which run identifies a shared output repo: a run
+    that reached "done" beats one that didn't (it is the one that published the
+    final policy at the repo root), and among equals the later-started run
+    wins (the deepest link of a resume chain)."""
+    candidate_done = candidate.state == "done"
+    incumbent_done = incumbent.state == "done"
+    if candidate_done != incumbent_done:
+        return candidate_done
+    return candidate.started_at > incumbent.started_at
+
+
+def _jobs_by_hub_repo() -> dict[str, JobRecord]:
+    """Tracked runs keyed by the Hub repo they publish to, one run per repo.
+
+    A cloud resume REUSES its parent's output repo (hf_cloud sets
+    `policy_repo_id = resume_from_hub_repo`), so an N-deep resume chain shares a
+    single repo named after run #1 — and the Hub listing, which keys on repo_id,
+    then has no row under the name of the run that actually finished. Collapse
+    each repo to the run that best identifies it (see _job_outranks).
+
+    IMPORTED records are skipped: an import REGISTERS an existing repo rather
+    than producing it, so its config is a placeholder (dataset_repo_id
+    "(imported)", the default step count) and its auto-generated name says less
+    than the repo id does. They are also always "done" and usually the newest
+    record for their repo, so ranking them would let a placeholder outrank the
+    run that actually trained the weights.
+
+    Reads the registry, never mutates it. The scan limit matches
+    list_local_models so the two passes share the registry's per-record
+    checkpoint-count work (and, for cloud records, its 30s Hub cache) instead of
+    doubling it."""
+    best: dict[str, JobRecord] = {}
+    for record in job_registry.list(limit=_LOCAL_MODEL_SCAN_LIMIT):
+        repo_id = record.hf_repo_id
+        if not repo_id or record.runner == "imported":
+            continue
+        incumbent = best.get(repo_id)
+        if incumbent is None or _job_outranks(record, incumbent):
+            best[repo_id] = record
+    return best
+
+
+def _run_identity_name(record: JobRecord) -> str:
+    """A run's human name peeled down to the TASK it learned.
+
+    jobs.start auto-generates an unnamed run's name as
+    "{POLICY} · {dataset_repo_id}" — "SMOLVLA · makermods/eraser_place". Both
+    halves of that are stated elsewhere on every surface that renders it: the
+    row carries `policy_type` in its own field and `dataset` (the full repo id,
+    namespace included) in another, so the title line — the widest and the first
+    to truncate — spends its pixels on facts printed twice. Peel both:
+
+      "SMOLVLA · makermods/eraser_place"  ->  "eraser_place"
+
+    which converges model-card naming on one philosophy: the task identity,
+    policy-free and namespace-free. Imported titles already read this way
+    (utils.naming.derive_imported_title), and the retired "Imported · " prefix
+    (jobs._LEGACY_IMPORT_NAME_PREFIX) went for the same reason.
+
+    Only the GENERATED shape is peeled, and only when the head is a policy type
+    we recognize — a user-typed job_name that happens to contain " · " keeps
+    every word, and so does a name whose head isn't a policy. The namespace peel
+    is gated behind that same check, so it can never eat a slash out of a name a
+    human wrote. A rename (`display_name`) never reaches here; the caller
+    prefers it outright.
+
+    Two datasets that share a task name across namespaces (a/pick and b/pick)
+    now render one label twice — that is what _dedupe_listing_names exists for,
+    and its date suffix separates them.
+    """
+    head, separator, tail = record.name.partition(" · ")
+    if not (separator and tail and head.lower() in KNOWN_POLICY_TYPES):
+        return record.name
+    # The tail is a dataset repo id: keep the segment after the namespace. A
+    # bare name with no slash is already the task.
+    _namespace, slash, task = tail.partition("/")
+    return task if slash and task else tail
+
+
+def _enrich_repo_rows_from_jobs(merged: dict[str, dict[str, Any]]) -> None:
+    """Give each repo-keyed row the identity of the run that produced it.
+
+    Applies only to rows still named after their repo id — i.e. rows no local
+    checkpoint has claimed (a "both" collapse from a local run already put the
+    run's own name and detail there, and local always wins). That covers the
+    hub-only rows, hub rows flipped to "both" by a downloaded copy, and pinned
+    rows the Hub listing didn't return.
+
+    Identity fields are NOT touched: `id`, `repo_id` and `hf_repo_id` route
+    every request (info / download / pin / hide / deploy) and a resume chain's
+    repo keeps the name of run #1 on the Hub. Only the human-facing `name` is
+    replaced, plus the detail fields the repo listing could not know — filled in
+    only where they are still null, so a checkpoint-derived value always wins.
+    """
+    by_repo = _jobs_by_hub_repo()
+    if not by_repo:
+        return
+    for row in merged.values():
+        repo_id = row.get("hf_repo_id")
+        if not repo_id or row.get("name") != repo_id:
+            continue
+        record = by_repo.get(repo_id)
+        if record is None:
+            continue
+        row["name"] = record.display_name or _run_identity_name(record)
+        if row.get("policy_type") is None:
+            row["policy_type"] = record.config.policy_type or None
+        if row.get("dataset") is None:
+            row["dataset"] = record.config.dataset_repo_id or None
+        if row.get("steps") is None:
+            row["steps"] = _job_run_steps(record)
+
+
+def _row_dedupe_suffixes(row: dict[str, Any]) -> list[str]:
+    """The disambiguator ladder for one listing row, least → most specific.
+
+    Prefers the run timestamp embedded in the row's own NAME — every repo a
+    MakerMods Lab run publishes to carries the `_<date>_<time>` tail its run id
+    was generated with — over the Hub's `last_modified`. The two usually agree,
+    and where they disagree the name is the one the user means: last_modified
+    moves whenever anything is pushed to the repo (a re-push of the same
+    weights, a README edit, a later checkpoint upload), so a row could acquire a
+    date months after the run it labels and read as simply wrong next to its
+    sibling. The name's stamp is when the run STARTED and never moves.
+
+    Falls back to last_modified for a row whose name carries no stamp — a
+    community repo, a hand-named upload — which is the only signal there is.
+    Both ladders come from utils.naming, so a name-derived suffix and a
+    time-derived one are formatted identically and can disambiguate each other.
+    """
+    source = str(row.get("hf_repo_id") or row.get("id") or "")
+    if source and _RUN_REPO_RE.search(source.rsplit("/", 1)[-1]):
+        return imported_name_suffixes(source)
+    return iso_time_suffixes(row.get("last_modified"))
+
+
+def _dedupe_listing_names(merged: dict[str, dict[str, Any]]) -> None:
+    """Make the listing's display names unique, in place.
+
+    Run names are auto-generated from policy + dataset (jobs.start →
+    "SMOLVLA · ns/task", which the enrichment peels down to "task" — see
+    _run_identity_name), so retraining one task — a longer run, a different
+    seed — produces a SECOND row with a byte-identical name. Naming rows after
+    their run (see _enrich_repo_rows_from_jobs) makes that collision visible in
+    the picker, where two rows then read as duplicates of each other with
+    nothing on either to say which is which.
+
+    Disambiguate least-specific first (see _row_dedupe_suffixes for where the
+    date comes from, and dedupe_display_names, which escalates to date + time
+    and falls back to an ordinal if even that ties). Runs over EVERY row, not
+    just the enriched ones — two local runs of one policy on one dataset collide
+    the same way and never went near the enrichment.
+
+    Rows are grouped by (name, policy_type), so an ACT and a SmolVLA of one task
+    are NOT suffixed: the Policy row on the card already separates them, and a
+    date there would imply the difference between the two is when they ran.
+    Identity fields are left alone, on the same rule as the enrichment: only
+    `name` is display.
+    """
+    rows = list(merged.values())
+    resolved = dedupe_display_names(
+        [(str(row.get("name") or ""), _row_dedupe_suffixes(row)) for row in rows],
+        group_keys=[row.get("policy_type") for row in rows],
+    )
+    for row, name in zip(rows, resolved, strict=True):
+        row["name"] = name
+
+
 def list_all_models() -> list[dict[str, Any]]:
     """Merged listing: local completed runs + Hub policy repos, with a `source`.
 
@@ -531,6 +829,11 @@ def list_all_models() -> list[dict[str, Any]]:
     local-only run is "local". Mirrors list_all_datasets's merge/dedup/sort and
     its resilience: the Hub half is best-effort (list_hub_models never raises),
     so a Hub outage degrades to local-only rather than crashing.
+
+    A row still named after its repo id is then named after the tracked run that
+    produced it (see _enrich_repo_rows_from_jobs) — a repo id names a run only
+    by accident, and never names the right one for a cloud resume chain, which
+    publishes every link into the FIRST run's repo.
 
     Cached for up to _LISTING_CACHE_TTL_S so repeated startup/nav loads reuse a
     recent listing; a mutation invalidates the cache (see
@@ -567,6 +870,8 @@ def list_all_models() -> list[dict[str, Any]]:
             "policy_type": item.get("policy_type"),
             "dataset": None,
             "steps": None,
+            "target_steps": None,
+            "state": None,
             "path": None,
             "last_modified": item.get("last_modified"),
             "hf_repo_id": repo_id,
@@ -588,7 +893,7 @@ def list_all_models() -> list[dict[str, Any]]:
             # hub row's placeholder id/name and fill in the checkpoint fields it
             # couldn't know (per the contract, `id`/`name` follow the local run
             # for a "both" model).
-            for key in ("id", "name", "policy_type", "dataset", "steps", "path"):
+            for key in ("id", "name", "policy_type", "dataset", "steps", "target_steps", "state", "path"):
                 if item.get(key) is not None:
                     existing[key] = item[key]
             a = existing.get("last_modified") or ""
@@ -639,6 +944,8 @@ def list_all_models() -> list[dict[str, Any]]:
                 "policy_type": _hub_policy_type(None, repo_id.split("/", 1)[-1]),
                 "dataset": None,
                 "steps": None,
+                "target_steps": None,
+                "state": None,
                 "path": None,
                 "last_modified": None,
                 "hf_repo_id": repo_id,
@@ -650,6 +957,21 @@ def list_all_models() -> list[dict[str, Any]]:
             existing["source"] = "both"
             existing["hf_repo_id"] = repo_id
             existing["saved_custom"] = True
+
+    # Name the repo-keyed rows after the run that produced them, now that every
+    # source has merged in. A tracked run whose output repo is shared with its
+    # resume chain (or simply never collapsed into a local row) would otherwise
+    # reach the picker as a bare repo id with null steps/dataset — under the
+    # name of the FIRST run in the chain, never the one that finished. Runs
+    # after the merge and before the hidden filter so it can't resurrect a
+    # hidden row, and so local-checkpoint detail always wins (see the helper).
+    _enrich_repo_rows_from_jobs(merged)
+
+    # Then separate the rows the naming above left indistinguishable: two runs
+    # of one policy on one dataset carry the same auto-generated name, so the
+    # picker would show the same label twice. Immediately after the enrichment
+    # so it sees the final names, and still before the hidden filter.
+    _dedupe_listing_names(merged)
 
     # Hidden models ("removed from list") are filtered LAST — after the
     # hub/local/downloaded merge and the pin fold — so a hidden id can't
@@ -1067,6 +1389,18 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
             409,
             f"Model {model_id!r} is still training — stop the run before deleting it.",
         ) from exc
+    except JobHasChildrenError as exc:
+        # Mid-chain delete, reached from the MODEL library rather than the jobs
+        # one: another run resumed out of this run's checkpoint dir, which the
+        # delete would take with it. Same refusal and same shape the /jobs
+        # route returns (409, naming the continuations) — without this it fell
+        # into the catch-all below and surfaced as a 502 "Failed to delete".
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise ModelError(
+            409,
+            f"Model {model_id!r} was continued by {continued_by}, which would be left "
+            "pointing at a deleted run. Delete the continuation(s) first.",
+        ) from exc
     except JobNotFoundError as exc:
         raise ModelError(404, f"Model {model_id!r} not found.") from exc
     except Exception as exc:
@@ -1087,6 +1421,98 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# Optimizer/scheduler state, excluded from everything the Models page pulls.
+# Two patterns because huggingface_hub filters with fnmatch, NOT path-aware
+# globbing: `training_state/**` catches the root one a flat push leaves, and
+# `*/training_state/**` catches the per-step ones (fnmatch's `*` spans `/`, so
+# it covers `checkpoints/<step>/training_state/...` at any depth).
+_TRAINING_STATE_IGNORE = ["training_state/**", "*/training_state/**"]
+
+
+def _copy_snapshot_into_store(snapshot: Path, target: Path) -> None:
+    """Copy a hub-cache snapshot dir into the local models store.
+
+    Two things this must NOT do naively:
+
+    * **Symlinks.** A cache snapshot is a farm of symlinks into the sibling
+      ``blobs/`` dir; copying them as links would leave the store pointing at
+      files `huggingface_hub` may garbage-collect (``delete_revisions``) or that
+      simply vanish if the user clears their hub cache. Every file is
+      dereferenced (``shutil.copyfile`` copies CONTENT through a symlink), so
+      the store stays the self-contained directory the rest of models.py
+      assumes. It also leaves dest mtimes at "now", which is what the listing's
+      `_dir_mtime_iso` should report for a just-downloaded model — a blob's own
+      mtime could be months old.
+    * **training_state.** A cache entry can predate this exclusion (inference's
+      @root fetch, or a plain `hf_hub_download`, may have populated it), so the
+      snapshot on disk can hold optimizer state even though we asked
+      snapshot_download to skip it. Filtering is delegated to huggingface_hub's
+      OWN `filter_repo_objects` — the same function snapshot_download filters
+      with — so the copied tree is byte-for-byte the tree the local_dir download
+      would have produced, rather than a hand-rolled guess at fnmatch semantics.
+
+    Copies IN PLACE into `target` rather than staging in a temp dir and swapping:
+    it matches what the local_dir download does (write over whatever is there),
+    keeps a re-download of an already-present model from ever having a window
+    where the model is missing, and a half-finished copy is handled the same way
+    a half-finished download is — the caller falls back to the network path,
+    which rewrites these very paths, and `_cleanup_partial_model` removes the
+    dir if the result still doesn't resolve."""
+    rel_paths = [p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*") if p.is_file()]
+    for rel in filter_repo_objects(rel_paths, ignore_patterns=_TRAINING_STATE_IGNORE):
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(snapshot / rel, dest)
+
+
+def _fetch_via_hub_cache(repo_id: str, target: Path) -> bool:
+    """Materialize `repo_id` into `target` from the shared hub cache, or return
+    False to say "not applicable — do the normal download".
+
+    Closes the second half of design-debt F6. `_fetch_model_snapshot` downloads
+    with ``local_dir=``, and huggingface_hub 1.21.0's local_dir mode neither
+    reads nor populates the shared cache (it is the deliberate "give me a plain
+    directory, no cache machinery" mode). So a repo inference had already pulled
+    into the cache was downloaded a SECOND time, in full, the moment the user
+    clicked Download on the Models page. (`rollout._local_store_policy_path`
+    covers the opposite order: Models page first, inference second.)
+
+    Deliberately routed through a cache-mode ``snapshot_download`` — no
+    ``local_dir`` — rather than copying the newest snapshot dir straight out of
+    the cache. That call dedupes against the cache and pulls only what is
+    missing or changed, which means:
+
+      * a PARTIAL cache entry (someone `hf_hub_download`-ed a single file, so
+        `_hub_cache_has_repo` says yes but the snapshot is one symlink) gets
+        COMPLETED rather than copied as a broken tree, and
+      * the result is revision-correct — we get `main` as it is now, not
+        whatever stale revision happens to sit in the cache.
+
+    It is an optimization and must never become a new failure mode, so ANY
+    failure (HF error, a cache entry mutated out from under us, a copy that runs
+    out of disk) returns False and lets the caller do the plain download. The
+    exception is logged, not swallowed silently — a cache path that always fails
+    would otherwise just look like "downloads are slow"."""
+    if not _hub_cache_has_repo(repo_id):
+        return False
+    try:
+        snapshot = snapshot_download(
+            repo_id,
+            repo_type="model",
+            ignore_patterns=_TRAINING_STATE_IGNORE,
+        )
+        _copy_snapshot_into_store(Path(snapshot), target)
+    except Exception as exc:  # noqa: BLE001 - optimization only; the caller re-downloads
+        logger.warning(
+            "Could not serve %s from the HF hub cache (%s) — falling back to a full download",
+            repo_id,
+            exc,
+        )
+        return False
+    logger.info("Served %s from the HF hub cache instead of re-downloading it", repo_id)
+    return True
+
+
 def _fetch_model_snapshot(repo_id: str) -> None:
     """Snapshot a Hub model repo into ``<local models root>/<repo_id>/``.
 
@@ -1094,9 +1520,31 @@ def _fetch_model_snapshot(repo_id: str) -> None:
     (_resolve_pretrained_dir) — a repo with no config.json / checkpoints tree is
     not a policy and is rejected (the manager's cleanup then removes it).
     Invalidates the /models listing cache so the source flips to "both"
-    immediately."""
+    immediately.
+
+    Optimizer/scheduler state is excluded. A training repo carries a
+    ``training_state/`` dir next to every ``pretrained_model/`` (and one at the
+    repo root for a flat push), which exists only to RESUME training — nothing
+    that reads a downloaded model here (inference, the checkpoint browser,
+    _resolve_pretrained_dir) ever opens it, and it is hundreds of MB per step.
+    Observed: a 5.6 GB local model dir of which ~3.5 GB was training_state.
+    ``rollout._resolve_policy_path``'s @root fetch already dropped exactly these
+    for exactly this reason; the two call sites now agree. The
+    ``checkpoints/<step>/pretrained_model`` trees are deliberately KEPT — the
+    checkpoint browser lists and inference selects individual steps from them.
+
+    When the shared hub cache ALREADY holds the repo, the bytes are taken from
+    there instead of off the network — see `_fetch_via_hub_cache`, which is a
+    pure optimization and falls back to the download below on any failure.
+    """
     target = _local_models_root() / repo_id
-    snapshot_download(repo_id, repo_type="model", local_dir=str(target))
+    if not _fetch_via_hub_cache(repo_id, target):
+        snapshot_download(
+            repo_id,
+            repo_type="model",
+            local_dir=str(target),
+            ignore_patterns=_TRAINING_STATE_IGNORE,
+        )
     if _resolve_pretrained_dir(target) is None:
         raise ModelError(
             400,

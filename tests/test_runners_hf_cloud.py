@@ -241,6 +241,18 @@ def test_localize_allows_cloud_resume_from_hub() -> None:
     assert config.policy_device == "cuda"
 
 
+def test_localize_rejects_a_resume_that_names_no_hub_checkpoint() -> None:
+    """MT42's invariant at the cloud submission boundary: `resume` with nothing
+    to resume FROM would fall through build_training_command's fresh-run branch
+    and start over at step 0 on rented hardware while every UI surface reported a
+    continuation. Refuse instead — silence is the failure mode here."""
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+
+    config = _request(resume=True)
+    with pytest.raises(ValueError, match="step 0"):
+        localize_config_for_cloud(config, "t4-small")
+
+
 def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
     from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
@@ -251,6 +263,19 @@ def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
     hub = _request(policy_pretrained_path="user/some-model")
     localize_config_for_cloud(hub, "t4-small")  # no raise
     assert hub.policy_pretrained_path == "user/some-model"
+
+
+def test_localize_allows_a_step_suffixed_hub_pretrained_ref() -> None:
+    """MT2, cloud half: fine-tuning from a SPECIFIC Hub step travels as the ref
+    'repo@checkpoints/<step_dir>' — the wrapper materializes it pod-side, the
+    same way cloud resume already downloads its parent checkpoint. It must reach
+    the container verbatim, not be rejected as a host path and not be rewritten
+    here (a host path would be meaningless on the pod)."""
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+
+    config = _request(policy_pretrained_path="user/some-model@checkpoints/003000")
+    localize_config_for_cloud(config, "t4-small")  # no raise
+    assert config.policy_pretrained_path == "user/some-model@checkpoints/003000"
 
 
 # -- in-container installer ladder (the image's uv venv ships no pip) --
@@ -301,6 +326,97 @@ def test_install_plan_reports_no_installer() -> None:
     assert _install_plan("spec", "/py", None, False, False) == (None, [])
 
 
+# -- checkpoint-completeness check (partial-upload race fix) --
+
+
+def test_checkpoint_step_ready_false_when_no_last_link_exists(tmp_path: Path) -> None:
+    """No checkpoints/last symlink at all — e.g. before the first checkpoint
+    of a run has completed — must not be mistaken for readiness."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_when_last_points_to_an_earlier_step(tmp_path: Path) -> None:
+    """The exact race this fixes: lerobot writes pretrained_model/config.json
+    (and creates training_state/) well before the step is actually complete.
+    Only checkpoints/last advancing to (or past) this step is proof the whole
+    step finished — a step dir existing on its own proves nothing."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "010000"
+    step_dir.mkdir()
+    (tmp_path / "005000").mkdir()
+    (tmp_path / "last").symlink_to("005000")
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_true_when_last_points_to_this_step(tmp_path: Path) -> None:
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "last").symlink_to("005000")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_true_when_last_has_advanced_past_this_step(tmp_path: Path) -> None:
+    """<=, not ==: two checkpoints can complete inside one 15s poll window, and
+    a step must not go permanently unuploaded just because the poller missed
+    the instant `last` pointed at it exactly."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "010000").mkdir()
+    (tmp_path / "last").symlink_to("010000")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_false_when_last_is_not_a_symlink(tmp_path: Path) -> None:
+    """A plain file or directory named `last` (not the symlink lerobot writes)
+    must not be misread as a target step number."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "last").mkdir()
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_wrapper_source_inlines_the_tested_checkpoint_ready_check() -> None:
+    """The wrapper's checkpoint-completeness check is _checkpoint_step_ready's
+    source inlined verbatim, so the in-container upload gate is exactly the
+    function the tests above exercise — and _scan_and_upload must call it
+    instead of checking config.json directly."""
+    import inspect
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _checkpoint_step_ready
+
+    assert inspect.getsource(_checkpoint_step_ready) in WRAPPER_SOURCE
+    assert "__CHECKPOINT_READY_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
+    assert "_checkpoint_step_ready(entry)" in WRAPPER_SOURCE
+
+
+def test_lerobot_last_checkpoint_symlink_matches_our_readiness_check() -> None:
+    """_checkpoint_step_ready's readiness signal is lerobot's own
+    checkpoints/<LAST_CHECKPOINT_LINK> symlink, which lerobot_train.py points
+    at a step directory via update_last_checkpoint() strictly after
+    save_checkpoint() returns for that step. A lerobot pin bump that renames
+    the link or reorders those two calls should fail here in CI, not ship a
+    gate that silently never passes."""
+    import inspect
+
+    from lerobot.scripts import lerobot_train
+    from lerobot.utils.constants import LAST_CHECKPOINT_LINK
+
+    assert LAST_CHECKPOINT_LINK == "last"
+    src = inspect.getsource(lerobot_train)
+    assert src.index("save_checkpoint(") < src.index("update_last_checkpoint(checkpoint_dir)")
+
+
 # -- wrapper sanity --
 
 
@@ -318,15 +434,96 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
 
 def test_wrapper_source_handles_resume_download() -> None:
     """Cloud resume: the wrapper must parse --resume-from, download the parent
-    checkpoint tree, refuse when training_state/ is absent, and pre-seed `seen`
-    so it never re-uploads the checkpoint it just pulled down."""
+    checkpoint tree, refuse when the downloaded step is incomplete, and
+    pre-seed `seen` so it never re-uploads the checkpoint it just pulled
+    down."""
     from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
 
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # still valid with the resume block
     assert "--resume-from=" in WRAPPER_SOURCE
     assert "snapshot_download" in WRAPPER_SOURCE
-    assert "training_state" in WRAPPER_SOURCE
     assert "seen.add(step_dir)" in WRAPPER_SOURCE
+
+
+def test_wrapper_source_resume_checks_weights_and_training_state_not_just_a_bare_dir() -> None:
+    """C4: a plain `training_state/` is_dir() check would pass a checkpoint
+    that was itself only partially uploaded before this fix existed — the
+    checkpoints/last symlink used by the live watcher isn't available here
+    (it's never pushed to the Hub), so the resume path checks the files it
+    actually needs directly instead of trusting the directory's existence."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    assert 'any((dest / "pretrained_model").glob("*.safetensors"))' in WRAPPER_SOURCE
+    assert '(dest / "training_state" / "training_step.json").is_file()' in WRAPPER_SOURCE
+    assert '(dest / "training_state" / "rng_state.safetensors").is_file()' in WRAPPER_SOURCE
+
+
+def test_wrapper_source_materializes_a_step_suffixed_finetune_base() -> None:
+    """MT2, container half: a --policy.pretrained_path naming a Hub STEP is
+    downloaded pod-side and rewritten to that local dir before the trainer runs.
+
+    Two properties the block must keep:
+      * it pulls ONLY that step's pretrained_model/ (weights-only — fine-tuning
+        needs no training_state/), and
+      * it uses the snapshot cache rather than <output_dir>/checkpoints/, which
+        the uploader watches — a base checkpoint copied there would be
+        republished as if this run had produced it.
+
+    Source-level assertions: the block is top-level wrapper code (like the
+    resume download it mirrors), so it has no import seam to exec against. The
+    argv rewrite it depends on IS unit-tested below."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")
+    assert '_arg("--policy.pretrained_path")' in WRAPPER_SOURCE
+    assert '_set_arg("--policy.pretrained_path", str(base_dir))' in WRAPPER_SOURCE
+    assert 'allow_patterns=[f"checkpoints/{step_dir}/pretrained_model/*"]' in WRAPPER_SOURCE
+    # Never staged under the watched output dir.
+    assert 'base_dir = Path(local_root) / "checkpoints" / step_dir / "pretrained_model"' in WRAPPER_SOURCE
+
+
+def _wrapper_argv_helpers(trainer_argv: list[str]):
+    """Exec the wrapper's own `_arg` / `_set_arg` over `trainer_argv`.
+
+    Sliced out of WRAPPER_SOURCE by name and given the globals the wrapper would
+    have, so a drift between the template and these tests fails loudly instead
+    of silently testing a host-side paraphrase."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    namespace: dict = {"trainer_argv": trainer_argv}
+    for name in ("_arg", "_set_arg"):
+        match = re.search(rf"^def {name}\(.*?(?=^\S)", WRAPPER_SOURCE, re.MULTILINE | re.DOTALL)
+        assert match, f"{name} not found in WRAPPER_SOURCE"
+        exec(compile(match.group(0), "<hf-jobs-wrapper>", "exec"), namespace)  # noqa: S102
+    return namespace["_arg"], namespace["_set_arg"]
+
+
+def test_wrapper_set_arg_rewrites_both_argv_spellings() -> None:
+    """The rewrite must hit whichever form the argv builder used, and touch
+    nothing else — this is what turns a Hub ref only the pod can resolve into a
+    real path for the trainer."""
+    joined = ["--policy.type=act", "--policy.pretrained_path=user/repo@checkpoints/003000", "--steps=10"]
+    arg, set_arg = _wrapper_argv_helpers(joined)
+    assert arg("--policy.pretrained_path") == "user/repo@checkpoints/003000"
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is True
+    assert joined == ["--policy.type=act", "--policy.pretrained_path=/tmp/base", "--steps=10"]
+
+    split = ["--policy.pretrained_path", "user/repo@checkpoints/003000", "--steps", "10"]
+    arg, set_arg = _wrapper_argv_helpers(split)
+    assert arg("--policy.pretrained_path") == "user/repo@checkpoints/003000"
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is True
+    assert split == ["--policy.pretrained_path", "/tmp/base", "--steps", "10"]
+
+
+def test_wrapper_set_arg_reports_a_missing_flag() -> None:
+    """A bare-repo-id fine-tune (or no fine-tune at all) leaves the argv alone;
+    the wrapper treats an unexpected miss as a hard error rather than launching
+    a run that trains from the wrong weights."""
+    argv = ["--policy.type=act"]
+    arg, set_arg = _wrapper_argv_helpers(argv)
+    assert arg("--policy.pretrained_path") is None
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is False
+    assert argv == ["--policy.type=act"]
 
 
 def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
@@ -354,6 +551,56 @@ def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
     assert "--policy.type" not in cmd
 
 
+def _submitted_command(config, tmp_path, monkeypatch, job_id: str = "child_run"):
+    """Drive HfCloudJobRunner.start with the Hub stubbed out; return the argv it
+    submitted. No token, no network, no job — the run_job stand-in records and
+    the worker threads are stubbed off."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.get_token", lambda: "hf_fake")
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.cached_whoami", lambda: {"name": "alice"})
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "t4-small")
+    api = MagicMock()
+    api.run_job.return_value = MagicMock(id="hfjob-1", url="https://hf/jobs/1")
+    runner._api = api
+    monkeypatch.setattr(runner, "_ensure_dataset_on_hub", lambda repo_id: None)
+    monkeypatch.setattr(runner, "_start_worker_threads", lambda label: None)
+    runner.start(job_id, config, "/host/out")
+    return api.run_job.call_args.kwargs["command"]
+
+
+def test_cloud_resume_from_a_cloud_parent_publishes_into_the_parents_repo(tmp_path, monkeypatch) -> None:
+    """Unchanged behaviour, pinned: a cloud→cloud continuation keeps the whole
+    lineage in one repo."""
+    config = _request(resume=True, resume_from_hub_repo="user/parent-run", resume_from_hub_step="005000")
+    command = _submitted_command(config, tmp_path, monkeypatch)
+
+    assert config.policy_repo_id == "user/parent-run"
+    assert "--resume-from=user/parent-run@checkpoints/005000" in command
+
+
+def test_cloud_resume_from_an_uploaded_local_checkpoint_gets_its_own_repo(tmp_path, monkeypatch) -> None:
+    """F7, local→cloud: the source repo is a private STAGING repo holding the
+    local parent's uploaded checkpoint, not an output repo. Publishing into it
+    would put parent and child checkpoints in one tree again, so the run takes
+    its own repo — while still resuming from the staged step."""
+    config = _request(
+        resume=True,
+        resume_from_hub_repo="alice/src_checkpoints",
+        resume_from_hub_step="000100",
+        resume_from_uploaded_checkpoint=True,
+    )
+    command = _submitted_command(config, tmp_path, monkeypatch)
+
+    assert config.policy_repo_id == "alice/child_run"
+    assert "--resume-from=alice/src_checkpoints@checkpoints/000100" in command
+    assert "--policy.repo_id" in command
+    assert command[command.index("--policy.repo_id") + 1] == "alice/child_run"
+
+
 def test_wrapper_source_inlines_the_tested_install_plan() -> None:
     """The wrapper's installer choice is _install_plan's source inlined
     verbatim, so the in-container code is exactly what the unit tests above
@@ -369,6 +616,107 @@ def test_wrapper_source_inlines_the_tested_install_plan() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint uploader hardening. The readiness GATE is covered above (it is
+# _checkpoint_step_ready, exercised directly); what follows covers the two
+# things the upload call itself must get right, by exec'ing the wrapper's own
+# _scan_and_upload against fakes rather than a host-side paraphrase.
+# ---------------------------------------------------------------------------
+
+
+class _FakeUploadApi:
+    """Records upload_folder calls; optionally fails the first `fail_times`."""
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.calls: list[dict] = []
+        self._fail_times = fail_times
+
+    def upload_folder(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise RuntimeError("hub is having a day")
+
+
+def _wrapper_scanner(output_dir: Path, api: _FakeUploadApi):
+    """Exec the wrapper's own `_scan_and_upload` and return (call, seen).
+
+    The function is sliced out of WRAPPER_SOURCE by name and given the globals
+    the wrapper would have around it, so a drift between the template and this
+    test surfaces as a KeyError/NameError rather than passing silently.
+    """
+    import os
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _checkpoint_step_ready
+
+    match = re.search(r"^def _scan_and_upload\(.*?(?=^\S)", WRAPPER_SOURCE, re.MULTILINE | re.DOTALL)
+    assert match, "_scan_and_upload not found in WRAPPER_SOURCE"
+    namespace: dict = {
+        "Path": Path,
+        "os": os,
+        "re": re,
+        "api": api,
+        "output_dir": str(output_dir),
+        "repo_id": "user/run",
+        "seen": set(),
+        "waits": {},
+        "_checkpoint_step_ready": _checkpoint_step_ready,
+        "print": lambda *a, **k: None,  # keep the wrapper's logging out of pytest
+    }
+    exec(compile(match.group(0), "<hf-jobs-wrapper>", "exec"), namespace)  # noqa: S102
+    return namespace["_scan_and_upload"], namespace["seen"]
+
+
+def _write_checkpoint(output_dir: Path, step_dir: str) -> Path:
+    """A complete lerobot checkpoint tree, with `checkpoints/last` advanced to
+    it — the signal _checkpoint_step_ready reads to call the save finished."""
+    import os
+
+    ck = output_dir / "checkpoints" / step_dir
+    pm = ck / "pretrained_model"
+    pm.mkdir(parents=True, exist_ok=True)
+    (pm / "config.json").write_text("{}")
+    (pm / "model.safetensors").write_bytes(b"weights")
+    (pm / "train_config.json").write_text("{}")
+    ts = ck / "training_state"
+    ts.mkdir(exist_ok=True)
+    (ts / "training_step.json").write_text("{}")
+    (ts / "rng_state.safetensors").write_bytes(b"rng")
+    (ts / "optimizer_state.safetensors").write_bytes(b"optim")
+    last = output_dir / "checkpoints" / "last"
+    if last.is_symlink() or last.exists():
+        last.unlink()
+    os.symlink(step_dir, last)
+    return ck
+
+
+def test_wrapper_does_not_seal_a_checkpoint_whose_upload_failed(tmp_path: Path) -> None:
+    """`seen.add` runs only after upload_folder returns, so a partial or failed
+    commit must leave the step retryable instead of retiring it forever."""
+    api = _FakeUploadApi(fail_times=1)
+    scan, seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "002000")
+    scan()  # attempts the upload, which raises
+    assert len(api.calls) == 1
+    assert seen == set()  # not retired
+
+    scan()  # retried on the next tick, and this time it lands
+    assert len(api.calls) == 2
+    assert seen == {"002000"}
+
+
+def test_wrapper_upload_excludes_safetensors_temp_files(tmp_path: Path) -> None:
+    """A .tmp* file caught mid-rename has landed on the Hub before; keep it out
+    of the commit even when the rest of the tree is complete."""
+    api = _FakeUploadApi()
+    scan, _seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "003000")
+    scan()
+    assert api.calls[0]["ignore_patterns"] == [".tmp*", "**/.tmp*"]
+
+
+# ---------------------------------------------------------------------------
 # Job-timeout precedence: request value wins (normalised to seconds), else the
 # HF_JOB_TIMEOUT fallback constant.
 # ---------------------------------------------------------------------------
@@ -380,7 +728,23 @@ def test_resolve_job_timeout_falls_back_to_constant_when_unset() -> None:
 
     config = TrainingRequest(dataset_repo_id="x")
     assert config.hf_job_timeout is None
-    assert resolve_job_timeout(config) == HF_JOB_TIMEOUT  # "2h" string passthrough
+    assert resolve_job_timeout(config) == HF_JOB_TIMEOUT  # string passthrough, not seconds
+
+
+def test_hf_job_timeout_constant_is_single_unit_and_covers_measured_runs() -> None:
+    """The fallback is handed to run_job as a raw string, and run_job's parser is
+    only `float(timeout[:-1]) * factor[timeout[-1]]` — a single unit suffix. A
+    compound "improvement" like "1d12h" would not survive that, so pin the shape
+    as well as the budget: it must clear the longest run we have measured
+    (SmolVLA 15k steps at 2.24 s/step on a10g-small ≈ 8.8h)."""
+    from makermodslab.runners.hf_cloud import HF_JOB_TIMEOUT
+
+    assert isinstance(HF_JOB_TIMEOUT, str)
+    factors = {"s": 1, "m": 60, "h": 3600, "d": 3600 * 24}  # run_job's own table
+    assert HF_JOB_TIMEOUT[-1] in factors
+    seconds = float(HF_JOB_TIMEOUT[:-1]) * factors[HF_JOB_TIMEOUT[-1]]  # no ValueError
+    assert seconds == 24 * 3600
+    assert seconds > 8.8 * 3600
 
 
 def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
@@ -393,3 +757,137 @@ def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="2h")) == 7200
+
+
+# --- stop(): distinguishing a cancel from a crash ---------------------------
+#
+# returncode() collapses every non-COMPLETED stage to 1, so the registry
+# classifies cloud runs on terminal_stage() instead. These cover stop()'s own
+# decisions only — no submission, no threads, no network — because the stage
+# stop() leaves behind is what decides whether a stopped run reads as
+# `interrupted` or as a failed model.
+
+
+class _FakeStatus:
+    def __init__(self, stage, message=None):
+        self.stage = stage
+        self.message = message
+
+
+class _FakeJobInfo:
+    def __init__(self, stage, message=None):
+        self.status = _FakeStatus(stage, message)
+
+
+class _FakeJobsApi:
+    """Just the two calls stop() makes."""
+
+    def __init__(self, *, cancel_raises=False, inspect=None, inspect_raises=False):
+        self._cancel_raises = cancel_raises
+        self._inspect = inspect
+        self._inspect_raises = inspect_raises
+        self.cancelled = []
+        self.inspected = []
+
+    def cancel_job(self, job_id):
+        self.cancelled.append(job_id)
+        if self._cancel_raises:
+            raise RuntimeError("404 job already ended")
+
+    def inspect_job(self, job_id):
+        self.inspected.append(job_id)
+        if self._inspect_raises:
+            raise RuntimeError("network down")
+        return self._inspect
+
+
+def _runner_with(api, tmp_path, *, stage=None):
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "a10g-small")
+    runner._api = api
+    runner._hf_job_id = "job-1"
+    runner._terminal_status = stage
+    return runner
+
+
+def test_stop_records_canceled_stage(tmp_path) -> None:
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert api.cancelled == ["job-1"]
+    assert runner.terminal_stage() == "CANCELED"
+    assert runner.is_running() is False
+    # No corrective lookup needed when the cancel was accepted.
+    assert api.inspected == []
+
+
+def test_stop_does_not_overwrite_a_stage_the_poller_already_saw(tmp_path) -> None:
+    """_set_terminal is idempotent, and that is what keeps a run which
+    finished before the stop landed reported as COMPLETED."""
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path, stage="COMPLETED")
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "COMPLETED"
+    assert runner.returncode() == 0
+
+
+def test_stop_adopts_the_real_stage_when_cancel_is_refused(tmp_path) -> None:
+    """cancel_job refusing usually means the job had ALREADY ended, so the
+    pre-set CANCELED describes a run that finished on its own. Re-read it."""
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("COMPLETED"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert api.inspected == ["job-1"]
+    assert runner.terminal_stage() == "COMPLETED"
+    assert runner.returncode() == 0
+
+
+def test_stop_adopts_an_error_stage_and_its_message(tmp_path) -> None:
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("ERROR", "Job timeout"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "ERROR"
+    assert runner.terminal_message() == "Job timeout"
+
+
+def test_stop_keeps_canceled_when_the_stage_cannot_be_re_read(tmp_path) -> None:
+    """An unreachable Hub leaves CANCELED standing: our cancel is already out,
+    so it's the best available account of the run."""
+    api = _FakeJobsApi(cancel_raises=True, inspect_raises=True)
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "CANCELED"
+
+
+def test_stop_keeps_canceled_when_the_job_is_still_running(tmp_path) -> None:
+    """cancel_job can also fail transiently. A non-terminal stage is no
+    evidence that the run ended on its own, so don't adopt it."""
+    api = _FakeJobsApi(cancel_raises=True, inspect=_FakeJobInfo("RUNNING"))
+    runner = _runner_with(api, tmp_path)
+
+    runner.stop()
+
+    assert runner.terminal_stage() == "CANCELED"
+
+
+def test_stop_is_a_noop_before_submission(tmp_path) -> None:
+    api = _FakeJobsApi()
+    runner = _runner_with(api, tmp_path)
+    runner._hf_job_id = None
+
+    runner.stop()
+
+    assert api.cancelled == []
+    assert runner.terminal_stage() is None

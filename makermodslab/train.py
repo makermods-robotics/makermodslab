@@ -80,6 +80,51 @@ def _policy_hub_flags() -> list[str]:
     return ["--policy.private", "false", "--policy.tags", tag_list]
 
 
+# Which optimizer knobs each policy type actually exposes on ITS OWN config.
+#
+# Why this exists: the form always runs with `use_policy_training_preset true`,
+# and lerobot's TrainPipelineConfig.validate() then REPLACES the whole optimizer
+# with `active_cfg.get_optimizer_preset()` (configs/train.py:249-253) on every
+# fresh run. So `--optimizer.*` flags are silently discarded — the only way to
+# influence the optimizer is to set the POLICY fields the preset is built from
+# (`ACTConfig.get_optimizer_preset()` -> `AdamWConfig(lr=self.optimizer_lr,
+# weight_decay=self.optimizer_weight_decay)`), i.e. `--policy.optimizer_lr`.
+#
+# Gating is load-bearing, not cosmetic: draccus fails at CLI PARSE time when
+# given a `--policy.<field>` the selected policy config doesn't declare, so
+# emitting an unsupported knob kills the run before training starts. And the
+# /policy-optimizer-defaults payload can NOT be used to derive this — both
+# AdamWConfig and AdamConfig carry a `grad_clip_norm` field regardless of
+# whether the policy exposes an `optimizer_grad_clip_norm` knob.
+#
+# Derived by dataclass introspection of the pinned lerobot (see the `lerobot`
+# commit pin in pyproject.toml): for each policy in the form's
+# POLICY_TYPE_OPTIONS, `dataclasses.fields(make_policy_config(<type>))`.
+# Re-verify after a pin bump. Unknown/absent policy types fall back to lr-only.
+#
+# Notable: `gaussian_actor` exposes NONE of the three (its preset is a
+# MultiAdamConfig built from per-group settings), so it gets an empty set.
+_POLICY_OPTIMIZER_FIELDS: dict[str, frozenset[str]] = {
+    "act": frozenset({"lr", "weight_decay"}),
+    "diffusion": frozenset({"lr", "weight_decay"}),
+    "pi0": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    "smolvla": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    "tdmpc": frozenset({"lr"}),
+    "vqbet": frozenset({"lr", "weight_decay"}),
+    "pi0_fast": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    # Same PreTrainedConfig shape as pi0 (verified by dataclass introspection
+    # against the pinned lerobot: identical optimizer_lr/betas/eps/
+    # weight_decay/grad_clip_norm/scheduler_* fields and defaults).
+    "pi05": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    "gaussian_actor": frozenset(),
+}
+
+# Conservative fallback for a policy type not in the table (e.g. one added to
+# the form ahead of this table, or an old persisted config). `optimizer_lr` is
+# the one knob every action policy in the pin declares.
+_DEFAULT_POLICY_OPTIMIZER_FIELDS = frozenset({"lr"})
+
+
 def _resolve_device(device: str | None) -> str:
     """Resolve the requested training device to a concrete backend.
 
@@ -137,6 +182,31 @@ class TrainingRequest(BaseModel):
     # needs the checkpoint's train_config.json to reconstruct the run).
     resume_from_job_id: str | None = None
     resume_from_step: int | None = None
+    # CHAIN REWIND. `resume_from_job_id` is the LINEAGE EDGE — always the leaf
+    # the user clicked, so chains stay linear (parent -> leaf -> this run). This
+    # field is the PROVENANCE: which run's storage the chosen checkpoint bytes
+    # actually come from, when the user rewound to an ancestor's checkpoint
+    # rather than the leaf's own. None ⇒ the leaf owns it (every plain
+    # tip-resume, and every record written before rewind existed — so no
+    # migration).
+    #
+    # It cannot be derived from the step, which is why it is carried
+    # explicitly: rewind itself produces same-step-different-owner checkpoints
+    # on ONE linear path. Rewind a leaf to its trunk's step 2000, and the new
+    # run saves its own 4000 and 6000 alongside the trunk's 4000 and the old
+    # leaf's 6000 — all four on the new run's single ancestor path. Guessing
+    # the owner from the step would silently train from different weights than
+    # the user picked. JobRegistry.start refuses an owner that is not on the
+    # leaf's ancestor path or does not hold the named step.
+    #
+    # WIDER THAN THE UI, deliberately (user decision 2026-08-10). The app's
+    # Continue is latest-only: it always resumes the newest checkpoint on the
+    # lineage, so the only owner it ever names is the one that happens to hold
+    # that checkpoint — an ancestor exactly when the leaf saved nothing of its
+    # own. An arbitrary rewind is reachable only by calling the API directly.
+    # The guards below are therefore not dead code protecting a UI path; they
+    # are the whole validation for a surface the UI no longer narrows first.
+    resume_from_checkpoint_job_id: str | None = None
     # Set by the "Fine-tune" flow: start a FRESH run (fresh optimizer, step 0)
     # whose weights are initialized from an imported/existing checkpoint. Unlike
     # resume, this needs no optimizer/step state — weights-only is exactly the
@@ -159,6 +229,30 @@ class TrainingRequest(BaseModel):
     # resume source is a cloud run; never set for local runs.
     resume_from_hub_repo: str | None = None
     resume_from_hub_step: str | None = None
+    # Cross-runner resume, local parent → cloud target (F7). The parent's
+    # checkpoint is on THIS machine, so it has to be uploaded to the Hub before
+    # a pod can read it. That upload is a deliberate act, not a side effect of
+    # clicking Continue: the client must say yes here, and the registry refuses
+    # the launch otherwise (naming the control that grants it). Ignored on every
+    # other path — nothing is uploaded when the checkpoint is already on the Hub,
+    # including a re-resume of a step a previous continuation already pushed.
+    upload_resume_checkpoint: bool = False
+    # The fine-tune twin of the consent above: a fine-tune whose BASE checkpoint
+    # lives only on this machine, launched on cloud compute. The base's weights
+    # (pretrained_model/ only — a fine-tune never reads training_state/) are
+    # staged to the same private per-source Hub repo a cloud resume uses, and
+    # the registry refuses the launch without this consent. Ignored whenever the
+    # base is already on the Hub, including a re-fine-tune of a step an earlier
+    # launch already staged.
+    upload_finetune_checkpoint: bool = False
+    # Set by the registry (never by a client) when `resume_from_hub_repo` is the
+    # staging repo above rather than a cloud parent's own output repo. It tells
+    # the cloud runner not to adopt the source repo as this run's OUTPUT repo:
+    # a cloud→cloud continuation shares its parent's repo on purpose (one
+    # lineage, one place), but a local→cloud one must not publish into a staging
+    # repo that exists only to carry the parent's bytes. Defaults False so
+    # configs persisted before F7 — all of them cloud→cloud — keep their meaning.
+    resume_from_uploaded_checkpoint: bool = False
 
     # Weights & Biases
     wandb_enable: bool = False
@@ -222,6 +316,27 @@ class TrainingRequest(BaseModel):
         return text
 
 
+def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:
+    """`--policy.optimizer_*` flags for the knobs this policy actually exposes.
+
+    Fresh runs only — see `_POLICY_OPTIMIZER_FIELDS` above for why these replace
+    the inert `--optimizer.*` flags, and why unsupported knobs must be dropped
+    rather than passed through. A value the policy can't accept is silently
+    skipped: the user's stored config keeps it (so switching back to a policy
+    that does support it restores the value) but it never reaches argv.
+    """
+    supported = _POLICY_OPTIMIZER_FIELDS.get(request.policy_type, _DEFAULT_POLICY_OPTIMIZER_FIELDS)
+    flags: list[str] = []
+    for name, value in (
+        ("lr", request.optimizer_lr),
+        ("weight_decay", request.optimizer_weight_decay),
+        ("grad_clip_norm", request.optimizer_grad_clip_norm),
+    ):
+        if value is not None and name in supported:
+            flags.extend([f"--policy.optimizer_{name}", str(value)])
+    return flags
+
+
 def build_training_command(
     request: TrainingRequest, output_dir: str, python_executable: str = "python"
 ) -> list[str]:
@@ -247,7 +362,11 @@ def build_training_command(
     # from config_path, not the CLI. --steps must be raised above the resumed
     # step for the loop to do any work; --output_dir points new checkpoints at
     # this job's own dir so tracking stays consistent (state still loads from
-    # the source checkpoint).
+    # the source checkpoint). --num_workers rides along too: it is a
+    # host-capacity knob, not an experiment property, and a resume can land on a
+    # different flavor than the parent run, so inheriting the checkpoint's
+    # worker count would oversubscribe or starve the new host. (A bare int
+    # decodes fine through the config_path parse path.)
     if request.resume and request.config_path:
         # lerobot pre-parses config_path with its own parser that ONLY accepts
         # the "--config_path=<path>" form (space-separated is silently ignored,
@@ -256,6 +375,7 @@ def build_training_command(
         cmd.extend(["--resume", "true"])
         cmd.extend(["--output_dir", output_dir])
         cmd.extend(["--steps", str(request.steps)])
+        cmd.extend(["--num_workers", str(request.num_workers)])
         cmd.extend(["--log_freq", str(request.log_freq)])
         cmd.extend(["--save_freq", str(request.save_freq)])
         cmd.extend(["--save_checkpoint", "true" if request.save_checkpoint else "false"])
@@ -266,8 +386,18 @@ def build_training_command(
         if request.policy_push_to_hub and request.policy_repo_id:
             cmd.extend(["--policy.repo_id", request.policy_repo_id])
         if request.policy_push_to_hub:
-            # Public + required Hub tags, same global default as datasets.
-            cmd.extend(_policy_hub_flags())
+            # Visibility only — NOT _policy_hub_flags(). On the resume path
+            # lerobot parses via TrainPipelineConfig.from_pretrained(config_path,
+            # cli_args=...) -> draccus.parse(cls, config_file, args=...), which
+            # merges each CLI override into the config dict as a RAW STRING and
+            # then decodes it against the field type. `--policy.tags
+            # '[a,b,c]'` therefore reaches list[str] decoding as the literal
+            # string "[a,b,c]" and dies with DecodingError. (The fresh-run
+            # branch survives the same token because it goes through argparse,
+            # which splits the bracket form itself.) Re-passing tags is also
+            # redundant: the checkpoint's train_config.json already carries
+            # policy.tags/private/repo_id/push_to_hub. See MT24.
+            cmd.extend(["--policy.private", "false"])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
         return cmd
@@ -349,15 +479,15 @@ def build_training_command(
     cmd.extend(["--eval.batch_size", str(request.eval_batch_size)])
     cmd.extend(["--eval.use_async_envs", "true" if request.eval_use_async_envs else "false"])
 
-    # Optimizer
-    if request.optimizer_type:
-        cmd.extend(["--optimizer.type", request.optimizer_type])
-    if request.optimizer_lr is not None:
-        cmd.extend(["--optimizer.lr", str(request.optimizer_lr)])
-    if request.optimizer_weight_decay is not None:
-        cmd.extend(["--optimizer.weight_decay", str(request.optimizer_weight_decay)])
-    if request.optimizer_grad_clip_norm is not None:
-        cmd.extend(["--optimizer.grad_clip_norm", str(request.optimizer_grad_clip_norm)])
+    # Optimizer. Routed through the POLICY config, never `--optimizer.*`: with
+    # the training preset on (always, below) lerobot overwrites the whole
+    # optimizer from `active_cfg.get_optimizer_preset()`, so every `--optimizer.*`
+    # flag is discarded before the first step. `request.optimizer_type` is
+    # deliberately NOT emitted — the optimizer CLASS is fixed by the policy's
+    # preset (AdamW for act/smolvla/pi0/pi0_fast, Adam for diffusion/vqbet/tdmpc)
+    # and is not overridable; the field survives on the request only because
+    # persisted job configs and the resume prefill read it. See MT43.
+    cmd.extend(_policy_optimizer_flags(request))
 
     # Advanced
     cmd.extend(["--use_policy_training_preset", "true" if request.use_policy_training_preset else "false"])

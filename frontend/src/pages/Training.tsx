@@ -70,7 +70,14 @@ const ConfigurationMode: React.FC = () => {
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto max-w-3xl px-4 py-6">
         <TrainingConfigurator
-          key={`${resumeSource?.jobId ?? ""}::${finetuneSource?.jobId ?? ""}`}
+          // Same composite the studio's Train panel keys on: the seeds are read
+          // once as initial state, so the step (and a resume's checkpoint
+          // owner) has to be in the key too — a second seed for the same run
+          // would otherwise update the banner and the step validation while the
+          // payload kept the first pick.
+          key={`${resumeSource?.jobId ?? ""}@${resumeSource?.step ?? ""}@${
+            resumeSource?.checkpointJobId ?? ""
+          }::${finetuneSource?.jobId ?? ""}@${finetuneSource?.step ?? ""}`}
           policyType={policyType}
           onPolicyTypeChange={setPolicyType}
           datasetRepoId={datasetRepoId}

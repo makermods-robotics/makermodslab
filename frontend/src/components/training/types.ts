@@ -24,8 +24,12 @@ export interface TrainingConfig {
   // Output configuration
   resume: boolean;
   // Set by the "Continue training" flow (source run + checkpoint step).
+  // `resume_from_job_id` is the LEAF being continued — the lineage edge.
   resume_from_job_id?: string;
   resume_from_step?: number;
+  // Chain rewind: the ancestor whose storage holds that checkpoint, when it is
+  // not the leaf's own. Provenance, not the edge.
+  resume_from_checkpoint_job_id?: string;
   // Set by the "Fine-tune" flow: fresh run initialized from a source
   // checkpoint's weights (resume stays false).
   finetune_from_job_id?: string;
@@ -73,6 +77,7 @@ export const POLICY_TYPE_OPTIONS: {
   },
   { value: "diffusion", label: "Diffusion", display: "Diffusion Policy" },
   { value: "pi0", label: "PI0", display: "PI0" },
+  { value: "pi05", label: "PI0.5", display: "PI0.5" },
   { value: "smolvla", label: "SmolVLA", display: "SmolVLA" },
   { value: "tdmpc", label: "TD-MPC", display: "TD-MPC" },
   { value: "vqbet", label: "VQ-BeT", display: "VQ-BeT" },
@@ -135,4 +140,32 @@ export interface ConfigComponentProps {
     key: T,
     value: TrainingConfig[T],
   ) => void;
+  /** True on a RESUME entry (a Continue / Resume seed). lerobot rebuilds the
+   * run's shape from the checkpoint's train_config.json, and
+   * build_training_command's resume branch (makermodslab/train.py) passes it
+   * only the continuation essentials — config_path, resume, output_dir, steps,
+   * num_workers, log_freq, save_freq, save_checkpoint, the push-to-hub flags
+   * and job_name.
+   * Every other hyperparameter the form shows is silently discarded, so on a
+   * resume those controls render read-only instead of pretending to matter. */
+  resumeLocked?: boolean;
 }
+
+// Shown once where a card's inherited (read-only) fields begin. Deliberately
+// text-only: the fine-tune flow is reached from a model's own card, not from
+// here, so this points at it in prose rather than growing a button.
+//
+// Worded around the BEHAVIOUR ("rebuilt from the checkpoint") rather than the
+// displayed value: the form does not prefill these controls from the parent
+// run's persisted config, so the number beside the note is the form's default,
+// not the parent's. Saying "inherited" of a control showing a default would be
+// a fresh untruth — the lock's whole job is to stop the form claiming influence
+// it does not have.
+export const RESUME_INHERITED_NOTE =
+  "Rebuilt from the parent run's checkpoint — a resume continues the same experiment, so changing these here has no effect. To train with different settings, fine-tune from this checkpoint instead.";
+
+// The same idea for a lone locked control that sits directly under the resume
+// banner (which already carries the full explanation) — repeating the whole
+// sentence beside every field reads as nagging.
+export const RESUME_INHERITED_SHORT =
+  "Rebuilt from the parent run's checkpoint.";

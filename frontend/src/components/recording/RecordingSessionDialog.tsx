@@ -66,6 +66,10 @@ type Phase = "preparing" | "recording" | "resetting" | "completed";
 interface BackendStatus {
   recording_active: boolean;
   current_phase: string;
+  // Only meaningful while current_phase === "reconnecting_robot" — which
+  // connect attempt is about to be retried, out of connect_retry_max.
+  connect_retry_attempt?: number;
+  connect_retry_max?: number;
   current_episode?: number;
   total_episodes?: number;
   saved_episodes?: number;
@@ -380,10 +384,25 @@ const RecordingSessionDialog: React.FC<{
         // The backend rejected the start (e.g. 409 already-active, or a config
         // error) — no session is ours to stop, so keep the safety net from
         // firing a stop that would kill an unrelated in-flight session.
+        // A rejection now raises HTTPException, whose body carries the reason
+        // under "detail" (FastAPI's convention), not "message" — read both so
+        // the specific reason (already active / invalid name / etc.) still
+        // reaches the toast instead of falling back to the generic text.
+        // A 422 (request validation failure) puts an array of {loc,msg,type}
+        // in `detail` instead of a string — toast() renders description as a
+        // React node, so an unguarded array would crash the render.
         markHandled();
+        const detail =
+          typeof data.detail === "string"
+            ? data.detail
+            : Array.isArray(data.detail)
+              ? data.detail
+                  .map((d: { msg?: string }) => d?.msg ?? JSON.stringify(d))
+                  .join("; ")
+              : null;
         toast({
           title: "Error Starting Recording",
-          description: data.message || "Failed to start recording session.",
+          description: detail || data.message || "Failed to start recording session.",
           variant: "destructive",
         });
         onExitRef.current();
@@ -756,6 +775,13 @@ const RecordingSessionDialog: React.FC<{
     // substep the startup is actually in.
     const raw = backendStatus?.current_phase;
     if (raw === "connecting_robot") return "CONNECTING ARM & CAMERAS…";
+    if (raw === "reconnecting_robot") {
+      const attempt = backendStatus?.connect_retry_attempt;
+      const max = backendStatus?.connect_retry_max;
+      return attempt && max
+        ? `CAMERA HICCUP, RETRYING (${attempt}/${max})…`
+        : "CAMERA HICCUP, RETRYING…";
+    }
     if (raw === "connecting_teleop") return "CONNECTING LEADER ARM…";
     if (raw === "stopping") return "STOPPING…";
     if (raw === "error") return "SESSION ERROR — SEE LOG";

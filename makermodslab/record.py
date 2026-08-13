@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import collections
-import contextlib
 import json
 import logging
 import shutil
@@ -42,8 +41,15 @@ from .datasets import (
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
-from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
+from .teleoperate import (
+    _device_buses,
+    _return_followers_to_rest,
+    force_disable_torque,
+    force_disconnect_partial,
+)
 from .utils.config import (
+    CameraResolutionError,
+    load_robot_cameras,
     validate_dataset_repo_id,
     with_makermodslab_tag,
 )
@@ -76,6 +82,10 @@ _DEFAULT_FOURCC = "MJPG"
 _BUS_SYNC_READ_RETRIES = 2
 _original_sync_read = MotorsBus.sync_read
 
+# Robot-connect attempts before giving up on transient camera turbulence (see
+# the retry loop below and connect_retry_attempt above).
+_CONNECT_ATTEMPTS = 3
+
 
 def _sync_read_with_default_retries(
     self, data_name, motors=None, *, normalize=True, num_retry=_BUS_SYNC_READ_RETRIES
@@ -94,11 +104,14 @@ if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":  # idempot
 # polled GET endpoint. The deque is capacity-capped (maxlen) so memory can never
 # grow unbounded no matter how chatty or long a session is.
 _RECORD_LOG_MAX_LINES = 500
-# Loggers whose records describe a recording session: this module's logger and
+# Loggers whose records describe a recording session: this module's logger,
 # lerobot's own record/control loggers (the "Recording episode N", save/reset
-# lines come from there). Attaching to the shared "lerobot" ancestor captures
-# any lerobot child logger via propagation.
-_RECORD_LOG_LOGGER_NAMES = (__name__, "lerobot")
+# lines come from there; attaching to the shared "lerobot" ancestor captures
+# any lerobot child logger via propagation), and teleoperate's connect/
+# teardown logger — force_disconnect_partial's warnings and torque-disable
+# errors otherwise only ever reach the server console, invisible to an
+# operator watching the Record page during a failed/retried connect.
+_RECORD_LOG_LOGGER_NAMES = (__name__, "lerobot", "makermodslab.teleoperate")
 
 
 class _RingBufferLogHandler(logging.Handler):
@@ -192,6 +205,14 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
+# Set only while current_phase == "reconnecting_robot" (the teardown and
+# backoff sleep between connect retries below); 0 otherwise — including on a
+# successful connect and on the terminal failure, so a reader can treat
+# "connect_retry_attempt > 0" as "a retry is in flight right now". Lets the
+# frontend show which retry attempt that is ("Camera hiccup, retrying (2/3)…")
+# instead of one static "Connecting arm & cameras…" label for a window that
+# can run past ten seconds across multiple component-wise teardowns.
+connect_retry_attempt = 0
 # Total time spent paused during the CURRENT reset phase, credited on resume
 # (see handle_resume_recording). Reset to 0.0 at the start of every new reset
 # phase (both reset-phase call sites in record_with_web_events) AND at the
@@ -340,9 +361,17 @@ class RecordingRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
-    # Robot record name — used only as the BiSO staging base id (bimanual). It
-    # decides the on-disk staging dir, not which calibration drives which arm.
-    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    # Robot record name. Two jobs:
+    #   1. The session's CAMERAS are resolved from this record, server-side
+    #      (utils/config.load_robot_cameras) — the request carries no camera
+    #      payload at all. Blank ⇒ a camera-less recording; a non-blank name
+    #      with no record on disk is a 400, never a silent camera-less run.
+    #   2. Bimanual only: the BiSO staging base id — it decides the on-disk
+    #      staging dir, not which calibration drives which arm. Blank/invalid
+    #      falls back to DEFAULT_BIMANUAL_BASE.
+    # A `cameras` dict used to live on this model. It was removed (the panel is
+    # read-only now); pydantic ignores unknown fields, so an older frontend's
+    # payload still parses and its stale camera set is correctly ignored.
     robot_name: str = ""
     dataset_repo_id: str
     single_task: str
@@ -356,7 +385,6 @@ class RecordingRequest(BaseModel):
     private: bool = False
     resume: bool = False
     streaming_encoding: bool = True
-    cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
     # Escape hatch for the arm-identity guard (see makermodslab/arm_identity.py):
     # when true, record even if the connected arms don't match their calibrations.
@@ -395,7 +423,10 @@ def _platform_backend():
 
 
 def _build_camera_configs(cameras: dict, default_backend) -> dict:
-    """Convert the frontend camera dict into OpenCVCameraConfig objects.
+    """Convert the session camera dict into OpenCVCameraConfig objects.
+
+    The dict is `{camera name: settings}` as resolved from the robot record by
+    utils/config.load_robot_cameras — it never comes from the request.
 
     `backend` (a Cv2Backends name) and `fourcc` (a 4-char code) are optional per
     camera; when omitted `backend` falls back to `default_backend` and `fourcc`
@@ -435,11 +466,71 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
-def create_record_config(request: RecordingRequest) -> RecordConfig:
-    """Create a RecordConfig from the recording request"""
-    # Convert the frontend camera dict into OpenCVCameraConfig objects. Backend
-    # defaults to the platform pin unless the request overrides it per camera.
-    camera_configs = _build_camera_configs(request.cameras, _platform_backend())
+def _is_transient_camera_error(msg: str) -> bool:
+    """True when a robot-connect failure is transient camera-session
+    turbulence, curable by a clean re-connect, rather than a real failure.
+
+    An AVCaptureSession opened into another session's asynchronous teardown
+    (e.g. right after a hot-unplug) intermittently comes up wrong —
+    forensically established 2026-07-09:
+      * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
+      * "timed out waiting for frame" — session came up frame-dead (opens
+        fine, background reader never receives a frame)
+      * "read thread is not running" — the same frame-dead session after its
+        background reader has already died (see below)
+
+    What reaches us, and what doesn't. Only `connect()`'s own exceptions land
+    here; anything raised inside a camera's background reader thread does not.
+    That matters for the wrong-native-format case (session lands 640x360
+    instead of 640x480): lerobot detects it in `_postprocess_image`, which
+    runs *only* in `_read_loop`, so its "do not match configured" text never
+    propagates — after 12 consecutive mismatches the loop dies and the caller
+    sees `async_read`'s "read thread is not running" instead (or, if the
+    reader is merely stalled, the timeout above). "do not match configured" is
+    kept in the tuple as a cheap guard in case upstream ever surfaces it
+    synchronously, but do not expect it to fire; "read thread is not running"
+    is the marker that actually catches that case today.
+
+    NOT included: "failed to set capture_" (width/height mismatch). That
+    string is also produced when a camera simply doesn't support the
+    configured resolution — a permanent misconfiguration, not turbulence —
+    and `utils/errors.py::friendly_hint` classifies it that way for the
+    operator. Retrying it would burn ~4s of backoff plus three connects on a
+    failure that cannot succeed before showing the correct "click Auto" hint.
+
+    Note "failed to set fps" has the *same* permanent-misconfiguration mode
+    (an operator can type an fps the device can't do, in the same settings
+    panel), so it is retried on the optimistic reading and then, if it never
+    recovers, handed to `friendly_hint`'s matching fps branch for the same
+    "click Auto" guidance. Keep those two in sync: any marker added here that
+    can also be a permanent misconfiguration needs a `friendly_hint` branch,
+    or the operator waits out the retries and gets no advice at the end.
+    """
+    low = msg.lower()
+    return any(
+        marker in low
+        for marker in (
+            "failed to set fps",
+            "do not match configured",
+            "read thread is not running",
+            "timed out waiting for frame",
+        )
+    )
+
+
+def create_record_config(request: RecordingRequest, cameras: dict | None = None) -> RecordConfig:
+    """Create a RecordConfig from the recording request.
+
+    `cameras` is the session camera dict already resolved from the robot record
+    (handle_start_recording resolves it inside its lock so a bad robot name is a
+    400 before the session claims anything). Left None it is resolved here from
+    `request.robot_name`, so a direct caller gets the same record-driven set.
+    """
+    # Convert the session camera dict into OpenCVCameraConfig objects. Backend
+    # defaults to the platform pin unless the record pins one per camera.
+    if cameras is None:
+        cameras = load_robot_cameras(request.robot_name)
+    camera_configs = _build_camera_configs(cameras, _platform_backend())
 
     if request.mode == "bimanual":
         # Build a lerobot BiSO leader+follower pair (config assembly + calibration
@@ -500,7 +591,11 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
 
 
 def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
-    """Handle start recording request by using the existing record() function"""
+    """Handle start recording request by using the existing record() function.
+
+    Returns a dict — the route layer turns a rejection into an HTTPException
+    using the "status_code" key when present (409 for an active-session
+    conflict, 400 for a malformed dataset name), defaulting to 500 otherwise."""
     global \
         recording_active, \
         releasing, \
@@ -517,7 +612,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         last_session_outcome, \
         last_session_error, \
         identity_warnings, \
-        discard_requested
+        discard_requested, \
+        connect_retry_attempt
 
     from . import (
         auto_calibrate as _auto_calibrate,
@@ -548,6 +644,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         if recording_active:
             return {
                 "success": False,
+                "status_code": 409,
                 "message": (
                     "The previous session is still releasing the arms. Try again in a few seconds."
                     if releasing
@@ -555,16 +652,33 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 ),
             }
         if _teleoperate.teleoperation_active:
-            return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Teleoperation is currently active. Stop it first.",
+            }
         if _rollout.inference_active:
-            return {"success": False, "message": "Inference is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Inference is currently active. Stop it first.",
+            }
         if _calibrate.calibration_is_active():
-            return {"success": False, "message": "Calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Calibration is currently active. Stop it first.",
+            }
         if _auto_calibrate.auto_calibration_is_active():
-            return {"success": False, "message": "Auto-calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Auto-calibration is currently active. Stop it first.",
+            }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
+                "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
             }
         if _replay.replay_active:
@@ -579,7 +693,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 request.dataset_repo_id,
                 name_reason,
             )
-            return {"success": False, "message": name_reason}
+            return {"success": False, "status_code": 400, "message": name_reason}
+        # Resolve the session's cameras from the robot record NAMED BY THE
+        # REQUEST — the request itself carries no camera payload. Done here,
+        # before the flag is claimed, so a wrong robot name or an ambiguous
+        # camera set is a plain 400 instead of a session that starts and
+        # silently records no video.
+        try:
+            session_cameras = load_robot_cameras(request.robot_name)
+        except CameraResolutionError as exc:
+            logger.warning("Rejected recording start: %s", exc)
+            return {"success": False, "status_code": 400, "message": str(exc)}
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later release grace short until the server
@@ -596,6 +720,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes = 0
         current_phase = "preparing"
         phase_start_time = None
+        connect_retry_attempt = 0
         last_session_discarded_empty = False
         last_session_outcome = None
         last_session_error = None
@@ -636,7 +761,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             "paused": False,  # Reset-phase pause/resume (mouse-only, no keyboard shortcut)
         }
 
-        record_config = create_record_config(request)
+        record_config = create_record_config(request, cameras=session_cameras)
 
         def recording_worker():
             global \
@@ -668,10 +793,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
                 # Give the frontend's camera streams time to release the
                 # underlying devices before lerobot tries to open them.
-                if request.cameras:
+                if session_cameras:
                     logger.info(
                         "Waiting for camera resources to be released (cameras: %s)",
-                        list(request.cameras.keys()),
+                        list(session_cameras.keys()),
                     )
                     time.sleep(2.0)
 
@@ -750,7 +875,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 recording_start_time = None
                 phase_start_time = None
                 current_episode = 1
-                saved_episodes = 0
+                # saved_episodes is deliberately left as-is (not reset here):
+                # handle_recording_status reports it in the terminal
+                # (session_ended) status, and the next session already resets it
+                # under the lock in handle_start_recording. Zeroing it here would
+                # erase the count before any poll can read it.
                 logger.info("Recording session ended")
 
         recording_thread = threading.Thread(target=recording_worker, name="recording-worker", daemon=True)
@@ -885,7 +1014,10 @@ def handle_pause_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     if current_phase not in ("recording", "resetting"):
-        return {"success": False, "message": "Pause is only available while recording or during the reset gap"}
+        return {
+            "success": False,
+            "message": "Pause is only available while recording or during the reset gap",
+        }
     if recording_events.get("paused", False):
         return {"success": True, "message": "Already paused", "events_state": dict(recording_events)}
 
@@ -908,7 +1040,10 @@ def handle_resume_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     if current_phase not in ("recording", "resetting"):
-        return {"success": False, "message": "Resume is only available while recording or during the reset gap"}
+        return {
+            "success": False,
+            "message": "Resume is only available while recording or during the reset gap",
+        }
     if not recording_events.get("paused", False):
         return {"success": True, "message": "Not paused", "events_state": dict(recording_events)}
 
@@ -930,9 +1065,7 @@ def _reset_paused() -> bool:
     leak into a later phase's available_controls or status — see the
     loop-exit cleanup in record_with_web_events, which is defense in depth
     on top of this gate, not a substitute for it."""
-    return bool(
-        recording_events and current_phase == "resetting" and recording_events.get("paused", False)
-    )
+    return bool(recording_events and current_phase == "resetting" and recording_events.get("paused", False))
 
 
 def _pause_armed() -> bool:
@@ -971,6 +1104,10 @@ def handle_recording_status() -> dict[str, Any]:
     status = {
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
+        # Only meaningful while current_phase == "reconnecting_robot": which
+        # connect attempt is about to be retried, out of _CONNECT_ATTEMPTS.
+        "connect_retry_attempt": connect_retry_attempt,
+        "connect_retry_max": _CONNECT_ATTEMPTS,
         "session_ended": session_ended,  # New field to indicate session completion
         # True during the post-session rest-pose return: the recording loop is
         # over but the arm is still energized and driving back to its
@@ -986,7 +1123,8 @@ def handle_recording_status() -> dict[str, Any]:
         "pause_armed": _pause_armed(),
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
-            "exit_early": recording_active and not _reset_paused(),  # Right arrow key replacement; disabled while paused
+            "exit_early": recording_active
+            and not _reset_paused(),  # Right arrow key replacement; disabled while paused
             "rerecord_episode": recording_active
             and current_phase == "recording",  # Only during recording phase
             "pause_recording": recording_active
@@ -1030,6 +1168,10 @@ def handle_recording_status() -> dict[str, Any]:
         status["outcome"] = last_session_outcome
         status["error"] = last_session_error
         status["hint"] = friendly_hint(last_session_error)
+        # The frontend's exit handoff reads this to show/pass along how many
+        # episodes actually got saved — it must survive past recording_active
+        # flipping False, not just live-poll while recording is in progress.
+        status["saved_episodes"] = saved_episodes
 
     # Warn-but-allow arm-identity findings (the guard runs in the worker, after
     # the start response) — the frontend shows these as a non-blocking toast.
@@ -1107,8 +1249,12 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
 
     # The listing just changed — drop the cached /datasets listing so the delete
-    # reflects immediately instead of after the TTL.
+    # reflects immediately instead of after the TTL. Also drop the cached
+    # Hub-existence answer: get_hub_status memoizes "local_only" (and "on_hub")
+    # for the process lifetime, so without this a dataset checked before the
+    # delete would keep reporting "local_only" forever instead of "absent".
     invalidate_dataset_listing_cache()
+    invalidate_hub_status(repo_id)
 
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
@@ -1478,7 +1624,7 @@ def record_with_web_events(
     from lerobot.utils.utils import log_say
 
     global current_phase, phase_start_time, current_episode, saved_episodes, releasing
-    global identity_warnings
+    global identity_warnings, connect_retry_attempt
     global paused_accum_seconds, pause_started_at
 
     robot = make_robot_from_config(cfg.robot)
@@ -1554,13 +1700,12 @@ def record_with_web_events(
     # handler already returns; no new plumbing.)
     current_phase = "connecting_robot"
     phase_start_time = time.time()
-    connect_attempts = 3
-    for attempt in range(1, connect_attempts + 1):
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
         try:
             logger.info(
                 "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
                 attempt,
-                connect_attempts,
+                _CONNECT_ATTEMPTS,
             )
             # Calibration is already on disk (loaded via the configs above), so never
             # let connect() drop into interactive recalibration — that would hang the
@@ -1570,23 +1715,7 @@ def record_with_web_events(
             break
         except Exception as e:
             msg = str(e)
-            # Transient camera-session turbulence, all observed on this bench and
-            # all curable by a clean re-connect (an AVCaptureSession opened into
-            # another session's asynchronous teardown intermittently comes up
-            # wrong — forensically established 2026-07-09):
-            #   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
-            #   * "do not match configured"   — session landed the neighboring
-            #     native format (e.g. 640x360 instead of 640x480)
-            #   * "timed out waiting for frame" — session came up frame-dead
-            #     (opens fine, background reader never receives a frame)
-            transient_camera = any(
-                marker in msg.lower()
-                for marker in (
-                    "failed to set fps",
-                    "do not match configured",
-                    "timed out waiting for frame",
-                )
-            )
+            transient_camera = _is_transient_camera_error(msg)
             logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
             # If robot connection fails due to camera conflict, provide clear error
             if (
@@ -1601,13 +1730,47 @@ def record_with_web_events(
                 logger.error(
                     "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
                 )
-            if attempt < connect_attempts and transient_camera:
-                # Drop any half-open handles from this failed attempt so the retry
-                # starts from a clean device, then let the OS release settle past
-                # the turbulence window before re-rolling the connect.
-                with contextlib.suppress(Exception):
-                    robot.disconnect()
+            will_retry = attempt < _CONNECT_ATTEMPTS and transient_camera
+            if will_retry:
+                # Enter the retry substep BEFORE the teardown, not after: the
+                # component-wise release below is the slow part (each wedged
+                # camera's disconnect joins a read thread that is waiting out
+                # a frame timeout), so bracketing only the 2s sleep would
+                # leave the operator staring at a static "Connecting arm &
+                # cameras…" for the window this substep exists to explain.
+                # Logged at INFO through this module's own logger (already in
+                # _RECORD_LOG_LOGGER_NAMES) so it reaches the visible
+                # Record-page log panel, not just the server console.
+                current_phase = "reconnecting_robot"
+                # The attempt about to run, not the one that just failed —
+                # same convention as the log line below, so the Record page's
+                # dialog and its log panel can't disagree about the number
+                # (they sit one above the other).
+                connect_retry_attempt = attempt + 1
+                logger.info(
+                    "🔁 ROBOT CONNECTION: Camera hiccup, retrying (%d/%d) after OS release settles...",
+                    attempt + 1,
+                    _CONNECT_ATTEMPTS,
+                )
+            # Drop any half-open handles from this failed attempt so the retry
+            # starts from a clean device — and so a *terminal* failure doesn't
+            # leak the opened bus and camera read threads into the rest of the
+            # process. Must be the component-wise teardown, not
+            # robot.disconnect(): connect() dies with the later cameras still
+            # unopened, and lerobot's all-or-nothing is_connected guard makes
+            # disconnect() a no-op raise in exactly that state (see
+            # force_disconnect_partial).
+            force_disconnect_partial(robot, "robot")
+            if will_retry:
+                # Let the OS release settle past the turbulence window before
+                # re-rolling the connect.
                 time.sleep(2.0)
+                current_phase = "connecting_robot"
+                # Back to a plain connect attempt: keep the "0 unless we are
+                # in reconnecting_robot" contract this field documents, so a
+                # later reader can't mistake a healthy session for a retrying
+                # one.
+                connect_retry_attempt = 0
                 continue
             raise
 
@@ -1628,6 +1791,12 @@ def record_with_web_events(
             logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
         except Exception as e:
             logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
+            # The robot connected fine a moment ago; release both so a leader
+            # failure can't strand the follower's bus and camera threads for
+            # the rest of the process (partial teardown for the same reason as
+            # the robot-connect path above).
+            force_disconnect_partial(robot, "robot")
+            force_disconnect_partial(teleop, "teleop")
             raise
 
     # Arm-identity guard: read-only check that each connected arm matches its

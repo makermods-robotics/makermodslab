@@ -2,47 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## I10: real SIGTERM does not appear to gracefully stop a live, real-hardware teleoperation session
-
-**Status: RESOLVED for the scope actually tested — false alarm caused by a test-setup bug, not a real defect. A plain `kill -TERM` against a prod-mode, single-arm, actively-driving teleoperation session correctly runs I8's graceful stop. `uvicorn --reload`, bimanual, and a signal landing mid-release are all still untested — see "What was NOT tested" below before assuming those are covered too.**
-
-PR #29 (I8) added `stop_and_wait()` to `teleoperate.py`/`record.py` and wired both into `shutdown_event()` so that a `SIGTERM` (plain `kill <pid>`, or a `uvicorn --reload` restart) gracefully stops an active teleoperation/recording session — return-to-rest, torque release, disconnect — before the process exits, instead of orphaning the in-process control-loop thread. All of I8's automated tests pass, but they only ever invoke `shutdown_event()` directly via `asyncio.run(...)`; none of them go through a real OS signal delivered to a live process that's actually driving hardware.
-
-### Original finding (real hardware, twice in a row) — since invalidated, see below
-
-Tested that gap directly, against a real, connected SO-101 (single arm, leader `/dev/tty.usbmodem5B140311451` / follower `/dev/tty.usbmodem5B3E0901701`, calibration profile "autocalli robot"): started a real teleoperation session and never called stop, then sent a real `kill -TERM` to the running `makerlab` server process (prod mode, no `--reload`). Twice in a row the process exited in ~0.2–0.3s with zero log output from `handle_stop_teleoperation()`/`stop_and_wait()`, versus ~4s and full logging for an uninterrupted stop. Several hardware-free repros against "the real code" (`stop_and_wait()` directly, the real `server:app`, real pyserial reads at loop cadence) all worked correctly under SIGTERM, which pointed suspicion at the real `teleoperation_worker()` loop itself — possibly a Feetech bus call not responding the same way to a genuine OS signal as to an in-process call.
-
-**Root cause of the original finding: it wasn't a code bug, it was a branch bug.** `fix/i10-real-sigterm-skips-teleoperation-stop` was cut from `89eef7b`, the same commit I8 branched from — but I10 was never rebased or merged with I8's commits. Every real-hardware test run described above (and the hardware-free repros) ran against a `shutdown_event()` that was still the *original two-line stub* (log line, `stop_broadcast_thread()`, log line) — it never called `handle_stop_teleoperation()` or `stop_and_wait()` at all, because I8's wiring simply wasn't present on this branch. So of course nothing happened: there was nothing to run. This was caught by inspecting `git log fix/i10...origin/fix/i8` and finding I8's four commits absent, then confirming `shutdown_event()`'s body directly (no `asyncio.gather`, no `stop_teleoperation_and_wait` reference — just the pre-I8 original).
-
-### Corrected re-test (after merging I8 into this branch)
-
-Merged `origin/fix/i8-shutdown-orphans-teleop-recording-threads` into this branch (clean merge, no conflicts; `git merge-base` confirmed both branches shared `89eef7b`). Re-verified `shutdown_event()` now contains I8's `asyncio.gather(asyncio.to_thread(stop_teleoperation_and_wait), asyncio.to_thread(stop_recording_and_wait), ...)`. Full suite: 867 passed. Also added temporary entry/exit logging (`[I10]` tag) around every real Feetech bus call reachable from `teleoperation_worker()` — `teleop_device.get_action()`, `robot.send_action()`, the Present_Current `sync_read` in `PowerTelemetry.sample()`, and `robot.get_observation()` in `get_joint_positions_from_robot()` — to catch a call stuck mid-flight if the failure was real.
-
-Repeated the identical real-hardware procedure (start teleoperation, never call stop, real `kill -TERM` to the live prod-mode process) twice:
-
-- **First run** (pre-merge, unfixed code, instrumentation only): every `[I10] enter`/`exit` pair matched — no call was ever stuck. `shutdown_event()` ran (`Cleanup completed` logged) but with no trace of `stop_teleoperation_and_wait()`, exactly reproducing (and confirming the cause of) the original finding.
-- **Second run** (post-merge, I8's fix actually present): the log shows the full graceful path firing under the real signal — `Stop teleoperation triggered from web interface` → power-telemetry summary → `Rest-pose return starting`/`finished` (~4s, matching normal-stop timing) → both devices disconnected → `Teleoperation stopped` → `Broadcast thread stop requested` → `Cleanup completed`. One `[I10] enter teleop_device.get_action` line was in flight when the signal landed (interleaved with the shutdown log lines from the concurrent async handler) and still exited normally at 1.0ms — no hang, no interrupted call. `/teleoperation-status` confirmed `teleoperation_active: false` afterward with no cleanup error.
-
-Within the scope actually tested (below), I8 protects the arm during a real `kill <pid>` exactly as designed, once its own commits are actually part of the running code. There is no signal-vs-Feetech-call mechanism to chase.
-
-### What was NOT tested — do not assume these are fine
-
-- **`uvicorn --reload` restarts.** Both this investigation's two runs used a real `kill -TERM` against a **prod-mode** process (`_run_prod()`, no `--reload`). `--reload` goes through uvicorn's separate file-watcher/reloader supervisor process, which is a different signal-delivery path (parent forwards the signal to a child worker, on its own timing) — not exercised here at all, despite being named as one of the two triggers this whole investigation (and I8 itself) is meant to cover.
-- **Bimanual mode.** Both runs used a single-arm rig. `teleoperation_worker()` has a separate `is_bimanual` path (`BiSOFollower`/`BiSOLeader`, two buses, two rest poses, `asyncio.gather`-free sequential-looking bimanual bus access) that was never driven under a real signal.
-- **A SIGTERM landing mid-release** (i.e. while a previous stop's rest-pose return/torque-release is already in flight — the `releasing` state and its "second stop forces immediate release" path). Only a SIGTERM against an actively-driving, not-yet-stopped session was tested.
-- Recording's side of the same I8 mechanism (`stop_recording_and_wait`) — see below, blocked separately.
-
-Treat the resolution above as "plain `kill -TERM` against a prod-mode, single-arm, actively-driving teleoperation session is fine" — not as "the whole real-world SIGTERM/`--reload` risk is closed."
-
-### Still open (unrelated to the above, not blocking)
-
-- Recording's side of the same I8 mechanism (`stop_recording_and_wait`) was not exercised end-to-end against real hardware — blocked by a pre-existing, unrelated bug (`AttributeError: 'DatasetRecordConfig' object has no attribute 'vcodec'`) that stops any real recording session from starting in this environment. Worth a real-SIGTERM pass once that's fixed, but there's no reason from this investigation to expect it behaves differently from teleoperation — same `stop_and_wait` pattern, same `asyncio.gather` wiring, same in-process thread shape.
-- Whether I5 (inference) / I7 (auto-calibration) share any gap: not applicable here — this whole investigation turned out to be about a missing merge, not a subprocess-vs-thread distinction, so it says nothing new about those.
-
-### Recommendation
-
-Close this specific finding — the original SIGTERM-does-nothing report was a test-setup artifact, not a defect, for the scope actually tested. Don't broaden that to "I8 is fully validated on real hardware": `--reload`, bimanual, and mid-release SIGTERM are all still open and worth a real-hardware pass before treating those specifically as safe. PR #29's own diff was not found to have any defect by this investigation.
-
 ## Repository purpose
 
 MakerMods Lab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm (single or bimanual). It exposes teleoperation, dataset recording, calibration, training, inference, and replay as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows. It is a fork of Hugging Face's [leLab](https://github.com/huggingface/leLab), heavily extended by [makermods-robotics](https://github.com/makermods-robotics).
