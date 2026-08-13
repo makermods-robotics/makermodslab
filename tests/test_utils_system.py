@@ -175,18 +175,6 @@ def test_training_extra_available_flips_with_find_spec(monkeypatch) -> None:
     assert system.handle_get_training_extra()["install_hint"] == "pip install accelerate"
 
 
-def test_wandb_extra_available_flips_with_find_spec(monkeypatch) -> None:
-    import importlib.util
-
-    from makermodslab.utils import system
-
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-    assert system.handle_get_wandb_extra()["available"] is False
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
-    assert system.handle_get_wandb_extra()["available"] is True
-    assert system.handle_get_wandb_extra()["install_hint"] == "pip install wandb"
-
-
 def test_extra_available_swallows_find_spec_errors(monkeypatch) -> None:
     import importlib.util
 

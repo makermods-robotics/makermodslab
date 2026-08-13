@@ -107,6 +107,13 @@ from .rollout import (
     handle_stop_inference,
 )
 
+# Training is now job-based; see app/jobs.py.
+from .runners.hf_cloud import (
+    WANDB_KEY_MISSING_MESSAGE,
+    handle_get_wandb_credentials,
+    resolve_wandb_api_key,
+)
+
 # Import our custom teleoperation functionality
 from .teleoperate import (
     TeleoperateRequest,
@@ -115,8 +122,6 @@ from .teleoperate import (
     handle_teleoperation_status,
     stop_and_wait as stop_teleoperation_and_wait,
 )
-
-# Training is now job-based; see app/jobs.py.
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
@@ -160,13 +165,10 @@ from .utils.hf_auth import (
 from .utils.system import (
     handle_get_policy_extra,
     handle_get_training_extra,
-    handle_get_wandb_extra,
     handle_install_policy_extra,
     handle_install_policy_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
-    handle_install_wandb_extra,
-    handle_install_wandb_extra_status,
     open_folder_in_file_browser,
     warn_if_cuda_mismatch,
 )
@@ -1295,6 +1297,23 @@ async def create_training_job(req: Request):
                     "fetch it, or record/obtain the dataset locally first."
                 ),
             )
+
+    # W&B credentials, the FAST half (MT40). Any run that asks for W&B needs an
+    # API key on THIS machine, on either runner: a cloud job gets it forwarded
+    # as a job secret, and a local job's trainer is a non-tty subprocess that
+    # can't prompt for a login. Refuse here, before anything is uploaded,
+    # submitted or spawned.
+    #
+    # Fast half only, and for the same reason as the resume-steps guard above:
+    # it reads the REQUEST's `wandb_enable`, which on a resume is not the
+    # authority — JobRegistry.start overwrites it with the parent run's value
+    # (a continuation always re-opens the parent's W&B run). So resumes are
+    # skipped here and re-asked there, once the inherited value is known; that
+    # check is the authority and raises ValueError -> the 400 below.
+    if cfg.wandb_enable and not cfg.resume and not resolve_wandb_api_key():
+        logger.warning("Rejecting run: W&B enabled but no API key resolvable on this host.")
+        raise HTTPException(status_code=400, detail=WANDB_KEY_MISSING_MESSAGE)
+
     try:
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:
@@ -1978,22 +1997,19 @@ def install_training_extra_status():
     return handle_install_training_extra_status()
 
 
-@app.get("/system/wandb-extra")
-def get_wandb_extra():
-    """Return whether the `wandb` package is importable in this MakerMods Lab process."""
-    return handle_get_wandb_extra()
+@app.get("/system/wandb-credentials")
+def get_wandb_credentials():
+    """Whether a Weights & Biases API key is resolvable on this host.
 
+    Powers the training form's W&B preflight: the Start button reflects a
+    missing key BEFORE the click, rather than the launch 400ing on it. There
+    is deliberately no install endpoint beside this one — wandb the package is
+    a transitive dependency of the pinned lerobot, so the only thing that can
+    actually be missing is the credential.
 
-@app.post("/system/wandb-extra/install")
-def install_wandb_extra():
-    """Spawn `pip install wandb` as a background subprocess. No-op if already running."""
-    return handle_install_wandb_extra()
-
-
-@app.get("/system/wandb-extra/install-status")
-def install_wandb_extra_status():
-    """Return current wandb install state plus any pending log lines (drained on read)."""
-    return handle_install_wandb_extra_status()
+    Returns `{"available": bool, "login_hint": str}` and never the key itself.
+    """
+    return handle_get_wandb_credentials()
 
 
 @app.get("/system/policy-extra/{policy_type}")
