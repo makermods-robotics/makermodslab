@@ -828,6 +828,47 @@ def _read_trash_manifest(manifest_path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _iter_trash_manifests(root: Path) -> list[Path]:
+    """Every `*.manifest.json` trash manifest under `root`, one level deep at
+    most — mirrors list_local_datasets' own "walks one level deep" scope."""
+    manifests = list(root.glob("*.trash-*.manifest.json"))
+    for top in root.iterdir():
+        if top.is_dir() and not top.name.startswith("."):
+            manifests.extend(top.glob("*.trash-*.manifest.json"))
+    return manifests
+
+
+def list_deleted_episodes(repo_id: str) -> list[dict[str, Any]]:
+    """Unexpired episode-kind trash entries for `repo_id`, newest first."""
+    target = _resolve_cache_path(repo_id)
+    if target is None:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for manifest_path in target.parent.glob(f".{target.name}.trash-*.manifest.json"):
+        manifest = _read_trash_manifest(manifest_path)
+        if manifest is None or manifest.get("kind") != "episode":
+            continue
+        if manifest.get("repo_id") != repo_id:
+            continue
+        deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+        trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
+        out.append(
+            {
+                "trash_id": trash_id,
+                "episode_index": manifest["episode_index"],
+                "deleted_at": manifest["deleted_at"],
+                "expires_at": (
+                    deleted_at.timestamp() + TRASH_RETENTION_SECONDS
+                ),
+                "length": manifest["length"],
+                "duration_s": manifest["duration_s"],
+            }
+        )
+    out.sort(key=lambda e: e["deleted_at"], reverse=True)
+    return out
+
+
 def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
     """Detail view of one locally-cached dataset, for the selection info card.
 

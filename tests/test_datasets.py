@@ -3064,3 +3064,43 @@ def test_write_trash_manifest_never_raises_on_oserror(tmp_lerobot_home: Path) ->
             episode_index=0,
         )
     # If we reach here without an exception, the test passes.
+
+
+def test_list_deleted_episodes_returns_unexpired_entries_for_repo(
+    tmp_lerobot_home: Path,
+) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, list_deleted_episodes
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=2, length=10, duration_s=1.0
+    )
+
+    # A trash entry for a DIFFERENT repo must not show up.
+    other_target = tmp_lerobot_home / "other"
+    other_target.mkdir()
+    _, other_manifest, _ = _new_trash_paths(other_target)
+    _write_trash_manifest(other_manifest, kind="episode", repo_id="other", episode_index=0)
+
+    entries = list_deleted_episodes("pusht")
+    assert len(entries) == 1
+    assert entries[0]["trash_id"] == trash_id
+    assert entries[0]["episode_index"] == 2
+    assert entries[0]["length"] == 10
+    assert entries[0]["duration_s"] == 1.0
+    assert "deleted_at" in entries[0]
+    assert "expires_at" in entries[0]
+
+
+def test_list_deleted_episodes_excludes_dataset_kind_entries(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, list_deleted_episodes
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    _, manifest_path, _ = _new_trash_paths(target)
+    _write_trash_manifest(manifest_path, kind="dataset", repo_id="pusht")
+
+    assert list_deleted_episodes("pusht") == []

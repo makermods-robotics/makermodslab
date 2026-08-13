@@ -722,6 +722,13 @@ def datasets_episode_delete_status():
     return dataset_browser.get_episode_delete_status()
 
 
+@app.get("/datasets/deleted-episodes")
+def datasets_deleted_episodes(repo_id: str):
+    """Unexpired (< 24h old) episode-delete trash entries for repo_id, newest
+    first — powers the dataset viewer's 'Deleted episodes' undo panel."""
+    return dataset_browser.list_deleted_episodes(repo_id)
+
+
 @app.get("/datasets/hub-status")
 def datasets_hub_status(repo_id: str):
     """Whether a dataset repo with this id exists on the Hub.
