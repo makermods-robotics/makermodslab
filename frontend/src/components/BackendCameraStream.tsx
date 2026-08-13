@@ -33,8 +33,8 @@ const RETRY_MAX_MS = 12000;
  * endpoint WHY (the 409/503 detail — "recording is using the cameras" etc.),
  * shows that on the tile, and retries with capped backoff; clicking the tile
  * retries immediately. Parents should render it whenever a cameraIndex is
- * known and unmount it to pause/release (unmount cleanup clears the img src
- * so the browser drops the HTTP connection and the server releases the
+ * known and unmount it to pause/release (the img's detach handler clears its
+ * src so the browser drops the HTTP connection and the server releases the
  * shared capture).
  */
 const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
@@ -43,7 +43,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   className,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
-  const imgRef = useRef<HTMLImageElement>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
   // Bumping remounts the <img> with a cache-busted URL — a clean retry.
@@ -64,13 +64,22 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   }, [cameraIndex, uniqueId]);
 
   useEffect(() => {
-    const img = imgRef.current;
     return () => {
       if (retryTimer.current) clearTimeout(retryTimer.current);
-      // Detaching an <img> doesn't reliably abort its in-flight request;
-      // clearing src does, which is what lets the backend release the camera.
-      if (img) img.src = "";
     };
+  }, []);
+
+  // Detaching an <img> doesn't reliably abort its in-flight request; clearing
+  // src does, which is what lets the backend release the camera. A callback
+  // ref (not a mount-effect cleanup) because `key={attempt}` remounts the
+  // <img> on every retry: a cleanup captured at mount clears the first,
+  // long-dead element and leaves the live stream's connection open after the
+  // tile is removed.
+  const attachImg = useCallback((node: HTMLImageElement | null) => {
+    if (node === null && imgRef.current) {
+      imgRef.current.src = "";
+    }
+    imgRef.current = node;
   }, []);
 
   const scheduleRetry = useCallback(() => {
@@ -146,7 +155,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   return (
     <img
       key={attempt}
-      ref={imgRef}
+      ref={attachImg}
       src={`${baseUrl}/camera-preview/${cameraIndex}?r=${attempt}${
         uniqueId ? `&unique_id=${encodeURIComponent(uniqueId)}` : ""
       }`}
