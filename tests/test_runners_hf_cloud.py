@@ -1129,6 +1129,14 @@ def test_repeated_silence_timeouts_do_not_strand_reader_threads(
     """Reviewer repro 1: four silent intervals produced four concurrent live
     reader threads.
 
+    COVERS THE RELEASED CASE ONLY — reads that eventually come back. This test
+    releases its parked readers precisely so they can reach a boundary and
+    observe the abandon flag, which is what makes it a test OF that flag. It
+    therefore says nothing about a read that never returns; that case has no
+    boundary, is not fixable from here, and is bounded instead by the cap (see
+    test_readers_parked_in_a_never_returning_read_stop_at_the_cap). Do not read
+    a green result here as "readers can always be retired".
+
     `_stop_event` is deliberately NEVER set here. It is the other arm of
     `_finished()`, so setting it would retire the parked readers on its own and
     the test would pass with the `abandoned` mechanism deleted entirely — which
@@ -1494,3 +1502,153 @@ def test_a_batched_burst_cannot_walk_progress_backwards_within_one_line(
 
     assert m.current_step == 500, "the last frame in the burst owns the step"
     assert floor.value == 500, "and the floor must not be dragged back with it"
+
+
+# ---------------------------------------------------------------------------
+# The reader cap: a read that NEVER returns (PR #71, third review round).
+#
+# Every other reader-lifetime test here releases its parked readers so they can
+# observe the abandon flag — which is precisely the case the flag handles, and
+# precisely why those tests missed this one. The tests below never release
+# anything: their reads block until the process exits.
+# ---------------------------------------------------------------------------
+
+
+class _NeverReturningStream:
+    """A `fetch_job_logs` whose read never comes back.
+
+    DELIBERATE LEAK: threads parked in `park.wait()` stay parked for the rest of
+    the pytest session, because that is the situation under test — a read with
+    no boundary at which the abandon flag could be observed. They are daemons
+    holding a `threading.Event` and no other resource, and the cap is what keeps
+    their number small (3), so the leak is bounded and cheap by construction.
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self.connections = 0
+        self._park = threading.Event()  # never set, by design
+
+    def __call__(self, job_id, follow):
+        self.connections += 1
+        self._park.wait()  # never returns
+        yield "unreachable"  # pragma: no cover
+
+
+def _live_reader_threads(job_id: str) -> int:
+    import threading
+
+    return sum(1 for t in threading.enumerate() if t.name == f"hf-job-{job_id}-sse" and t.is_alive())
+
+
+def test_readers_parked_in_a_never_returning_read_stop_at_the_cap(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The regression this branch introduced, bounded.
+
+    On main the tail iterated `fetch_job_logs` in the single tail thread, so a
+    read that never returned stranded ONE thread and killed logging for that
+    job. Moving the read onto a per-connection thread — which is what lets the
+    silence timeout break that stall — means every timeout starts another
+    reader, and a parked one can never retire. Uncapped, that is one stranded
+    thread and one HTTP connection per timeout, forever.
+
+    So: connections stop at the cap, not cap+k, and no new reader appears after
+    it trips.
+    """
+    import logging
+    import threading
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_POLL_S", 0.05)
+
+    stream = _NeverReturningStream()
+    api = MagicMock()
+    api.fetch_job_logs = stream
+    runner = _runner_with(api, tmp_path)
+    # Other tests here park readers under the same job id on purpose, so the
+    # absolute count is not ours to assert on — only what THIS runner adds.
+    before = _live_reader_threads(runner._hf_job_id)
+
+    with caplog.at_level(logging.ERROR, logger="makermodslab.runners.hf_cloud"):
+        thread = threading.Thread(target=runner._tail_loop, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+
+    assert not thread.is_alive(), "the tail loop must give up rather than spin forever"
+    # (a) it stopped opening connections AT the cap.
+    assert stream.connections == hf_cloud._TAIL_MAX_LIVE_READERS, (
+        f"opened {stream.connections} connections against a cap of {hf_cloud._TAIL_MAX_LIVE_READERS}"
+    )
+    # (c) and no reader appeared afterwards.
+    settled = _live_reader_threads(runner._hf_job_id)
+    time.sleep(0.3)
+    assert _live_reader_threads(runner._hf_job_id) == settled
+    assert settled - before <= hf_cloud._TAIL_MAX_LIVE_READERS
+
+    # (b) it said so, loudly and precisely.
+    give_up = [
+        r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR and "giving up" in r.getMessage()
+    ]
+    assert give_up, f"expected a loud give-up line, got {[r.getMessage() for r in caplog.records]}"
+    # Precise, not just loud: it must name the count and say why.
+    assert "parked in reads that never returned" in give_up[0]
+    assert str(hf_cloud._TAIL_MAX_LIVE_READERS) in give_up[0]
+
+
+def test_the_tail_giving_up_does_not_fail_the_job(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boundary that matters most: losing the logs is not losing the run.
+
+    The status poller is deliberately independent of the tail, so a run whose
+    log stream has been abandoned must still finalise through it — and finalise
+    as `done`, not as a failure. Marking the job failed here would turn a
+    telemetry outage into a fake training failure, which is the opposite of what
+    MT47 is for.
+    """
+    import threading
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.runners import hf_cloud
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_POLL_S", 0.05)
+
+    api = MagicMock()
+    api.fetch_job_logs = _NeverReturningStream()
+    runner = _runner_with(api, tmp_path)
+
+    thread = threading.Thread(target=runner._tail_loop, daemon=True)
+    thread.start()
+    thread.join(timeout=10)
+    assert not thread.is_alive(), "the tail must have given up for this test to mean anything"
+
+    # The tail is dead. The status path still finalises the run, exactly as it
+    # would have if the tail had never existed.
+    reg = JobRegistry(tmp_path / "root")
+    record = JobRecord(
+        id="J",
+        name="j",
+        state="running",
+        config=TrainingRequest(dataset_repo_id="d", steps=100),
+        output_dir=str(tmp_path / "root" / "J" / "run"),
+        started_at=0.0,
+        runner="hf_cloud",
+    )
+    reg._records["J"] = record
+    runner._set_terminal("COMPLETED")
+    reg._runners["J"] = runner
+    reg._tick()
+
+    assert record.state == "done", "a dead log tail must not change the job's outcome"
+    assert record.error_message is None

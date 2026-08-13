@@ -645,10 +645,39 @@ _TAIL_READER_POLL_S = 1.0
 # lines against the old unbounded queue).
 _TAIL_READER_QUEUE_MAX = 256
 
+# How many reader threads this runner may have alive at once before it gives up
+# rather than opening another.
+#
+# This bounds a regression THIS BRANCH INTRODUCED. On main the tail iterated
+# `fetch_job_logs` directly in the single tail thread, so a read that never
+# returned stranded exactly one thread and killed logging for that job —
+# permanent, but singly. Moving the read onto a per-connection thread so the
+# silence timeout could break that stall means every timeout starts ANOTHER
+# reader, and a parked one cannot be retired: the flag is only observed at the
+# boundaries of a read, and a read that never returns has no boundary. Left
+# uncapped that turns one stranded thread into one per timeout, each holding an
+# HTTP connection too.
+#
+# Three, not one: a healthy runner holds exactly one live reader, so the cap has
+# to leave room for the ordinary case plus a stray or two before declaring the
+# situation pathological. Small because each stray costs a thread AND a socket,
+# and because a runner needing a fourth concurrent reader is not recovering —
+# it is accumulating.
+_TAIL_MAX_LIVE_READERS = 3
+
 # How long a reader blocks trying to hand a line over before re-checking
 # whether its connection has been abandoned. Only a liveness knob: it bounds
 # how long an abandoned reader lingers once its queue is full.
 _TAIL_READER_PUT_TIMEOUT_S = 1.0
+
+
+class _TailReaderCapError(RuntimeError):
+    """Raised instead of opening reader N+1 when the cap is already reached.
+
+    Distinct from every other tail failure because it means the opposite thing:
+    other failures are transient and the loop should reconnect, this one says
+    reconnecting is exactly what must stop.
+    """
 
 
 def resolve_wandb_api_key() -> str | None:
@@ -695,6 +724,12 @@ class HfCloudJobRunner:
         # One floor per RUNNER, not per connection: surviving a reconnect is
         # exactly what makes it a replay guard.
         self._step_floor = StepFloor()
+        # Live reader threads for this runner — incremented when one starts and
+        # decremented when it actually EXITS, so the count reflects threads that
+        # are genuinely still parked rather than connections we have opened. A
+        # reader whose read eventually returns retires itself and stops counting.
+        self._live_readers = 0
+        self._live_readers_lock = threading.Lock()
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -982,10 +1017,45 @@ class HfCloudJobRunner:
             times out, the flag is re-checked, and the thread exits.
 
         Between them an abandoned reader retains at most one queue's worth of
-        lines and exits on its next successful read — and it can never deliver
-        to the live consumer, which by then is draining a different queue.
+        lines and exits at its next opportunity — and it can never deliver to
+        the live consumer, which by then is draining a different queue.
+
+        "At its next opportunity" is the honest limit, and it only exists for a
+        read that EVENTUALLY RETURNS. A read that never returns has no boundary
+        at which the flag can be observed, so that reader never retires. We
+        cannot reach its socket to break it: the response is a local inside a
+        `with` two generator frames below the iterator we hold
+        (huggingface_hub hf_api.py:8385), and HfApi exposes no per-instance
+        client. The log stream itself is bounded upstream — a 120s httpx read
+        timeout (hf_api.py:11935) — but the job-status GET the client issues
+        between iterations carries NO timeout (hf_api.py:11851, shared client
+        built with timeout=None), and that is the read that can park forever.
+        Reported upstream; unfixable from here.
+
+        So the number of such readers is CAPPED instead — see
+        _TAIL_MAX_LIVE_READERS. Bounding the damage is the guarantee this makes;
+        eliminating the strand is not.
         """
         assert self._hf_job_id is not None
+
+        # Refuse to open reader N+1. Checked BEFORE anything is allocated, and
+        # against the count of readers still ALIVE — a reader whose read came
+        # back has already retired itself and does not count here.
+        #
+        # `_stop_event` first: a shutdown racing the cap is an ordinary exit,
+        # not a pathology, and must not be reported as one.
+        if self._stop_event.is_set():
+            return
+        with self._live_readers_lock:
+            live = self._live_readers
+            if live >= _TAIL_MAX_LIVE_READERS:
+                raise _TailReaderCapError(
+                    f"{live} log-reader threads for job {self._hf_job_id} are still parked in "
+                    f"reads that never returned (cap {_TAIL_MAX_LIVE_READERS}); refusing to open "
+                    "another"
+                )
+            self._live_readers = live + 1
+
         queue: Queue = Queue(maxsize=_TAIL_READER_QUEUE_MAX)
         abandoned = threading.Event()
         # The terminator lives OUTSIDE the bounded queue, and that is not a
@@ -1021,6 +1091,11 @@ class HfCloudJobRunner:
             except Exception as exc:  # surfaced on the consuming thread
                 error.append(exc)
             finally:
+                # Reaching here IS the retirement: this thread is about to die,
+                # so it stops counting against the cap. A reader parked forever
+                # never gets here, which is exactly what the cap is counting.
+                with self._live_readers_lock:
+                    self._live_readers -= 1
                 # Never blocked, never dropped: unlike a queue slot, this always
                 # lands, so the consumer learns the connection is over as soon
                 # as it has drained whatever the reader managed to hand over.
@@ -1028,7 +1103,14 @@ class HfCloudJobRunner:
                 with contextlib.suppress(Full):
                     queue.put_nowait(wake)
 
-        threading.Thread(target=_reader, name=f"hf-job-{self._hf_job_id}-sse", daemon=True).start()
+        try:
+            threading.Thread(target=_reader, name=f"hf-job-{self._hf_job_id}-sse", daemon=True).start()
+        except BaseException:
+            # The reader's own `finally` is what normally decrements; if it
+            # never ran, the reservation would leak and shrink the cap forever.
+            with self._live_readers_lock:
+                self._live_readers -= 1
+            raise
 
         try:
             deadline = time.monotonic() + _TAIL_SILENCE_TIMEOUT_S
@@ -1114,6 +1196,25 @@ class HfCloudJobRunner:
                                 self._log_queue.get_nowait()
                         self._log_queue.put(log_line)
                     clean_end = True
+                except _TailReaderCapError as exc:
+                    # The one failure that must NOT reconnect: reconnecting is
+                    # what got us here. Loud, because this is silent otherwise —
+                    # logs simply stop arriving and nothing says why.
+                    #
+                    # Deliberately NOT a job failure. The status poller runs
+                    # independently and still finalises this run correctly, and
+                    # _settle_terminal_metrics still applies at finalise; what is
+                    # lost is live log streaming and the metrics parsed from it,
+                    # not the run. Marking the job failed here would turn a
+                    # telemetry outage into a fake training failure.
+                    logger.error(
+                        "HF log tail for job %s is giving up: %s. Live logs and parsed "
+                        "progress stop here; the run itself is unaffected and will still "
+                        "be finalised by the status poller.",
+                        self._hf_job_id,
+                        exc,
+                    )
+                    return
                 except Exception as exc:
                     logger.info("HF log tail disconnected, will reconnect: %s", exc)
 
