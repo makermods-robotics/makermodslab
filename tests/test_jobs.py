@@ -3613,9 +3613,9 @@ def test_a_download_bound_job_queues_a_second_local_run(monkeypatch, tmp_path) -
     """The slot is taken for the download window too — the machine is spoken for
     from the moment the record exists, not from the trainer's first step.
 
-    It used to be a refusal (`JobAlreadyRunningError` → 409). Now the second run
-    is ACCEPTED and parked: same invariant (one local trainer at a time), but the
-    user does not have to come back and resubmit by hand when the first ends."""
+    The second run is ACCEPTED and parked rather than refused: the same
+    invariant (one local trainer at a time), without the user having to come
+    back and resubmit by hand once the first ends."""
     from makermodslab.jobs import JobRegistry, JobTarget
     from makermodslab.train import TrainingRequest
 
@@ -6419,10 +6419,9 @@ def test_stop_on_a_queued_job_removes_it(tmp_path) -> None:
 
     It never executed — no process, no runner, no logs, no checkpoint, and an
     output dir holding nothing but its own job.json — so there is no history to
-    keep. An earlier version left an `interrupted` tombstone, which then had to
-    be excused from every question the registry asks about runs (most sharply:
-    a cancelled continuation permanently superseded the parent it was going to
-    continue). Removing it is the same outcome without the special cases."""
+    keep, only a record that every later question the registry asks about runs
+    would have to excuse (most sharply: a cancelled continuation permanently
+    superseding the parent it was going to continue)."""
     from makermodslab.jobs import JobNotFoundError
 
     reg = _quiet_registry(tmp_path)
@@ -6497,7 +6496,7 @@ def test_a_queued_cloud_record_is_not_left_parked_forever(tmp_path) -> None:
     hand-edited file or a downgrade-then-upgrade. It waits on a slot it does not
     need and nothing will ever start it, and there is no way out from the UI —
     so the loader retires it rather than leaving it stuck."""
-    from makermodslab.jobs import CANCELLED_IN_QUEUE_MESSAGE
+    from makermodslab.jobs import UNQUEUEABLE_RUNNER_MESSAGE
 
     reg = _quiet_registry(tmp_path)
     record = _inject_queued(reg, "cloudy", seq=10)
@@ -6509,7 +6508,7 @@ def test_a_queued_cloud_record_is_not_left_parked_forever(tmp_path) -> None:
 
     recovered = reloaded.get("cloudy")
     assert recovered.state == "interrupted"
-    assert recovered.error_message == CANCELLED_IN_QUEUE_MESSAGE
+    assert recovered.error_message == UNQUEUEABLE_RUNNER_MESSAGE
     assert reloaded._queued_records() == []
 
 

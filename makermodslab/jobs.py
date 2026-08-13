@@ -269,10 +269,11 @@ class JobRunner(Protocol):
 # `exit_code` for anyone debugging.
 STOPPED_BY_REQUEST_MESSAGE = "Stopped at your request, not by a training error."
 
-# The queued twin of the message above. A cancelled-in-queue run shares the
-# `interrupted` state with a stopped one, so the state alone can't tell the
-# user that this one never trained a single step — the message has to.
-CANCELLED_IN_QUEUE_MESSAGE = "Removed from the queue before it started, so it never trained."
+# Written to `error_message` when the loader retires a `queued` record that
+# only a local run could ever have been: see _load_from_disk. It shares the
+# `interrupted` state with a stopped run, so the state alone cannot tell the
+# user this one never trained a single step — the message has to.
+UNQUEUEABLE_RUNNER_MESSAGE = "Only local runs wait in the queue, so this one never started."
 
 # Written to `error_message` for a run that ended while we weren't watching and
 # left no evidence of how: no exit status from the wrapper (see
@@ -2586,6 +2587,16 @@ def ancestor_ids_of(records: Mapping[str, JobRecord], job_id: str) -> list[str]:
     return out
 
 
+def _queue_order(record: JobRecord) -> tuple[int, float]:
+    """Sort key for the queue: enqueue order, `started_at` breaking ties.
+
+    Defined once and used by everything that puts queued runs in order, so the
+    positions the UI shows cannot drift from the order `_drain_queue` promotes
+    in — two copies of this key would be two orders the moment either changed.
+    """
+    return (record.queue_seq, record.started_at)
+
+
 def _owner_holds_step(owner: JobRecord, step: int) -> bool:
     """Whether `owner` has a checkpoint at `step`, for the rewind guard.
 
@@ -2913,10 +2924,9 @@ class JobRegistry:
         container, so any number can be in flight in parallel — this says
         nothing about them.
 
-        It used to RAISE (`_assert_no_running_local`), and a second local start
-        was a 409 the user had to retry by hand once the first finished. Now a
-        busy slot means the new run is accepted as `queued` and the watchdog
-        starts it when the slot frees — so this reports, and the callers decide.
+        A busy slot refuses nothing: the new run is accepted as `queued` and the
+        watchdog starts it once the slot frees. So this reports, and the callers
+        decide what that means.
 
         Takes NO lock, so it is callable both inside and outside the registry's
         critical section (self._lock is a plain Lock — re-entering it would
@@ -2930,26 +2940,24 @@ class JobRegistry:
     def _queued_records(self) -> builtins.list[JobRecord]:
         """Every queued job, in the order they will run. Caller holds the lock
         (or accepts a snapshot's staleness)."""
-        return sorted(
-            (r for r in self._records.values() if r.state == "queued"),
-            key=lambda r: (r.queue_seq, r.started_at),
-        )
+        return sorted((r for r in self._records.values() if r.state == "queued"), key=_queue_order)
 
-    def _annotate_queue(self, record: JobRecord, snapshot: Mapping[str, JobRecord]) -> None:
+    @staticmethod
+    def _queue_positions(snapshot: Mapping[str, JobRecord]) -> dict[str, int]:
+        """Map job id to its 1-based queue position.
+
+        Built once per read and shared across the records being annotated:
+        sorting inside the per-record stamp instead made a queue read O(N² log N)
+        on an endpoint the UI polls.
+        """
+        ordered = sorted((r for r in snapshot.values() if r.state == "queued"), key=_queue_order)
+        return {r.id: i for i, r in enumerate(ordered, start=1)}
+
+    @staticmethod
+    def _annotate_queue(record: JobRecord, positions: Mapping[str, int]) -> None:
         """Stamp the derived 1-based `queue_position`, in place. 0 for anything
-        not queued."""
-        if record.state != "queued":
-            record.queue_position = 0
-            return
-        ordered = sorted(
-            (r for r in snapshot.values() if r.state == "queued"),
-            key=lambda r: (r.queue_seq, r.started_at),
-        )
-        for i, r in enumerate(ordered, start=1):
-            if r.id == record.id:
-                record.queue_position = i
-                return
-        record.queue_position = 0
+        not queued — which `positions` expresses by simply not holding it."""
+        record.queue_position = positions.get(record.id, 0)
 
     def _annotate_lineage(
         self,
@@ -2974,10 +2982,11 @@ class JobRegistry:
         # Indexed over the whole snapshot, then applied to the page: a run's
         # leaf-ness is a fact about the registry, not about what fits on a page.
         children = build_child_index(snapshot.values())
+        positions = self._queue_positions(snapshot)
         for r in records:
             r.checkpoint_count = self._count_checkpoints(r)
             self._annotate_lineage(r, snapshot, children)
-            self._annotate_queue(r, snapshot)
+            self._annotate_queue(r, positions)
         return records
 
     def get(self, job_id: str) -> JobRecord:
@@ -2988,7 +2997,7 @@ class JobRegistry:
             raise JobNotFoundError(job_id)
         record.checkpoint_count = self._count_checkpoints(record)
         self._annotate_lineage(record, snapshot, build_child_index(snapshot.values()))
-        self._annotate_queue(record, snapshot)
+        self._annotate_queue(record, self._queue_positions(snapshot))
         return record
 
     def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
@@ -3065,13 +3074,12 @@ class JobRegistry:
                 "or drop finetune_from_step to train from scratch."
             )
 
-        # NOTE: no local-slot pre-flight here any more. It used to fail the
-        # request fast (`_assert_no_running_local`) to spare a doomed download,
-        # but a busy slot no longer dooms anything — the run is accepted and
-        # queued. Every VALIDATION below still runs synchronously, so a bad
-        # request is still refused at submit time rather than surfacing minutes
-        # later when the queue reaches it; only the launch is deferred. The
-        # authoritative slot check is under the lock at record creation.
+        # Deliberately no local-slot pre-flight: a busy slot does not doom a
+        # submit any more, it queues it. Every VALIDATION below still runs
+        # synchronously, so a bad request is refused at submit time rather than
+        # surfacing minutes later when the queue reaches it — only the launch is
+        # deferred. The authoritative slot check is under the lock at record
+        # creation.
 
         # ------------------------------------------------------------------
         # Pretrained-path resolution runs OUTSIDE the registry lock.
@@ -3435,7 +3443,7 @@ class JobRegistry:
                 # position 0 — so the UI could not tell the user where in line
                 # the run it just accepted actually is. Annotated AFTER the
                 # persist, so the derived value is not what reaches disk.
-                self._annotate_queue(record, self._records)
+                self._annotate_queue(record, self._queue_positions(self._records))
             else:
                 self._persist(record, force=True)
                 self._launch_locked(
@@ -3446,11 +3454,10 @@ class JobRegistry:
                     deferred_resume_upload=deferred_resume_upload,
                     deferred_finetune_upload=deferred_finetune_upload,
                 )
-        # Both paths converge here, OUTSIDE the lock — the queued branch used to
-        # fire its own notify and return early from inside the critical section,
-        # the one _notify_change in this file that did. Every other call site
-        # defers it (see the `notify` flag in _start_after_prepare) because a
-        # listener that reads the registry would deadlock on a plain Lock.
+        # Both paths converge here, OUTSIDE the lock. Every _notify_change in
+        # this file is deferred until the critical section is over (see the
+        # `notify` flag in _start_after_prepare): a listener that reads the
+        # registry would deadlock on a plain Lock.
         self._notify_change()
         return record
 
@@ -3500,9 +3507,10 @@ class JobRegistry:
         # running, from `stop`'s point of view) nor delete it (it IS running). The
         # queue would be dead for the life of the process with no way out of the UI.
         #
-        # This used to guard `runner.start()` alone, which left the whole deferred
-        # branch — the PreparingJobRunner registration and `thread.start()` — and the
-        # `_persist` + `_runners` bookkeeping after a SUCCESSFUL start uncovered.
+        # So the try must cover the WHOLE launch: the deferred branch's
+        # PreparingJobRunner registration and `thread.start()`, and the `_persist`
+        # + `_runners` bookkeeping after a SUCCESSFUL start — not `runner.start()`
+        # alone.
         try:
             if deferred:
                 # Something still has to move (GBs, minutes). Hand the caller its
@@ -3582,11 +3590,12 @@ class JobRegistry:
                 # only THEN starts its stdout thread, and `HfCloudJobRunner.start`
                 # sets `_hf_job_id` and only then starts two worker threads. A
                 # throw from the second half of either (a thread-table
-                # exhaustion is the realistic one) used to land in the handler
-                # with `started` still None — so it skipped `stop()`, released
-                # the slot, and the next drain put a SECOND trainer on the same
-                # GPU. `process_pid`/`hf_job_id` are assigned further down, so
-                # that orphan was unreachable from the UI and survived a restart.
+                # exhaustion is the realistic one) would otherwise reach the
+                # handler with `started` still None — skipping `stop()`,
+                # releasing the slot, and letting the next drain put a SECOND
+                # trainer on the same GPU. `process_pid`/`hf_job_id` are
+                # assigned further down, so that orphan would be unreachable
+                # from the UI and would survive a restart.
                 #
                 # Binding first costs nothing when the runner never started:
                 # `LocalJobRunner.stop` returns immediately while `_process is
@@ -4392,39 +4401,28 @@ class JobRegistry:
             # the very race it exists to close.
             if expect_state is not None and record.state != expect_state:
                 raise JobStateChangedError(job_id, expect_state, record.state)
-            # A QUEUED job has no process to signal and no runner to ask, so
-            # Stop means CANCEL — and cancelling one removes it outright rather
-            # than leaving a record behind.
+            # A queued job has no process to signal and no runner to ask, so
+            # Stop means CANCEL: the record is removed outright. It never
+            # executed — no logs, no metrics, no checkpoints, an output dir
+            # holding nothing but its own job.json — so there is no history a
+            # tombstone could preserve, only a record that every later question
+            # about runs would have to special-case.
             #
-            # It never executed: no process, no logs, no metrics, no checkpoint,
-            # and an output dir containing nothing but its own job.json. So
-            # there is no history to preserve, and a tombstone was not free — a
-            # record that looks like a run but never was has to be specially
-            # excused from every question the registry asks about runs. The
-            # version that kept one needed a persisted "never started" flag, a
-            # contraction rule in BOTH directions of the resume graph, a guard
-            # refusing to continue it, and a matching salvage path in the
-            # loader — machinery whose entire purpose was to make a record mean
-            # nothing. Removing it is the same outcome with none of that.
-            #
-            # Identical to `delete()`'s effect, done inline because `delete`
-            # takes this same lock and re-entering a plain Lock deadlocks.
+            # Removal is exactly `delete()`'s effect, done inline because
+            # `delete` takes this same lock and re-entering a plain Lock
+            # deadlocks.
             if record.state == "queued":
-                # The SAME guards `delete()` applies, because this has the same
-                # effect: the record is removed, and removing a record does not
-                # remove the references to it.
-                #
-                # A queued run looks like it can hold nothing — it has no
-                # checkpoints of its own — but `_resolve_checkpoint_owner` lets
-                # a continuation attach to a leaf that saved nothing and read
-                # the bytes from an ANCESTOR, and only a `done` source is
-                # refused. So a queued run is a legal resume parent. Cancelling
-                # one unguarded severed its child's lineage, left a phantom
-                # parent id in `build_child_index` (so both ends read as
-                # leaves), un-forked the `JobAlreadyContinuedError` guard so the
-                # grandparent could be continued a second time, and — worst —
-                # made the grandparent deletable while a queued run was still
-                # waiting to resume from its checkpoints.
+                # So it needs `delete()`'s guards too: removing a record does
+                # not remove the references to it. A queued run holds no
+                # checkpoints of its own, but `_resolve_checkpoint_owner` lets a
+                # continuation attach to a leaf that saved nothing and read the
+                # bytes from an ANCESTOR — only a `done` source is refused — so
+                # a queued run is a legal resume parent. Cancelling one
+                # unguarded severed its child's lineage, left a phantom parent
+                # id in `build_child_index` (both ends then read as leaves),
+                # un-forked `JobAlreadyContinuedError` so the grandparent could
+                # be continued twice, and made that grandparent deletable while
+                # a queued run was still waiting to resume from its checkpoints.
                 children = build_child_index(self._records.values()).get(job_id, [])
                 if children:
                     raise JobHasChildrenError(job_id, children)
@@ -4436,8 +4434,8 @@ class JobRegistry:
             else:
                 cancelled = None
                 runner = self._runners.get(job_id)
-                # Raised under the lock (it used to be checked outside it) so the
-                # intent below can't be recorded for a job that just finalised.
+                # Raised under the lock, not outside it, so the intent below
+                # cannot be recorded for a job that just finalised.
                 if record.state != "running" or runner is None:
                     raise JobNotRunningError(job_id)
                 self._stop_requested.add(job_id)
@@ -4834,7 +4832,7 @@ class JobRegistry:
                     record.state = "interrupted"
                     record.ended_at = time.time()
                     if record.error_message is None:
-                        record.error_message = CANCELLED_IN_QUEUE_MESSAGE
+                        record.error_message = UNQUEUEABLE_RUNNER_MESSAGE
                     # Queue fields released: nothing that will never run keeps
                     # a place in line on disk.
                     record.queue_seq = 0
@@ -4988,6 +4986,7 @@ class JobRegistry:
         # under a heading that says "queued" is the exact confusion the cancel
         # guard in the UI exists to catch, so don't ship it in the first place.
         ordered = [r for r in ordered if r.state == "queued"]
+        positions = self._queue_positions(snapshot)
         for r in ordered:
             # The same annotations `list()` applies, so a record means the same
             # thing whichever endpoint returned it — a queued CONTINUATION
@@ -4995,7 +4994,7 @@ class JobRegistry:
             # that only looks right until someone reads it.
             r.checkpoint_count = self._count_checkpoints(r)
             self._annotate_lineage(r, snapshot, children)
-            self._annotate_queue(r, snapshot)
+            self._annotate_queue(r, positions)
         return ordered
 
     def reorder_queue(self, job_ids: builtins.list[str]) -> builtins.list[JobRecord]:
@@ -5054,8 +5053,9 @@ class JobRegistry:
                 self._persist(record, force=True)
             snapshot = dict(self._records)
             ordered = self._queued_records()
+        positions = self._queue_positions(snapshot)
         for r in ordered:
-            self._annotate_queue(r, snapshot)
+            self._annotate_queue(r, positions)
         self._notify_change()
         return ordered
 
@@ -5650,6 +5650,6 @@ __all__ = [
     "parse_metrics_into",
     "classify_terminal_state",
     "STOPPED_BY_REQUEST_MESSAGE",
-    "CANCELLED_IN_QUEUE_MESSAGE",
+    "UNQUEUEABLE_RUNNER_MESSAGE",
     "UNCONFIRMED_OUTCOME_MESSAGE",
 ]
