@@ -2905,3 +2905,26 @@ def test_trash_paths_for_id_rejects_path_traversal(tmp_lerobot_home: Path) -> No
     from makermodslab.datasets import _trash_paths_for_id
 
     assert _trash_paths_for_id("../../etc", "abcd1234") is None
+
+
+def test_write_trash_manifest_never_raises_on_oserror(tmp_lerobot_home: Path) -> None:
+    """_write_trash_manifest gracefully degrades on I/O failure (permissions, disk
+    full, etc.) instead of raising, matching the "never raise" constraint for
+    cosmetic trash bookkeeping."""
+    from unittest.mock import patch
+
+    from makermodslab.datasets import _write_trash_manifest
+
+    manifest_path = tmp_lerobot_home / ".pusht.trash-abcd1234.manifest.json"
+
+    # Patch _atomic_write_text to raise OSError (simulating disk full, permission
+    # denied, etc.). _write_trash_manifest must NOT propagate this exception.
+    with patch("makermodslab.datasets._atomic_write_text", side_effect=OSError("disk full")):
+        # This must not raise; it should log and return normally.
+        _write_trash_manifest(
+            manifest_path,
+            kind="episode",
+            repo_id="pusht",
+            episode_index=0,
+        )
+    # If we reach here without an exception, the test passes.

@@ -38,6 +38,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from lerobot.datasets.dataset_tools import delete_episodes
 
 from .utils.config import (
+    _atomic_write_text,
     get_hidden_datasets,
     get_saved_custom_datasets,
     validate_dataset_name,
@@ -799,7 +800,10 @@ def _write_trash_manifest(
     length: int | None = None,
     duration_s: float | None = None,
 ) -> None:
-    """Write a trash entry's manifest. `kind` is "episode" or "dataset"."""
+    """Write a trash entry's manifest. `kind` is "episode" or "dataset".
+
+    Never raises — trash bookkeeping is cosmetic; a write failure degrades
+    silently (best-effort) to match _read_trash_manifest's error resilience."""
     payload = {
         "kind": kind,
         "repo_id": repo_id,
@@ -808,7 +812,10 @@ def _write_trash_manifest(
         "length": length,
         "duration_s": duration_s,
     }
-    manifest_path.write_text(json.dumps(payload))
+    try:
+        _atomic_write_text(str(manifest_path), json.dumps(payload))
+    except OSError as exc:
+        logger.warning(f"Failed to write trash manifest {manifest_path}: {exc}")
 
 
 def _read_trash_manifest(manifest_path: Path) -> dict[str, Any] | None:
