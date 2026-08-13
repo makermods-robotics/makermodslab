@@ -580,6 +580,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
         return []
 
     _recover_orphaned_episode_delete_dirs_once(root)
+    reap_expired_trash(root)
 
     out: list[dict[str, Any]] = []
     try:
@@ -836,6 +837,32 @@ def _iter_trash_manifests(root: Path) -> list[Path]:
         if top.is_dir() and not top.name.startswith("."):
             manifests.extend(top.glob("*.trash-*.manifest.json"))
     return manifests
+
+
+def reap_expired_trash(root: Path) -> None:
+    """Remove any trash dir + manifest whose 24h retention has passed. Called
+    on every list_local_datasets() call (unlike the once-per-process
+    crash-recovery sweep) — trash is deliberately kept for up to 24h WITHIN a
+    single long-running process's lifetime, so a once-at-startup check isn't
+    enough."""
+    if not root.is_dir():
+        return
+    now = datetime.now(UTC)
+    for manifest_path in _iter_trash_manifests(root):
+        manifest = _read_trash_manifest(manifest_path)
+        if manifest is None:
+            continue
+        try:
+            deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+        except (KeyError, ValueError):
+            continue
+        age = (now - deleted_at).total_seconds()
+        if age <= TRASH_RETENTION_SECONDS:
+            continue
+        trash_dir = manifest_path.parent / manifest_path.name.removesuffix(".manifest.json")
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
+        logger.info("Reaped expired trash entry %s (age %.0fh)", trash_dir, age / 3600)
 
 
 def list_deleted_episodes(repo_id: str) -> list[dict[str, Any]]:

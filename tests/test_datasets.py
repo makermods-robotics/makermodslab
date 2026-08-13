@@ -3266,3 +3266,77 @@ def test_undo_episode_delete_merges_trash_onto_live_dataset(tmp_lerobot_home: Pa
         assert not manifest_path.exists()
     finally:
         ds._undo_status = None
+
+
+def test_reap_expired_trash_removes_entries_past_retention(tmp_lerobot_home: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from makermodslab.datasets import (
+        TRASH_RETENTION_SECONDS,
+        _new_trash_paths,
+        _write_trash_manifest,
+        reap_expired_trash,
+    )
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, _ = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0)
+
+    # Backdate deleted_at to just past the retention window.
+    manifest = json.loads(manifest_path.read_text())
+    stale = datetime.now(UTC) - timedelta(seconds=TRASH_RETENTION_SECONDS + 60)
+    manifest["deleted_at"] = stale.isoformat()
+    manifest_path.write_text(json.dumps(manifest))
+
+    reap_expired_trash(tmp_lerobot_home)
+
+    assert not trash_dir.exists()
+    assert not manifest_path.exists()
+
+
+def test_reap_expired_trash_keeps_entries_within_retention(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, reap_expired_trash
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, _ = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0)
+
+    reap_expired_trash(tmp_lerobot_home)
+
+    assert trash_dir.exists()
+    assert manifest_path.exists()
+
+
+def test_list_local_datasets_reaps_trash_without_process_restart(tmp_lerobot_home: Path) -> None:
+    """Unlike the once-per-process crash-recovery sweep, trash reaping must
+    fire on every call — a long-lived server process outlives the 24h
+    window many times over."""
+    from datetime import UTC, datetime, timedelta
+
+    from makermodslab.datasets import (
+        TRASH_RETENTION_SECONDS,
+        _new_trash_paths,
+        _write_trash_manifest,
+        list_local_datasets,
+    )
+
+    target = tmp_lerobot_home / "pusht"
+    _make_dataset(tmp_lerobot_home, "pusht")
+    trash_dir, manifest_path, _ = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0)
+    manifest = json.loads(manifest_path.read_text())
+    stale = datetime.now(UTC) - timedelta(seconds=TRASH_RETENTION_SECONDS + 60)
+    manifest["deleted_at"] = stale.isoformat()
+    manifest_path.write_text(json.dumps(manifest))
+
+    list_local_datasets()  # first call already swept once-per-process crash recovery
+    assert not trash_dir.exists()
+
+    # Second call, well past process start, still reaps — no once-only gate.
+    list_local_datasets()
+    assert not manifest_path.exists()
