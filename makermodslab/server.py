@@ -93,8 +93,10 @@ from .record import (
     handle_resume_recording,
     handle_start_recording,
     handle_stop_recording,
+    handle_undo_dataset_delete,
     handle_upload_dataset,
     handle_upload_status,
+    list_deleted_datasets,
     stop_and_wait as stop_recording_and_wait,
 )
 from .rollout import (
@@ -752,6 +754,24 @@ def datasets_episode_undo_status():
     """Current episode-undo state ("idle"|"running"|"done"|"error") +
     repo_id, trash_id, message, and result once done."""
     return dataset_browser.get_episode_undo_status()
+
+
+class DatasetUndoBody(BaseModel):
+    repo_id: str
+    trash_id: str
+
+
+@app.post("/datasets/undo-dataset-delete")
+def datasets_undo_dataset_delete(body: DatasetUndoBody):
+    """Restore a whole dataset from its trash entry (within the 24h window)."""
+    return handle_undo_dataset_delete(body.repo_id, body.trash_id)
+
+
+@app.get("/datasets/deleted-datasets")
+def datasets_deleted_datasets():
+    """Unexpired whole-dataset trash entries across the whole local cache,
+    newest first — powers the library's 'Recently deleted' toggle."""
+    return list_deleted_datasets()
 
 
 @app.get("/datasets/hub-status")

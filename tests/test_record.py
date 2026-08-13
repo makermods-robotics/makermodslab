@@ -18,6 +18,7 @@ from __future__ import annotations
 import itertools
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -2069,6 +2070,63 @@ def test_handle_delete_dataset_moves_to_trash_instead_of_destroying(
     manifest = json.loads(manifests[0].read_text())
     assert manifest["kind"] == "dataset"
     assert manifest["repo_id"] == "pusht"
+
+
+def test_handle_undo_dataset_delete_renames_trash_back_to_live(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+    from makermodslab.record import handle_undo_dataset_delete
+
+    # handle_undo_dataset_delete resolves HF_LEROBOT_HOME via a lerobot constant
+    # that's frozen at first import, not re-read from the env var per call —
+    # tmp_lerobot_home's monkeypatch.setenv alone doesn't reach it, so point
+    # it at the tmp dir directly (test-only; not a production code path). Same
+    # gotcha as handle_delete_dataset's trash test above.
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    (trash_dir / "marker.txt").write_text("restored")
+    _write_trash_manifest(manifest_path, kind="dataset", repo_id="pusht")
+
+    result = handle_undo_dataset_delete("pusht", trash_id)
+
+    assert result["success"] is True
+    assert target.is_dir()
+    assert (target / "marker.txt").exists()
+    assert not trash_dir.exists()
+    assert not manifest_path.exists()
+
+
+def test_handle_undo_dataset_delete_404_when_unknown(tmp_lerobot_home: Path) -> None:
+    from makermodslab.record import handle_undo_dataset_delete
+
+    result = handle_undo_dataset_delete("pusht", "deadbeef")
+    assert result["success"] is False
+
+
+def test_list_deleted_datasets_is_library_wide(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+    from makermodslab.record import list_deleted_datasets
+
+    # list_deleted_datasets resolves HF_LEROBOT_HOME via the same frozen
+    # lerobot constant as handle_undo_dataset_delete above — point it at the
+    # tmp dir directly so it scans tmp_lerobot_home instead of the real cache.
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    for name in ("pusht", "alice/aloha"):
+        target = tmp_lerobot_home / name
+        trash_dir, manifest_path, _ = _new_trash_paths(target)
+        trash_dir.mkdir(parents=True)
+        _write_trash_manifest(manifest_path, kind="dataset", repo_id=name)
+
+    entries = list_deleted_datasets()
+    repo_ids = {e["repo_id"] for e in entries}
+    assert repo_ids == {"pusht", "alice/aloha"}
 
 
 def _stub_recording_request(**overrides):

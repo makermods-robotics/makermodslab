@@ -15,6 +15,7 @@
 import collections
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -1260,6 +1261,83 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
 
     logger.info(f"Moved dataset directory {target} to trash ({trash_dir})")
     return {"success": True, "message": f"Deleted {repo_id}", "trash_id": trash_id}
+
+
+def handle_undo_dataset_delete(repo_id: str, trash_id: str) -> dict[str, Any]:
+    """Rename a whole-dataset trash entry back to its live path. No merge
+    needed — nothing else could have happened to a dataset that doesn't
+    exist locally while it was trashed."""
+    from .datasets import (
+        _dataset_in_use,
+        _read_trash_manifest,
+        _trash_paths_for_id,
+        invalidate_dataset_listing_cache,
+        invalidate_hub_status,
+    )
+
+    in_use = _dataset_in_use(repo_id)
+    if in_use is not None:
+        return {"success": False, "message": in_use}
+
+    paths = _trash_paths_for_id(repo_id, trash_id)
+    if paths is None:
+        return {"success": False, "message": f"No such trash entry '{trash_id}' for '{repo_id}'"}
+    trash_dir, manifest_path = paths
+    manifest = _read_trash_manifest(manifest_path)
+    if manifest is None or manifest.get("kind") != "dataset" or not trash_dir.is_dir():
+        return {"success": False, "message": f"No such trash entry '{trash_id}' for '{repo_id}'"}
+
+    from pathlib import Path
+
+    from lerobot.utils.constants import HF_LEROBOT_HOME
+
+    target = (Path(HF_LEROBOT_HOME).resolve() / repo_id).resolve()
+    if target.exists():
+        return {"success": False, "message": f"A dataset already exists at '{repo_id}'"}
+
+    try:
+        os.rename(trash_dir, target)
+        manifest_path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.error(f"Failed to restore dataset {repo_id} from trash: {e}")
+        return {"success": False, "message": f"Failed to restore dataset: {e}"}
+
+    invalidate_dataset_listing_cache()
+    invalidate_hub_status(repo_id)
+    logger.info(f"Restored dataset directory {target} from trash")
+    return {"success": True, "message": f"Restored {repo_id}"}
+
+
+def list_deleted_datasets() -> list[dict[str, Any]]:
+    """Unexpired dataset-kind trash entries across the whole cache root,
+    newest first — powers the library's 'Recently deleted' toggle."""
+    from pathlib import Path
+
+    from lerobot.utils.constants import HF_LEROBOT_HOME
+
+    from .datasets import TRASH_RETENTION_SECONDS, _iter_trash_manifests, _read_trash_manifest
+
+    root = Path(HF_LEROBOT_HOME).resolve()
+    if not root.is_dir():
+        return []
+
+    out: list[dict[str, Any]] = []
+    for manifest_path in _iter_trash_manifests(root):
+        manifest = _read_trash_manifest(manifest_path)
+        if manifest is None or manifest.get("kind") != "dataset":
+            continue
+        deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+        trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
+        out.append(
+            {
+                "trash_id": trash_id,
+                "repo_id": manifest["repo_id"],
+                "deleted_at": manifest["deleted_at"],
+                "expires_at": deleted_at.timestamp() + TRASH_RETENTION_SECONDS,
+            }
+        )
+    out.sort(key=lambda e: e["deleted_at"], reverse=True)
+    return out
 
 
 def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
