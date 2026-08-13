@@ -67,37 +67,3 @@ export const studioTour: Tour = {
     },
   ],
 };
-
-/**
- * First-run tour shown once the first time a user opens the Teleoperation
- * page — a single reveal orienting them to the live leader/follower view.
- */
-export const teleopTour: Tour = {
-  id: "teleop",
-  steps: [
-    {
-      target: "[data-tour=teleop-page]",
-      title: "Teleoperation",
-      description:
-        "Move the leader arm and watch the follower mirror it live. Camera feeds are on the right; use Go back to end the session.",
-      placement: "bottom",
-    },
-  ],
-};
-
-/**
- * First-run tour shown once the first time a user lands on the Training
- * route's configurator — a single reveal orienting them to the run form.
- */
-export const trainingRouteTour: Tour = {
-  id: "training-route",
-  steps: [
-    {
-      target: "[data-tour=training-configurator]",
-      title: "Configure a training run",
-      description:
-        "Pick your compute target, training steps, and other run parameters here, then start.",
-      placement: "bottom",
-    },
-  ],
-};
