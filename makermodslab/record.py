@@ -1214,6 +1214,7 @@ def handle_recording_status() -> dict[str, Any]:
 
 def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     """Remove a recorded dataset's directory from local disk."""
+    import os
     from pathlib import Path
 
     from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -1239,8 +1240,12 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     if not target.exists():
         return {"success": False, "message": f"Dataset not found on disk: {repo_id}"}
 
+    from .datasets import _new_trash_paths, _write_trash_manifest
+
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
     try:
-        shutil.rmtree(target)
+        os.rename(target, trash_dir)
+        _write_trash_manifest(manifest_path, kind="dataset", repo_id=repo_id)
     except Exception as e:
         logger.error(f"Failed to delete dataset {repo_id}: {e}")
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
@@ -1253,8 +1258,8 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     invalidate_dataset_listing_cache()
     invalidate_hub_status(repo_id)
 
-    logger.info(f"Deleted dataset directory {target}")
-    return {"success": True, "message": f"Deleted {repo_id}"}
+    logger.info(f"Moved dataset directory {target} to trash ({trash_dir})")
+    return {"success": True, "message": f"Deleted {repo_id}", "trash_id": trash_id}
 
 
 def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:

@@ -2028,6 +2028,49 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     assert result["message"].endswith("Stop it first.")
 
 
+def test_handle_delete_dataset_moves_to_trash_instead_of_destroying(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whole-dataset delete renames the directory aside into a trash entry
+    (reusing the same trash mechanism episode-delete uses) instead of
+    shutil.rmtree-ing it — the content must actually survive the move, not
+    just vanish from the live path."""
+    import json
+
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    # handle_delete_dataset resolves HF_LEROBOT_HOME via a lerobot constant
+    # that's frozen at first import, not re-read from the env var per call —
+    # tmp_lerobot_home's monkeypatch.setenv alone doesn't reach it, so point
+    # it at the tmp dir directly (test-only; not a production code path).
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    (target / "meta").mkdir()
+    (target / "meta" / "info.json").write_text('{"total_episodes": 2}')
+    (target / "marker.txt").write_text("still here")
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id="pusht"))
+
+    assert result["success"] is True
+    assert "trash_id" in result
+    assert not target.exists()
+
+    # ".pusht.trash-*" also matches the manifest file itself
+    # (".pusht.trash-<id>.manifest.json"), so exclude it — same filter
+    # test_datasets.py's episode-delete trash tests use.
+    trash_dirs = [p for p in tmp_lerobot_home.glob(".pusht.trash-*") if not p.name.endswith(".manifest.json")]
+    assert len(trash_dirs) == 1
+    assert (trash_dirs[0] / "marker.txt").exists()
+
+    manifests = list(tmp_lerobot_home.glob(".pusht.trash-*.manifest.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert manifest["kind"] == "dataset"
+    assert manifest["repo_id"] == "pusht"
+
+
 def _stub_recording_request(**overrides):
     """Minimal RecordingRequest for exercising handle_start_recording's
     precondition checks — none of these reach real hardware. Pass keyword
