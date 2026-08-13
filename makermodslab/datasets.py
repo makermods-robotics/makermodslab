@@ -35,7 +35,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
-from lerobot.datasets.dataset_tools import delete_episodes
+from lerobot.datasets.dataset_tools import delete_episodes, split_dataset
 
 from .utils.config import (
     _atomic_write_text,
@@ -1533,16 +1533,39 @@ def _episode_delete_worker(repo_id: str, episode_index: int, target: Path) -> No
         return
 
     total_episodes = dataset.meta.total_episodes
+    episode_row = dataset.meta.episodes[episode_index]
+
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    try:
+        split_dataset(dataset, {"trash": [episode_index]}, output_dir=trash_dir)
+        _write_trash_manifest(
+            manifest_path,
+            kind="episode",
+            repo_id=repo_id,
+            episode_index=episode_index,
+            length=int(episode_row["length"]),
+            duration_s=float(episode_row["length"]) / dataset.meta.fps,
+        )
+    except Exception as exc:
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
+        logger.error("Failed to extract episode %s of %s to trash: %s", episode_index, repo_id, exc)
+        _finish_delete_status("error", "Failed to delete episode. See server logs for details.")
+        return
 
     tmp_dir = target.parent / f".{target.name}.delete-tmp-{uuid.uuid4().hex[:8]}"
     try:
         delete_episodes(dataset, [episode_index], output_dir=tmp_dir, repo_id=repo_id)
     except ValueError as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
         _finish_delete_status("error", str(exc))
         return
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
         logger.error("Failed to delete episode %s from %s: %s", episode_index, repo_id, exc)
         _finish_delete_status("error", "Failed to delete episode. See server logs for details.")
         return
@@ -1594,6 +1617,7 @@ def _episode_delete_worker(repo_id: str, episode_index: int, target: Path) -> No
             "repo_id": repo_id,
             "deleted_episode": episode_index,
             "total_episodes": new_total,
+            "trash_id": trash_id,
         },
     )
 

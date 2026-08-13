@@ -838,6 +838,10 @@ def test_delete_episode_and_upload_start_cannot_interleave(tmp_lerobot_home: Pat
             patch("makermodslab.datasets._dataset_in_use", delayed_check),
             patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
             patch(
+                "makermodslab.datasets.split_dataset",
+                side_effect=_stub_split_dataset_success(),
+            ),
+            patch(
                 "makermodslab.datasets.delete_episodes",
                 side_effect=_stub_delete_episodes_success(2),
             ),
@@ -909,6 +913,13 @@ def test_delete_episode_load_failure_400s(tmp_lerobot_home: Path) -> None:
 def _fake_loaded_dataset(total_episodes: int) -> MagicMock:
     ds = MagicMock()
     ds.meta.total_episodes = total_episodes
+    # Real values (not auto-mocked attributes) for the fields the episode-delete
+    # worker's trash-extraction step reads directly — dividing a MagicMock by
+    # another MagicMock doesn't raise, it just returns yet another MagicMock,
+    # which then blows up json-serializing the trash manifest instead of at
+    # the point that's actually wrong.
+    ds.meta.fps = 30
+    ds.meta.episodes = {i: {"length": 20} for i in range(total_episodes)}
     return ds
 
 
@@ -959,6 +970,20 @@ def _stub_delete_episodes_success(new_total: int, *, marker: bytes = b"new-data"
     return _fake
 
 
+def _stub_split_dataset_success():
+    """Build a fake `split_dataset` that mimics lerobot's real contract:
+    write something into `output_dir/<split_name>` for each split and return
+    a dict of split name -> dataset."""
+
+    def _fake(dataset, splits, output_dir=None):
+        output_dir = Path(output_dir)
+        for split_name in splits:
+            (output_dir / split_name).mkdir(parents=True, exist_ok=True)
+        return {name: MagicMock() for name in splits}
+
+    return _fake
+
+
 def _wait_for_delete_worker() -> dict[str, Any]:
     """Block until the background worker launched by the most recent
     start_episode_delete call finishes, returning the final
@@ -1001,13 +1026,19 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
     """The live directory ends up as whatever lerobot's delete_episodes wrote
     into output_dir, the temp/backup dirs are cleaned up, and the listing
     cache is invalidated — all from the background worker, whose outcome
-    shows up in get_episode_delete_status once it's done."""
+    shows up in get_episode_delete_status once it's done. The deleted episode
+    is extracted into a trash entry first, which is the one thing that's
+    NOT cleaned up afterward — it's meant to survive for later undo."""
     from makermodslab.datasets import start_episode_delete
 
     _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
 
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
         patch(
             "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
@@ -1023,7 +1054,10 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
         status = _wait_for_delete_worker()
 
     assert status["state"] == "done"
-    assert status["result"] == {
+    result = dict(status["result"])
+    trash_id = result.pop("trash_id")
+    assert trash_id
+    assert result == {
         "success": True,
         "repo_id": "makermods/three",
         "deleted_episode": 1,
@@ -1032,9 +1066,10 @@ def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> No
     live = tmp_lerobot_home / "makermods" / "three"
     assert (live / "marker.bin").read_bytes() == b"new-data"
     assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 2
-    # No leftover temp/backup siblings.
-    leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
-    assert leftovers == []
+    # No leftover temp/backup siblings — only the trash entry (dir + manifest)
+    # from the extraction step, which is expected to persist.
+    leftovers = sorted(p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three")
+    assert leftovers == [f".three.trash-{trash_id}", f".three.trash-{trash_id}.manifest.json"]
     inval.assert_called_once()
 
 
@@ -1050,6 +1085,10 @@ def test_delete_episode_never_pushes_to_hub(tmp_lerobot_home: Path) -> None:
 
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
         patch(
             "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
@@ -1082,6 +1121,10 @@ def test_delete_episode_rewrite_failure_leaves_original_intact(tmp_lerobot_home:
 
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
         patch("makermodslab.datasets.delete_episodes", side_effect=_boom),
     ):
         start_episode_delete("makermods/three", 1)
@@ -1091,6 +1134,9 @@ def test_delete_episode_rewrite_failure_leaves_original_intact(tmp_lerobot_home:
     assert status["result"] is None
     live = tmp_lerobot_home / "makermods" / "three"
     assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+    # delete_episodes failing after the trash extraction already succeeded
+    # rolls the trash entry back too — the episode was never actually
+    # removed from the live dataset, so there's nothing to undo.
     leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
     assert leftovers == []
 
@@ -1117,6 +1163,10 @@ def test_delete_episode_swap_failure_rolls_back(tmp_lerobot_home: Path) -> None:
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
         patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
             "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
@@ -1129,8 +1179,16 @@ def test_delete_episode_swap_failure_rolls_back(tmp_lerobot_home: Path) -> None:
     # Rolled back: the original 3-episode dataset is back at the live path.
     assert live.exists()
     assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
-    leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
-    assert leftovers == []
+    # This is one of the two LATER failure paths (the swap itself, not the
+    # extraction or the rewrite) — the trash extraction already succeeded by
+    # this point and is deliberately left alone rather than cleaned up, so
+    # the trash dir + manifest are expected leftovers here.
+    leftovers = sorted(p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three")
+    assert len(leftovers) == 2
+    trash_dirs = [n for n in leftovers if n.startswith(".three.trash-") and not n.endswith(".manifest.json")]
+    manifests = [n for n in leftovers if n.endswith(".manifest.json")]
+    assert len(trash_dirs) == 1
+    assert manifests == [f"{trash_dirs[0]}.manifest.json"]
 
 
 def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> None:
@@ -1155,6 +1213,10 @@ def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> N
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
         patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
             "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
@@ -1170,6 +1232,70 @@ def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> N
     # tmp_dir is cleaned up (not left as orphan).
     tmp_dirs = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if ".delete-tmp-" in p.name]
     assert tmp_dirs == []
+
+
+def test_episode_delete_worker_extracts_episode_to_trash_before_rewriting(
+    tmp_lerobot_home: Path,
+) -> None:
+    """_episode_delete_worker runs on a background thread against a real
+    LeRobotDataset, which this project's test policy deliberately doesn't
+    unit-test (see this file's existing busy-guard-only coverage of episode
+    delete, and CLAUDE.md: "subprocess/thread happy paths ... are
+    deliberately not unit-tested"). This instead checks, via mocks, that the
+    worker calls split_dataset (to extract the deleted episode into a trash
+    entry) BEFORE calling delete_episodes (which rewrites the live dataset) —
+    matching the level the rest of this file already tests the worker at."""
+    from makermodslab import datasets as ds
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=3)
+    target = tmp_lerobot_home / "pusht"
+
+    calls: list[str] = []
+
+    def fake_split_dataset(dataset, splits, output_dir):
+        calls.append("split_dataset")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return {"trash": object()}
+
+    def fake_delete_episodes(dataset, indices, output_dir, repo_id):
+        calls.append("delete_episodes")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "meta").mkdir()
+        (Path(output_dir) / "meta" / "info.json").write_text('{"total_episodes": 2}')
+
+    # _fake_loaded_dataset (not a bare MagicMock()) gives dataset.meta.episodes
+    # and dataset.meta.fps real values — the worker's trash-extraction step
+    # reads both directly (episode length + duration for the manifest), and a
+    # bare MagicMock's arithmetic there produces another MagicMock rather
+    # than raising, which then fails much later trying to json-serialize it.
+    fake_dataset = _fake_loaded_dataset(3)
+
+    ds._delete_status = {
+        "state": "running",
+        "repo_id": "pusht",
+        "episode_index": 1,
+        "message": "Deleting…",
+        "result": None,
+    }
+    try:
+        with (
+            # LeRobotDataset is imported inside _episode_delete_worker via a
+            # local `from lerobot.datasets import LeRobotDataset`, so it's
+            # never a module-level `makermodslab.datasets.LeRobotDataset`
+            # name to patch — patch it where the rest of this file's
+            # episode-delete tests do, at the source module.
+            patch("lerobot.datasets.LeRobotDataset", return_value=fake_dataset),
+            patch("makermodslab.datasets.split_dataset", side_effect=fake_split_dataset),
+            patch("makermodslab.datasets.delete_episodes", side_effect=fake_delete_episodes),
+        ):
+            ds._episode_delete_worker("pusht", 1, target)
+    finally:
+        result = ds._delete_status
+        ds._delete_status = None
+
+    assert calls == ["split_dataset", "delete_episodes"]
+    assert result["state"] == "done"
+    assert "trash_id" in result["result"]
 
 
 # --- Orphaned episode-delete dir recovery ---
@@ -1282,6 +1408,10 @@ def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: P
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
         patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
             "makermodslab.datasets.delete_episodes",
             side_effect=_stub_delete_episodes_success(2),
         ),
@@ -1299,7 +1429,9 @@ def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: P
         status = _wait_for_delete_worker()
 
     assert status["state"] == "done"
-    assert status["result"] == {
+    result = dict(status["result"])
+    assert result.pop("trash_id")
+    assert result == {
         "success": True,
         "repo_id": "makermods/three",
         "deleted_episode": 1,
@@ -1328,6 +1460,10 @@ def test_delete_episode_endpoint_returns_before_worker_finishes(
 
     with (
         patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
         patch("makermodslab.datasets.delete_episodes", side_effect=_blocking_delete),
     ):
         resp = client.post(
