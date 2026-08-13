@@ -157,6 +157,16 @@ async def wiggle_gripper(port: str) -> dict:
             "success": False,
             "message": "Replay is currently active — wait for it to stop before wiggling.",
         }
+    # Lazy, because jobs imports this module back the same way.
+    from . import jobs as _jobs
+
+    if (training := _jobs.training_is_active()) is not None:
+        return {
+            "success": False,
+            "message": (
+                f"Training run '{training}' is using this machine — wait for it to stop before wiggling."
+            ),
+        }
 
     wiggle_active = True
     try:

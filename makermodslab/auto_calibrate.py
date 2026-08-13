@@ -243,6 +243,15 @@ class _AutoCalArmRunner:
             if _replay.replay_active:
                 return {"success": False, "message": "Replay is currently active. Stop it first."}
 
+            # Lazy, because jobs imports this module back the same way.
+            from . import jobs as _jobs
+
+            if (training := _jobs.training_is_active()) is not None:
+                return {
+                    "success": False,
+                    "message": f"Training run '{training}' is using this machine. Stop it first.",
+                }
+
             if request.device_type not in ("teleop", "robot"):
                 return {"success": False, "message": "Invalid device type"}
             if not request.port:
@@ -605,6 +614,15 @@ class AutoCalibrationBatchManager:
                 }
             if _replay.replay_active:
                 return {"success": False, "message": "Replay is currently active. Stop it first."}
+
+            # Lazy, because jobs imports this module back the same way.
+            from . import jobs as _jobs
+
+            if (training := _jobs.training_is_active()) is not None:
+                return {
+                    "success": False,
+                    "message": f"Training run '{training}' is using this machine. Stop it first.",
+                }
 
             arms = request.arms
             # --- Fail-fast validation, before touching any hardware. ---

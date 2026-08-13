@@ -3609,10 +3609,14 @@ def test_stop_during_the_download_is_interrupted(monkeypatch, tmp_path) -> None:
     assert record.id not in reg._runners
 
 
-def test_a_download_bound_job_refuses_a_second_local_run(monkeypatch, tmp_path) -> None:
-    """The local mutex covers the download window too — the machine is spoken
-    for from the moment the record exists, not from the trainer's first step."""
-    from makermodslab.jobs import JobAlreadyRunningError, JobRegistry, JobTarget
+def test_a_download_bound_job_queues_a_second_local_run(monkeypatch, tmp_path) -> None:
+    """The slot is taken for the download window too — the machine is spoken for
+    from the moment the record exists, not from the trainer's first step.
+
+    It used to be a refusal (`JobAlreadyRunningError` → 409). Now the second run
+    is ACCEPTED and parked: same invariant (one local trainer at a time), but the
+    user does not have to come back and resubmit by hand when the first ends."""
+    from makermodslab.jobs import JobRegistry, JobTarget
     from makermodslab.train import TrainingRequest
 
     started, release = threading.Event(), threading.Event()
@@ -3624,16 +3628,20 @@ def test_a_download_bound_job_refuses_a_second_local_run(monkeypatch, tmp_path) 
 
     reg = JobRegistry(tmp_path / "root")
     source = _cloud_finetune_source(reg)
-    _fake_local_runner(monkeypatch)
+    fake_runner = _fake_local_runner(monkeypatch)
 
     record = reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
     assert started.wait(timeout=10), "the download never started"
 
-    with pytest.raises(JobAlreadyRunningError):
-        reg.start(
-            TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
-            JobTarget(runner="local"),
-        )
+    second = reg.start(
+        TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        JobTarget(runner="local"),
+    )
+    assert second.state == "queued"
+    assert reg.get(second.id).queue_position == 1
+    # Parked, not started: the one slot still belongs to the download above.
+    assert fake_runner.start.call_count == 0
+    assert second.id not in reg._runners
 
     release.set()
     _join_prepare(reg, record.id)
@@ -6253,3 +6261,1101 @@ def test_rewind_steps_guard_reads_the_chosen_checkpoint(tmp_path) -> None:
             _rewind_request(leaf="tip", owner="trunk", step=200, steps=200),
             JobTarget(runner="local"),
         )
+
+
+# ---------------------------------------------------------------------------
+# The local training queue.
+#
+# One local trainer at a time is still the invariant; what changed is what a
+# second request gets. It used to be a 409 the user had to resubmit by hand;
+# now it is accepted as `queued` and the watchdog starts it when the slot frees.
+# These cover the pure/idle branches of that machinery — the ordering maths, the
+# reorder contract, cancel-while-queued, and the restart round-trip. The launch
+# path itself (_drain_queue → _launch_locked → a real subprocess) is a thread +
+# subprocess happy path, deliberately out of scope per CLAUDE.md.
+# ---------------------------------------------------------------------------
+
+
+def _quiet_registry(tmp_path):
+    """A registry whose watchdog never starts, so a background _tick() can't
+    drain the queue underneath an assertion. Every test here drives
+    `_drain_queue` by hand when it wants it to run.
+
+    Suppressed at construction rather than stopped afterwards (the usual
+    `shutdown()` + join): __init__ starts the watchdog, so by the time a test
+    could call shutdown() a tick may already have promoted and LAUNCHED the head
+    of a queue loaded from disk. That is exactly right in production and exactly
+    a race in a test."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import JobRegistry
+
+    with patch.object(JobRegistry, "_start_watchdog", lambda self: None):
+        return JobRegistry(tmp_path / "root")
+
+
+def _inject_queued(reg, job_id: str, seq: int, *, persist: bool = False):
+    """Splice a `queued` record straight into the registry — the same shape
+    start() produces when it finds the slot busy, without the pile of Hub
+    patching a real start needs."""
+    from makermodslab.jobs import JobRecord, _job_dir
+    from makermodslab.train import TrainingRequest
+
+    record = JobRecord(
+        id=job_id,
+        name=job_id,
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        # A real `start()` always claims a job dir before queuing, and two
+        # checks read it: `_queued_dependents_of` guards on `if out_dir and …`,
+        # so `""` made the path-containment half of the dependency check
+        # structurally unreachable for every injected record, and
+        # `_count_checkpoints("")` resolved to `Path("checkpoints")` in the
+        # pytest CWD — the repo itself.
+        output_dir=str(_job_dir(reg._output_root, job_id) / "run"),
+        started_at=0.0,
+        runner="local",
+        queue_seq=seq,
+    )
+    with reg._lock:
+        reg._records[job_id] = record
+        reg._next_queue_seq = max(reg._next_queue_seq, seq + 1)
+        if persist:
+            reg._write_meta(record)
+    return record
+
+
+def _inject_running_local(reg, job_id: str = "busy"):
+    """A local run holding the single slot. No runner is registered: nothing
+    here asks the runner anything, and stop() is never called on it."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    record = JobRecord(
+        id=job_id,
+        name=job_id,
+        state="running",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir="",
+        started_at=0.0,
+        runner="local",
+    )
+    with reg._lock:
+        reg._records[job_id] = record
+    return record
+
+
+def test_queue_positions_number_by_seq_not_by_insertion(tmp_path) -> None:
+    """queue_position is DERIVED, 1-based, and ordered by queue_seq — not by the
+    order records happen to sit in the dict. Anything not queued reads 0, so the
+    field never claims a place in line for a run that has one."""
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    # Inserted out of order on purpose: seq decides, insertion does not.
+    _inject_queued(reg, "third", seq=30)
+    _inject_queued(reg, "first", seq=10)
+    _inject_queued(reg, "second", seq=20)
+
+    by_id = {r.id: r for r in reg.list(limit=50)}
+
+    assert by_id["first"].queue_position == 1
+    assert by_id["second"].queue_position == 2
+    assert by_id["third"].queue_position == 3
+    # The running job is not in the queue and must not be numbered as if it were.
+    assert by_id["busy"].queue_position == 0
+    # get() annotates the same way list() does.
+    assert reg.get("second").queue_position == 2
+
+
+def test_reorder_queue_permutes_the_waiting_order(tmp_path) -> None:
+    """Any permutation is legitimate, including hauling the last-queued run to
+    the front. The new order is returned already numbered and survives a
+    re-read, because queue_seq is persisted."""
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    for jid, seq in (("a", 10), ("b", 20), ("c", 30)):
+        _inject_queued(reg, jid, seq=seq, persist=True)
+
+    ordered = reg.reorder_queue(["c", "a", "b"])
+
+    assert [r.id for r in ordered] == ["c", "a", "b"]
+    assert [r.queue_position for r in ordered] == [1, 2, 3]
+    # Re-derived from the registry, not just from the return value.
+    assert [r.id for r in reg._queued_records()] == ["c", "a", "b"]
+
+
+def test_reorder_queue_refuses_a_stale_list_rather_than_half_applying(tmp_path) -> None:
+    """The frontend sends the whole queue back after a drag. If the queue moved
+    in between — the head started, or one was cancelled — applying the part that
+    still matches would reorder around a job the user could still see on screen.
+    Refuse, and hand back the CURRENT ids so the caller can re-render."""
+    from makermodslab.jobs import QueueChangedError
+
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    for jid, seq in (("a", 10), ("b", 20)):
+        _inject_queued(reg, jid, seq=seq)
+
+    # Omits one that is queued: a well-formed list that lost its race. THIS is
+    # the staleness case, and the only one whose "refresh and try again" advice
+    # can actually succeed.
+    with pytest.raises(QueueChangedError) as excinfo:
+        reg.reorder_queue(["a"])
+    assert sorted(excinfo.value.current_ids) == ["a", "b"]
+
+    # A list naming something that was never queued is a MALFORMED request, not
+    # a race — see test_reorder_names_a_bad_id_instead_of_blaming_a_race. It is
+    # refused here too; what matters is that it is a different refusal.
+    with pytest.raises(ValueError) as bad:
+        reg.reorder_queue(["a", "b", "ghost"])
+    assert not isinstance(bad.value, QueueChangedError)
+
+    # Nothing moved.
+    assert [r.id for r in reg._queued_records()] == ["a", "b"]
+
+
+def test_stop_on_a_queued_job_removes_it(tmp_path) -> None:
+    """Stop on a queued run means cancel, and cancelling one REMOVES it.
+
+    It never executed — no process, no runner, no logs, no checkpoint, and an
+    output dir holding nothing but its own job.json — so there is no history to
+    keep. An earlier version left an `interrupted` tombstone, which then had to
+    be excused from every question the registry asks about runs (most sharply:
+    a cancelled continuation permanently superseded the parent it was going to
+    continue). Removing it is the same outcome without the special cases."""
+    from makermodslab.jobs import JobNotFoundError
+
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    _inject_queued(reg, "a", seq=10, persist=True)
+    queued = _inject_queued(reg, "b", seq=20, persist=True)
+    queued.queued_hub_ref = "user/repo@checkpoints/003000"
+    job_dir = tmp_path / "root" / "b"
+    assert job_dir.exists()
+
+    removed = reg.stop("b")
+
+    # The caller still gets the record it asked about.
+    assert removed.id == "b"
+    # But it is gone from the registry, from disk, and from the queue.
+    with pytest.raises(JobNotFoundError):
+        reg.get("b")
+    assert not job_dir.exists()
+    assert "b" not in reg._stop_requested
+    assert [r.id for r in reg._queued_records()] == ["a"]
+    assert reg.get("a").queue_position == 1
+    # A restart does not resurrect it.
+    assert "b" not in _quiet_registry(tmp_path)._records
+
+
+def test_drain_queue_is_a_no_op_while_the_local_slot_is_busy(tmp_path) -> None:
+    """The whole point of the queue: while a local run holds the slot, nothing
+    behind it starts, however many ticks go by."""
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    _inject_queued(reg, "a", seq=10)
+
+    reg._drain_queue()
+    reg._drain_queue()
+
+    assert reg.get("a").state == "queued"
+    assert reg.get("a").queue_position == 1
+    assert "a" not in reg._runners
+
+
+def test_drain_queue_does_nothing_with_an_empty_queue(tmp_path) -> None:
+    """A free slot and nothing waiting is the ordinary idle case — it must not
+    trip over the empty queue on every single tick."""
+    reg = _quiet_registry(tmp_path)
+
+    reg._drain_queue()  # no records at all
+
+    assert reg.list() == []
+
+
+def test_a_queued_job_survives_a_restart_and_keeps_its_place(tmp_path) -> None:
+    """Nothing was started, so there is nothing to reattach — a queued record
+    comes back as itself, in the order it had. The seq counter is recovered too,
+    so a run enqueued after the restart lands BEHIND the ones already waiting
+    instead of jumping the line with a fresh seq of 1."""
+    reg = _quiet_registry(tmp_path)
+    _inject_queued(reg, "a", seq=10, persist=True)
+    _inject_queued(reg, "b", seq=20, persist=True)
+
+    reloaded = _quiet_registry(tmp_path)
+
+    assert [r.id for r in reloaded._queued_records()] == ["a", "b"]
+    assert reloaded.get("a").state == "queued"
+    assert reloaded.get("b").queue_position == 2
+    assert reloaded._next_queue_seq > 20
+    # The next enqueue goes to the back, not the front.
+    assert _inject_queued(reloaded, "c", seq=reloaded._take_queue_seq()).queue_seq > 20
+
+
+def test_a_queued_cloud_record_is_not_left_parked_forever(tmp_path) -> None:
+    """Cloud never queues, so a `queued` cloud record can only come from a
+    hand-edited file or a downgrade-then-upgrade. It waits on a slot it does not
+    need and nothing will ever start it, and there is no way out from the UI —
+    so the loader retires it rather than leaving it stuck."""
+    from makermodslab.jobs import CANCELLED_IN_QUEUE_MESSAGE
+
+    reg = _quiet_registry(tmp_path)
+    record = _inject_queued(reg, "cloudy", seq=10)
+    record.runner = "hf_cloud"
+    with reg._lock:
+        reg._write_meta(record)
+
+    reloaded = _quiet_registry(tmp_path)
+
+    recovered = reloaded.get("cloudy")
+    assert recovered.state == "interrupted"
+    assert recovered.error_message == CANCELLED_IN_QUEUE_MESSAGE
+    assert reloaded._queued_records() == []
+
+
+# ---------------------------------------------------------------------------
+# Queue regressions.
+#
+# Each of these is a bug that shipped in the first cut of the queue and was
+# found by review, not by the tests above. They are the cases where the queue
+# turned a previously-impossible situation into an ordinary one: before it, a
+# busy slot refused the second local run outright, so there was no such thing as
+# an accepted-but-not-started run to strand, starve, or invalidate.
+# ---------------------------------------------------------------------------
+
+
+def test_a_launch_that_throws_frees_the_slot_instead_of_wedging_the_queue(monkeypatch, tmp_path) -> None:
+    """The single worst outcome this machinery has: a launch that dies OUTSIDE
+    `runner.start()` used to leave the record `running` with no usable runner.
+    `_local_slot_busy` then named it forever, so `_drain_queue` returned early on
+    every later tick and the queue was dead for the life of the process — while
+    `stop()` refused it (not running, to stop's eyes) and `delete()` refused it
+    (it IS running), leaving no way out short of editing job.json.
+
+    The deferred branch is the one that was uncovered: `PreparingJobRunner` is
+    registered before the thread starts, and its `is_running()` is hardcoded
+    True, so nothing could ever finalise it."""
+    from unittest.mock import patch
+
+    reg = _quiet_registry(tmp_path)
+    # Faked BEFORE the drains below: the "queue advances" assertion promotes a
+    # record with no deferred ref, which takes the direct branch and would
+    # otherwise spawn a real lerobot subprocess (and, with the helper's empty
+    # output_dir, drop an `exit_status` file into the pytest CWD). Subprocess
+    # happy paths are deliberately out of the suite — see CLAUDE.md.
+    fake_runner = _fake_local_runner(monkeypatch)
+    head = _inject_queued(reg, "head", seq=10)
+    head.queued_hub_ref = "user/repo@checkpoints/003000"  # forces the deferred branch
+    _inject_queued(reg, "next", seq=20)
+
+    with patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
+        reg._drain_queue()
+
+    failed = reg.get("head")
+    assert failed.state == "failed"
+    assert "can't start new thread" in (failed.error_message or "")
+    # The slot is the whole point: it must be free again.
+    assert reg._local_slot_busy() is None
+    assert "head" not in reg._runners
+    # The corpse releases its queue bookkeeping too, so nothing that will never
+    # run keeps a place in line or claims transfers it never did.
+    assert failed.queue_seq == 0
+    assert failed.queued_hub_ref is None
+    assert "head" not in reg._prepare_threads
+    # And the queue actually moves on rather than starving behind the corpse.
+    reg._drain_queue()
+    assert reg.get("next").state == "running"
+    assert fake_runner.start.call_count == 1
+
+
+def test_a_new_run_does_not_jump_a_queue_that_is_already_waiting(monkeypatch, tmp_path) -> None:
+    """FIFO has to survive the handover window. `_drain_queue` runs at the END of
+    a watchdog tick, so between the finalisation that frees the slot and the
+    promotion that fills it the slot reads FREE with jobs still waiting — for a
+    whole second when the release came from a prepare thread. Deciding purely on
+    "is something running" let a run submitted in that window start immediately,
+    ahead of everything already in line."""
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    # Nothing is running — the slot is genuinely free — but two runs are waiting.
+    _inject_queued(reg, "first", seq=10)
+    _inject_queued(reg, "second", seq=20)
+    assert reg._local_slot_busy() is None
+
+    latecomer = reg.start(
+        TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        JobTarget(runner="local"),
+    )
+
+    assert latecomer.state == "queued"
+    assert [r.id for r in reg._queued_records()] == ["first", "second", latecomer.id]
+    assert reg.get(latecomer.id).queue_position == 3
+
+
+def test_the_submit_response_knows_its_place_in_line(monkeypatch, tmp_path) -> None:
+    """`queue_position` is derived, and `start()` used to return the record
+    without deriving it — so the ONE response the submitting client gets said
+    position 0 for a run that was third in line, and the UI could only say
+    "waiting to start" at the exact moment the user wanted a number."""
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    _inject_running_local(reg)
+    _inject_queued(reg, "ahead", seq=10)
+
+    submitted = reg.start(
+        TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        JobTarget(runner="local"),
+    )
+
+    # The returned object itself, not a re-read of the registry.
+    assert submitted.state == "queued"
+    assert submitted.queue_position == 2
+
+
+def test_cancelling_a_queued_continuation_leaves_the_parent_continuable(tmp_path) -> None:
+    """The bug this closes: a continuation cancelled before it ever started left
+    its parent permanently `JobAlreadyContinuedError` and filed as superseded,
+    so the parent vanished from the library — superseded by a run that never
+    trained a step, with no way back but finding and deleting the cancelled
+    record. Removing the record on cancel means the edge goes with it, with no
+    flag, no graph rule and no special case anywhere."""
+    from makermodslab.jobs import JobRecord, build_child_index
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    parent = JobRecord(
+        id="parent",
+        name="parent",
+        state="interrupted",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir="",
+        started_at=0.0,
+        runner="local",
+    )
+    with reg._lock:
+        reg._records[parent.id] = parent
+    child = _inject_queued(reg, "child", seq=10, persist=True)
+    child.config.resume_from_job_id = "parent"
+    with reg._lock:
+        reg._write_meta(child)
+
+    assert build_child_index(reg._records.values()).get("parent") == ["child"]
+
+    reg.stop("child")
+
+    # The parent is a leaf again — continuable, deletable, visible.
+    assert build_child_index(reg._records.values()).get("parent") is None
+    # And still so after a restart: the record is gone, not merely hidden.
+    reloaded = _quiet_registry(tmp_path)
+    assert "child" not in reloaded._records
+    assert build_child_index(reloaded._records.values()).get("parent") is None
+
+
+def test_deleting_the_source_a_queued_finetune_will_read_is_refused(tmp_path) -> None:
+    """A fine-tune freezes its base checkpoint as an absolute PATH at submit and
+    nothing re-resolves it at launch, while `build_child_index` deliberately
+    excludes fine-tune edges — so `delete()` could take the directory out from
+    under a run that had not started. The queue turned that from a seconds-wide
+    race into an ordinary sequence of clicks: fine-tune from A, tidy up by
+    deleting A, wait."""
+    from makermodslab.jobs import JobRecord, JobSourceOfQueuedRunError
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    source_dir = tmp_path / "source-run"
+    source_dir.mkdir()
+    source = JobRecord(
+        id="source",
+        name="source",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir=str(source_dir),
+        started_at=0.0,
+        runner="local",
+    )
+    with reg._lock:
+        reg._records[source.id] = source
+
+    # Named as the fine-tune source.
+    waiting = _inject_queued(reg, "waiting", seq=10)
+    waiting.config.finetune_from_job_id = "source"
+    with pytest.raises(JobSourceOfQueuedRunError) as excinfo:
+        reg.delete("source")
+    assert excinfo.value.queued_ids == ["waiting"]
+
+    # A CHAIN REWIND fine-tune never names the ancestor it reads — it just holds
+    # a path inside it — so containment has to be checked too.
+    waiting.config.finetune_from_job_id = None
+    waiting.config.policy_pretrained_path = f"{source_dir}/checkpoints/010000/pretrained_model"
+    with pytest.raises(JobSourceOfQueuedRunError):
+        reg.delete("source")
+
+    # A sibling directory that merely shares a prefix is NOT containment.
+    waiting.config.policy_pretrained_path = f"{source_dir}-old/checkpoints/010000"
+    reg.delete("source")
+    assert "source" not in reg._records
+
+
+def test_a_queued_run_is_revalidated_before_it_launches(monkeypatch, tmp_path) -> None:
+    """The feature-space guard reads the LOCAL DATASET, whose answer changes if
+    that dataset is deleted and re-recorded with a camera added while the run
+    waits. lerobot sizes the policy from the dataset and loads the checkpoint
+    with strict=False, so nothing downstream notices — it trains with
+    randomly-initialised inputs and only shows up as bad rollouts (MT44)."""
+    import makermodslab.jobs as jobs_mod
+
+    reg = _quiet_registry(tmp_path)
+    record = _inject_queued(reg, "stale", seq=10)
+    record.config.policy_pretrained_path = "/some/checkpoint"
+    _inject_queued(reg, "behind", seq=20)
+
+    def _refuse(pretrained_path: str, dataset_repo_id: str) -> None:
+        raise ValueError("Checkpoint expects 2 cameras; the dataset has 3.")
+
+    monkeypatch.setattr(jobs_mod, "_check_pretrained_policy_type", lambda *a: None)
+    monkeypatch.setattr(jobs_mod, "_check_pretrained_feature_space", _refuse)
+
+    reg._drain_queue()
+
+    failed = reg.get("stale")
+    assert failed.state == "failed"
+    assert "the dataset has 3" in (failed.error_message or "")
+    # Says WHY it is only failing now — the request was valid when accepted.
+    assert "changed while it waited" in (failed.error_message or "")
+    # It never reached a runner, and the queue is free to move on.
+    assert "stale" not in reg._runners
+    assert reg._local_slot_busy() is None
+
+
+def test_a_transient_revalidation_error_does_not_fail_a_legitimate_run(monkeypatch, tmp_path) -> None:
+    """Only a ValueError — the checks' own verdict — refuses a launch. An
+    unreadable config.json or a Hub hiccup is "no opinion": failing a legitimate
+    run on a transient read would be worse than the bug being guarded against,
+    and the trainer still refuses a checkpoint it genuinely cannot load."""
+    import makermodslab.jobs as jobs_mod
+
+    reg = _quiet_registry(tmp_path)
+    record = _inject_queued(reg, "fine", seq=10)
+    record.config.policy_pretrained_path = "/some/checkpoint"
+
+    def _boom(*args) -> None:
+        raise OSError("connection reset by peer")
+
+    monkeypatch.setattr(jobs_mod, "_check_pretrained_policy_type", _boom)
+    monkeypatch.setattr(jobs_mod, "LocalJobRunner", lambda *a, **k: _fake_runner_obj())
+
+    reg._drain_queue()
+
+    assert reg.get("fine").state == "running"
+
+
+def test_list_queue_is_the_whole_queue_not_a_page(tmp_path) -> None:
+    """The queue widget used to derive itself from `list(limit=10)`. A queued
+    record carries its SUBMIT time, so queued runs crowd the top of that
+    newest-first page and, past the page size, the runs at the HEAD of the line
+    fell off it — hiding the run about to start and making every reorder a 409,
+    because `reorder_queue` requires the whole list."""
+    reg = _quiet_registry(tmp_path)
+    for i in range(15):
+        record = _inject_queued(reg, f"q{i:02d}", seq=(i + 1) * 10)
+        # Distinct submit times, ascending with the queue order — which is what
+        # real submissions have, and what makes `list()`'s newest-first page
+        # drop the OLDEST queued runs: the ones at the head of the line.
+        record.started_at = float(i)
+
+    page = reg.list(limit=10)
+    queue = reg.list_queue()
+
+    assert len(page) == 10  # unchanged: /jobs is still a page
+    assert len(queue) == 15  # the queue is not
+    assert [r.id for r in queue] == [f"q{i:02d}" for i in range(15)]
+    assert [r.queue_position for r in queue] == list(range(1, 16))
+    # The head of the line is exactly what the page loses.
+    assert "q00" not in {r.id for r in page}
+
+
+def _fake_runner_obj():
+    from unittest.mock import MagicMock
+
+    runner = MagicMock()
+    runner.pid.return_value = 4242
+    return runner
+
+
+# ---------------------------------------------------------------------------
+# Round-2 regressions.
+#
+# These are bugs found IN THE FIXES for the round-1 bugs above — the queue's
+# second review pass. Several are cases where a fix closed one hole and opened
+# another, which is why each of them gets a test rather than a comment.
+# ---------------------------------------------------------------------------
+
+
+def test_a_launch_that_throws_after_spawning_stops_the_process_it_started(tmp_path) -> None:
+    """Releasing the slot is only safe if nothing is still using it.
+
+    The handler that frees the slot on a failed launch marks the record
+    `failed`, which is exactly what lets the NEXT run start. If the trainer was
+    already spawned when the throw happened, that is two local trainings on one
+    GPU — the single invariant this whole feature exists to hold — plus an
+    orphan the UI cannot reach (`stop` refuses a non-running record; `delete`
+    would wipe the output dir under the live process)."""
+    from unittest.mock import MagicMock, patch
+
+    reg = _quiet_registry(tmp_path)
+    _inject_queued(reg, "head", seq=10)
+
+    runner = MagicMock()
+    runner.pid.side_effect = RuntimeError("could not read pid")  # throws AFTER start()
+
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: runner):
+        reg._drain_queue()
+
+    assert reg.get("head").state == "failed"
+    # The process that was started is stopped before the slot is handed on.
+    assert runner.start.call_count == 1
+    assert runner.stop.call_count == 1
+    assert reg._local_slot_busy() is None
+    assert "head" not in reg._runners
+
+
+def test_a_launch_whose_start_throws_midway_stops_what_it_already_spawned(tmp_path) -> None:
+    """The sibling above covers a throw AFTER `start()` returned. This covers a
+    throw from inside it, which is the reachable one.
+
+    Neither runner's `start` is atomic. `LocalJobRunner.start` calls `Popen` and
+    only then starts its stdout thread; `HfCloudJobRunner.start` sets
+    `_hf_job_id` and only then starts two workers. A `RuntimeError: can't start
+    new thread` from that second half leaves a live trainer behind. While
+    `started` was recorded only after `start()` returned, the handler saw None,
+    skipped `stop()`, and released the slot to a second trainer — with
+    `process_pid` never assigned, so the first was unreachable from the UI and
+    survived a restart."""
+    from unittest.mock import MagicMock, patch
+
+    reg = _quiet_registry(tmp_path)
+    _inject_queued(reg, "head", seq=10)
+
+    runner = MagicMock()
+    # Spawns, then dies partway through its own start() — the process is live.
+    runner.start.side_effect = RuntimeError("can't start new thread")
+
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: runner):
+        reg._drain_queue()
+
+    assert reg.get("head").state == "failed"
+    assert runner.start.call_count == 1
+    assert runner.stop.call_count == 1, "a half-started runner must still be stopped"
+    assert reg._local_slot_busy() is None
+    assert "head" not in reg._runners
+
+
+def test_the_queue_waits_while_the_robot_is_in_use(monkeypatch, tmp_path) -> None:
+    """Every robot feature checks the other five before starting, because they
+    share this machine's GPU and USB. Training never joined that set, which was
+    survivable while a run could only begin from an explicit submit — the user
+    was present. The queue starts runs from a watchdog thread with nobody at the
+    keyboard, so it has to ask."""
+    import makermodslab.record as record_mod
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    _inject_queued(reg, "waiting", seq=10)
+
+    monkeypatch.setattr(record_mod, "recording_active", True, raising=False)
+    reg._drain_queue()
+    assert reg.get("waiting").state == "queued", "a recording session must hold the queue"
+
+    # It waits rather than failing: the run keeps its place and starts later.
+    monkeypatch.setattr(record_mod, "recording_active", False, raising=False)
+    reg._drain_queue()
+    assert reg.get("waiting").state == "running"
+
+
+def test_a_robot_module_that_cannot_answer_does_not_kill_the_queue(monkeypatch, tmp_path) -> None:
+    """`_robot_busy` is the FIRST statement of `_drain_queue`, and it reaches
+    into six modules that pull in cv2, av and the lerobot robot backends —
+    none of which `jobs` depended on before the queue existed.
+
+    Unguarded, one raise there propagates through `_tick` to `_watchdog_loop`'s
+    blanket handler, which keeps the loop alive but means `_drain_queue` never
+    completes again for the life of the process: queued runs sit forever against
+    an idle GPU, one traceback per second, while the UI looks healthy because
+    finalisation runs earlier in the tick. Idle is both the fail-safe answer and
+    the true one — a module that cannot be imported cannot be running."""
+    import makermodslab.calibrate as calibrate_mod
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    _inject_queued(reg, "blocked", seq=10)
+
+    def _explode() -> bool:
+        raise ImportError("simulated: no serial backend")
+
+    monkeypatch.setattr(calibrate_mod, "calibration_is_active", _explode)
+
+    assert reg._robot_busy() is None
+    reg._drain_queue()
+    assert reg.get("blocked").state == "running", "a broken robot module must not stall the queue"
+    # Latched, so a permanently broken module logs once rather than ~86k/day.
+    assert reg._robot_check_failed is True
+
+
+def test_the_watchdog_actually_drains_the_queue(monkeypatch, tmp_path) -> None:
+    """The one test here that lets a real watchdog thread run.
+
+    Every other queue test uses `_quiet_registry` and calls `_drain_queue()` by
+    hand, which means the suite verified the drain's LOGIC exhaustively while
+    nothing checked that anything in the product ever calls it: deleting the
+    `self._drain_queue()` at the end of `_tick` — its only production call site,
+    without which no queued run ever starts and the feature is inert — left all
+    314 queue tests green.
+
+    CLAUDE.md says thread happy paths are deliberately not unit-tested, and this
+    is a deliberate exception rather than an oversight: the runner is faked and
+    the robot check stubbed, so nothing here spawns a process or touches
+    hardware. What it exercises is one wire."""
+    import time as _time
+
+    from makermodslab.jobs import JobRegistry
+
+    _fake_local_runner(monkeypatch)
+    # Hermetic and fast: the real one imports six robot modules (cv2, av, the
+    # lerobot backends) on the first tick.
+    monkeypatch.setattr(JobRegistry, "_robot_busy", lambda self: None)
+
+    reg = JobRegistry(tmp_path / "root")
+    try:
+        _inject_queued(reg, "waiting", seq=10)
+
+        # The tick is 1.0s; the margin is for a loaded CI box, and the loop
+        # exits as soon as it sees the promotion rather than sleeping it out.
+        deadline = _time.time() + 15.0
+        while _time.time() < deadline and reg.get("waiting").state == "queued":
+            _time.sleep(0.05)
+
+        assert reg.get("waiting").state == "running", "the watchdog never drained the queue"
+    finally:
+        reg.shutdown()
+
+
+def test_a_base_checkpoint_that_cannot_be_re_read_is_logged_not_silent(monkeypatch, tmp_path, caplog) -> None:
+    """The launch-time re-validation's real failure mode is silence, not an
+    exception.
+
+    Both helpers swallow their own read failures and return None, so "the Hub is
+    unreachable right now" is indistinguishable from "everything checks out" —
+    and that happens exactly when the network is worse at promotion time than it
+    was at submit, which for a run that waited hours is ordinary. It matters
+    because lerobot loads weights with `strict=False`: a base whose feature
+    space no longer matches loads cleanly and trains garbage recorded as a
+    fine-tune. The run still starts (refusing every unverifiable run would make
+    the queue useless offline), but it may not start quietly."""
+    import makermodslab.jobs as jobs_mod
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    record = _inject_queued(reg, "finetune", seq=10)
+    record.config.policy_pretrained_path = "user/base"
+
+    # Both checks answer "no opinion", which is what they do when they cannot
+    # read either side.
+    monkeypatch.setattr(jobs_mod, "_check_pretrained_policy_type", lambda *a, **k: None)
+    monkeypatch.setattr(jobs_mod, "_check_pretrained_feature_space", lambda *a, **k: None)
+    monkeypatch.setattr(jobs_mod, "read_pretrained_config", lambda _path: None)
+
+    with caplog.at_level("WARNING"):
+        reg._drain_queue()
+
+    assert reg.get("finetune").state == "running", "an unverifiable base must not block the queue"
+    assert "NOT re-verified" in caplog.text
+    assert "user/base" in caplog.text
+
+
+def test_stop_refuses_when_the_run_left_the_state_the_caller_saw(tmp_path) -> None:
+    """Cancel and kill are the same request on the wire.
+
+    A UI draws Cancel because the run was queued when the list was fetched, then
+    the user takes a moment — a blocking `window.confirm` holds the JS thread
+    but not the server, and a stale queue list holds forever. If the watchdog
+    promotes the run in between, that click SIGTERMs a live training run, and
+    the UI says "Removed from the queue" because it picks the wording from the
+    same stale record. The caller's belief has to travel with the request."""
+    from makermodslab.jobs import JobStateChangedError
+
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg, "promoted")
+
+    with pytest.raises(JobStateChangedError) as refused:
+        reg.stop("promoted", expect_state="queued")
+
+    assert refused.value.expected == "queued"
+    assert refused.value.actual == "running"
+    # Untouched: no stop intent recorded, so the watchdog cannot finalise it as
+    # a stop nobody asked for.
+    assert reg.get("promoted").state == "running"
+    assert "promoted" not in reg._stop_requested
+
+    # Without a belief to check, behaviour is exactly as before.
+    _inject_queued(reg, "waiting", seq=10)
+    assert reg.stop("waiting").id == "waiting"
+
+
+def test_cancelling_a_queued_run_something_resumes_from_is_refused(tmp_path) -> None:
+    """Cancelling a queued run REMOVES its record — and removing a record does
+    not remove the references to it.
+
+    A queued run looks unreferenceable: it has no checkpoints of its own. But
+    `_resolve_checkpoint_owner` lets a continuation attach to a leaf that saved
+    nothing and read the bytes from an ancestor, and only a `done` source is
+    refused — so a queued run is a legal resume parent. Cancelling one
+    unguarded severed the child's lineage, left a phantom parent id in
+    `build_child_index` (both ends then read as leaves), un-forked
+    `JobAlreadyContinuedError` so the grandparent could be continued twice, and
+    made the grandparent deletable while a queued run still needed its
+    checkpoints."""
+    from makermodslab.jobs import JobHasChildrenError, build_child_index
+
+    reg = _quiet_registry(tmp_path)
+    owner = _inject_queued(reg, "owner", seq=5)
+    owner.state = "interrupted"  # a real run, with checkpoints on disk
+    mid = _inject_queued(reg, "mid", seq=10)
+    mid.config.resume_from_job_id = "owner"
+    tip = _inject_queued(reg, "tip", seq=20)
+    tip.config.resume_from_job_id = "mid"
+
+    with pytest.raises(JobHasChildrenError):
+        reg.stop("mid")
+
+    # Still there, and the chain is still whole.
+    assert reg.get("mid") is not None
+    assert reg.get("tip").config.resume_from_job_id == "mid"
+    assert build_child_index(reg._records.values()).get("owner") == ["mid"]
+
+
+def test_deleting_the_owner_a_queued_resume_froze_a_path_into_is_refused(tmp_path) -> None:
+    """The third dependency edge, and the one `_queued_dependents_of` missed.
+
+    A local→local resume freezes its base as an absolute `config_path` into the
+    checkpoint OWNER's directory at submit. The owner is not always the parent,
+    so `JobHasChildrenError` does not always cover it — and the docstring
+    claimed there were two ways to depend on a run when there are three. Deleting
+    the owner rmtree'd checkpoints a queued run was still waiting to train from;
+    it then launched and died on a missing `--config_path`."""
+    from makermodslab.jobs import JobSourceOfQueuedRunError, build_child_index
+
+    reg = _quiet_registry(tmp_path)
+    owner = _inject_queued(reg, "owner", seq=5)
+    owner.state = "interrupted"
+    waiting = _inject_queued(reg, "waiting", seq=10)
+    # Names no parent, so build_child_index sees nothing — only the frozen path
+    # ties these two records together.
+    waiting.config.config_path = f"{owner.output_dir}/checkpoints/001000/pretrained_model/train_config.json"
+
+    assert build_child_index(reg._records.values()).get("owner") is None
+    with pytest.raises(JobSourceOfQueuedRunError):
+        reg.delete("owner")
+    assert reg.get("owner") is not None
+
+
+def test_training_is_active_reports_only_a_running_local_run(monkeypatch, tmp_path) -> None:
+    """The reciprocal of `_robot_busy`, read by the six robot features.
+
+    Only a LOCAL run that is actually `running` owns this machine: a cloud run
+    is somebody else's GPU, and a queued run has not claimed anything yet.
+    Reporting a queued run here would block recording behind a queue that is
+    waiting for recording to finish — a deadlock made of politeness."""
+    import makermodslab.jobs as jobs_mod
+
+    reg = _quiet_registry(tmp_path)
+    monkeypatch.setattr(jobs_mod, "job_registry", reg)
+
+    assert jobs_mod.training_is_active() is None
+
+    _inject_queued(reg, "waiting", seq=10)
+    assert jobs_mod.training_is_active() is None, "a queued run has claimed nothing yet"
+
+    _inject_running_local(reg, "busy")
+    assert jobs_mod.training_is_active() is not None
+
+
+def test_every_robot_feature_checks_for_a_running_training(  # noqa: D401
+    monkeypatch, tmp_path
+) -> None:
+    """CLAUDE.md: "New features that drive the robot must add the same
+    reciprocal checks against every existing one."
+
+    Training was the exception for as long as a run could only begin from an
+    explicit submit. The queue promotes runs from a watchdog thread, so the gate
+    has to close in both directions — `_robot_busy` is only half of it, and a
+    one-directional gate let inference start on top of a promoted trainer.
+
+    This asserts on source text, which is blunt, but the behavioural half is
+    covered per-module in test_record.py / test_rollout.py and what this pins is
+    the thing most easily lost: a seventh feature, or a deleted call."""
+    import importlib
+    import inspect
+
+    for name in ("record", "rollout", "teleoperate", "calibrate", "auto_calibrate", "wiggle"):
+        module = importlib.import_module(f"makermodslab.{name}")
+        assert "training_is_active()" in inspect.getsource(module), (
+            f"{name} can start the robot without checking for a running training run"
+        )
+
+
+def test_reorder_names_a_bad_id_instead_of_blaming_a_race(tmp_path) -> None:
+    """A malformed list and a stale one are different failures. Collapsing them
+    into one refusal told a caller to "refresh and try again" about a body that
+    could never succeed, with nothing saying which id was wrong."""
+    from makermodslab.jobs import QueueChangedError
+
+    reg = _quiet_registry(tmp_path)
+    for jid, seq in (("a", 10), ("b", 20)):
+        _inject_queued(reg, jid, seq=seq)
+
+    with pytest.raises(ValueError, match="not a queued run") as unknown:
+        reg.reorder_queue(["a", "b", "ghost"])
+    assert "ghost" in str(unknown.value)
+    assert not isinstance(unknown.value, QueueChangedError)
+
+    with pytest.raises(ValueError, match="more than once") as dupe:
+        reg.reorder_queue(["a", "a"])
+    assert not isinstance(dupe.value, QueueChangedError)
+
+    # A well-formed list that genuinely lost its race is still the 409 case.
+    with pytest.raises(QueueChangedError):
+        reg.reorder_queue(["a"])
+
+
+def test_list_queue_never_returns_a_run_that_left_the_queue(tmp_path) -> None:
+    """The snapshot is a SHALLOW copy, so it holds live record objects: the head
+    can be promoted between picking the list and annotating it. A `running`
+    record served under a heading that says "queued" is the exact confusion the
+    UI's cancel guard exists to catch — don't ship it."""
+    reg = _quiet_registry(tmp_path)
+    _inject_queued(reg, "gone", seq=10)
+    _inject_queued(reg, "stays", seq=20)
+
+    # Simulate the promotion landing mid-call.
+    reg._records["gone"].state = "running"
+
+    queue = reg.list_queue()
+
+    assert [r.id for r in queue] == ["stays"]
+    assert queue[0].queue_position == 1
+
+
+def test_a_promotion_interrupted_by_a_restart_goes_back_to_the_queue(tmp_path) -> None:
+    """`_drain_queue` persists `running` BEFORE launching, so the slot closes
+    behind the promotion. A crash in that window — which for a deferred launch
+    spans the entire base-checkpoint download, not a hairline — used to come
+    back as `interrupted` with "restarted while this run was training", which it
+    never was, silently dropping it out of the queue (and, for a continuation,
+    stranding its parent as superseded). `queue_seq` survives the promotion
+    precisely so this is recognisable."""
+    reg = _quiet_registry(tmp_path)
+    record = _inject_queued(reg, "midflight", seq=10, persist=True)
+    # Exactly what _drain_queue leaves on disk between promoting and launching.
+    record.state = "running"
+    record.started_at = 1_700_000_000.0
+    record.queue_position = 0
+    with reg._lock:
+        reg._write_meta(record)
+
+    reloaded = _quiet_registry(tmp_path)
+
+    recovered = reloaded.get("midflight")
+    assert recovered.state == "queued"
+    assert recovered.process_pid is None
+    # It keeps its place, and the counter still moves past it.
+    assert recovered.queue_position == 1
+    assert reloaded._next_queue_seq > 10
+
+
+def test_a_deferred_promotion_keeps_its_marker_until_a_real_trainer_exists(monkeypatch, tmp_path) -> None:
+    """The sibling above hand-writes the mid-promotion state. This one PRODUCES
+    it, which is the half that was wrong.
+
+    `_launch_locked`'s deferred branch returns as soon as it starts the prepare
+    thread, so `_drain_queue` used to clear `queue_seq` before the multi-GB
+    download had moved a byte — leaving the single longest crash window in the
+    feature uncovered by the very marker written for it. An ordinary reboot
+    during the download then filed the run `interrupted` with "restarted while
+    this run was training", dropped it from the queue, and stranded its parent
+    as superseded if it was a continuation."""
+    import threading as _threading
+
+    reg = _quiet_registry(tmp_path)
+    _inject_queued(reg, "dl", seq=10, persist=True)
+    # What makes the launch deferred: the base checkpoint has to be fetched
+    # first, so `_launch_locked` hands off to a prepare thread.
+    reg._records["dl"].queued_hub_ref = "user/base@checkpoints/001000"
+    with reg._lock:
+        reg._write_meta(reg._records["dl"])
+
+    # The prepare thread never runs, which IS the state on disk for the whole
+    # length of the download.
+    monkeypatch.setattr(_threading.Thread, "start", lambda self: None)
+    reg._drain_queue()
+
+    on_disk = _json.loads((tmp_path / "root" / "dl" / "job.json").read_text())
+    assert on_disk["state"] == "running"
+    assert on_disk["process_pid"] is None
+    assert on_disk["queue_seq"] == 10, "the marker must outlive the transfer, not the handoff"
+
+    # So a restart mid-download returns it to the queue rather than reporting a
+    # run that never trained a step as one that did.
+    reloaded = _quiet_registry(tmp_path)
+    assert reloaded.get("dl").state == "queued"
+    assert reloaded.get("dl").queue_position == 1
+
+
+def test_a_restart_does_not_requeue_a_promotion_whose_trainer_is_alive(tmp_path) -> None:
+    """`queue_seq > 0` alone does not mean "never launched".
+
+    An immediate launch persists a live `process_pid` while the marker is still
+    set — `_launch_locked` writes the pid, and only then does `_drain_queue`
+    clear it. A hard kill in that gap leaves a durable record with both. Demoted
+    on the marker alone, the run goes back in the queue with its pid erased and
+    the next tick starts a SECOND trainer against the same output dir, while the
+    first is still on the GPU and now unreachable from any record."""
+    reg = _quiet_registry(tmp_path)
+    record = _inject_queued(reg, "live", seq=10, persist=True)
+    record.state = "running"
+    # This test process: certainly alive, so `_pid_alive` cannot be flaky.
+    record.process_pid = os.getpid()
+    with reg._lock:
+        reg._write_meta(record)
+
+    reloaded = _quiet_registry(tmp_path)
+
+    assert reloaded.get("live").state != "queued", "a live trainer must not be re-queued"
+    assert reloaded.get("live").process_pid == os.getpid()
+    assert reloaded.list_queue() == []
+
+
+def test_notify_never_fires_while_the_registry_lock_is_held(tmp_path) -> None:
+    """A listener is entitled to read the registry when told something changed.
+
+    `self._lock` is a plain Lock, so a `_notify_change()` raised while holding it
+    deadlocks the caller the moment any listener does that — and on the queue's
+    paths the caller is the WATCHDOG, which would take the whole job API down
+    with it. This has been re-introduced once already, by a later fix that added
+    a notify to a path inside the critical section, so it gets a test rather
+    than a comment: the callback below is exactly the listener that would hang.
+    """
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    seen: list[int] = []
+
+    def _reads_the_registry() -> None:
+        # Would deadlock instantly if fired under the lock.
+        seen.append(len(reg.list_queue()))
+
+    reg.set_on_change(_reads_the_registry)
+    _inject_running_local(reg)
+
+    # Enqueue (start), cancel (stop), reorder, and the drain's refusal path all
+    # notify; each must do so with the lock released.
+    queued = reg.start(
+        TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        JobTarget(runner="local"),
+    )
+    _inject_queued(reg, "other", seq=queued.queue_seq + 5)
+    reg.reorder_queue(["other", queued.id])
+    reg.stop(queued.id)
+
+    assert len(seen) >= 3, "the listener never ran, so this proved nothing"
+
+
+def test_a_queued_run_protects_its_dataset(monkeypatch, tmp_path) -> None:
+    """A queued run has already been validated against its dataset and will
+    train on it when the slot frees, but nothing re-resolves the dataset at
+    launch — so renaming or deleting it here surfaced hours later as a bare
+    exit code with nothing tying it to the action that caused it."""
+    import makermodslab.datasets as datasets_mod
+    from makermodslab.jobs import job_registry
+
+    reg = _quiet_registry(tmp_path)
+    record = _inject_queued(reg, "waiting", seq=10)
+    record.config.dataset_repo_id = "user/ds"
+    monkeypatch.setattr(job_registry, "list", lambda limit=10: [record])
+
+    blocked = datasets_mod._dataset_in_use("user/ds")
+
+    assert blocked is not None
+    assert "cancel" in blocked.lower()
+    # An unrelated dataset is untouched.
+    assert datasets_mod._dataset_in_use("user/other") is None
+
+
+def test_the_queue_endpoints_are_reachable_and_say_why_they_refuse(client, tmp_path, monkeypatch) -> None:
+    """Route ORDER is the point here, not just the handlers.
+
+    `GET /jobs/queue` is a literal path competing with `GET /jobs/{job_id}`, and
+    FastAPI matches in declaration order — declared after it, the queue endpoint
+    answers "Job 'queue' not found" instead. Nothing but an HTTP-level test
+    catches that, and a future edit that moves a route would reintroduce it
+    silently."""
+    from makermodslab.jobs import JobRecord, JobRegistry, job_registry
+    from makermodslab.train import TrainingRequest
+
+    # Unlike every other queue test, this one drives the module-level singleton
+    # (it has to — the routes close over it), and that registry's watchdog is a
+    # REAL running thread. The records injected below are therefore a live
+    # queue: a tick between here and the assertions promotes the head and
+    # `_launch_locked` spawns an actual `lerobot-train` subprocess. Route order
+    # is the point of this test, so the drain is switched off outright rather
+    # than faking a runner. Patched on the class, so `monkeypatch` restores it
+    # even though `shutdown()` is one-way.
+    monkeypatch.setattr(JobRegistry, "_drain_queue", lambda self: None)
+
+    def _queued(jid: str, seq: int) -> JobRecord:
+        return JobRecord(
+            id=jid,
+            name=jid,
+            state="queued",
+            config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+            # A real queued record always carries its own job dir; `""` here
+            # resolved `_count_checkpoints` to `Path("checkpoints")` in the
+            # pytest CWD, i.e. the repo itself.
+            output_dir=str(tmp_path / jid / "run"),
+            started_at=float(seq),
+            runner="local",
+            queue_seq=seq,
+        )
+
+    original = dict(job_registry._records)
+    try:
+        job_registry._records.clear()
+        job_registry._records.update({"a": _queued("a", 10), "b": _queued("b", 20)})
+
+        listed = client.get("/jobs/queue")
+        assert listed.status_code == 200, listed.json()
+        assert [j["id"] for j in listed.json()["jobs"]] == ["a", "b"]
+        assert [j["queue_position"] for j in listed.json()["jobs"]] == [1, 2]
+
+        assert client.post("/jobs/queue/reorder", json={"job_ids": ["b", "a"]}).status_code == 200
+
+        # A malformed list is 400 and NAMES the offender; only a well-formed
+        # list that lost its race is the retry-after-refresh 409.
+        unknown = client.post("/jobs/queue/reorder", json={"job_ids": ["b", "a", "ghost"]})
+        assert unknown.status_code == 400
+        assert "ghost" in unknown.json()["detail"]
+
+        stale = client.post("/jobs/queue/reorder", json={"job_ids": ["b"]})
+        assert stale.status_code == 409
+
+        # A queued run is deletable (it holds nothing), unlike a running one.
+        assert client.delete("/jobs/a").status_code == 204
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
