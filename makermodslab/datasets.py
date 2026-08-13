@@ -35,7 +35,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
-from lerobot.datasets.dataset_tools import delete_episodes, split_dataset
+from lerobot.datasets.dataset_tools import delete_episodes, merge_datasets, split_dataset
 
 from .utils.config import (
     _atomic_write_text,
@@ -1683,6 +1683,144 @@ def get_episode_delete_status() -> dict[str, Any]:
         if _delete_status is None:
             return {"state": "idle", "repo_id": None, "episode_index": None, "message": None, "result": None}
         return dict(_delete_status)
+
+
+class EpisodeUndoError(Exception):
+    """Raised by start_episode_undo when the undo can't even start. Same
+    status/message shape as DatasetEpisodeDeleteError."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+_undo_status: dict[str, Any] | None = None
+_undo_thread: threading.Thread | None = None
+
+
+def start_episode_undo(repo_id: str, trash_id: str) -> dict[str, Any]:
+    """Validate and start restoring a trashed episode. Mirrors
+    start_episode_delete's shape: synchronous checks here, the actual merge
+    on a background thread, poll get_episode_undo_status() for the outcome."""
+    global _undo_status, _undo_thread
+
+    paths = _trash_paths_for_id(repo_id, trash_id)
+    if paths is None:
+        raise EpisodeUndoError(404, f"No such trash entry '{trash_id}' for '{repo_id}'")
+    trash_dir, manifest_path = paths
+    manifest = _read_trash_manifest(manifest_path)
+    if manifest is None or manifest.get("kind") != "episode" or not trash_dir.is_dir():
+        raise EpisodeUndoError(404, f"No such trash entry '{trash_id}' for '{repo_id}'")
+
+    target = _resolve_local_dataset_path(repo_id)
+    if target is None:
+        raise EpisodeUndoError(404, f"Dataset '{repo_id}' not found in the local cache")
+
+    with _dataset_guard_lock:
+        if _undo_status is not None and _undo_status["state"] == "running":
+            raise EpisodeUndoError(409, "Another undo is already in progress. Wait for it to finish.")
+        in_use = _dataset_in_use(repo_id)
+        if in_use is not None:
+            raise EpisodeUndoError(409, in_use)
+        _undo_status = {
+            "state": "running",
+            "repo_id": repo_id,
+            "trash_id": trash_id,
+            "message": f"Restoring a deleted episode of {repo_id}…",
+            "result": None,
+        }
+
+    # Same disk-space preflight start_episode_delete already runs — merge_datasets
+    # has the same transient "both copies exist at once" shape as delete_episodes.
+    dataset_size = _dir_size_bytes(target)
+    free_space = shutil.disk_usage(target.parent).free
+    needed = int(dataset_size * _DISK_PREFLIGHT_MARGIN)
+    if free_space < needed:
+        with _dataset_guard_lock:
+            _undo_status = None
+        raise EpisodeUndoError(
+            507,
+            "Not enough free disk space to restore this episode — rewriting the dataset needs "
+            f"about {needed / 1e9:.1f} GB free, but only {free_space / 1e9:.1f} GB is available.",
+        )
+
+    _undo_thread = threading.Thread(
+        target=_episode_undo_worker,
+        args=(repo_id, trash_id, target, trash_dir, manifest_path),
+        name="episode-undo-worker",
+        daemon=True,
+    )
+    _undo_thread.start()
+    return {"started": True, "repo_id": repo_id, "message": "Episode undo started"}
+
+
+def _finish_undo_status(state: str, message: str | None, result: dict[str, Any] | None = None) -> None:
+    global _undo_status
+    with _dataset_guard_lock:
+        if _undo_status is not None:
+            _undo_status = {**_undo_status, "state": state, "message": message, "result": result}
+
+
+def _episode_undo_worker(
+    repo_id: str, trash_id: str, target: Path, trash_dir: Path, manifest_path: Path
+) -> None:
+    """Merge the trashed single-episode dataset back onto whatever the
+    CURRENT live dataset is (never a stale full snapshot), so undoing this
+    delete can't affect any other delete made since."""
+    from lerobot.datasets import LeRobotDataset
+
+    try:
+        live = LeRobotDataset(repo_id=repo_id, root=target)
+        # split_dataset (Task 2) wrote the extracted episode to
+        # trash_dir / "trash" — output_dir / split_name, per its own
+        # signature — not to trash_dir itself.
+        trashed = LeRobotDataset(repo_id=f"{repo_id}-trash", root=trash_dir / "trash")
+    except Exception as exc:
+        logger.error("Failed to load datasets for episode-undo worker on %s: %s", repo_id, exc)
+        _finish_undo_status("error", "Failed to restore episode. See server logs for details.")
+        return
+
+    tmp_dir = target.parent / f".{target.name}.undo-tmp-{uuid.uuid4().hex[:8]}"
+    try:
+        merge_datasets([live, trashed], output_repo_id=repo_id, output_dir=tmp_dir)
+    except Exception as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to merge trashed episode back into %s: %s", repo_id, exc)
+        _finish_undo_status("error", "Failed to restore episode. See server logs for details.")
+        return
+
+    backup_dir = target.parent / f".{target.name}.pre-undo-{uuid.uuid4().hex[:8]}"
+    try:
+        os.rename(target, backup_dir)
+        os.rename(tmp_dir, target)
+    except OSError as exc:
+        try:
+            if not target.exists():
+                os.rename(backup_dir, target)
+        except OSError:
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to swap in the restored dataset for %s: %s", repo_id, exc)
+        _finish_undo_status("error", "Failed to restore episode. See server logs for details.")
+        return
+
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    shutil.rmtree(trash_dir, ignore_errors=True)
+    manifest_path.unlink(missing_ok=True)
+    invalidate_dataset_listing_cache()
+
+    logger.info("Restored a deleted episode of %s (trash_id=%s)", repo_id, trash_id)
+    _finish_undo_status("done", None, result={"success": True, "repo_id": repo_id})
+
+
+def get_episode_undo_status() -> dict[str, Any]:
+    """Status of the single-slot background episode-undo — mirrors
+    get_episode_delete_status's shape."""
+    with _dataset_guard_lock:
+        if _undo_status is None:
+            return {"state": "idle", "repo_id": None, "trash_id": None, "message": None, "result": None}
+        return dict(_undo_status)
 
 
 def list_user_datasets() -> list[dict[str, Any]]:

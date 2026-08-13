@@ -729,6 +729,31 @@ def datasets_deleted_episodes(repo_id: str):
     return dataset_browser.list_deleted_episodes(repo_id)
 
 
+class DatasetEpisodeUndoBody(BaseModel):
+    repo_id: str
+    trash_id: str
+
+
+@app.post("/datasets/undo-episode-delete")
+def datasets_undo_episode_delete(body: DatasetEpisodeUndoBody):
+    """Start restoring a deleted episode from its trash entry. Returns
+    immediately with {started, repo_id, message}; poll
+    /datasets/episode-undo-status for the outcome. 404 if the trash entry is
+    unknown/expired; 409 if the dataset is busy; 507 if there isn't enough
+    free disk space."""
+    try:
+        return dataset_browser.start_episode_undo(body.repo_id, body.trash_id)
+    except dataset_browser.EpisodeUndoError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+@app.get("/datasets/episode-undo-status")
+def datasets_episode_undo_status():
+    """Current episode-undo state ("idle"|"running"|"done"|"error") +
+    repo_id, trash_id, message, and result once done."""
+    return dataset_browser.get_episode_undo_status()
+
+
 @app.get("/datasets/hub-status")
 def datasets_hub_status(repo_id: str):
     """Whether a dataset repo with this id exists on the Hub.

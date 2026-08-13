@@ -3158,3 +3158,91 @@ def test_list_deleted_episodes_skips_malformed_manifests(tmp_lerobot_home: Path)
     assert len(entries) == 1
     assert entries[0]["trash_id"] == trash_id
     assert entries[0]["episode_index"] == 0
+
+
+def test_start_episode_undo_404_when_trash_id_unknown(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import EpisodeUndoError, start_episode_undo
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=2)
+    with pytest.raises(EpisodeUndoError) as exc:
+        start_episode_undo("pusht", "deadbeef")
+    assert exc.value.status == 404
+
+
+def test_start_episode_undo_409_when_dataset_busy(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+    from makermodslab.datasets import EpisodeUndoError, _new_trash_paths, _write_trash_manifest
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=2)
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0
+    )
+
+    ds._delete_status = {
+        "state": "running",
+        "repo_id": "pusht",
+        "episode_index": 1,
+        "message": "Deleting…",
+        "result": None,
+    }
+    try:
+        with pytest.raises(EpisodeUndoError) as exc:
+            ds.start_episode_undo("pusht", trash_id)
+        assert exc.value.status == 409
+    finally:
+        ds._delete_status = None
+
+
+def test_undo_episode_delete_merges_trash_onto_live_dataset(tmp_lerobot_home: Path) -> None:
+    from unittest.mock import patch
+
+    from makermodslab import datasets as ds
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=2)
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    (trash_dir / "meta").mkdir()
+    (trash_dir / "meta" / "info.json").write_text('{"total_episodes": 1}')
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=1, length=5, duration_s=1.0
+    )
+
+    calls: list[str] = []
+
+    def fake_merge_datasets(datasets, output_repo_id, output_dir):
+        calls.append("merge_datasets")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "meta").mkdir()
+        (Path(output_dir) / "meta" / "info.json").write_text('{"total_episodes": 3}')
+
+    # _episode_undo_worker is invoked directly here (bypassing
+    # start_episode_undo), so _undo_status must be seeded first — mirrors
+    # test_episode_delete_worker_extracts_episode_to_trash_before_rewriting's
+    # ds._delete_status seeding above: _finish_undo_status only publishes
+    # into an existing slot, it's a no-op against a None one.
+    ds._undo_status = {
+        "state": "running",
+        "repo_id": "pusht",
+        "trash_id": trash_id,
+        "message": "Restoring…",
+        "result": None,
+    }
+    try:
+        with (
+            patch("lerobot.datasets.LeRobotDataset", return_value=MagicMock()),
+            patch("makermodslab.datasets.merge_datasets", side_effect=fake_merge_datasets),
+        ):
+            ds._episode_undo_worker("pusht", trash_id, target, trash_dir, manifest_path)
+
+        assert calls == ["merge_datasets"]
+        status = ds.get_episode_undo_status()
+        assert status["state"] == "done"
+        assert not trash_dir.exists()
+        assert not manifest_path.exists()
+    finally:
+        ds._undo_status = None
