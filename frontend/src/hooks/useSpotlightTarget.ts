@@ -5,11 +5,17 @@ export interface SpotlightRect {
   left: number;
   width: number;
   height: number;
+  /** The target's own border-radius, so the cutout/ring match its actual
+   * shape instead of assuming every target looks like a rounded button (a
+   * hardcoded radius leaves visible corner gaps against square-cornered
+   * targets like the Studio panels). */
+  radius: string;
 }
 
 function measure(el: Element): SpotlightRect {
   const r = el.getBoundingClientRect();
-  return { top: r.top, left: r.left, width: r.width, height: r.height };
+  const radius = getComputedStyle(el).borderRadius || "0px";
+  return { top: r.top, left: r.left, width: r.width, height: r.height, radius };
 }
 
 function measureSelector(selector: string): SpotlightRect | null {

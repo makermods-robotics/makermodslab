@@ -742,7 +742,7 @@ const DeployPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="3" title="Run">
+      <PanelHeader step="3" title="Run" dataTour="studio-deploy">
         {resolving ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         ) : null}

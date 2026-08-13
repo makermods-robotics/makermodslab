@@ -118,7 +118,6 @@ const StudioOverlay: React.FC = () => {
       <div className="grid flex-1 grid-cols-1 gap-px overflow-y-auto bg-border lg:grid-cols-3 lg:overflow-hidden">
         <section
           aria-label="Collect dataset"
-          data-tour="studio-collect"
           className={cn(
             "flex min-h-0 flex-col bg-background lg:overflow-y-auto",
             activePanel === "collect" && "ring-1 ring-inset ring-ring/20",
@@ -128,7 +127,6 @@ const StudioOverlay: React.FC = () => {
         </section>
         <section
           aria-label="Train"
-          data-tour="studio-train"
           className={cn(
             "flex min-h-0 flex-col bg-background lg:overflow-y-auto",
             activePanel === "train" && "ring-1 ring-inset ring-ring/20",
@@ -138,7 +136,6 @@ const StudioOverlay: React.FC = () => {
         </section>
         <section
           aria-label="Deploy policy"
-          data-tour="studio-deploy"
           className={cn(
             "flex min-h-0 flex-col bg-background lg:overflow-y-auto",
             activePanel === "deploy" && "ring-1 ring-inset ring-ring/20",

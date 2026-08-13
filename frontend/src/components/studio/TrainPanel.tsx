@@ -443,7 +443,7 @@ const TrainPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="2" title="Train" />
+      <PanelHeader step="2" title="Train" dataTour="studio-train" />
 
       {/* Start a new training — the form slides open in place (no dialog),
           mirroring Collect's "Record new dataset". */}

@@ -21,8 +21,12 @@ export const PanelHeader: React.FC<{
   title: string;
   /** Optional trailing element (e.g. a resolving spinner). */
   children?: React.ReactNode;
-}> = ({ step, title, children }) => (
-  <div className="flex items-baseline gap-2">
+  /** Onboarding tour anchor — a normal-sized element to spotlight, instead of
+   * the full-height panel section (which leaves the Popover callout with no
+   * room to render within the viewport). */
+  dataTour?: string;
+}> = ({ step, title, children, dataTour }) => (
+  <div className="flex items-baseline gap-2" data-tour={dataTour}>
     <span className="font-mono text-xs text-muted-foreground">{step}</span>
     <h2 className="text-base">{title}</h2>
     {children}

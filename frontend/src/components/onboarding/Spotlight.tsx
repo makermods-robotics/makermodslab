@@ -119,12 +119,13 @@ const Spotlight: React.FC = () => {
           to the app so the tour never blocks normal use. */}
       <div
         aria-hidden
-        className="pointer-events-none fixed rounded-md transition-all duration-300"
+        className="pointer-events-none fixed transition-all duration-300"
         style={{
           top: rect.top - 4,
           left: rect.left - 4,
           width: rect.width + 8,
           height: rect.height + 8,
+          borderRadius: rect.radius,
           boxShadow: "0 0 0 9999px rgba(0, 0, 0, 0.5)",
         }}
       />
@@ -132,12 +133,13 @@ const Spotlight: React.FC = () => {
           distorts the cutout's edge. */}
       <div
         aria-hidden
-        className="pointer-events-none fixed rounded-md ring-2 ring-ring animate-spotlight-pulse motion-reduce:animate-none"
+        className="pointer-events-none fixed ring-2 ring-ring animate-spotlight-pulse motion-reduce:animate-none"
         style={{
           top: rect.top - 4,
           left: rect.left - 4,
           width: rect.width + 8,
           height: rect.height + 8,
+          borderRadius: rect.radius,
         }}
       />
       <Popover.Root open>

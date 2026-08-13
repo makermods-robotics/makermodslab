@@ -216,7 +216,7 @@ const TeleoperationPage = () => {
           )}
         </div>
       )}
-      <div className="w-full h-[95vh] flex" data-tour="teleop-page">
+      <div className="w-full h-[95vh] flex">
         <VisualizerPanel
           onGoBack={handleGoBack}
           className="lg:w-full"

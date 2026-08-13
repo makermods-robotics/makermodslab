@@ -102,4 +102,50 @@ describe("Spotlight", () => {
       document.body.removeChild(targetB);
     }
   });
+
+  it("matches the cutout's corner radius to the target's own border-radius (regression: sharp-cornered targets like the Studio panels got a hardcoded rounded-md cutout, leaving mismatched corners)", () => {
+    const target = document.createElement("div");
+    target.setAttribute("data-tour", "square-target");
+    target.style.borderRadius = "0px";
+    target.getBoundingClientRect = () =>
+      ({
+        top: 10, left: 10, width: 200, height: 100,
+        right: 210, bottom: 110, x: 10, y: 10,
+        toJSON() { return this; },
+      }) as DOMRect;
+    document.body.appendChild(target);
+
+    const tour: Tour = {
+      id: "square-tour",
+      steps: [
+        { target: "[data-tour=square-target]", title: "Square", description: "desc" },
+      ],
+    };
+
+    function TourStarter() {
+      const { start } = useOnboarding();
+      useEffect(() => {
+        start(tour, () => {});
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return null;
+    }
+
+    try {
+      const { container } = render(
+        <OnboardingProvider>
+          <TourStarter />
+          <Spotlight />
+        </OnboardingProvider>,
+      );
+
+      const cutout = container.querySelector(
+        'div[aria-hidden][style*="box-shadow"]',
+      ) as HTMLElement;
+      expect(cutout).toBeTruthy();
+      expect(cutout.style.borderRadius).toBe("0px");
+    } finally {
+      document.body.removeChild(target);
+    }
+  });
 });

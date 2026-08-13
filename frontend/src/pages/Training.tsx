@@ -83,7 +83,10 @@ const ConfigurationMode: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto max-w-3xl px-4 py-6" data-tour="training-configurator">
+      <div className="mx-auto max-w-3xl px-4 py-6">
+        <div className="mb-4 flex items-baseline gap-2" data-tour="training-configurator">
+          <h1 className="text-base font-medium">Configure a training run</h1>
+        </div>
         <TrainingConfigurator
           // Same composite the studio's Train panel keys on: the seeds are read
           // once as initial state, so the step (and a resume's checkpoint

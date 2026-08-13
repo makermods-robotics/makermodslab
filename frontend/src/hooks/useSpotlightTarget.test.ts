@@ -47,7 +47,13 @@ describe("useSpotlightTarget", () => {
     document.body.appendChild(el);
     mockRect(el, { top: 10, left: 20, width: 100, height: 40 });
     const { result } = renderHook(() => useSpotlightTarget("[data-tour=real]"));
-    expect(result.current).toEqual({ top: 10, left: 20, width: 100, height: 40 });
+    expect(result.current).toEqual({
+      top: 10,
+      left: 20,
+      width: 100,
+      height: 40,
+      radius: "0px",
+    });
   });
 
   it("picks up element that appears after hook mount (late-appearing target)", async () => {
@@ -65,7 +71,13 @@ describe("useSpotlightTarget", () => {
 
     // Wait for the MutationObserver to trigger and the hook to update
     await waitFor(() => {
-      expect(result.current).toEqual({ top: 5, left: 15, width: 80, height: 60 });
+      expect(result.current).toEqual({
+        top: 5,
+        left: 15,
+        width: 80,
+        height: 60,
+        radius: "0px",
+      });
     });
   });
 });
