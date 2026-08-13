@@ -3104,3 +3104,57 @@ def test_list_deleted_episodes_excludes_dataset_kind_entries(tmp_lerobot_home: P
     _write_trash_manifest(manifest_path, kind="dataset", repo_id="pusht")
 
     assert list_deleted_episodes("pusht") == []
+
+
+def test_list_deleted_episodes_skips_malformed_manifests(tmp_lerobot_home: Path) -> None:
+    """list_deleted_episodes never raises on malformed trash manifests (missing
+    required fields or invalid JSON values); it silently skips them instead. This
+    matches _read_trash_manifest's degrade-to-None contract and the "trash
+    bookkeeping must never raise" constraint."""
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, list_deleted_episodes
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+
+    # Write one valid manifest.
+    trash_dir, valid_manifest, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        valid_manifest, kind="episode", repo_id="pusht", episode_index=0, length=10, duration_s=1.0
+    )
+
+    # Write one manifest missing "deleted_at" (will fail on datetime.fromisoformat).
+    _, malformed_manifest1, _ = _new_trash_paths(target)
+    malformed_manifest1.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 1,
+                "length": 5,
+                "duration_s": 0.5,
+                # Missing "deleted_at" — will raise KeyError
+            }
+        )
+    )
+
+    # Write one manifest with malformed "deleted_at" string.
+    _, malformed_manifest2, _ = _new_trash_paths(target)
+    malformed_manifest2.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 2,
+                "length": 5,
+                "duration_s": 0.5,
+                "deleted_at": "not-a-valid-iso-date",  # Will raise ValueError
+            }
+        )
+    )
+
+    # list_deleted_episodes must not raise and must return only the valid entry.
+    entries = list_deleted_episodes("pusht")
+    assert len(entries) == 1
+    assert entries[0]["trash_id"] == trash_id
+    assert entries[0]["episode_index"] == 0

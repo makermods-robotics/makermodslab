@@ -839,7 +839,11 @@ def _iter_trash_manifests(root: Path) -> list[Path]:
 
 
 def list_deleted_episodes(repo_id: str) -> list[dict[str, Any]]:
-    """Unexpired episode-kind trash entries for `repo_id`, newest first."""
+    """Unexpired episode-kind trash entries for `repo_id`, newest first.
+
+    Silently skips entries with missing or malformed fields (never raises — trash
+    bookkeeping is cosmetic; a bad entry just makes that single item invisible,
+    it doesn't take down the listing)."""
     target = _resolve_cache_path(repo_id)
     if target is None:
         return []
@@ -851,20 +855,28 @@ def list_deleted_episodes(repo_id: str) -> list[dict[str, Any]]:
             continue
         if manifest.get("repo_id") != repo_id:
             continue
-        deleted_at = datetime.fromisoformat(manifest["deleted_at"])
-        trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
-        out.append(
-            {
-                "trash_id": trash_id,
-                "episode_index": manifest["episode_index"],
-                "deleted_at": manifest["deleted_at"],
-                "expires_at": (
-                    deleted_at.timestamp() + TRASH_RETENTION_SECONDS
-                ),
-                "length": manifest["length"],
-                "duration_s": manifest["duration_s"],
-            }
-        )
+        try:
+            deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+            trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
+            out.append(
+                {
+                    "trash_id": trash_id,
+                    "episode_index": manifest["episode_index"],
+                    "deleted_at": manifest["deleted_at"],
+                    "expires_at": (
+                        deleted_at.timestamp() + TRASH_RETENTION_SECONDS
+                    ),
+                    "length": manifest["length"],
+                    "duration_s": manifest["duration_s"],
+                }
+            )
+        except (KeyError, ValueError):
+            # Malformed manifest (missing required field or invalid deleted_at).
+            # Skip this entry rather than raising, matching _read_trash_manifest's
+            # degrade-to-None contract and the "trash bookkeeping must never raise"
+            # constraint.
+            logger.warning(f"Skipping malformed trash manifest {manifest_path}")
+            continue
     out.sort(key=lambda e: e["deleted_at"], reverse=True)
     return out
 
