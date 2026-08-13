@@ -426,6 +426,19 @@ def test_handle_start_inference_blocked_when_wiggle_active(monkeypatch) -> None:
     assert "wiggle" in result["message"].lower()
 
 
+def test_handle_start_inference_blocked_when_replay_active(monkeypatch) -> None:
+    """Replay drives the same follower bus open-loop — inference must refuse
+    to start while it's active, or both threads race to write goal positions
+    to the same servos."""
+    from makermodslab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "replay" in result["message"].lower()
+
+
 def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp_path) -> None:
     """The stop dialog promises the follower eases back to its start pose on
     teardown. That behaviour is lerobot's `return_to_initial_position`, which

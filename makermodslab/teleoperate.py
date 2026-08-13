@@ -626,6 +626,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        replay as _replay,
         rollout as _rollout,
         wiggle as _wiggle,
     )
@@ -659,6 +660,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             return {
                 "success": False,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+            }
+        if _replay.replay_active:
+            return {
+                "success": False,
+                "message": "Replay is currently active. Stop it first.",
             }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop

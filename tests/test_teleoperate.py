@@ -415,6 +415,22 @@ def test_start_teleoperation_blocked_when_wiggle_active(monkeypatch: pytest.Monk
     }
 
 
+def test_start_teleoperation_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay drives the same follower bus open-loop — teleoperation must
+    refuse to start while it's active, or both threads race to write goal
+    positions to the same servos."""
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+
+    result = teleop.handle_start_teleoperation(_stub_teleop_request())
+    assert result == {
+        "success": False,
+        "message": "Replay is currently active. Stop it first.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Teleop opens no cameras: it consumes no frames (only motor positions drive the
 # URDF viewer). The follower config it builds therefore carries an empty camera
