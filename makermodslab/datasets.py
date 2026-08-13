@@ -747,6 +747,80 @@ def _resolve_local_dataset_path(repo_id: str) -> Path | None:
     return path
 
 
+TRASH_RETENTION_SECONDS = 24 * 60 * 60  # 24h recoverable window for delete undo
+
+
+def _resolve_cache_path(repo_id: str) -> Path | None:
+    """Resolve `repo_id` to where its dataset dir would live under the cache
+    root, WITHOUT requiring it to currently exist — unlike
+    _resolve_local_dataset_path, which 404s a whole-dataset-deleted repo_id
+    since there's nothing left at that path to recognize as a dataset dir.
+    Still rejects path traversal. None only on an invalid/escaping repo_id."""
+    root = _lerobot_cache_root().resolve()
+    try:
+        path = (root / repo_id).resolve()
+    except OSError:
+        return None
+    if path == root or root not in path.parents:
+        return None
+    return path
+
+
+def _new_trash_paths(target: Path) -> tuple[Path, Path, str]:
+    """Fresh (trash_dir, manifest_path, trash_id) sibling paths for a new
+    trash entry from deleting `target` (an episode extraction or the whole
+    dataset). Doesn't touch disk — callers create trash_dir via split_dataset
+    (episode) or os.rename (whole dataset)."""
+    trash_id = uuid.uuid4().hex[:8]
+    trash_dir = target.parent / f".{target.name}.trash-{trash_id}"
+    manifest_path = target.parent / f"{trash_dir.name}.manifest.json"
+    return trash_dir, manifest_path, trash_id
+
+
+def _trash_paths_for_id(repo_id: str, trash_id: str) -> tuple[Path, Path] | None:
+    """(trash_dir, manifest_path) for an existing trash entry, given the
+    repo_id and trash_id an earlier delete returned. None if repo_id escapes
+    the cache root; does NOT check the paths actually exist — callers use
+    _read_trash_manifest's None return for that."""
+    target = _resolve_cache_path(repo_id)
+    if target is None:
+        return None
+    trash_dir = target.parent / f".{target.name}.trash-{trash_id}"
+    manifest_path = target.parent / f"{trash_dir.name}.manifest.json"
+    return trash_dir, manifest_path
+
+
+def _write_trash_manifest(
+    manifest_path: Path,
+    *,
+    kind: str,
+    repo_id: str,
+    episode_index: int | None = None,
+    length: int | None = None,
+    duration_s: float | None = None,
+) -> None:
+    """Write a trash entry's manifest. `kind` is "episode" or "dataset"."""
+    payload = {
+        "kind": kind,
+        "repo_id": repo_id,
+        "deleted_at": datetime.now(UTC).isoformat(),
+        "episode_index": episode_index,
+        "length": length,
+        "duration_s": duration_s,
+    }
+    manifest_path.write_text(json.dumps(payload))
+
+
+def _read_trash_manifest(manifest_path: Path) -> dict[str, Any] | None:
+    """Parsed manifest, or None on missing/corrupt (never raises — trash
+    bookkeeping is cosmetic; a bad manifest just makes that entry invisible,
+    it doesn't take down the listing)."""
+    try:
+        return json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
     """Detail view of one locally-cached dataset, for the selection info card.
 

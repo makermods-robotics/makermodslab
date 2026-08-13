@@ -2835,3 +2835,73 @@ def test_hub_dataset_viewer_endpoints_404_without_video(
 
     assert resp.status_code == 404
     dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info
+
+
+# --- Trash manifest helpers --------------------------------------------------
+
+
+def test_new_trash_paths_are_siblings_of_target(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths
+
+    target = tmp_lerobot_home / "alice" / "pusht"
+    target.mkdir(parents=True)
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+
+    assert trash_dir.parent == target.parent
+    assert trash_dir.name == f".pusht.trash-{trash_id}"
+    assert manifest_path == target.parent / f".pusht.trash-{trash_id}.manifest.json"
+    assert len(trash_id) == 8
+
+
+def test_write_and_read_trash_manifest_roundtrip(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _read_trash_manifest, _write_trash_manifest
+
+    manifest_path = tmp_lerobot_home / ".pusht.trash-abcd1234.manifest.json"
+    _write_trash_manifest(
+        manifest_path,
+        kind="episode",
+        repo_id="pusht",
+        episode_index=2,
+        length=150,
+        duration_s=5.0,
+    )
+
+    manifest = _read_trash_manifest(manifest_path)
+    assert manifest is not None
+    assert manifest["kind"] == "episode"
+    assert manifest["repo_id"] == "pusht"
+    assert manifest["episode_index"] == 2
+    assert manifest["length"] == 150
+    assert manifest["duration_s"] == 5.0
+    assert "deleted_at" in manifest
+
+
+def test_read_trash_manifest_missing_file_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _read_trash_manifest
+
+    assert _read_trash_manifest(tmp_lerobot_home / "nope.manifest.json") is None
+
+
+def test_read_trash_manifest_corrupt_json_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _read_trash_manifest
+
+    bad = tmp_lerobot_home / "bad.manifest.json"
+    bad.write_text("{not json")
+    assert _read_trash_manifest(bad) is None
+
+
+def test_trash_paths_for_id_resolves_deterministically(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths, _trash_paths_for_id
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+
+    resolved = _trash_paths_for_id("pusht", trash_id)
+    assert resolved == (trash_dir, manifest_path)
+
+
+def test_trash_paths_for_id_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _trash_paths_for_id
+
+    assert _trash_paths_for_id("../../etc", "abcd1234") is None
