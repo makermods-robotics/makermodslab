@@ -62,7 +62,7 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_identity import resolve_cv2_index
+from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
@@ -836,17 +836,25 @@ class DatasetRenameBody(BaseModel):
 
 @app.post("/datasets/rename")
 def datasets_rename(body: DatasetRenameBody):
-    """Rename a locally-cached dataset by moving its directory.
+    """Rename a locally-cached dataset by moving its directory, and its Hub
+    copy (if any) to match.
 
     `new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so
     `ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is
-    being recorded, merged, or trained on locally. Returns the new repo_id.
+    being recorded, merged, or trained on locally, or if the new name is
+    already taken (locally or on the Hub).
+
+    Returns `{success, repo_id, hub}`, where `hub` is `"renamed"` (the Hub copy
+    moved too), `"none"` (the Hub has no copy of this dataset), or `"skipped"`
+    (the Hub step didn't run — offline, logged out, or someone else's
+    namespace — so a Hub copy, if any, kept its old name). The caller needs
+    that distinction to avoid claiming a Hub rename that didn't happen.
     """
     try:
-        new_repo_id = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
+        result = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
     except dataset_browser.DatasetRenameError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
-    return {"success": True, "repo_id": new_repo_id}
+    return {"success": True, **result}
 
 
 class CustomDatasetRequest(BaseModel):
@@ -2680,9 +2688,13 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
 
     ``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors
     the index to the physical device before opening: cv2 resolves indices
-    against this process's startup device snapshot, which diverges from the
+    against this process's device snapshot, which diverges from the
     fresh-subprocess enumeration after a replug — without the re-anchor the
     stream can silently show a different camera (see makermodslab/camera_identity.py).
+    The identity is also what the preview registry shares captures by, so the
+    resolver hands back both: the index to open and the key to file it under.
+    Keying by the bare index aliased two different cameras onto one handle
+    whenever the device set renumbered mid-session.
 
     Returns 409 while recording or inference is active (they own the cv2
     devices) and 503 when the camera can't be opened. Teleoperation drives the
@@ -2699,15 +2711,25 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
             status_code=409,
             detail="Inference is active — the cameras are in use. Stop the run to preview them.",
         )
-    resolved = resolve_cv2_index(unique_id, index)
-    if resolved is None:
+    identified = identify_cv2_index(unique_id, index)
+    if identified is None:
         raise HTTPException(
             status_code=503,
-            detail="Camera not visible to the server — it was plugged in after MakerMods Lab "
-            "started. Restart MakerMods Lab to use it.",
+            # Two causes reach here and the server cannot tell them apart
+            # without plumbing that would not change the remedy: the camera
+            # was attached after startup and this process never saw it, or
+            # macOS is denying MakerMods Lab camera access, in which case the
+            # enumeration truthfully reports nothing and cv2 could not open
+            # the device either. Naming both beats asserting the first and
+            # sending the user to a restart that cannot help.
+            detail="Camera not visible to the server — either it was plugged in after "
+            "MakerMods Lab started, or macOS is not granting MakerMods Lab camera access "
+            "(System Settings → Privacy & Security → Camera). Grant access if it is missing, "
+            "then restart MakerMods Lab.",
         )
+    resolved, key = identified
     try:
-        stream = camera_preview_manager.open_stream(resolved)
+        stream = camera_preview_manager.open_stream(resolved, key)
     except CameraOpenError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
@@ -2909,10 +2931,33 @@ def startup_event():
     warn_if_cuda_mismatch()
 
 
+# Strong reference so the loop's task set can't drop the pump mid-flight.
+_avf_pump_task: asyncio.Task | None = None
+
+
+@app.on_event("startup")
+async def start_avfoundation_pump():
+    """Keep the in-process camera list live on macOS (hotplug/replug).
+
+    Async handler on purpose: it runs inside the event loop (main thread),
+    which is where the pump must live — AVFoundation's device-cache updates
+    only drain on the main thread's runloop (see camera_identity). A sync
+    startup handler would run in the threadpool and couldn't schedule it.
+    No-op off macOS.
+    """
+    global _avf_pump_task
+    _avf_pump_task = asyncio.create_task(pump_avfoundation_runloop())
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
+
+    # Stop the AVFoundation pump first so its next tick can't interleave with
+    # shutdown (and so --reload restarts don't log a destroyed-pending-task).
+    if _avf_pump_task is not None:
+        _avf_pump_task.cancel()
 
     # Teleoperation and recording drive the follower(s) as background threads
     # INSIDE this process (teleoperation_thread / recording_thread); auto-

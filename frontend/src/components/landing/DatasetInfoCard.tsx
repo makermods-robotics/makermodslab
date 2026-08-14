@@ -140,6 +140,28 @@ const useCanEditHub = (repoId: string): boolean => {
   );
 };
 
+/** True when Rename should be offered for `repoId`.
+ *
+ * Rename is an identity mutation the backend refuses outside a namespace the
+ * user can write to, so a downloaded third-party dataset (`lerobot/pusht`)
+ * shouldn't show the button at all — mirroring how the delete flow offers
+ * remove-local-copy for third-party content rather than an identity change.
+ *
+ * Unlike `useCanEditHub` this defaults to TRUE while loading or unauthenticated:
+ * with no Hub identity the namespace can't be judged, and the backend does a
+ * purely local rename in that case, so hiding the button would break renaming
+ * a never-uploaded dataset while logged out. A bare id has no namespace to
+ * disown — it lives under the user's own account. */
+const useCanRename = (repoId: string): boolean => {
+  const { auth } = useHfAuth();
+  if (auth.status !== "authenticated") return true;
+  if (!repoId.includes("/")) return true;
+  const ns = repoId.split("/")[0];
+  return auth.writableNamespaces.some(
+    (n) => n.toLowerCase() === ns.toLowerCase(),
+  );
+};
+
 /** Org/required tags the backend's `with_makermodslab_tag` always re-adds on save, so
  * they can't actually be dropped. Shown as locked, non-removable chips so the
  * UI never implies the user can remove them. Matched case-insensitively. */
@@ -601,7 +623,8 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
  * Rename dialog for a local dataset (mirrors JobCard's rename UI). The namespace
  * prefix is fixed — the user edits only the name segment, shown after a static
  * "namespace/" prefix. A dataset's repo id IS its directory path, so this moves
- * the directory; the Hub copy (if any) keeps its old name, called out below.
+ * the directory; if a copy also exists on the Hub, the server renames that too
+ * so the two stay in sync.
  */
 const RenameDatasetDialog: React.FC<{
   open: boolean;
@@ -647,7 +670,22 @@ const RenameDatasetDialog: React.FC<{
     setError(null);
     try {
       const res = await renameDataset(baseUrl, fetchWithHeaders, repoId, next);
-      toast({ title: "Dataset renamed", description: res.repo_id });
+      /* The dialog has closed by the time the toast shows, so it's the only
+       * place the user learns whether the Hub copy moved — never claim a Hub
+       * rename on "skipped" (offline / logged out / unwritable namespace). */
+      if (res.hub === "renamed") {
+        toast({
+          title: "Dataset renamed",
+          description: `${res.repo_id} — the Hub copy was renamed too.`,
+        });
+      } else if (res.hub === "skipped") {
+        toast({
+          title: "Dataset renamed locally",
+          description: `${res.repo_id} — any copy on the Hub still has the old name.`,
+        });
+      } else {
+        toast({ title: "Dataset renamed", description: res.repo_id });
+      }
       onOpenChange(false);
       onRenamed(res.repo_id);
     } catch (e) {
@@ -669,8 +707,8 @@ const RenameDatasetDialog: React.FC<{
         <DialogHeader>
           <DialogTitle>Rename dataset</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Renames the local dataset directory. If this dataset has a copy on
-            the Hub, the Hub copy keeps its old name.
+            Renames the local dataset directory. If this dataset also has a
+            copy on the Hub, it's renamed there too.
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center gap-1">
@@ -914,6 +952,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ notLocal: boolean } | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
+  const canRename = useCanRename(repoId);
   // Bumped when a Hub-only dataset finishes downloading, to re-run the info
   // fetch (now that the dataset is local, /datasets/info succeeds and the card
   // flips from the Hub-only fallback to the full local detail view).
@@ -993,8 +1032,9 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                 </div>
                 <div className="-mr-1 -mt-0.5 flex shrink-0 items-center gap-0.5">
                   {/* Rename moves the local directory — meaningless for a
-                      hub-only summary. */}
-                  {!isHubOnly && (
+                      hub-only summary, and refused by the backend outside a
+                      namespace the user owns (see useCanRename). */}
+                  {!isHubOnly && canRename && (
                     <button
                       type="button"
                       onClick={() => setRenameOpen(true)}
