@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Archive,
@@ -7,6 +7,8 @@ import {
   GitMerge,
   Play,
   Plus,
+  Trash2,
+  Undo2,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -22,8 +24,14 @@ import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelItem, downloadModel, saveCustomModel } from "@/lib/modelsApi";
 import {
   DatasetItem,
+  DeletedDatasetEntry,
+  deleteDataset,
   downloadDataset,
+  hideDataset,
+  listDeletedDatasets,
+  removeCustomDataset,
   saveCustomDataset,
+  undoDatasetDelete,
 } from "@/lib/replayApi";
 import AddDatasetFromHubDialog from "@/components/landing/AddDatasetFromHubDialog";
 import ImportDatasetFromDiskDialog from "@/components/landing/ImportDatasetFromDiskDialog";
@@ -37,7 +45,9 @@ import {
 } from "@/components/launchpad/SkillCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
+import DeleteConfirmDialog from "@/components/dialogs/DeleteConfirmDialog";
 import SkillManageDialog from "@/components/dialogs/SkillManageDialog";
+import { DeleteResolution } from "@/lib/deleteSemantics";
 
 export interface LibrarySheetProps {
   open: boolean;
@@ -92,8 +102,31 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   const [manageCachesOpen, setManageCachesOpen] = useState(false);
   const [addModelOpen, setAddModelOpen] = useState(false);
   const [importModelOpen, setImportModelOpen] = useState(false);
+  const [pendingDeleteDataset, setPendingDeleteDataset] =
+    useState<DatasetItem | null>(null);
+  const [showRecentlyDeleted, setShowRecentlyDeleted] = useState(false);
+  const [deletedDatasets, setDeletedDatasets] = useState<DeletedDatasetEntry[]>([]);
+  const [undoingTrashId, setUndoingTrashId] = useState<string | null>(null);
 
   const username = auth.status === "authenticated" ? auth.username : null;
+
+  useEffect(() => {
+    if (!showRecentlyDeleted) {
+      setDeletedDatasets([]);
+      return;
+    }
+    let cancelled = false;
+    listDeletedDatasets(baseUrl, fetchWithHeaders)
+      .then((entries) => {
+        if (!cancelled) setDeletedDatasets(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setDeletedDatasets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showRecentlyDeleted, baseUrl, fetchWithHeaders]);
 
   // "Add a dataset from Hugging Face": pin + select the typed Hub id, and
   // optionally kick off a background download into the local cache. Ported
@@ -127,6 +160,81 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     setSelectedDataset(repoId);
     refreshDatasets();
     toast({ title: "Dataset imported", description: repoId });
+  };
+
+  const confirmDeleteDataset = async (resolution: DeleteResolution) => {
+    const item = pendingDeleteDataset;
+    if (!item) return;
+    setPendingDeleteDataset(null);
+    try {
+      let result: { success: boolean; message?: string };
+      if (resolution.action === "unpin") {
+        result = await removeCustomDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      } else if (resolution.action === "hide") {
+        result = await hideDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      } else {
+        result = await deleteDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      }
+      if (!result.success) {
+        toast({
+          title:
+            resolution.action === "delete-local" ? "Delete failed" : "Couldn't remove",
+          description: result.message ?? "Something went wrong",
+          variant: "destructive",
+        });
+        return;
+      }
+      toast({
+        title:
+          resolution.action === "delete-local-copy"
+            ? "Local copy removed"
+            : resolution.action === "delete-local"
+              ? "Dataset deleted"
+              : "Removed from list",
+        description: item.repo_id,
+      });
+      refreshDatasets();
+    } catch (e) {
+      toast({
+        title:
+          resolution.action === "delete-local" ? "Delete failed" : "Couldn't remove",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleUndoDatasetDelete = async (trashId: string) => {
+    const entry = deletedDatasets.find((d) => d.trash_id === trashId);
+    if (!entry) return;
+    setUndoingTrashId(trashId);
+    try {
+      const result = await undoDatasetDelete(
+        baseUrl,
+        fetchWithHeaders,
+        entry.repo_id,
+        trashId,
+      );
+      if (!result.success) {
+        toast({
+          title: "Undo failed",
+          description: result.message || "Something went wrong",
+          variant: "destructive",
+        });
+        return;
+      }
+      setDeletedDatasets((prev) => prev.filter((d) => d.trash_id !== trashId));
+      refreshDatasets();
+      toast({ title: "Dataset restored", description: entry.repo_id });
+    } catch (e) {
+      toast({
+        title: "Undo failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setUndoingTrashId(null);
+    }
   };
 
   // Models twins of the two handlers above (ported from ModelsPanel).
@@ -286,6 +394,63 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                 </div>
               ) : (
                 <div className="flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowRecentlyDeleted((v) => !v)}
+                    className="self-start rounded-md px-1 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {showRecentlyDeleted
+                      ? "Hide recently deleted"
+                      : "Recently deleted"}
+                  </button>
+
+                  {showRecentlyDeleted && (
+                    <div className="flex flex-col gap-2 border-b border-border pb-2">
+                      {deletedDatasets.length === 0 ? (
+                        <p className="px-1 py-2 text-center text-xs text-muted-foreground">
+                          No recently deleted datasets.
+                        </p>
+                      ) : (
+                        deletedDatasets.map((entry) => {
+                          const hoursLeft = Math.max(
+                            0,
+                            (entry.expires_at * 1000 - Date.now()) / 3_600_000,
+                          );
+                          return (
+                            <div
+                              key={entry.trash_id}
+                              className="flex items-center gap-2 rounded-md border border-border bg-card p-3 transition-colors hover:border-ring"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <span className="block truncate font-medium">
+                                  {entry.repo_id}
+                                </span>
+                                <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                                  expires{" "}
+                                  {hoursLeft < 1
+                                    ? "<1h"
+                                    : `${Math.floor(hoursLeft)}h`}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUndoDatasetDelete(entry.trash_id)
+                                }
+                                disabled={undoingTrashId !== null}
+                                aria-label={`Undo delete of ${entry.repo_id}`}
+                                title="Undo delete"
+                                className="shrink-0 rounded p-1.5 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                              >
+                                <Undo2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
                   {datasetsLoading ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
                       Loading datasets…
@@ -296,26 +461,42 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                     </p>
                   ) : (
                     myDatasets.map((d) => (
-                      <button
+                      <div
                         key={d.repo_id}
-                        type="button"
-                        onClick={() => openDatasetDetail(d)}
-                        className="flex items-center gap-2 rounded-md border border-border bg-card p-3 text-left transition-colors hover:border-ring"
+                        className="flex items-center gap-2 rounded-md border border-border bg-card p-3 transition-colors hover:border-ring"
                       >
-                        <div className="min-w-0 flex-1">
-                          <span className="block truncate font-medium">
-                            {d.repo_id}
-                          </span>
-                          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
-                            {d.source === "both"
-                              ? "local + Hub"
-                              : d.source === "hub"
-                                ? "on Hub"
-                                : "local only"}
-                            {d.private ? " · private" : ""}
-                          </p>
-                        </div>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => openDatasetDetail(d)}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <span className="block truncate font-medium">
+                              {d.repo_id}
+                            </span>
+                            <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                              {d.source === "both"
+                                ? "local + Hub"
+                                : d.source === "hub"
+                                  ? "on Hub"
+                                  : "local only"}
+                              {d.private ? " · private" : ""}
+                            </p>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPendingDeleteDataset(d);
+                          }}
+                          aria-label={`Delete ${d.repo_id}`}
+                          title="Delete dataset"
+                          className="shrink-0 rounded p-1.5 text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     ))
                   )}
                 </div>
@@ -415,6 +596,15 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
         // The sheet sits above the studio overlay — close it when a dataset
         // action opens a studio panel, or the panel appears "behind" it.
         onStudioAction={() => onOpenChange(false)}
+        onDeleted={refreshDatasets}
+      />
+
+      <DeleteConfirmDialog
+        kind="dataset"
+        item={pendingDeleteDataset}
+        label={pendingDeleteDataset?.repo_id}
+        onOpenChange={(o) => !o && setPendingDeleteDataset(null)}
+        onConfirm={confirmDeleteDataset}
       />
 
       <SkillManageDialog

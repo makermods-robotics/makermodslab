@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -101,6 +102,30 @@ def test_list_local_datasets_hides_empty_dataset(
     repo_ids = [d["repo_id"] for d in list_local_datasets()]
     assert "has_eps" in repo_ids
     assert "empty_ds" not in repo_ids
+
+
+def test_list_local_datasets_skips_dot_prefixed_dirs(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Dot-prefixed directories (scratch/hidden by convention, including
+    temporary episode-delete swap dirs) are skipped even if they contain
+    valid meta/info.json and episodes."""
+    from makermodslab.datasets import list_local_datasets
+
+    # Create a normal dataset that should appear.
+    _make_dataset(tmp_lerobot_home, "normal", episodes=3)
+
+    # Create a dot-prefixed dataset that should NOT appear.
+    dot_dataset = tmp_lerobot_home / ".hidden"
+    dot_dataset.mkdir(parents=True)
+    (dot_dataset / "meta").mkdir()
+    (dot_dataset / "meta" / "info.json").write_text(json.dumps({"total_episodes": 3}))
+
+    repo_ids = [d["repo_id"] for d in list_local_datasets()]
+    assert "normal" in repo_ids
+    # The dot-prefixed dir name doesn't appear even though it has valid structure.
+    assert ".hidden" not in repo_ids
+    assert not any(".hidden" in rid for rid in repo_ids)
 
 
 def test_list_user_datasets_returns_empty_when_not_logged_in(
@@ -746,6 +771,947 @@ def test_rename_invalidates_hub_status_for_both_ids(tmp_lerobot_home: Path) -> N
 
     called = {c.args[0] for c in inval.call_args_list}
     assert called == {"makermods/before", "makermods/after"}
+
+
+# --- Episode delete ----------------------------------------------------------
+
+
+def test_delete_episode_missing_dataset_404s(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    with pytest.raises(DatasetEpisodeDeleteError) as exc:
+        start_episode_delete("makermods/ghost", 0)
+    assert exc.value.status == 404
+
+
+def test_delete_episode_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    for bad in ["../outside", "..", "."]:
+        with pytest.raises(DatasetEpisodeDeleteError) as exc:
+            start_episode_delete(bad, 0)
+        assert exc.value.status == 404
+
+
+def test_delete_episode_busy_guard_recording(tmp_lerobot_home: Path) -> None:
+    """Refused (409) while a recording session writes to the id — before ever
+    touching lerobot's delete_episodes."""
+    from makermodslab import record as rec
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/live", episodes=3)
+
+    fake_cfg = MagicMock()
+    fake_cfg.dataset_repo_id = "makermods/live"
+    with (
+        patch.object(rec, "recording_active", True),
+        patch.object(rec, "recording_config", fake_cfg),
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        start_episode_delete("makermods/live", 0)
+    assert exc.value.status == 409
+    assert (tmp_lerobot_home / "makermods" / "live").exists()
+
+
+def test_delete_episode_busy_guard_merge(tmp_lerobot_home: Path) -> None:
+    from makermodslab import merge
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/out", episodes=3)
+
+    with (
+        patch.object(merge.merge_manager, "state", "running"),
+        patch.object(merge.merge_manager, "output_repo_id", "makermods/out"),
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        start_episode_delete("makermods/out", 0)
+    assert exc.value.status == 409
+
+
+def test_delete_episode_busy_guard_concurrent_episode_delete(tmp_lerobot_home: Path) -> None:
+    """A second start_episode_delete call for the same repo_id, while the
+    first is still mid-rewrite, is refused (409) instead of racing it."""
+    from makermodslab import datasets as ds
+
+    _make_dataset(tmp_lerobot_home, "makermods/busy", episodes=3)
+
+    ds._delete_status = {
+        "state": "running",
+        "repo_id": "makermods/busy",
+        "episode_index": 0,
+        "message": "Deleting…",
+        "result": None,
+    }
+    try:
+        with pytest.raises(ds.DatasetEpisodeDeleteError) as exc:
+            ds.start_episode_delete("makermods/busy", 0)
+        assert exc.value.status == 409
+    finally:
+        ds._delete_status = None
+
+
+def test_dataset_in_use_reports_episode_delete_in_progress() -> None:
+    """_dataset_in_use (used by rename, whole-dataset delete, and
+    upload-start) refuses a dataset that's mid-episode-delete, so those
+    operations can't race the episode-delete worker's swap."""
+    from makermodslab import datasets as ds
+
+    ds._delete_status = {
+        "state": "running",
+        "repo_id": "makermods/mid-swap",
+        "episode_index": 0,
+        "message": "Deleting…",
+        "result": None,
+    }
+    try:
+        assert ds._dataset_in_use("makermods/mid-swap") is not None
+    finally:
+        ds._delete_status = None
+
+
+def test_dataset_in_use_reports_episode_undo_in_progress() -> None:
+    """_dataset_in_use (used by rename, whole-dataset delete, episode-delete's
+    own busy-check, and upload-start) refuses a dataset that's mid-episode-undo,
+    so those operations can't race _episode_undo_worker's non-atomic
+    target -> backup_dir -> target swap."""
+    from makermodslab import datasets as ds
+
+    ds._undo_status = {
+        "state": "running",
+        "repo_id": "makermods/mid-undo-swap",
+        "trash_id": "deadbeef",
+        "message": "Restoring…",
+        "result": None,
+    }
+    try:
+        assert ds._dataset_in_use("makermods/mid-undo-swap") is not None
+    finally:
+        ds._undo_status = None
+
+
+def test_delete_episode_and_upload_start_cannot_interleave(tmp_lerobot_home: Path) -> None:
+    """TOCTOU regression test (PR #54 review, C2): start_episode_delete's busy
+    CHECK (_dataset_in_use) and its CLAIM (_delete_status = {...}) must be
+    atomic with respect to UploadManager.start's own check-and-claim. An
+    upload-start landing in the gap between delete's check and its claim
+    must not slip through and begin pushing a directory that's about to be
+    rewritten out from under it.
+
+    Reproduced deterministically (no real timing race): a patched
+    _dataset_in_use pauses on its FIRST call only (start_episode_delete's),
+    holding whatever synchronization the real code provides, while a second
+    thread attempts UploadManager.start for the same repo_id. If the two
+    don't share a lock, the upload's own call to _dataset_in_use runs
+    unimpeded and sees nothing claimed yet — the actual bug."""
+    from makermodslab import datasets as ds, record as rec
+    from makermodslab.record import UploadRequest
+
+    repo_id = "makermods/three"
+    _make_dataset(tmp_lerobot_home, repo_id, episodes=3)
+
+    checked = threading.Event()
+    proceed = threading.Event()
+    real_dataset_in_use = ds._dataset_in_use
+    first_call_lock = threading.Lock()
+    first_call_done = False
+
+    def delayed_check(rid: str):
+        nonlocal first_call_done
+        with first_call_lock:
+            is_first = not first_call_done
+            first_call_done = True
+        result = real_dataset_in_use(rid)
+        if is_first:
+            checked.set()
+            assert proceed.wait(timeout=5), "test deadlocked waiting for main thread"
+        return result
+
+    mgr = rec.UploadManager()
+    # If the race isn't closed, start() succeeds and spawns a real worker
+    # thread that would hit the network (LeRobotDataset load + push_to_hub).
+    # Neuter it — only start()'s own check-and-claim is under test here.
+    mgr._worker = lambda request: None
+
+    delete_result: dict[str, Any] = {}
+
+    def run_delete() -> None:
+        with (
+            patch("makermodslab.datasets._dataset_in_use", delayed_check),
+            patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+            patch(
+                "makermodslab.datasets.split_dataset",
+                side_effect=_stub_split_dataset_success(),
+            ),
+            patch(
+                "makermodslab.datasets.delete_episodes",
+                side_effect=_stub_delete_episodes_success(2),
+            ),
+            # The real job_registry is process-global and, on a dev machine
+            # with real HF Cloud job history, listing it hits the network
+            # (checkpoint lookups) — unrelated to this test, so keep
+            # _dataset_in_use's job-registry check fast and deterministic.
+            patch("makermodslab.jobs.job_registry.list", return_value=[]),
+        ):
+            delete_result["value"] = ds.start_episode_delete(repo_id, 1)
+            # The actual rewrite runs in a background thread now — wait for it
+            # HERE, still inside the patches, since the worker (running on its
+            # own thread) needs the same mocked LeRobotDataset/delete_episodes
+            # the synchronous validation above just used.
+            assert ds._delete_thread is not None
+            ds._delete_thread.join(timeout=10)
+
+    deleter = threading.Thread(target=run_delete, daemon=True)
+    deleter.start()
+    assert checked.wait(timeout=5), "delete_local_episode never reached its busy check"
+
+    upload_result: dict[str, Any] = {}
+    upload_attempted = threading.Event()
+
+    def run_upload() -> None:
+        upload_attempted.set()
+        upload_result["value"] = mgr.start(UploadRequest(dataset_repo_id=repo_id))
+
+    uploader = threading.Thread(target=run_upload, daemon=True)
+    uploader.start()
+    assert upload_attempted.wait(timeout=5)
+    uploader.join(timeout=0.3)
+    assert uploader.is_alive(), (
+        "upload-start returned while delete_local_episode was still mid busy-check — "
+        "the two don't share a lock, so the upload slipped through the TOCTOU gap"
+    )
+
+    proceed.set()
+    deleter.join(timeout=10)
+    uploader.join(timeout=10)
+
+    assert delete_result["value"] == {
+        "started": True,
+        "repo_id": repo_id,
+        "message": "Episode delete started",
+    }
+    status = ds.get_episode_delete_status()
+    assert status["state"] == "done"
+    assert status["result"]["success"] is True
+    assert upload_result["value"]["started"] is False
+
+
+def test_delete_episode_load_failure_400s(tmp_lerobot_home: Path) -> None:
+    """A dataset dir that passes the cheap `_is_dataset_dir` check (has
+    meta/info.json) but isn't a real loadable LeRobotDataset (e.g. corrupt,
+    or predates v3.0) 400s instead of raising an unhandled exception."""
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/corrupt", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", side_effect=ValueError("bad dataset")),
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        start_episode_delete("makermods/corrupt", 0)
+    assert exc.value.status == 400
+
+
+def _fake_loaded_dataset(total_episodes: int) -> MagicMock:
+    ds = MagicMock()
+    ds.meta.total_episodes = total_episodes
+    # Real values (not auto-mocked attributes) for the fields the episode-delete
+    # worker's trash-extraction step reads directly — dividing a MagicMock by
+    # another MagicMock doesn't raise, it just returns yet another MagicMock,
+    # which then blows up json-serializing the trash manifest instead of at
+    # the point that's actually wrong.
+    ds.meta.fps = 30
+    ds.meta.episodes = {i: {"length": 20} for i in range(total_episodes)}
+    return ds
+
+
+def test_delete_episode_out_of_range_400s(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        start_episode_delete("makermods/three", 3)
+    assert exc.value.status == 400
+
+
+def test_delete_episode_last_remaining_400s(tmp_lerobot_home: Path) -> None:
+    """The only episode in the dataset — refused; the frontend is expected to
+    route this through whole-dataset delete instead, but the backend must not
+    silently misbehave if it's hit directly."""
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/solo", episodes=1)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(1)),
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        start_episode_delete("makermods/solo", 0)
+    assert exc.value.status == 400
+    assert "only episode" in exc.value.message
+
+
+def _stub_delete_episodes_success(new_total: int, *, marker: bytes = b"new-data"):
+    """Build a fake `delete_episodes` that mimics lerobot's real contract:
+    write something into `output_dir` and return an object with the new
+    dataset's metadata."""
+
+    def _fake(dataset, episode_indices, output_dir=None, repo_id=None):
+        output_dir = Path(output_dir)
+        (output_dir / "meta").mkdir(parents=True)
+        (output_dir / "meta" / "info.json").write_text(json.dumps({"total_episodes": new_total}))
+        (output_dir / "marker.bin").write_bytes(marker)
+        result = MagicMock()
+        result.meta.total_episodes = new_total
+        return result
+
+    return _fake
+
+
+def _stub_split_dataset_success():
+    """Build a fake `split_dataset` that mimics lerobot's real contract:
+    write something into `output_dir/<split_name>` for each split and return
+    a dict of split name -> dataset."""
+
+    def _fake(dataset, splits, output_dir=None):
+        output_dir = Path(output_dir)
+        for split_name in splits:
+            (output_dir / split_name).mkdir(parents=True, exist_ok=True)
+        return {name: MagicMock() for name in splits}
+
+    return _fake
+
+
+def _wait_for_delete_worker() -> dict[str, Any]:
+    """Block until the background worker launched by the most recent
+    start_episode_delete call finishes, returning the final
+    get_episode_delete_status() snapshot. Must be called while any patches
+    the test relies on (LeRobotDataset, delete_episodes, os.rename, ...) are
+    still active — the worker runs on its own thread, asynchronously."""
+    from makermodslab import datasets as ds
+
+    assert ds._delete_thread is not None
+    ds._delete_thread.join(timeout=10)
+    return ds.get_episode_delete_status()
+
+
+def test_delete_episode_insufficient_disk_space_507s(tmp_lerobot_home: Path) -> None:
+    """Not enough free space for the rewrite is caught up front — a clear 507,
+    not a mid-re-encode ENOSPC surfacing as a generic error."""
+    from makermodslab.datasets import DatasetEpisodeDeleteError, start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+    fake_usage = MagicMock(free=10)  # far below any real dataset's on-disk size
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch("makermodslab.datasets.shutil.disk_usage", return_value=fake_usage),
+        patch("makermodslab.datasets.delete_episodes") as delete_episodes_mock,
+        pytest.raises(DatasetEpisodeDeleteError) as exc,
+    ):
+        start_episode_delete("makermods/three", 1)
+
+    assert exc.value.status == 507
+    delete_episodes_mock.assert_not_called()
+    # Original directory is completely untouched.
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+    leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
+    assert leftovers == []
+
+
+def test_delete_episode_happy_path_swaps_directory(tmp_lerobot_home: Path) -> None:
+    """The live directory ends up as whatever lerobot's delete_episodes wrote
+    into output_dir, the temp/backup dirs are cleaned up, and the listing
+    cache is invalidated — all from the background worker, whose outcome
+    shows up in get_episode_delete_status once it's done. The deleted episode
+    is extracted into a trash entry first, which is the one thing that's
+    NOT cleaned up afterward — it's meant to survive for later undo."""
+    from makermodslab.datasets import start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch("makermodslab.datasets.invalidate_dataset_listing_cache") as inval,
+    ):
+        started = start_episode_delete("makermods/three", 1)
+        assert started == {
+            "started": True,
+            "repo_id": "makermods/three",
+            "message": "Episode delete started",
+        }
+        status = _wait_for_delete_worker()
+
+    assert status["state"] == "done"
+    result = dict(status["result"])
+    trash_id = result.pop("trash_id")
+    assert trash_id
+    assert result == {
+        "success": True,
+        "repo_id": "makermods/three",
+        "deleted_episode": 1,
+        "total_episodes": 2,
+    }
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert (live / "marker.bin").read_bytes() == b"new-data"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 2
+    # No leftover temp/backup siblings — only the trash entry (dir + manifest)
+    # from the extraction step, which is expected to persist.
+    leftovers = sorted(p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three")
+    assert leftovers == [f".three.trash-{trash_id}", f".three.trash-{trash_id}.manifest.json"]
+    inval.assert_called_once()
+
+
+def test_delete_episode_never_pushes_to_hub(tmp_lerobot_home: Path) -> None:
+    """Deleting an episode must never trigger a Hub push — a local edit does
+    not touch an already-published Hub copy. (This replaces the old
+    resync-on-delete feature, which used to push the rewritten dataset back
+    to the Hub automatically.)"""
+    from makermodslab import record
+    from makermodslab.datasets import start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "makermods/three", "status": "on_hub", "url": "x"},
+        ),
+        patch.object(record.upload_manager, "start") as start_mock,
+    ):
+        start_episode_delete("makermods/three", 1)
+        status = _wait_for_delete_worker()
+
+    assert status["state"] == "done"
+    assert status["result"]["success"] is True
+    start_mock.assert_not_called()
+
+
+def test_delete_episode_rewrite_failure_leaves_original_intact(tmp_lerobot_home: Path) -> None:
+    """If lerobot's delete_episodes itself raises, the original dataset
+    directory is untouched and no temp dir is left behind."""
+    from makermodslab.datasets import start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    def _boom(dataset, episode_indices, output_dir=None, repo_id=None):
+        Path(output_dir).mkdir(parents=True)
+        (Path(output_dir) / "partial").write_bytes(b"x")
+        raise RuntimeError("re-encode blew up")
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch("makermodslab.datasets.delete_episodes", side_effect=_boom),
+    ):
+        start_episode_delete("makermods/three", 1)
+        status = _wait_for_delete_worker()
+
+    assert status["state"] == "error"
+    assert status["result"] is None
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+    # delete_episodes failing after the trash extraction already succeeded
+    # rolls the trash entry back too — the episode was never actually
+    # removed from the live dataset, so there's nothing to undo.
+    leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
+    assert leftovers == []
+
+
+def test_delete_episode_manifest_write_failure_rolls_back(tmp_lerobot_home: Path) -> None:
+    """If _write_trash_manifest fails (returns False), the worker must not
+    proceed to delete_episodes — it should clean up the trash extraction and
+    report an error, the same as any other failure in this stage. Otherwise
+    the trash dir would be indistinguishable from a valid one but with no
+    manifest, invisible to list_deleted_episodes/reap_expired_trash."""
+    from makermodslab.datasets import start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch("makermodslab.datasets._write_trash_manifest", return_value=False),
+        patch("makermodslab.datasets.delete_episodes") as delete_episodes_mock,
+    ):
+        start_episode_delete("makermods/three", 1)
+        status = _wait_for_delete_worker()
+
+    assert status["state"] == "error"
+    assert status["result"] is None
+    delete_episodes_mock.assert_not_called()
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+    # The trash dir (and any manifest) from the failed extraction is cleaned
+    # up rather than left as an orphan with no manifest.
+    leftovers = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three"]
+    assert leftovers == []
+
+
+def test_delete_episode_swap_failure_rolls_back(tmp_lerobot_home: Path) -> None:
+    """If the final tmp_dir -> target rename fails, the original directory is
+    restored from the backup rather than left missing."""
+    from makermodslab.datasets import start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+    live = tmp_lerobot_home / "makermods" / "three"
+
+    real_rename = os.rename
+    call_count = {"n": 0}
+
+    def _flaky_rename(src, dst):
+        call_count["n"] += 1
+        # First rename is target -> backup (let it through); second is
+        # tmp_dir -> target (fail it) to exercise the rollback path.
+        if call_count["n"] == 2:
+            raise OSError("disk full")
+        real_rename(src, dst)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch("makermodslab.datasets.os.rename", side_effect=_flaky_rename),
+    ):
+        start_episode_delete("makermods/three", 1)
+        status = _wait_for_delete_worker()
+
+    assert status["state"] == "error"
+    # Rolled back: the original 3-episode dataset is back at the live path.
+    assert live.exists()
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+    # This is one of the two LATER failure paths (the swap itself, not the
+    # extraction or the rewrite) — the trash extraction already succeeded by
+    # this point and is deliberately left alone rather than cleaned up, so
+    # the trash dir + manifest are expected leftovers here.
+    leftovers = sorted(p.name for p in (tmp_lerobot_home / "makermods").iterdir() if p.name != "three")
+    assert len(leftovers) == 2
+    trash_dirs = [n for n in leftovers if n.startswith(".three.trash-") and not n.endswith(".manifest.json")]
+    manifests = [n for n in leftovers if n.endswith(".manifest.json")]
+    assert len(trash_dirs) == 1
+    assert manifests == [f"{trash_dirs[0]}.manifest.json"]
+
+
+def test_delete_episode_swap_and_rollback_both_fail(tmp_lerobot_home: Path) -> None:
+    """If both the tmp_dir -> target swap AND the backup_dir -> target rollback
+    fail, tmp_dir must be cleaned up (backup_dir is the safety net and stays)."""
+    from makermodslab.datasets import start_episode_delete
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    real_rename = os.rename
+    call_count = {"n": 0}
+
+    def _flaky_rename(src, dst):
+        call_count["n"] += 1
+        # First rename is target -> backup (let it through); second is
+        # tmp_dir -> target (fail it); third is backup_dir -> target
+        # (also fail it) to exercise the double-failure rollback cleanup path.
+        if call_count["n"] in (2, 3):
+            raise OSError("disk full")
+        real_rename(src, dst)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+        patch("makermodslab.datasets.os.rename", side_effect=_flaky_rename),
+    ):
+        start_episode_delete("makermods/three", 1)
+        status = _wait_for_delete_worker()
+
+    assert status["state"] == "error"
+    # backup_dir exists (safety net with original data).
+    backups = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if ".pre-delete-" in p.name]
+    assert len(backups) == 1
+    # tmp_dir is cleaned up (not left as orphan).
+    tmp_dirs = [p.name for p in (tmp_lerobot_home / "makermods").iterdir() if ".delete-tmp-" in p.name]
+    assert tmp_dirs == []
+
+
+def test_episode_delete_worker_extracts_episode_to_trash_before_rewriting(
+    tmp_lerobot_home: Path,
+) -> None:
+    """_episode_delete_worker runs on a background thread against a real
+    LeRobotDataset, which this project's test policy deliberately doesn't
+    unit-test (see this file's existing busy-guard-only coverage of episode
+    delete, and CLAUDE.md: "subprocess/thread happy paths ... are
+    deliberately not unit-tested"). This instead checks, via mocks, that the
+    worker calls split_dataset (to extract the deleted episode into a trash
+    entry) BEFORE calling delete_episodes (which rewrites the live dataset) —
+    matching the level the rest of this file already tests the worker at."""
+    from makermodslab import datasets as ds
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=3)
+    target = tmp_lerobot_home / "pusht"
+
+    calls: list[str] = []
+
+    def fake_split_dataset(dataset, splits, output_dir):
+        calls.append("split_dataset")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return {"trash": object()}
+
+    def fake_delete_episodes(dataset, indices, output_dir, repo_id):
+        calls.append("delete_episodes")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "meta").mkdir()
+        (Path(output_dir) / "meta" / "info.json").write_text('{"total_episodes": 2}')
+
+    # _fake_loaded_dataset (not a bare MagicMock()) gives dataset.meta.episodes
+    # and dataset.meta.fps real values — the worker's trash-extraction step
+    # reads both directly (episode length + duration for the manifest), and a
+    # bare MagicMock's arithmetic there produces another MagicMock rather
+    # than raising, which then fails much later trying to json-serialize it.
+    fake_dataset = _fake_loaded_dataset(3)
+
+    ds._delete_status = {
+        "state": "running",
+        "repo_id": "pusht",
+        "episode_index": 1,
+        "message": "Deleting…",
+        "result": None,
+    }
+    try:
+        with (
+            # LeRobotDataset is imported inside _episode_delete_worker via a
+            # local `from lerobot.datasets import LeRobotDataset`, so it's
+            # never a module-level `makermodslab.datasets.LeRobotDataset`
+            # name to patch — patch it where the rest of this file's
+            # episode-delete tests do, at the source module.
+            patch("lerobot.datasets.LeRobotDataset", return_value=fake_dataset),
+            patch("makermodslab.datasets.split_dataset", side_effect=fake_split_dataset),
+            patch("makermodslab.datasets.delete_episodes", side_effect=fake_delete_episodes),
+        ):
+            ds._episode_delete_worker("pusht", 1, target)
+    finally:
+        result = ds._delete_status
+        ds._delete_status = None
+
+    assert calls == ["split_dataset", "delete_episodes"]
+    assert result["state"] == "done"
+    assert "trash_id" in result["result"]
+
+
+# --- Orphaned episode-delete dir recovery ---
+
+
+def _make_dot_dir(root: Path, repo_id: str, kind: str, episodes: int = 1) -> Path:
+    """Create a dot-prefixed sibling of `repo_id`'s dataset dir, named like
+    delete_local_episode's own tmp_dir/backup_dir (".<name>.<kind>-<hex8>"),
+    with a real dataset layout inside so recovery can be verified by content."""
+    namespace, _, name = repo_id.rpartition("/")
+    parent = (root / namespace) if namespace else root
+    parent.mkdir(parents=True, exist_ok=True)
+    dot_dir = parent / f".{name}.{kind}-aaaaaaaa"
+    (dot_dir / "meta").mkdir(parents=True)
+    (dot_dir / "meta" / "info.json").write_text(json.dumps({"total_episodes": episodes}))
+    return dot_dir
+
+
+def test_recover_orphaned_dirs_removes_stale_tmp_dir(tmp_lerobot_home: Path) -> None:
+    """A leftover .delete-tmp-* dir (crash mid re-encode) is always disposable."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    tmp_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "delete-tmp")
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not tmp_dir.exists()
+
+
+def test_recover_orphaned_dirs_removes_backup_when_swap_already_completed(
+    tmp_lerobot_home: Path,
+) -> None:
+    """If the live dataset already exists, the swap finished before the crash
+    and only the backup's own cleanup was interrupted — remove the backup."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=2)
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "pre-delete", episodes=3)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 2
+
+
+def test_recover_orphaned_dirs_restores_backup_when_live_dir_missing(
+    tmp_lerobot_home: Path,
+) -> None:
+    """If the live dataset is missing, the crash landed mid-swap and the
+    backup is the only surviving copy — restore it rather than delete it."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "pre-delete", episodes=3)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+
+
+def test_recover_orphaned_dirs_handles_top_level_repo_id(tmp_lerobot_home: Path) -> None:
+    """The same recovery works for a bare (non-namespaced) repo id, not just
+    a namespace/name one."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "pusht", "pre-delete", episodes=5)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "pusht"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 5
+
+
+def test_recover_orphaned_dirs_ignores_unrelated_dot_dirs(tmp_lerobot_home: Path) -> None:
+    """A dot-dir that doesn't match the tmp/backup naming (e.g. some other
+    hidden dir) is left alone."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=2)
+    unrelated = tmp_lerobot_home / "makermods" / ".hidden"
+    unrelated.mkdir(parents=True)
+    (unrelated / "marker").write_bytes(b"x")
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert unrelated.exists()
+
+
+def test_list_local_datasets_recovers_orphan_and_lists_it(tmp_lerobot_home: Path) -> None:
+    """list_local_datasets sweeps for orphaned episode-delete dirs (once per
+    cache root) so a dataset stranded by a crash reappears without a restart."""
+    from makermodslab.datasets import list_local_datasets
+
+    _make_dot_dir(tmp_lerobot_home, "makermods/recovered", "pre-delete", episodes=4)
+
+    repo_ids = [d["repo_id"] for d in list_local_datasets()]
+
+    assert "makermods/recovered" in repo_ids
+
+
+def test_recover_orphaned_dirs_removes_stale_undo_tmp_dir(tmp_lerobot_home: Path) -> None:
+    """A leftover .undo-tmp-* dir (crash mid merge-back) is always disposable,
+    the same as a .delete-tmp-* dir — it's just the freshly re-encoded output
+    of _episode_undo_worker's merge, not any dataset's only copy."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    tmp_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "undo-tmp")
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not tmp_dir.exists()
+
+
+def test_recover_orphaned_dirs_removes_pre_undo_backup_when_swap_already_completed(
+    tmp_lerobot_home: Path,
+) -> None:
+    """If the live dataset already exists, the undo's swap finished before
+    the crash and only the backup's own cleanup was interrupted — remove the
+    backup, mirroring the pre-delete case."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "pre-undo", episodes=2)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+
+
+def test_recover_orphaned_dirs_restores_pre_undo_backup_when_live_dir_missing(
+    tmp_lerobot_home: Path,
+) -> None:
+    """If the live dataset is missing, the crash landed mid-swap inside
+    _episode_undo_worker and the .pre-undo-* backup is the only surviving
+    copy of the dataset — restore it rather than delete it. This is the
+    scenario Finding 1 identified as silent, permanent data loss before
+    "undo-tmp"/"pre-undo" were added to _DOT_DIR_KINDS."""
+    from makermodslab.datasets import recover_orphaned_episode_delete_dirs
+
+    backup_dir = _make_dot_dir(tmp_lerobot_home, "makermods/three", "pre-undo", episodes=3)
+
+    recover_orphaned_episode_delete_dirs(tmp_lerobot_home)
+
+    assert not backup_dir.exists()
+    live = tmp_lerobot_home / "makermods" / "three"
+    assert json.loads((live / "meta" / "info.json").read_text())["total_episodes"] == 3
+
+
+def test_list_local_datasets_recovers_orphaned_pre_undo_and_lists_it(tmp_lerobot_home: Path) -> None:
+    """Same crash-recovery sweep, exercised through list_local_datasets, for
+    a stranded .pre-undo-* backup."""
+    from makermodslab.datasets import list_local_datasets
+
+    _make_dot_dir(tmp_lerobot_home, "makermods/recovered-undo", "pre-undo", episodes=4)
+
+    repo_ids = [d["repo_id"] for d in list_local_datasets()]
+
+    assert "makermods/recovered-undo" in repo_ids
+
+
+# --- Episode delete endpoint ---
+
+
+def test_delete_episode_endpoint_success(client: TestClient, tmp_lerobot_home: Path) -> None:
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch(
+            "makermodslab.datasets.delete_episodes",
+            side_effect=_stub_delete_episodes_success(2),
+        ),
+    ):
+        resp = client.post(
+            "/datasets/episode-delete",
+            json={"repo_id": "makermods/three", "episode_index": 1},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "started": True,
+            "repo_id": "makermods/three",
+            "message": "Episode delete started",
+        }
+        status = _wait_for_delete_worker()
+
+    assert status["state"] == "done"
+    result = dict(status["result"])
+    assert result.pop("trash_id")
+    assert result == {
+        "success": True,
+        "repo_id": "makermods/three",
+        "deleted_episode": 1,
+        "total_episodes": 2,
+    }
+    status_resp = client.get("/datasets/episode-delete-status")
+    assert status_resp.status_code == 200
+    assert status_resp.json() == status
+
+
+def test_delete_episode_endpoint_returns_before_worker_finishes(
+    client: TestClient, tmp_lerobot_home: Path
+) -> None:
+    """The whole point of backgrounding this: POST returns immediately, and
+    the rewrite is still observably in flight afterward — not the old
+    behavior where the request blocked for the entire re-encode."""
+    from makermodslab import datasets as ds
+
+    _make_dataset(tmp_lerobot_home, "makermods/three", episodes=3)
+    release = threading.Event()
+    real_stub = _stub_delete_episodes_success(2)
+
+    def _blocking_delete(dataset, episode_indices, output_dir=None, repo_id=None):
+        assert release.wait(timeout=5), "test deadlocked waiting for the main thread"
+        return real_stub(dataset, episode_indices, output_dir=output_dir, repo_id=repo_id)
+
+    with (
+        patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(3)),
+        patch(
+            "makermodslab.datasets.split_dataset",
+            side_effect=_stub_split_dataset_success(),
+        ),
+        patch("makermodslab.datasets.delete_episodes", side_effect=_blocking_delete),
+    ):
+        resp = client.post(
+            "/datasets/episode-delete",
+            json={"repo_id": "makermods/three", "episode_index": 1},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["started"] is True
+
+        mid_status = client.get("/datasets/episode-delete-status").json()
+        assert mid_status["state"] == "running"
+        assert mid_status["repo_id"] == "makermods/three"
+
+        release.set()
+        assert ds._delete_thread is not None
+        ds._delete_thread.join(timeout=10)
+
+    final_status = client.get("/datasets/episode-delete-status").json()
+    assert final_status["state"] == "done"
+    assert final_status["result"]["success"] is True
+
+
+def test_delete_episode_endpoint_404_missing(client: TestClient, tmp_lerobot_home: Path) -> None:
+    resp = client.post(
+        "/datasets/episode-delete",
+        json={"repo_id": "makermods/ghost", "episode_index": 0},
+    )
+    assert resp.status_code == 404
+    assert isinstance(resp.json()["detail"], str)
+
+
+def test_delete_episode_endpoint_last_episode_400s(client: TestClient, tmp_lerobot_home: Path) -> None:
+    _make_dataset(tmp_lerobot_home, "makermods/solo", episodes=1)
+
+    with patch("lerobot.datasets.LeRobotDataset", return_value=_fake_loaded_dataset(1)):
+        resp = client.post(
+            "/datasets/episode-delete",
+            json={"repo_id": "makermods/solo", "episode_index": 0},
+        )
+    assert resp.status_code == 400
+
+
+def test_delete_episode_status_endpoint_idle_by_default(client: TestClient) -> None:
+    resp = client.get("/datasets/episode-delete-status")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "state": "idle",
+        "repo_id": None,
+        "episode_index": None,
+        "message": None,
+        "result": None,
+    }
 
 
 # --- Rename: Hub sync ---------------------------------------------------
@@ -2667,3 +3633,452 @@ def test_hub_dataset_viewer_endpoints_404_without_video(
 
     assert resp.status_code == 404
     dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info
+
+
+# --- Trash manifest helpers --------------------------------------------------
+
+
+def test_new_trash_paths_are_siblings_of_target(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths
+
+    target = tmp_lerobot_home / "alice" / "pusht"
+    target.mkdir(parents=True)
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+
+    assert trash_dir.parent == target.parent
+    assert trash_dir.name == f".pusht.trash-{trash_id}"
+    assert manifest_path == target.parent / f".pusht.trash-{trash_id}.manifest.json"
+    assert len(trash_id) == 8
+
+
+def test_write_and_read_trash_manifest_roundtrip(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _read_trash_manifest, _write_trash_manifest
+
+    manifest_path = tmp_lerobot_home / ".pusht.trash-abcd1234.manifest.json"
+    _write_trash_manifest(
+        manifest_path,
+        kind="episode",
+        repo_id="pusht",
+        episode_index=2,
+        length=150,
+        duration_s=5.0,
+    )
+
+    manifest = _read_trash_manifest(manifest_path)
+    assert manifest is not None
+    assert manifest["kind"] == "episode"
+    assert manifest["repo_id"] == "pusht"
+    assert manifest["episode_index"] == 2
+    assert manifest["length"] == 150
+    assert manifest["duration_s"] == 5.0
+    assert "deleted_at" in manifest
+
+
+def test_read_trash_manifest_missing_file_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _read_trash_manifest
+
+    assert _read_trash_manifest(tmp_lerobot_home / "nope.manifest.json") is None
+
+
+def test_read_trash_manifest_corrupt_json_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _read_trash_manifest
+
+    bad = tmp_lerobot_home / "bad.manifest.json"
+    bad.write_text("{not json")
+    assert _read_trash_manifest(bad) is None
+
+
+def test_trash_paths_for_id_resolves_deterministically(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths, _trash_paths_for_id
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+
+    resolved = _trash_paths_for_id("pusht", trash_id)
+    assert resolved == (trash_dir, manifest_path)
+
+
+def test_trash_paths_for_id_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _trash_paths_for_id
+
+    assert _trash_paths_for_id("../../etc", "abcd1234") is None
+
+
+def test_write_trash_manifest_never_raises_on_oserror(tmp_lerobot_home: Path) -> None:
+    """_write_trash_manifest gracefully degrades on I/O failure (permissions, disk
+    full, etc.) instead of raising, matching the "never raise" constraint for
+    cosmetic trash bookkeeping."""
+    from unittest.mock import patch
+
+    from makermodslab.datasets import _write_trash_manifest
+
+    manifest_path = tmp_lerobot_home / ".pusht.trash-abcd1234.manifest.json"
+
+    # Patch _atomic_write_text to raise OSError (simulating disk full, permission
+    # denied, etc.). _write_trash_manifest must NOT propagate this exception,
+    # but it must report the failure via its return value (False) so callers
+    # can roll back instead of reporting success.
+    with patch("makermodslab.datasets._atomic_write_text", side_effect=OSError("disk full")):
+        result = _write_trash_manifest(
+            manifest_path,
+            kind="episode",
+            repo_id="pusht",
+            episode_index=0,
+        )
+    assert result is False
+
+
+def test_list_deleted_episodes_returns_unexpired_entries_for_repo(
+    tmp_lerobot_home: Path,
+) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, list_deleted_episodes
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=2, length=10, duration_s=1.0
+    )
+
+    # A trash entry for a DIFFERENT repo must not show up.
+    other_target = tmp_lerobot_home / "other"
+    other_target.mkdir()
+    _, other_manifest, _ = _new_trash_paths(other_target)
+    _write_trash_manifest(other_manifest, kind="episode", repo_id="other", episode_index=0)
+
+    entries = list_deleted_episodes("pusht")
+    assert len(entries) == 1
+    assert entries[0]["trash_id"] == trash_id
+    assert entries[0]["episode_index"] == 2
+    assert entries[0]["length"] == 10
+    assert entries[0]["duration_s"] == 1.0
+    assert "deleted_at" in entries[0]
+    assert "expires_at" in entries[0]
+
+
+def test_list_deleted_episodes_excludes_dataset_kind_entries(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, list_deleted_episodes
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    _, manifest_path, _ = _new_trash_paths(target)
+    _write_trash_manifest(manifest_path, kind="dataset", repo_id="pusht")
+
+    assert list_deleted_episodes("pusht") == []
+
+
+def test_list_deleted_episodes_skips_malformed_manifests(tmp_lerobot_home: Path) -> None:
+    """list_deleted_episodes never raises on malformed trash manifests (missing
+    required fields or invalid JSON values); it silently skips them instead. This
+    matches _read_trash_manifest's degrade-to-None contract and the "trash
+    bookkeeping must never raise" constraint."""
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, list_deleted_episodes
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+
+    # Write one valid manifest.
+    trash_dir, valid_manifest, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        valid_manifest, kind="episode", repo_id="pusht", episode_index=0, length=10, duration_s=1.0
+    )
+
+    # Write one manifest missing "deleted_at" (will fail on datetime.fromisoformat).
+    _, malformed_manifest1, _ = _new_trash_paths(target)
+    malformed_manifest1.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 1,
+                "length": 5,
+                "duration_s": 0.5,
+                # Missing "deleted_at" — will raise KeyError
+            }
+        )
+    )
+
+    # Write one manifest with malformed "deleted_at" string.
+    _, malformed_manifest2, _ = _new_trash_paths(target)
+    malformed_manifest2.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 2,
+                "length": 5,
+                "duration_s": 0.5,
+                "deleted_at": "not-a-valid-iso-date",  # Will raise ValueError
+            }
+        )
+    )
+
+    # list_deleted_episodes must not raise and must return only the valid entry.
+    entries = list_deleted_episodes("pusht")
+    assert len(entries) == 1
+    assert entries[0]["trash_id"] == trash_id
+    assert entries[0]["episode_index"] == 0
+
+
+def test_start_episode_undo_404_when_trash_id_unknown(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import EpisodeUndoError, start_episode_undo
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=2)
+    with pytest.raises(EpisodeUndoError) as exc:
+        start_episode_undo("pusht", "deadbeef")
+    assert exc.value.status == 404
+
+
+def test_start_episode_undo_409_when_dataset_busy(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+    from makermodslab.datasets import EpisodeUndoError, _new_trash_paths, _write_trash_manifest
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=2)
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0
+    )
+
+    ds._delete_status = {
+        "state": "running",
+        "repo_id": "pusht",
+        "episode_index": 1,
+        "message": "Deleting…",
+        "result": None,
+    }
+    try:
+        with pytest.raises(EpisodeUndoError) as exc:
+            ds.start_episode_undo("pusht", trash_id)
+        assert exc.value.status == 409
+    finally:
+        ds._delete_status = None
+
+
+def test_undo_episode_delete_merges_trash_onto_live_dataset(tmp_lerobot_home: Path) -> None:
+    from unittest.mock import patch
+
+    from makermodslab import datasets as ds
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+
+    _make_dataset(tmp_lerobot_home, "pusht", episodes=2)
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    (trash_dir / "meta").mkdir()
+    (trash_dir / "meta" / "info.json").write_text('{"total_episodes": 1}')
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=1, length=5, duration_s=1.0
+    )
+
+    calls: list[str] = []
+
+    def fake_merge_datasets(datasets, output_repo_id, output_dir):
+        calls.append("merge_datasets")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "meta").mkdir()
+        (Path(output_dir) / "meta" / "info.json").write_text('{"total_episodes": 3}')
+
+    # _episode_undo_worker is invoked directly here (bypassing
+    # start_episode_undo), so _undo_status must be seeded first — mirrors
+    # test_episode_delete_worker_extracts_episode_to_trash_before_rewriting's
+    # ds._delete_status seeding above: _finish_undo_status only publishes
+    # into an existing slot, it's a no-op against a None one.
+    ds._undo_status = {
+        "state": "running",
+        "repo_id": "pusht",
+        "trash_id": trash_id,
+        "message": "Restoring…",
+        "result": None,
+    }
+    try:
+        with (
+            patch("lerobot.datasets.LeRobotDataset", return_value=MagicMock()),
+            patch("makermodslab.datasets.merge_datasets", side_effect=fake_merge_datasets),
+        ):
+            ds._episode_undo_worker("pusht", trash_id, target, trash_dir, manifest_path)
+
+        assert calls == ["merge_datasets"]
+        status = ds.get_episode_undo_status()
+        assert status["state"] == "done"
+        assert not trash_dir.exists()
+        assert not manifest_path.exists()
+    finally:
+        ds._undo_status = None
+
+
+def test_reap_expired_trash_removes_entries_past_retention(tmp_lerobot_home: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from makermodslab.datasets import (
+        TRASH_RETENTION_SECONDS,
+        _new_trash_paths,
+        _write_trash_manifest,
+        reap_expired_trash,
+    )
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, _ = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0
+    )
+
+    # Backdate deleted_at to just past the retention window.
+    manifest = json.loads(manifest_path.read_text())
+    stale = datetime.now(UTC) - timedelta(seconds=TRASH_RETENTION_SECONDS + 60)
+    manifest["deleted_at"] = stale.isoformat()
+    manifest_path.write_text(json.dumps(manifest))
+
+    reap_expired_trash(tmp_lerobot_home)
+
+    assert not trash_dir.exists()
+    assert not manifest_path.exists()
+
+
+def test_reap_expired_trash_keeps_entries_within_retention(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest, reap_expired_trash
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    trash_dir, manifest_path, _ = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0
+    )
+
+    reap_expired_trash(tmp_lerobot_home)
+
+    assert trash_dir.exists()
+    assert manifest_path.exists()
+
+
+def test_list_local_datasets_reaps_trash_without_process_restart(tmp_lerobot_home: Path) -> None:
+    """Unlike the once-per-process crash-recovery sweep, trash reaping must
+    fire on every call — a long-lived server process outlives the 24h
+    window many times over.
+
+    This test verifies the every-call behavior by: (1) creating fresh trash,
+    (2) confirming the first list_local_datasets() call leaves it intact, (3)
+    backdating it past retention, (4) confirming a second call reaps it. This
+    distinguishes "reaps every call" from "reaps only once"."""
+    from datetime import UTC, datetime, timedelta
+
+    from makermodslab.datasets import (
+        TRASH_RETENTION_SECONDS,
+        _new_trash_paths,
+        _write_trash_manifest,
+        list_local_datasets,
+    )
+
+    target = tmp_lerobot_home / "pusht"
+    _make_dataset(tmp_lerobot_home, "pusht")
+    trash_dir, manifest_path, _ = _new_trash_paths(target)
+    trash_dir.mkdir()
+    _write_trash_manifest(
+        manifest_path, kind="episode", repo_id="pusht", episode_index=0, length=1, duration_s=1.0
+    )
+
+    # First call: trash is fresh, should survive.
+    list_local_datasets()
+    assert trash_dir.exists(), "Fresh trash should not be reaped on first call"
+    assert manifest_path.exists()
+
+    # Backdate the manifest past the retention window.
+    manifest = json.loads(manifest_path.read_text())
+    stale = datetime.now(UTC) - timedelta(seconds=TRASH_RETENTION_SECONDS + 60)
+    manifest["deleted_at"] = stale.isoformat()
+    manifest_path.write_text(json.dumps(manifest))
+
+    # Second call: trash is now stale, should be reaped.
+    list_local_datasets()
+    assert not trash_dir.exists(), "Stale trash should be reaped on second call, not just at startup"
+    assert not manifest_path.exists()
+
+
+def test_reap_expired_trash_skips_malformed_manifests(tmp_lerobot_home: Path) -> None:
+    """reap_expired_trash never raises on malformed trash manifests (missing
+    required fields, invalid JSON values, or non-string deleted_at); it silently
+    skips them instead. This matches _read_trash_manifest's degrade-to-None
+    contract and the "trash bookkeeping must never raise" constraint."""
+    from datetime import UTC, datetime, timedelta
+
+    from makermodslab.datasets import (
+        TRASH_RETENTION_SECONDS,
+        _new_trash_paths,
+        _write_trash_manifest,
+        reap_expired_trash,
+    )
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+
+    # Write one valid stale manifest that should be reaped.
+    valid_trash_dir, valid_manifest, _ = _new_trash_paths(target)
+    valid_trash_dir.mkdir()
+    _write_trash_manifest(
+        valid_manifest, kind="episode", repo_id="pusht", episode_index=0, length=10, duration_s=1.0
+    )
+    manifest = json.loads(valid_manifest.read_text())
+    stale = datetime.now(UTC) - timedelta(seconds=TRASH_RETENTION_SECONDS + 60)
+    manifest["deleted_at"] = stale.isoformat()
+    valid_manifest.write_text(json.dumps(manifest))
+
+    # Write one manifest with non-string deleted_at (raises TypeError on fromisoformat).
+    _, malformed_manifest1, _ = _new_trash_paths(target)
+    malformed_manifest1.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 1,
+                "length": 5,
+                "duration_s": 0.5,
+                "deleted_at": 12345,  # Non-string — will raise TypeError
+            }
+        )
+    )
+
+    # Write one manifest missing "deleted_at" (raises KeyError).
+    _, malformed_manifest2, _ = _new_trash_paths(target)
+    malformed_manifest2.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 2,
+                "length": 5,
+                "duration_s": 0.5,
+                # Missing "deleted_at" — will raise KeyError
+            }
+        )
+    )
+
+    # Write one manifest with malformed "deleted_at" string (raises ValueError).
+    _, malformed_manifest3, _ = _new_trash_paths(target)
+    malformed_manifest3.write_text(
+        json.dumps(
+            {
+                "kind": "episode",
+                "repo_id": "pusht",
+                "episode_index": 3,
+                "length": 5,
+                "duration_s": 0.5,
+                "deleted_at": "not-a-valid-iso-date",  # Will raise ValueError
+            }
+        )
+    )
+
+    # reap_expired_trash must not raise and must remove only the valid stale entry.
+    reap_expired_trash(tmp_lerobot_home)
+    assert not valid_trash_dir.exists(), "Valid stale entry should be reaped"
+    assert not valid_manifest.exists()
+    # Malformed manifests should be skipped without raising.
+    assert malformed_manifest1.exists()
+    assert malformed_manifest2.exists()
+    assert malformed_manifest3.exists()

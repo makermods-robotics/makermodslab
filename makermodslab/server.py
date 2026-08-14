@@ -93,8 +93,10 @@ from .record import (
     handle_resume_recording,
     handle_start_recording,
     handle_stop_recording,
+    handle_undo_dataset_delete,
     handle_upload_dataset,
     handle_upload_status,
+    list_deleted_datasets,
     stop_and_wait as stop_recording_and_wait,
 )
 from .rollout import (
@@ -687,6 +689,89 @@ def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
             detail=f"No video for camera '{camera}', episode {episode_index} of '{repo_id}'",
         )
     return FileResponse(video_path, media_type="video/mp4")
+
+
+class DatasetEpisodeDeleteBody(BaseModel):
+    repo_id: str
+    episode_index: int
+
+
+@app.post("/datasets/episode-delete")
+def datasets_episode_delete(body: DatasetEpisodeDeleteBody):
+    """Start rewriting a locally-cached dataset to drop one episode, via
+    lerobot's delete_episodes. Never touches the Hub — if this dataset is
+    also on the Hub, its published copy is left exactly as it was; use
+    "Upload to Hub" to push the edited version manually.
+
+    Returns immediately with {started, repo_id, message}; the actual rewrite
+    runs in the background (it can take a while for a shared-video-file
+    episode) — poll /datasets/episode-delete-status for the outcome. Refuses
+    (409) if the dataset is being recorded, merged, uploaded, or trained on
+    locally, or another episode-delete is already in progress; 400 if the
+    index is invalid or it's the dataset's only episode; 507 if there isn't
+    enough free disk space for the rewrite."""
+    try:
+        return dataset_browser.start_episode_delete(body.repo_id, body.episode_index)
+    except dataset_browser.DatasetEpisodeDeleteError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+@app.get("/datasets/episode-delete-status")
+def datasets_episode_delete_status():
+    """Current episode-delete state ("idle"|"running"|"done"|"error") +
+    repo_id, episode_index, message, and result once done. Single global
+    slot — one episode-delete runs at a time, same as /upload-status."""
+    return dataset_browser.get_episode_delete_status()
+
+
+@app.get("/datasets/deleted-episodes")
+def datasets_deleted_episodes(repo_id: str):
+    """Unexpired (< 24h old) episode-delete trash entries for repo_id, newest
+    first — powers the dataset viewer's 'Deleted episodes' undo panel."""
+    return dataset_browser.list_deleted_episodes(repo_id)
+
+
+class DatasetEpisodeUndoBody(BaseModel):
+    repo_id: str
+    trash_id: str
+
+
+@app.post("/datasets/undo-episode-delete")
+def datasets_undo_episode_delete(body: DatasetEpisodeUndoBody):
+    """Start restoring a deleted episode from its trash entry. Returns
+    immediately with {started, repo_id, message}; poll
+    /datasets/episode-undo-status for the outcome. 404 if the trash entry is
+    unknown/expired; 409 if the dataset is busy; 507 if there isn't enough
+    free disk space."""
+    try:
+        return dataset_browser.start_episode_undo(body.repo_id, body.trash_id)
+    except dataset_browser.EpisodeUndoError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+@app.get("/datasets/episode-undo-status")
+def datasets_episode_undo_status():
+    """Current episode-undo state ("idle"|"running"|"done"|"error") +
+    repo_id, trash_id, message, and result once done."""
+    return dataset_browser.get_episode_undo_status()
+
+
+class DatasetUndoBody(BaseModel):
+    repo_id: str
+    trash_id: str
+
+
+@app.post("/datasets/undo-dataset-delete")
+def datasets_undo_dataset_delete(body: DatasetUndoBody):
+    """Restore a whole dataset from its trash entry (within the 24h window)."""
+    return handle_undo_dataset_delete(body.repo_id, body.trash_id)
+
+
+@app.get("/datasets/deleted-datasets")
+def datasets_deleted_datasets():
+    """Unexpired whole-dataset trash entries across the whole local cache,
+    newest first — powers the library's 'Recently deleted' toggle."""
+    return list_deleted_datasets()
 
 
 @app.get("/datasets/hub-status")

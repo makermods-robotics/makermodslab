@@ -18,6 +18,7 @@ from __future__ import annotations
 import itertools
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -2026,6 +2027,180 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     assert result["success"] is False
     assert "renaming" not in result["message"]
     assert result["message"].endswith("Stop it first.")
+
+
+def test_handle_delete_dataset_moves_to_trash_instead_of_destroying(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whole-dataset delete renames the directory aside into a trash entry
+    (reusing the same trash mechanism episode-delete uses) instead of
+    shutil.rmtree-ing it — the content must actually survive the move, not
+    just vanish from the live path."""
+    import json
+
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    # handle_delete_dataset resolves HF_LEROBOT_HOME via a lerobot constant
+    # that's frozen at first import, not re-read from the env var per call —
+    # tmp_lerobot_home's monkeypatch.setenv alone doesn't reach it, so point
+    # it at the tmp dir directly (test-only; not a production code path).
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    (target / "meta").mkdir()
+    (target / "meta" / "info.json").write_text('{"total_episodes": 2}')
+    (target / "marker.txt").write_text("still here")
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id="pusht"))
+
+    assert result["success"] is True
+    assert "trash_id" in result
+    assert not target.exists()
+
+    # ".pusht.trash-*" also matches the manifest file itself
+    # (".pusht.trash-<id>.manifest.json"), so exclude it — same filter
+    # test_datasets.py's episode-delete trash tests use.
+    trash_dirs = [p for p in tmp_lerobot_home.glob(".pusht.trash-*") if not p.name.endswith(".manifest.json")]
+    assert len(trash_dirs) == 1
+    assert (trash_dirs[0] / "marker.txt").exists()
+
+    manifests = list(tmp_lerobot_home.glob(".pusht.trash-*.manifest.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert manifest["kind"] == "dataset"
+    assert manifest["repo_id"] == "pusht"
+
+
+def test_handle_delete_dataset_rolls_back_when_manifest_write_fails(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If _write_trash_manifest fails after the target -> trash_dir rename
+    already succeeded, handle_delete_dataset must roll the rename back and
+    report failure rather than returning success over a dataset now sitting
+    in an unnamed, undiscoverable dot-directory (invisible to
+    list_local_datasets, list_deleted_datasets, and reap_expired_trash)."""
+    from unittest.mock import patch
+
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    (target / "meta").mkdir()
+    (target / "meta" / "info.json").write_text('{"total_episodes": 2}')
+    (target / "marker.txt").write_text("still here")
+
+    with patch("makermodslab.datasets._write_trash_manifest", return_value=False):
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id="pusht"))
+
+    assert result["success"] is False
+    assert "trash manifest" in result["message"].lower()
+    # Rolled back: the dataset is back at its live path, untouched, and no
+    # trash entry (dir or manifest) was left behind.
+    assert target.is_dir()
+    assert (target / "marker.txt").read_text() == "still here"
+    leftover_trash = [p.name for p in tmp_lerobot_home.iterdir() if ".trash-" in p.name]
+    assert leftover_trash == []
+
+
+def test_handle_undo_dataset_delete_renames_trash_back_to_live(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+    from makermodslab.record import handle_undo_dataset_delete
+
+    # handle_undo_dataset_delete resolves HF_LEROBOT_HOME via a lerobot constant
+    # that's frozen at first import, not re-read from the env var per call —
+    # tmp_lerobot_home's monkeypatch.setenv alone doesn't reach it, so point
+    # it at the tmp dir directly (test-only; not a production code path). Same
+    # gotcha as handle_delete_dataset's trash test above.
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir()
+    (trash_dir / "marker.txt").write_text("restored")
+    _write_trash_manifest(manifest_path, kind="dataset", repo_id="pusht")
+
+    result = handle_undo_dataset_delete("pusht", trash_id)
+
+    assert result["success"] is True
+    assert target.is_dir()
+    assert (target / "marker.txt").exists()
+    assert not trash_dir.exists()
+    assert not manifest_path.exists()
+
+
+def test_handle_undo_dataset_delete_404_when_unknown(tmp_lerobot_home: Path) -> None:
+    from makermodslab.record import handle_undo_dataset_delete
+
+    result = handle_undo_dataset_delete("pusht", "deadbeef")
+    assert result["success"] is False
+
+
+def test_list_deleted_datasets_is_library_wide(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+    from makermodslab.record import list_deleted_datasets
+
+    # list_deleted_datasets resolves HF_LEROBOT_HOME via the same frozen
+    # lerobot constant as handle_undo_dataset_delete above — point it at the
+    # tmp dir directly so it scans tmp_lerobot_home instead of the real cache.
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    for name in ("pusht", "alice/aloha"):
+        target = tmp_lerobot_home / name
+        trash_dir, manifest_path, _ = _new_trash_paths(target)
+        trash_dir.mkdir(parents=True)
+        _write_trash_manifest(manifest_path, kind="dataset", repo_id=name)
+
+    entries = list_deleted_datasets()
+    repo_ids = {e["repo_id"] for e in entries}
+    assert repo_ids == {"pusht", "alice/aloha"}
+
+
+def test_list_deleted_datasets_skips_malformed_manifests(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """list_deleted_datasets never raises on a malformed trash manifest (missing
+    required fields or an invalid deleted_at); it silently skips them instead —
+    same degrade-to-None contract as list_deleted_episodes/reap_expired_trash.
+    This matters more here than for those two: this listing is library-wide, so
+    one bad manifest anywhere in the cache must not take out every dataset's
+    'Recently deleted' entry."""
+    import json
+
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+    from makermodslab.record import list_deleted_datasets
+
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    # One valid manifest.
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, valid_manifest, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir(parents=True)
+    _write_trash_manifest(valid_manifest, kind="dataset", repo_id="pusht")
+
+    # One manifest missing "deleted_at" entirely (raises KeyError).
+    other_target = tmp_lerobot_home / "missing_field"
+    _, malformed_manifest1, _ = _new_trash_paths(other_target)
+    malformed_manifest1.write_text(json.dumps({"kind": "dataset", "repo_id": "missing_field"}))
+
+    # One manifest with a non-string "deleted_at" (raises TypeError from fromisoformat).
+    bad_type_target = tmp_lerobot_home / "bad_type"
+    _, malformed_manifest2, _ = _new_trash_paths(bad_type_target)
+    malformed_manifest2.write_text(
+        json.dumps({"kind": "dataset", "repo_id": "bad_type", "deleted_at": 12345})
+    )
+
+    entries = list_deleted_datasets()
+
+    assert len(entries) == 1
+    assert entries[0]["trash_id"] == trash_id
+    assert entries[0]["repo_id"] == "pusht"
 
 
 def _stub_recording_request(**overrides):

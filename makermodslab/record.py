@@ -15,6 +15,7 @@
 import collections
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -1214,6 +1215,7 @@ def handle_recording_status() -> dict[str, Any]:
 
 def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     """Remove a recorded dataset's directory from local disk."""
+    import os
     from pathlib import Path
 
     from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -1239,11 +1241,30 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     if not target.exists():
         return {"success": False, "message": f"Dataset not found on disk: {repo_id}"}
 
+    from .datasets import _new_trash_paths, _write_trash_manifest
+
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
     try:
-        shutil.rmtree(target)
+        os.rename(target, trash_dir)
     except Exception as e:
         logger.error(f"Failed to delete dataset {repo_id}: {e}")
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
+
+    if not _write_trash_manifest(manifest_path, kind="dataset", repo_id=repo_id):
+        # The dataset is currently sitting in an unnamed dot-directory with no
+        # manifest — invisible to list_local_datasets (dot-prefixed),
+        # list_deleted_datasets, and reap_expired_trash alike (both
+        # manifest-driven). Roll it back to its live path (best-effort)
+        # instead of reporting success over what would otherwise be silent,
+        # permanent data loss.
+        try:
+            os.rename(trash_dir, target)
+        except OSError as rollback_exc:
+            logger.error(
+                f"Failed to roll back {trash_dir} to {target} after a failed trash-manifest "
+                f"write for dataset delete of {repo_id}: {rollback_exc}"
+            )
+        return {"success": False, "message": "Failed to delete dataset: could not write trash manifest"}
 
     # The listing just changed — drop the cached /datasets listing so the delete
     # reflects immediately instead of after the TTL. Also drop the cached
@@ -1253,8 +1274,99 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     invalidate_dataset_listing_cache()
     invalidate_hub_status(repo_id)
 
-    logger.info(f"Deleted dataset directory {target}")
-    return {"success": True, "message": f"Deleted {repo_id}"}
+    logger.info(f"Moved dataset directory {target} to trash ({trash_dir})")
+    return {"success": True, "message": f"Deleted {repo_id}", "trash_id": trash_id}
+
+
+def handle_undo_dataset_delete(repo_id: str, trash_id: str) -> dict[str, Any]:
+    """Rename a whole-dataset trash entry back to its live path. No merge
+    needed — nothing else could have happened to a dataset that doesn't
+    exist locally while it was trashed."""
+    from .datasets import (
+        _dataset_in_use,
+        _read_trash_manifest,
+        _trash_paths_for_id,
+        invalidate_dataset_listing_cache,
+        invalidate_hub_status,
+    )
+
+    in_use = _dataset_in_use(repo_id)
+    if in_use is not None:
+        return {"success": False, "message": in_use}
+
+    paths = _trash_paths_for_id(repo_id, trash_id)
+    if paths is None:
+        return {"success": False, "message": f"No such trash entry '{trash_id}' for '{repo_id}'"}
+    trash_dir, manifest_path = paths
+    manifest = _read_trash_manifest(manifest_path)
+    if manifest is None or manifest.get("kind") != "dataset" or not trash_dir.is_dir():
+        return {"success": False, "message": f"No such trash entry '{trash_id}' for '{repo_id}'"}
+
+    from pathlib import Path
+
+    from lerobot.utils.constants import HF_LEROBOT_HOME
+
+    target = (Path(HF_LEROBOT_HOME).resolve() / repo_id).resolve()
+    if target.exists():
+        return {"success": False, "message": f"A dataset already exists at '{repo_id}'"}
+
+    try:
+        os.rename(trash_dir, target)
+        manifest_path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.error(f"Failed to restore dataset {repo_id} from trash: {e}")
+        return {"success": False, "message": f"Failed to restore dataset: {e}"}
+
+    invalidate_dataset_listing_cache()
+    invalidate_hub_status(repo_id)
+    logger.info(f"Restored dataset directory {target} from trash")
+    return {"success": True, "message": f"Restored {repo_id}"}
+
+
+def list_deleted_datasets() -> list[dict[str, Any]]:
+    """Unexpired dataset-kind trash entries across the whole cache root,
+    newest first — powers the library's 'Recently deleted' toggle.
+
+    Silently skips entries with missing or malformed fields (never raises —
+    trash bookkeeping is cosmetic; a bad entry just makes that single item
+    invisible, it doesn't take down the listing). This scans the WHOLE cache
+    root rather than one repo_id's directory, so a single malformed manifest
+    anywhere must not take out every dataset's listing."""
+    from pathlib import Path
+
+    from lerobot.utils.constants import HF_LEROBOT_HOME
+
+    from .datasets import TRASH_RETENTION_SECONDS, _iter_trash_manifests, _read_trash_manifest
+
+    root = Path(HF_LEROBOT_HOME).resolve()
+    if not root.is_dir():
+        return []
+
+    out: list[dict[str, Any]] = []
+    for manifest_path in _iter_trash_manifests(root):
+        manifest = _read_trash_manifest(manifest_path)
+        if manifest is None or manifest.get("kind") != "dataset":
+            continue
+        try:
+            deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+            trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
+            out.append(
+                {
+                    "trash_id": trash_id,
+                    "repo_id": manifest["repo_id"],
+                    "deleted_at": manifest["deleted_at"],
+                    "expires_at": deleted_at.timestamp() + TRASH_RETENTION_SECONDS,
+                }
+            )
+        except (KeyError, ValueError, TypeError):
+            # Malformed manifest (missing required field or invalid deleted_at).
+            # Skip this entry rather than raising, matching _read_trash_manifest's
+            # degrade-to-None contract and the "trash bookkeeping must never raise"
+            # constraint. Same pattern as list_deleted_episodes/reap_expired_trash.
+            logger.warning(f"Skipping malformed trash manifest {manifest_path}")
+            continue
+    out.sort(key=lambda e: e["deleted_at"], reverse=True)
+    return out
 
 
 def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
@@ -1433,12 +1545,21 @@ class UploadManager:
             # half-written directory would ship a corrupt dataset. Reuses the
             # rename busy-guard (recording / merge / local training); lazy import
             # to avoid the datasets<->record cycle documented in _dataset_in_use.
-            from .datasets import _dataset_in_use
+            #
+            # Also take datasets.py's shared guard lock across the check AND
+            # this claim (self.state = "running" below): start_episode_delete
+            # holds the same lock across its own check-and-claim, so whichever
+            # of the two gets there first is guaranteed to see the other's
+            # claim, closing the TOCTOU gap between "checked, not busy" and
+            # "claimed" that let an upload start against a directory an
+            # episode-delete was about to rewrite.
+            from .datasets import _dataset_guard_lock, _dataset_in_use
 
-            in_use = _dataset_in_use(repo_id)
-            if in_use is not None:
-                return {"started": False, "repo_id": repo_id, "message": in_use}
-            self.state = "running"
+            with _dataset_guard_lock:
+                in_use = _dataset_in_use(repo_id)
+                if in_use is not None:
+                    return {"started": False, "repo_id": repo_id, "message": in_use}
+                self.state = "running"
             self.repo_id = repo_id
             self.message = f"Uploading {repo_id} to the Hub…"
             self.dataset_url = None

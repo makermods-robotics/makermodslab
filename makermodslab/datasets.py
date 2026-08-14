@@ -19,6 +19,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,7 +35,10 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
+from lerobot.datasets.dataset_tools import delete_episodes, merge_datasets, split_dataset
+
 from .utils.config import (
+    _atomic_write_text,
     get_hidden_datasets,
     get_saved_custom_datasets,
     validate_dataset_name,
@@ -460,6 +464,134 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+_DOT_DIR_KINDS = ("delete-tmp", "pre-delete", "undo-tmp", "pre-undo")
+
+
+def _parse_orphaned_dot_dir(name: str) -> tuple[str, str] | None:
+    """If `name` matches the episode-delete/undo workers' own
+    tmp_dir/backup_dir naming (".<dataset_name>.delete-tmp-<hex8>",
+    ".<dataset_name>.pre-delete-<hex8>", ".<dataset_name>.undo-tmp-<hex8>",
+    or ".<dataset_name>.pre-undo-<hex8>"), return (dataset_name, kind). Else
+    None."""
+    if not name.startswith("."):
+        return None
+    body = name[1:]
+    for kind in _DOT_DIR_KINDS:
+        dataset_name, marker, suffix = body.rpartition(f".{kind}-")
+        if marker and len(suffix) == 8 and all(c in "0123456789abcdef" for c in suffix):
+            return dataset_name, kind
+    return None
+
+
+# Cache roots recover_orphaned_episode_delete_dirs has already swept — keyed by
+# root (not a single flag) because tests point _lerobot_cache_root() at a fresh
+# tmp dir per test, unlike a real process which only ever has one root for its
+# whole lifetime.
+_swept_roots: set[Path] = set()
+_swept_roots_lock = threading.Lock()
+
+
+def recover_orphaned_episode_delete_dirs(root: Path) -> None:
+    """Clean up or recover dot-prefixed dirs that the episode-delete/undo
+    workers leave behind ONLY if the process is killed mid-operation — a
+    clean run always removes its own tmp_dir/backup_dir via its except
+    blocks or the success path's final rmtree, so anything found here
+    predates this process (single-process app: nothing else could be
+    mid-delete/mid-undo right now).
+
+    ".<name>.delete-tmp-<hex8>" / ".<name>.undo-tmp-<hex8>" (the freshly
+    re-encoded output of a delete or an undo merge, respectively) are always
+    disposable — removed outright.
+
+    ".<name>.pre-delete-<hex8>" / ".<name>.pre-undo-<hex8>" (the pre-swap
+    backup taken by the delete or undo worker, respectively) need more care:
+    if "<name>" already exists as a valid dataset dir, the swap had completed
+    and only the backup's cleanup was interrupted — remove the backup. If
+    "<name>" is missing, the crash landed between staging the original aside
+    and swapping the rewritten copy in — the backup is the only surviving
+    copy of the dataset, so it's renamed back into place instead of deleted.
+    """
+    if not root.is_dir():
+        return
+
+    try:
+        top_entries = list(root.iterdir())
+    except OSError:
+        return
+
+    dot_dirs: list[Path] = []
+    for top in top_entries:
+        try:
+            if not top.is_dir():
+                continue
+        except OSError:
+            continue
+        if _parse_orphaned_dot_dir(top.name) is not None:
+            dot_dirs.append(top)
+            continue
+        if top.name.startswith("."):
+            continue
+        try:
+            sub_entries = list(top.iterdir())
+        except OSError:
+            continue
+        for sub in sub_entries:
+            try:
+                if sub.is_dir() and _parse_orphaned_dot_dir(sub.name) is not None:
+                    dot_dirs.append(sub)
+            except OSError:
+                continue
+
+    for dot_dir in dot_dirs:
+        parsed = _parse_orphaned_dot_dir(dot_dir.name)
+        if parsed is None:
+            continue
+        dataset_name, kind = parsed
+        target = dot_dir.parent / dataset_name
+
+        if kind in ("delete-tmp", "undo-tmp"):
+            shutil.rmtree(dot_dir, ignore_errors=True)
+            logger.info("Removed orphaned episode-delete/undo temp dir %s (an earlier crash)", dot_dir)
+            continue
+
+        if _is_dataset_dir(target):
+            shutil.rmtree(dot_dir, ignore_errors=True)
+            logger.info(
+                "Removed orphaned episode-delete/undo backup %s — %s already reflects the completed swap",
+                dot_dir,
+                target,
+            )
+        elif not target.exists():
+            try:
+                os.rename(dot_dir, target)
+                logger.warning(
+                    "Recovered %s from an interrupted episode-delete/undo backup after an earlier crash",
+                    target,
+                )
+            except OSError as exc:
+                logger.error(
+                    "Found an orphaned episode-delete/undo backup at %s but could not restore it to %s: %s",
+                    dot_dir,
+                    target,
+                    exc,
+                )
+        else:
+            logger.error(
+                "Found an orphaned episode-delete/undo backup %s but %s already exists and isn't a "
+                "valid dataset dir — leaving both for manual inspection",
+                dot_dir,
+                target,
+            )
+
+
+def _recover_orphaned_episode_delete_dirs_once(root: Path) -> None:
+    with _swept_roots_lock:
+        if root in _swept_roots:
+            return
+        _swept_roots.add(root)
+    recover_orphaned_episode_delete_dirs(root)
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -470,6 +602,9 @@ def list_local_datasets() -> list[dict[str, Any]]:
     root = _lerobot_cache_root()
     if not root.is_dir():
         return []
+
+    _recover_orphaned_episode_delete_dirs_once(root)
+    reap_expired_trash(root)
 
     out: list[dict[str, Any]] = []
     try:
@@ -483,6 +618,9 @@ def list_local_datasets() -> list[dict[str, Any]]:
             if not top.is_dir():
                 continue
         except OSError:
+            continue
+
+        if top.name.startswith("."):
             continue
 
         if _is_dataset_dir(top):
@@ -509,6 +647,10 @@ def list_local_datasets() -> list[dict[str, Any]]:
                     continue
             except OSError:
                 continue
+
+            if sub.name.startswith("."):
+                continue
+
             if _is_dataset_dir(sub) and _dataset_has_episodes(sub):
                 out.append(
                     {
@@ -629,6 +771,169 @@ def _resolve_local_dataset_path(repo_id: str) -> Path | None:
     if not _is_dataset_dir(path):
         return None
     return path
+
+
+TRASH_RETENTION_SECONDS = 24 * 60 * 60  # 24h recoverable window for delete undo
+
+
+def _resolve_cache_path(repo_id: str) -> Path | None:
+    """Resolve `repo_id` to where its dataset dir would live under the cache
+    root, WITHOUT requiring it to currently exist — unlike
+    _resolve_local_dataset_path, which 404s a whole-dataset-deleted repo_id
+    since there's nothing left at that path to recognize as a dataset dir.
+    Still rejects path traversal. None only on an invalid/escaping repo_id."""
+    root = _lerobot_cache_root().resolve()
+    try:
+        path = (root / repo_id).resolve()
+    except OSError:
+        return None
+    if path == root or root not in path.parents:
+        return None
+    return path
+
+
+def _new_trash_paths(target: Path) -> tuple[Path, Path, str]:
+    """Fresh (trash_dir, manifest_path, trash_id) sibling paths for a new
+    trash entry from deleting `target` (an episode extraction or the whole
+    dataset). Doesn't touch disk — callers create trash_dir via split_dataset
+    (episode) or os.rename (whole dataset)."""
+    trash_id = uuid.uuid4().hex[:8]
+    trash_dir = target.parent / f".{target.name}.trash-{trash_id}"
+    manifest_path = target.parent / f"{trash_dir.name}.manifest.json"
+    return trash_dir, manifest_path, trash_id
+
+
+def _trash_paths_for_id(repo_id: str, trash_id: str) -> tuple[Path, Path] | None:
+    """(trash_dir, manifest_path) for an existing trash entry, given the
+    repo_id and trash_id an earlier delete returned. None if repo_id escapes
+    the cache root; does NOT check the paths actually exist — callers use
+    _read_trash_manifest's None return for that."""
+    target = _resolve_cache_path(repo_id)
+    if target is None:
+        return None
+    trash_dir = target.parent / f".{target.name}.trash-{trash_id}"
+    manifest_path = target.parent / f"{trash_dir.name}.manifest.json"
+    return trash_dir, manifest_path
+
+
+def _write_trash_manifest(
+    manifest_path: Path,
+    *,
+    kind: str,
+    repo_id: str,
+    episode_index: int | None = None,
+    length: int | None = None,
+    duration_s: float | None = None,
+) -> bool:
+    """Write a trash entry's manifest. `kind` is "episode" or "dataset".
+
+    Never raises — an OSError is caught and logged — but DOES report success
+    via its return value (True/False) so callers that just moved something
+    into an unnamed dot-directory can tell whether that entry is actually
+    discoverable (list_deleted_datasets/episodes and reap_expired_trash are
+    both manifest-driven) and roll back if not, instead of reporting success
+    over what would otherwise be silent, permanent data loss."""
+    payload = {
+        "kind": kind,
+        "repo_id": repo_id,
+        "deleted_at": datetime.now(UTC).isoformat(),
+        "episode_index": episode_index,
+        "length": length,
+        "duration_s": duration_s,
+    }
+    try:
+        _atomic_write_text(str(manifest_path), json.dumps(payload))
+        return True
+    except OSError as exc:
+        logger.warning(f"Failed to write trash manifest {manifest_path}: {exc}")
+        return False
+
+
+def _read_trash_manifest(manifest_path: Path) -> dict[str, Any] | None:
+    """Parsed manifest, or None on missing/corrupt (never raises — trash
+    bookkeeping is cosmetic; a bad manifest just makes that entry invisible,
+    it doesn't take down the listing)."""
+    try:
+        return json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _iter_trash_manifests(root: Path) -> list[Path]:
+    """Every `*.manifest.json` trash manifest under `root`, one level deep at
+    most — mirrors list_local_datasets' own "walks one level deep" scope."""
+    manifests = list(root.glob("*.trash-*.manifest.json"))
+    for top in root.iterdir():
+        if top.is_dir() and not top.name.startswith("."):
+            manifests.extend(top.glob("*.trash-*.manifest.json"))
+    return manifests
+
+
+def reap_expired_trash(root: Path) -> None:
+    """Remove any trash dir + manifest whose 24h retention has passed. Called
+    on every list_local_datasets() call (unlike the once-per-process
+    crash-recovery sweep) — trash is deliberately kept for up to 24h WITHIN a
+    single long-running process's lifetime, so a once-at-startup check isn't
+    enough."""
+    if not root.is_dir():
+        return
+    now = datetime.now(UTC)
+    for manifest_path in _iter_trash_manifests(root):
+        manifest = _read_trash_manifest(manifest_path)
+        if manifest is None:
+            continue
+        try:
+            deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        age = (now - deleted_at).total_seconds()
+        if age <= TRASH_RETENTION_SECONDS:
+            continue
+        trash_dir = manifest_path.parent / manifest_path.name.removesuffix(".manifest.json")
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
+        logger.info("Reaped expired trash entry %s (age %.0fh)", trash_dir, age / 3600)
+
+
+def list_deleted_episodes(repo_id: str) -> list[dict[str, Any]]:
+    """Unexpired episode-kind trash entries for `repo_id`, newest first.
+
+    Silently skips entries with missing or malformed fields (never raises — trash
+    bookkeeping is cosmetic; a bad entry just makes that single item invisible,
+    it doesn't take down the listing)."""
+    target = _resolve_cache_path(repo_id)
+    if target is None:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for manifest_path in target.parent.glob(f".{target.name}.trash-*.manifest.json"):
+        manifest = _read_trash_manifest(manifest_path)
+        if manifest is None or manifest.get("kind") != "episode":
+            continue
+        if manifest.get("repo_id") != repo_id:
+            continue
+        try:
+            deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+            trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
+            out.append(
+                {
+                    "trash_id": trash_id,
+                    "episode_index": manifest["episode_index"],
+                    "deleted_at": manifest["deleted_at"],
+                    "expires_at": (deleted_at.timestamp() + TRASH_RETENTION_SECONDS),
+                    "length": manifest["length"],
+                    "duration_s": manifest["duration_s"],
+                }
+            )
+        except (KeyError, ValueError, TypeError):
+            # Malformed manifest (missing required field or invalid deleted_at).
+            # Skip this entry rather than raising, matching _read_trash_manifest's
+            # degrade-to-None contract and the "trash bookkeeping must never raise"
+            # constraint.
+            logger.warning(f"Skipping malformed trash manifest {manifest_path}")
+            continue
+    out.sort(key=lambda e: e["deleted_at"], reverse=True)
+    return out
 
 
 def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
@@ -1048,11 +1353,34 @@ class DatasetRenameError(Exception):
         self.message = message
 
 
+# Single-slot status for the background episode-delete worker — one at a
+# time, system-wide, same shape as UploadManager: state "running" | "done" |
+# "error", holding the last delete's outcome until the next one overwrites
+# it. None means no delete has run yet this process. Published here (rather
+# than as a class instance, unlike UploadManager/MergeManager) because
+# start_episode_delete/get_episode_delete_status are the only two operations
+# that ever touch it — a class would just be a wrapper around the same dict.
+#
+# Guarded by _dataset_guard_lock (reused rather than a dedicated lock) so
+# start_episode_delete's own check-and-claim stays atomic with
+# UploadManager.start's check-and-claim (record.py) — an RLock so
+# _dataset_in_use's own brief internal acquire (below) can nest inside a
+# caller that's already holding it. Without that, an upload could observe
+# "not in use" and start in the gap between delete's check and its claim,
+# then race the swap. rename_local_dataset and handle_delete_dataset still
+# read _dataset_in_use un-guarded — narrower than a fully shared lock across
+# every entry point, but closes the one race that actually corrupts data (a
+# background upload reading mid-rewrite).
+_dataset_guard_lock = threading.RLock()
+_delete_status: dict[str, Any] | None = None
+_delete_thread: threading.Thread | None = None  # test-only join() handle
+
+
 def _dataset_in_use(repo_id: str) -> str | None:
     """If `repo_id`'s directory is in use by a running operation, return a
     legible reason to refuse a rename; else None.
 
-    Checks the four ways a dataset dir can be actively read/written:
+    Checks the six ways a dataset dir can be actively read/written:
       * recording — the active session's (timestamp-stamped) repo id, OR the
         base name the user typed (recording stamps ``name`` → ``name_<ts>``,
         so a rename of the base while a session writes ``name_<ts>`` would
@@ -1060,7 +1388,14 @@ def _dataset_in_use(repo_id: str) -> str | None:
       * merge — the output dataset currently being aggregated;
       * upload — the dataset currently being pushed to the Hub (renaming or
         deleting the directory mid-push would corrupt the upload);
-      * local training — any running local job whose config trains on it.
+      * local training — any running local job whose config trains on it;
+      * episode delete — a background episode-delete rewriting this
+        directory (see _delete_status above);
+      * episode undo — a background episode-undo rewriting this directory
+        (see _undo_status above). Without this, a second episode-delete (or
+        a rename) could start mid-undo and race _episode_undo_worker's
+        target -> backup_dir -> target swap, which is two separate renames
+        with no atomicity between them.
 
     Read-only imports; each module owns its own state. Kept deliberately
     simple: a false "in use" is safer than yanking a directory mid-write.
@@ -1079,6 +1414,24 @@ def _dataset_in_use(repo_id: str) -> str | None:
     # lazy import (datasets<->record cycle) as recording above.
     if _record.upload_manager.state == "running" and _record.upload_manager.repo_id == repo_id:
         return "This dataset is being uploaded to the Hub right now. Wait for it to finish."
+
+    # Episode delete: datasets.py owns this state directly (see above).
+    with _dataset_guard_lock:
+        if (
+            _delete_status is not None
+            and _delete_status["state"] == "running"
+            and _delete_status["repo_id"] == repo_id
+        ):
+            return "An episode is being deleted from this dataset right now. Wait for it to finish."
+
+    # Episode undo: datasets.py owns this state directly (see above).
+    with _dataset_guard_lock:
+        if (
+            _undo_status is not None
+            and _undo_status["state"] == "running"
+            and _undo_status["repo_id"] == repo_id
+        ):
+            return "A deleted episode is being restored to this dataset right now. Wait for it to finish."
 
     # Merge: merge.py exposes a MergeManager singleton with state + output id.
     from . import merge as _merge
@@ -1338,6 +1691,387 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
 
     logger.info("Renamed dataset directory %s -> %s (hub: %s)", src, dst, hub_state)
     return {"repo_id": new_repo_id, "hub": hub_state}
+
+
+class DatasetEpisodeDeleteError(Exception):
+    """Raised by start_episode_delete when the delete can't even start.
+    `status` is the HTTP status the route should return (400 invalid index
+    or dataset's only episode, 404 not found, 409 busy, 507 not enough disk
+    space — all checked synchronously before the rewrite is handed to the
+    background worker); `message` is the user-facing reason."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+_DISK_PREFLIGHT_MARGIN = 1.1  # 10% headroom over the dataset's on-disk size
+
+
+def start_episode_delete(repo_id: str, episode_index: int) -> dict[str, Any]:
+    """Validate an episode delete and, if it's eligible, hand the actual
+    rewrite off to a background thread rather than blocking the request for
+    however long the re-encode takes (unlike upload/merge, this used to run
+    entirely inline). Poll get_episode_delete_status() for the outcome.
+
+    Episode deletion isn't a row removal: lerobot's v3.0 layout packs
+    consecutive episodes into shared per-camera video files, so removing one
+    episode can require re-encoding whatever physical file it shares with a
+    kept episode. We reuse lerobot's own ``delete_episodes``, which builds an
+    entirely new dataset directory rather than mutating in place — into a
+    temp sibling directory, then atomically swapped in for the original.
+
+    Raises DatasetEpisodeDeleteError (status + message) when: the dataset
+    isn't found locally (404), it's busy — recording / merge / upload /
+    local training / another episode-delete (409), the dataset can't be
+    loaded, the index is out of range, or it's the dataset's only episode
+    (400), or there isn't enough free disk space for the rewrite (507,
+    checked against the dataset's current on-disk size). A failure inside
+    the background rewrite itself (500-equivalent) instead surfaces as
+    ``state: "error"`` from get_episode_delete_status — there's no HTTP
+    response left open to carry a status code by then.
+    """
+    global _delete_status, _delete_thread
+
+    target = _resolve_local_dataset_path(repo_id)
+    if target is None:
+        raise DatasetEpisodeDeleteError(404, f"Dataset '{repo_id}' not found in the local cache")
+
+    # Check + claim atomically under the same lock UploadManager.start takes:
+    # without this, an upload (or a second episode-delete) could observe
+    # "not in use" in the gap between the check and the claim below, then
+    # race this call's rewrite/swap. Self-check first (mirrors
+    # UploadManager.start: one delete at a time, system-wide), then the
+    # shared per-repo busy check for every other kind of activity.
+    with _dataset_guard_lock:
+        if _delete_status is not None and _delete_status["state"] == "running":
+            raise DatasetEpisodeDeleteError(
+                409,
+                f"An episode is already being deleted from {_delete_status['repo_id']}. "
+                "Wait for it to finish.",
+            )
+        in_use = _dataset_in_use(repo_id)
+        if in_use is not None:
+            raise DatasetEpisodeDeleteError(409, in_use)
+        _delete_status = {
+            "state": "running",
+            "repo_id": repo_id,
+            "episode_index": episode_index,
+            "message": f"Deleting episode {episode_index} of {repo_id}…",
+            "result": None,
+        }
+
+    try:
+        from lerobot.datasets import LeRobotDataset
+
+        try:
+            dataset = LeRobotDataset(repo_id=repo_id, root=target)
+        except Exception as exc:
+            logger.error("Failed to load dataset %s for episode delete: %s", repo_id, exc)
+            raise DatasetEpisodeDeleteError(
+                400, f"Could not read dataset '{repo_id}'. It may be corrupted or in an unsupported format."
+            ) from exc
+
+        total_episodes = dataset.meta.total_episodes
+        if episode_index < 0 or episode_index >= total_episodes:
+            raise DatasetEpisodeDeleteError(
+                400,
+                f"Episode {episode_index} does not exist in '{repo_id}' ({total_episodes} episode(s))",
+            )
+        if total_episodes <= 1:
+            raise DatasetEpisodeDeleteError(
+                400, "This is the dataset's only episode — delete the whole dataset instead."
+            )
+
+        # delete_episodes builds an entirely new copy before the swap, so free
+        # space briefly has to hold both the original and the rewrite at once —
+        # check that up front rather than hitting a mid-re-encode ENOSPC that
+        # would otherwise surface as a generic error with no useful message.
+        dataset_size = _dir_size_bytes(target)
+        free_space = shutil.disk_usage(target.parent).free
+        needed = int(dataset_size * _DISK_PREFLIGHT_MARGIN)
+        if free_space < needed:
+            raise DatasetEpisodeDeleteError(
+                507,
+                "Not enough free disk space to delete this episode — rewriting the dataset needs "
+                f"about {needed / 1e9:.1f} GB free, but only {free_space / 1e9:.1f} GB is available.",
+            )
+    except DatasetEpisodeDeleteError:
+        with _dataset_guard_lock:
+            _delete_status = None
+        raise
+
+    _delete_thread = threading.Thread(
+        target=_episode_delete_worker,
+        args=(repo_id, episode_index, target),
+        name="episode-delete-worker",
+        daemon=True,
+    )
+    _delete_thread.start()
+    return {"started": True, "repo_id": repo_id, "message": "Episode delete started"}
+
+
+def _finish_delete_status(state: str, message: str | None, result: dict[str, Any] | None = None) -> None:
+    global _delete_status
+    with _dataset_guard_lock:
+        if _delete_status is not None:
+            _delete_status = {**_delete_status, "state": state, "message": message, "result": result}
+
+
+def _episode_delete_worker(repo_id: str, episode_index: int, target: Path) -> None:
+    """The actual rewrite, run off the request thread by start_episode_delete
+    once validation (including the busy-guard claim) has already passed.
+    Reloads the dataset itself rather than reusing the one start_episode_delete
+    loaded to validate — cheap (metadata only), and avoids handing a
+    LeRobotDataset object across threads with no guarantee it's safe to."""
+    from lerobot.datasets import LeRobotDataset
+
+    try:
+        dataset = LeRobotDataset(repo_id=repo_id, root=target)
+    except Exception as exc:
+        logger.error("Failed to reload dataset %s for episode-delete worker: %s", repo_id, exc)
+        _finish_delete_status("error", "Failed to delete episode. See server logs for details.")
+        return
+
+    total_episodes = dataset.meta.total_episodes
+
+    trash_dir, manifest_path, trash_id = _new_trash_paths(target)
+    try:
+        episode_row = dataset.meta.episodes[episode_index]
+        split_dataset(dataset, {"trash": [episode_index]}, output_dir=trash_dir)
+        wrote_manifest = _write_trash_manifest(
+            manifest_path,
+            kind="episode",
+            repo_id=repo_id,
+            episode_index=episode_index,
+            length=int(episode_row["length"]),
+            duration_s=float(episode_row["length"]) / dataset.meta.fps,
+        )
+        if not wrote_manifest:
+            raise OSError(f"Failed to write trash manifest {manifest_path}")
+    except Exception as exc:
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
+        logger.error("Failed to extract episode %s of %s to trash: %s", episode_index, repo_id, exc)
+        _finish_delete_status("error", "Failed to delete episode. See server logs for details.")
+        return
+
+    tmp_dir = target.parent / f".{target.name}.delete-tmp-{uuid.uuid4().hex[:8]}"
+    try:
+        delete_episodes(dataset, [episode_index], output_dir=tmp_dir, repo_id=repo_id)
+    except ValueError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
+        _finish_delete_status("error", str(exc))
+        return
+    except Exception as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(trash_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
+        logger.error("Failed to delete episode %s from %s: %s", episode_index, repo_id, exc)
+        _finish_delete_status("error", "Failed to delete episode. See server logs for details.")
+        return
+
+    backup_dir = target.parent / f".{target.name}.pre-delete-{uuid.uuid4().hex[:8]}"
+    try:
+        os.rename(target, backup_dir)
+    except OSError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to stage %s aside for episode delete: %s", target, exc)
+        _finish_delete_status("error", "Failed to delete episode. See server logs for details.")
+        return
+
+    try:
+        os.rename(tmp_dir, target)
+    except OSError as exc:
+        try:
+            os.rename(backup_dir, target)
+        except OSError:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.error(
+                "Failed to roll back %s after a failed episode-delete swap — dataset directory "
+                "may be missing; original data is at %s",
+                target,
+                backup_dir,
+            )
+            invalidate_dataset_listing_cache()
+            _finish_delete_status(
+                "error",
+                "Failed to delete episode and could not restore the original dataset. "
+                "See server logs for details.",
+            )
+            return
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to swap in the edited dataset for %s: %s", target, exc)
+        _finish_delete_status("error", "Failed to delete episode. See server logs for details.")
+        return
+
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    invalidate_dataset_listing_cache()
+
+    new_total = total_episodes - 1
+    logger.info("Deleted episode %s from %s (%s episode(s) remain)", episode_index, repo_id, new_total)
+    _finish_delete_status(
+        "done",
+        None,
+        result={
+            "success": True,
+            "repo_id": repo_id,
+            "deleted_episode": episode_index,
+            "total_episodes": new_total,
+            "trash_id": trash_id,
+        },
+    )
+
+
+def get_episode_delete_status() -> dict[str, Any]:
+    """Status of the single-slot background episode-delete — for the frontend
+    to poll after start_episode_delete returns. Mirrors UploadManager's
+    get_status shape (state "idle"|"running"|"done"|"error" + message)."""
+    with _dataset_guard_lock:
+        if _delete_status is None:
+            return {"state": "idle", "repo_id": None, "episode_index": None, "message": None, "result": None}
+        return dict(_delete_status)
+
+
+class EpisodeUndoError(Exception):
+    """Raised by start_episode_undo when the undo can't even start. Same
+    status/message shape as DatasetEpisodeDeleteError."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+_undo_status: dict[str, Any] | None = None
+_undo_thread: threading.Thread | None = None
+
+
+def start_episode_undo(repo_id: str, trash_id: str) -> dict[str, Any]:
+    """Validate and start restoring a trashed episode. Mirrors
+    start_episode_delete's shape: synchronous checks here, the actual merge
+    on a background thread, poll get_episode_undo_status() for the outcome."""
+    global _undo_status, _undo_thread
+
+    paths = _trash_paths_for_id(repo_id, trash_id)
+    if paths is None:
+        raise EpisodeUndoError(404, f"No such trash entry '{trash_id}' for '{repo_id}'")
+    trash_dir, manifest_path = paths
+    manifest = _read_trash_manifest(manifest_path)
+    if manifest is None or manifest.get("kind") != "episode" or not trash_dir.is_dir():
+        raise EpisodeUndoError(404, f"No such trash entry '{trash_id}' for '{repo_id}'")
+
+    target = _resolve_local_dataset_path(repo_id)
+    if target is None:
+        raise EpisodeUndoError(404, f"Dataset '{repo_id}' not found in the local cache")
+
+    with _dataset_guard_lock:
+        if _undo_status is not None and _undo_status["state"] == "running":
+            raise EpisodeUndoError(409, "Another undo is already in progress. Wait for it to finish.")
+        in_use = _dataset_in_use(repo_id)
+        if in_use is not None:
+            raise EpisodeUndoError(409, in_use)
+        _undo_status = {
+            "state": "running",
+            "repo_id": repo_id,
+            "trash_id": trash_id,
+            "message": f"Restoring a deleted episode of {repo_id}…",
+            "result": None,
+        }
+
+    # Same disk-space preflight start_episode_delete already runs — merge_datasets
+    # has the same transient "both copies exist at once" shape as delete_episodes.
+    dataset_size = _dir_size_bytes(target)
+    free_space = shutil.disk_usage(target.parent).free
+    needed = int(dataset_size * _DISK_PREFLIGHT_MARGIN)
+    if free_space < needed:
+        with _dataset_guard_lock:
+            _undo_status = None
+        raise EpisodeUndoError(
+            507,
+            "Not enough free disk space to restore this episode — rewriting the dataset needs "
+            f"about {needed / 1e9:.1f} GB free, but only {free_space / 1e9:.1f} GB is available.",
+        )
+
+    _undo_thread = threading.Thread(
+        target=_episode_undo_worker,
+        args=(repo_id, trash_id, target, trash_dir, manifest_path),
+        name="episode-undo-worker",
+        daemon=True,
+    )
+    _undo_thread.start()
+    return {"started": True, "repo_id": repo_id, "message": "Episode undo started"}
+
+
+def _finish_undo_status(state: str, message: str | None, result: dict[str, Any] | None = None) -> None:
+    global _undo_status
+    with _dataset_guard_lock:
+        if _undo_status is not None:
+            _undo_status = {**_undo_status, "state": state, "message": message, "result": result}
+
+
+def _episode_undo_worker(
+    repo_id: str, trash_id: str, target: Path, trash_dir: Path, manifest_path: Path
+) -> None:
+    """Merge the trashed single-episode dataset back onto whatever the
+    CURRENT live dataset is (never a stale full snapshot), so undoing this
+    delete can't affect any other delete made since."""
+    from lerobot.datasets import LeRobotDataset
+
+    try:
+        live = LeRobotDataset(repo_id=repo_id, root=target)
+        # split_dataset (Task 2) wrote the extracted episode to
+        # trash_dir / "trash" — output_dir / split_name, per its own
+        # signature — not to trash_dir itself.
+        trashed = LeRobotDataset(repo_id=f"{repo_id}-trash", root=trash_dir / "trash")
+    except Exception as exc:
+        logger.error("Failed to load datasets for episode-undo worker on %s: %s", repo_id, exc)
+        _finish_undo_status("error", "Failed to restore episode. See server logs for details.")
+        return
+
+    tmp_dir = target.parent / f".{target.name}.undo-tmp-{uuid.uuid4().hex[:8]}"
+    try:
+        merge_datasets([live, trashed], output_repo_id=repo_id, output_dir=tmp_dir)
+    except Exception as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to merge trashed episode back into %s: %s", repo_id, exc)
+        _finish_undo_status("error", "Failed to restore episode. See server logs for details.")
+        return
+
+    backup_dir = target.parent / f".{target.name}.pre-undo-{uuid.uuid4().hex[:8]}"
+    try:
+        os.rename(target, backup_dir)
+        os.rename(tmp_dir, target)
+    except OSError as exc:
+        try:
+            if not target.exists():
+                os.rename(backup_dir, target)
+        except OSError:
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.error("Failed to swap in the restored dataset for %s: %s", repo_id, exc)
+        _finish_undo_status("error", "Failed to restore episode. See server logs for details.")
+        return
+
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    shutil.rmtree(trash_dir, ignore_errors=True)
+    manifest_path.unlink(missing_ok=True)
+    invalidate_dataset_listing_cache()
+
+    logger.info("Restored a deleted episode of %s (trash_id=%s)", repo_id, trash_id)
+    _finish_undo_status("done", None, result={"success": True, "repo_id": repo_id})
+
+
+def get_episode_undo_status() -> dict[str, Any]:
+    """Status of the single-slot background episode-undo — mirrors
+    get_episode_delete_status's shape."""
+    with _dataset_guard_lock:
+        if _undo_status is None:
+            return {"state": "idle", "repo_id": None, "trash_id": None, "message": None, "result": None}
+        return dict(_undo_status)
 
 
 def list_user_datasets() -> list[dict[str, Any]]:

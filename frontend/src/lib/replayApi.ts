@@ -1,4 +1,4 @@
-import { Fetcher, apiRequest } from "./apiClient";
+import { ApiError, Fetcher, apiRequest } from "./apiClient";
 
 export type DatasetSource = "local" | "hub" | "both";
 
@@ -196,6 +196,187 @@ export async function listEpisodes(
     `/datasets/episodes?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "List episodes" },
   );
+}
+
+interface EpisodeDeleteResult {
+  success: boolean;
+  repo_id: string;
+  deleted_episode: number;
+  total_episodes: number;
+  trash_id: string;
+}
+
+interface EpisodeDeleteStatus {
+  state: "idle" | "running" | "done" | "error";
+  repo_id: string | null;
+  episode_index: number | null;
+  message: string | null;
+  result: EpisodeDeleteResult | null;
+}
+
+const EPISODE_DELETE_POLL_MS = 500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Delete one episode from a locally-cached dataset. Local-only — never
+ * touches a Hub copy. The actual rewrite runs on the backend in a background
+ * thread (it can take a moment for a shared-video-file episode); this
+ * function starts it and polls until it finishes, so callers keep awaiting
+ * one call exactly as before rather than holding one HTTP request open for
+ * the whole rewrite. Throws ApiError (400 invalid index / dataset's only
+ * episode, 404 not local, 409 busy, 507 not enough free disk space, or a
+ * background rewrite failure) with the backend message in `.detail`.
+ * POST /datasets/episode-delete, polls GET /datasets/episode-delete-status. */
+export async function deleteEpisode(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndex: number,
+): Promise<EpisodeDeleteResult> {
+  await apiRequest(baseUrl, fetcher, "/datasets/episode-delete", {
+    method: "POST",
+    body: { repo_id: repoId, episode_index: episodeIndex },
+    action: "Delete episode",
+  });
+
+  // A 409 above means someone else already owns the single delete slot, so
+  // once we get here nothing else can start and overwrite it before we see
+  // our own outcome — no need to match on repo_id/episode_index below.
+  for (;;) {
+    let status: EpisodeDeleteStatus | undefined;
+    try {
+      status = await apiRequest<EpisodeDeleteStatus>(
+        baseUrl,
+        fetcher,
+        "/datasets/episode-delete-status",
+        { action: "Delete episode" },
+      );
+    } catch {
+      // transient — retry next tick
+    }
+    if (status?.state === "done" && status.result) return status.result;
+    if (status?.state === "error") {
+      throw new ApiError(
+        `Delete episode failed: ${status.message ?? "Unknown error"}`,
+        500,
+        status.message,
+      );
+    }
+    await sleep(EPISODE_DELETE_POLL_MS);
+  }
+}
+
+export interface DeletedEpisodeEntry {
+  trash_id: string;
+  episode_index: number;
+  deleted_at: string;
+  expires_at: number;
+  length: number;
+  duration_s: number;
+}
+
+/** Unexpired (< 24h) episode-delete trash entries for repoId, newest first.
+ * GET /datasets/deleted-episodes. */
+export async function listDeletedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+): Promise<DeletedEpisodeEntry[]> {
+  return apiRequest<DeletedEpisodeEntry[]>(
+    baseUrl,
+    fetcher,
+    `/datasets/deleted-episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { action: "List deleted episodes" },
+  );
+}
+
+interface EpisodeUndoStatus {
+  state: "idle" | "running" | "done" | "error";
+  repo_id: string | null;
+  trash_id: string | null;
+  message: string | null;
+  result: { success: boolean; repo_id: string } | null;
+}
+
+/** Restore a deleted episode from its trash entry. Starts the restore then
+ * polls until it finishes, same start+poll shape as deleteEpisode. Throws
+ * ApiError (404 unknown/expired trash_id, 409 busy, 507 not enough disk
+ * space, or a background restore failure).
+ * POST /datasets/undo-episode-delete, polls GET /datasets/episode-undo-status. */
+export async function undoEpisodeDelete(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  trashId: string,
+): Promise<{ success: boolean; repo_id: string }> {
+  await apiRequest(baseUrl, fetcher, "/datasets/undo-episode-delete", {
+    method: "POST",
+    body: { repo_id: repoId, trash_id: trashId },
+    action: "Undo episode delete",
+  });
+
+  for (;;) {
+    let status: EpisodeUndoStatus | undefined;
+    try {
+      status = await apiRequest<EpisodeUndoStatus>(
+        baseUrl,
+        fetcher,
+        "/datasets/episode-undo-status",
+        { action: "Undo episode delete" },
+      );
+    } catch {
+      // transient — retry next tick
+    }
+    if (status?.state === "done" && status.result) return status.result;
+    if (status?.state === "error") {
+      throw new ApiError(
+        `Undo episode delete failed: ${status.message ?? "Unknown error"}`,
+        500,
+        status.message,
+      );
+    }
+    await sleep(EPISODE_DELETE_POLL_MS);
+  }
+}
+
+export interface DeletedDatasetEntry {
+  trash_id: string;
+  repo_id: string;
+  deleted_at: string;
+  expires_at: number;
+}
+
+/** Unexpired (< 24h) whole-dataset trash entries across the whole library,
+ * newest first. GET /datasets/deleted-datasets. */
+export async function listDeletedDatasets(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<DeletedDatasetEntry[]> {
+  return apiRequest<DeletedDatasetEntry[]>(baseUrl, fetcher, "/datasets/deleted-datasets", {
+    action: "List deleted datasets",
+  });
+}
+
+/** Restore a whole dataset from its trash entry. Runs synchronously on the
+ * backend (a rename, not a rewrite) so there's no polling here, unlike the
+ * episode case. Always resolves with { success, message }; check result.success
+ * to detect failures (unknown/expired trash_id, dataset busy, name collision, or
+ * OS errors) — none of these throw. May throw ApiError for transport/network
+ * failures via apiRequest.
+ * POST /datasets/undo-dataset-delete. */
+export async function undoDatasetDelete(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  trashId: string,
+): Promise<{ success: boolean; message: string }> {
+  return apiRequest(baseUrl, fetcher, "/datasets/undo-dataset-delete", {
+    method: "POST",
+    body: { repo_id: repoId, trash_id: trashId },
+    action: "Undo dataset delete",
+  });
 }
 
 export interface EpisodeJointSeries {

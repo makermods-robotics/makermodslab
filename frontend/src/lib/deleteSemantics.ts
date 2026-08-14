@@ -38,8 +38,8 @@ export interface DeleteResolution {
 
 const LOCAL_DELETE_DESCRIPTION: Record<"dataset" | "model", string> = {
   dataset:
-    "This permanently removes the dataset from local disk — including all " +
-    "recorded episodes and videos. You can't undo this.",
+    "This moves the dataset to trash. You can undo it from the Recently " +
+    "deleted list for 24 hours, but the disk space isn't freed until then.",
   model:
     "This permanently removes the model's local files from disk — including " +
     "its checkpoints. You can't undo this. A Hub copy, if any, is not affected.",
