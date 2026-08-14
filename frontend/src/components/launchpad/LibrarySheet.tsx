@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Archive,
@@ -8,6 +8,7 @@ import {
   Play,
   Plus,
   Trash2,
+  Undo2,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,11 +24,14 @@ import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelItem, downloadModel, saveCustomModel } from "@/lib/modelsApi";
 import {
   DatasetItem,
+  DeletedDatasetEntry,
   deleteDataset,
   downloadDataset,
   hideDataset,
+  listDeletedDatasets,
   removeCustomDataset,
   saveCustomDataset,
+  undoDatasetDelete,
 } from "@/lib/replayApi";
 import AddDatasetFromHubDialog from "@/components/landing/AddDatasetFromHubDialog";
 import ImportDatasetFromDiskDialog from "@/components/landing/ImportDatasetFromDiskDialog";
@@ -100,8 +104,29 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   const [importModelOpen, setImportModelOpen] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
+  const [showRecentlyDeleted, setShowRecentlyDeleted] = useState(false);
+  const [deletedDatasets, setDeletedDatasets] = useState<DeletedDatasetEntry[]>([]);
+  const [undoingTrashId, setUndoingTrashId] = useState<string | null>(null);
 
   const username = auth.status === "authenticated" ? auth.username : null;
+
+  useEffect(() => {
+    if (!showRecentlyDeleted) {
+      setDeletedDatasets([]);
+      return;
+    }
+    let cancelled = false;
+    listDeletedDatasets(baseUrl, fetchWithHeaders)
+      .then((entries) => {
+        if (!cancelled) setDeletedDatasets(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setDeletedDatasets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showRecentlyDeleted, baseUrl, fetchWithHeaders]);
 
   // "Add a dataset from Hugging Face": pin + select the typed Hub id, and
   // optionally kick off a background download into the local cache. Ported
@@ -176,6 +201,39 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
+    }
+  };
+
+  const handleUndoDatasetDelete = async (trashId: string) => {
+    const entry = deletedDatasets.find((d) => d.trash_id === trashId);
+    if (!entry) return;
+    setUndoingTrashId(trashId);
+    try {
+      const result = await undoDatasetDelete(
+        baseUrl,
+        fetchWithHeaders,
+        entry.repo_id,
+        trashId,
+      );
+      if (!result.success) {
+        toast({
+          title: "Undo failed",
+          description: result.message || "Something went wrong",
+          variant: "destructive",
+        });
+        return;
+      }
+      setDeletedDatasets((prev) => prev.filter((d) => d.trash_id !== trashId));
+      refreshDatasets();
+      toast({ title: "Dataset restored", description: entry.repo_id });
+    } catch (e) {
+      toast({
+        title: "Undo failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setUndoingTrashId(null);
     }
   };
 
@@ -336,6 +394,63 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                 </div>
               ) : (
                 <div className="flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowRecentlyDeleted((v) => !v)}
+                    className="self-start rounded-md px-1 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {showRecentlyDeleted
+                      ? "Hide recently deleted"
+                      : "Recently deleted"}
+                  </button>
+
+                  {showRecentlyDeleted && (
+                    <div className="flex flex-col gap-2 border-b border-border pb-2">
+                      {deletedDatasets.length === 0 ? (
+                        <p className="px-1 py-2 text-center text-xs text-muted-foreground">
+                          No recently deleted datasets.
+                        </p>
+                      ) : (
+                        deletedDatasets.map((entry) => {
+                          const hoursLeft = Math.max(
+                            0,
+                            (entry.expires_at * 1000 - Date.now()) / 3_600_000,
+                          );
+                          return (
+                            <div
+                              key={entry.trash_id}
+                              className="flex items-center gap-2 rounded-md border border-border bg-card p-3 transition-colors hover:border-ring"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <span className="block truncate font-medium">
+                                  {entry.repo_id}
+                                </span>
+                                <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                                  expires{" "}
+                                  {hoursLeft < 1
+                                    ? "<1h"
+                                    : `${Math.floor(hoursLeft)}h`}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUndoDatasetDelete(entry.trash_id)
+                                }
+                                disabled={undoingTrashId !== null}
+                                aria-label={`Undo delete of ${entry.repo_id}`}
+                                title="Undo delete"
+                                className="shrink-0 rounded p-1.5 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                              >
+                                <Undo2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
                   {datasetsLoading ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
                       Loading datasets…
