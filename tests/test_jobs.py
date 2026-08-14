@@ -7332,12 +7332,62 @@ def test_a_deferred_promotion_keeps_its_marker_until_a_real_trainer_exists(monke
     assert on_disk["state"] == "running"
     assert on_disk["process_pid"] is None
     assert on_disk["queue_seq"] == 10, "the marker must outlive the transfer, not the handoff"
+    # The refs are the other half of the marker and must outlive it too: they
+    # say WHAT the promotion still owes, and nothing can recompute them.
+    assert on_disk["queued_hub_ref"] == "user/base@checkpoints/001000"
 
     # So a restart mid-download returns it to the queue rather than reporting a
     # run that never trained a step as one that did.
     reloaded = _quiet_registry(tmp_path)
     assert reloaded.get("dl").state == "queued"
     assert reloaded.get("dl").queue_position == 1
+
+
+def test_a_requeued_promotion_still_knows_what_it_has_to_download(monkeypatch, tmp_path) -> None:
+    """Returning the run to the queue is only half a recovery — it has to come
+    back with what it still needs.
+
+    The promotion used to clear `queued_hub_ref`/`queued_resume_ref` and persist
+    that, keeping them only as locals. `_load_from_disk`'s demotion restored the
+    STATE but could not restore the refs: `None` was already on disk. The
+    requeued run then computed `deferred == False` and took `_launch_locked`'s
+    IMMEDIATE branch — spawning a trainer with no download, against a
+    `policy_pretrained_path` still holding the `repo@checkpoints/N` form that
+    only `localize_pretrained_path` understands and lerobot 404s on. (For a
+    continuation the twin failure is a `resume=True` with no `config_path`.)
+
+    `start` parks these on the record precisely because they are the one part of
+    submit-time resolution a later process cannot recompute."""
+    import threading as _threading
+
+    from makermodslab.jobs import JobRegistry
+
+    reg = _quiet_registry(tmp_path)
+    _inject_queued(reg, "dl", seq=10, persist=True)
+    reg._records["dl"].queued_hub_ref = "user/base@checkpoints/001000"
+    with reg._lock:
+        reg._write_meta(reg._records["dl"])
+
+    monkeypatch.setattr(_threading.Thread, "start", lambda self: None)
+    reg._drain_queue()
+
+    # Crash during the download, restart.
+    reloaded = _quiet_registry(tmp_path)
+    recovered = reloaded.get("dl")
+    assert recovered.state == "queued"
+    assert recovered.queued_hub_ref == "user/base@checkpoints/001000", (
+        "the requeued run lost the checkpoint it was going to download"
+    )
+
+    # And the next drain therefore DEFERS again rather than launching bare.
+    deferred: list[tuple] = []
+    monkeypatch.setattr(
+        JobRegistry,
+        "_launch_locked",
+        lambda self, r, t, **kw: deferred.append((kw.get("deferred_hub_ref"), kw.get("deferred_resume_ref"))),
+    )
+    reloaded._drain_queue()
+    assert deferred == [("user/base@checkpoints/001000", None)]
 
 
 def test_a_restart_does_not_requeue_a_promotion_whose_trainer_is_alive(tmp_path) -> None:

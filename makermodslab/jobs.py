@@ -3998,12 +3998,15 @@ class JobRegistry:
                     record.hf_repo_id = record.config.policy_repo_id
                 self._runners[job_id] = runner
                 # A real trainer exists now, so the promoted-but-never-launched
-                # marker can go. For a run that came off the QUEUE this is the
-                # moment that window actually closes — `_drain_queue` leaves
-                # `queue_seq` set precisely so a crash during the transfer above
-                # returns the run to the queue instead of filing it as a run
-                # that trained. A no-op for a direct submit, where it is 0.
+                # marker can go — and with it the transfer refs, which are the
+                # other half of that marker: `_drain_queue` leaves both set
+                # precisely so a crash during the transfer above returns the run
+                # to the queue WITH what it still needs to download, instead of
+                # filing it as a run that trained. A no-op for a direct submit,
+                # where they are already 0/None.
                 record.queue_seq = 0
+                record.queued_hub_ref = None
+                record.queued_resume_ref = None
                 self._persist(record, force=True)
                 notify = True
         finally:
@@ -5373,8 +5376,20 @@ class JobRegistry:
                 # a real trainer exists: below for an immediate launch, and in
                 # `_start_after_prepare` for a deferred one.
                 record.queue_position = 0
-                record.queued_hub_ref = None
-                record.queued_resume_ref = None
+                # The transfer refs are deliberately NOT cleared here, for the
+                # same reason and on the same schedule as `queue_seq`: they are
+                # the half of the marker that says WHAT the promotion still owes.
+                # `start` parks them on the record because they are the only part
+                # of submit-time resolution a later process cannot recompute
+                # (see the comment there). Clearing them at promotion persisted
+                # `None`, so a crash during the deferred download came back from
+                # `_load_from_disk` as a queued run with no refs — and the next
+                # drain, reading them as None, took `_launch_locked`'s IMMEDIATE
+                # branch and spawned a trainer with no download at all: a
+                # fine-tune handed lerobot the unresolvable `repo@checkpoints/N`
+                # form, a continuation a `resume=True` with no config_path. The
+                # recovery path destroyed the run it existed to save. They are
+                # cleared where `queue_seq` is, once a real trainer exists.
                 # Set BEFORE the persist rather than after it. A persist that
                 # throws (ENOSPC, EIO on an external volume) would otherwise
                 # leave the record mutated in memory with `notify` still False,
@@ -5395,8 +5410,8 @@ class JobRegistry:
                         record.id,
                     )
                     record.state = "queued"
-                    record.queued_hub_ref = hub_ref
-                    record.queued_resume_ref = resume_ref
+                    # The refs need no restoring — the promotion above no longer
+                    # clears them. `state` is the only field this has to undo.
                     return
                 try:
                     self._launch_locked(
