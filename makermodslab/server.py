@@ -36,7 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -1911,7 +1911,13 @@ def rename_job(job_id: str, body: RenameJobBody):
 class ReorderQueueRequest(BaseModel):
     # The WHOLE queue, first to run first. A partial list is refused rather
     # than merged — see JobRegistry.reorder_queue.
-    job_ids: list[str]
+    #
+    # Bounded because the queue is: it holds runs a user submitted by hand, one
+    # at a time, and a machine with a single local training slot will not have
+    # thousands waiting. Unbounded, a 20k-id body was validated INSIDE the
+    # registry lock (freezing every /jobs* request behind the set math) and came
+    # back as a 360 KB error detail echoing every bad id. 422 here costs neither.
+    job_ids: list[str] = Field(max_length=512)
 
 
 # Declared before /jobs/{job_id}/... so the intent is readable together with

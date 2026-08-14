@@ -2587,6 +2587,22 @@ def ancestor_ids_of(records: Mapping[str, JobRecord], job_id: str) -> list[str]:
     return out
 
 
+_NAMED_IDS_LIMIT = 10
+
+
+def _name_some(ids: builtins.list[str]) -> str:
+    """Render ids for an error message, naming at most `_NAMED_IDS_LIMIT`.
+
+    An error body exists to tell a human which id to fix; echoing every one of
+    a caller-sized list instead produced a 360 KB response that helps nobody and
+    is the caller's own input read back. The count still gives them the scale of
+    what they sent.
+    """
+    shown = ", ".join(repr(i) for i in ids[:_NAMED_IDS_LIMIT])
+    extra = len(ids) - _NAMED_IDS_LIMIT
+    return f"{shown} and {extra} more" if extra > 0 else shown
+
+
 def _queue_order(record: JobRecord) -> tuple[int, float]:
     """Sort key for the queue: enqueue order, `started_at` breaking ties.
 
@@ -5104,23 +5120,27 @@ class JobRegistry:
         Refuses nothing about WHERE the user dropped things: any permutation is
         legitimate, including moving a run that was queued last to the front.
         """
+        # A MALFORMED list and a STALE one are different failures and must not
+        # share an answer. `sorted(a) != sorted(b)` collapses "you named a job
+        # that isn't queued", "you sent the same id twice" and "the queue moved
+        # under your drag" into one refusal whose message says "the list has been
+        # refreshed; try again" — advice that can never work for the first two,
+        # so a non-UI caller retries the same impossible body forever. Name the
+        # bad ids instead; only a genuine set mismatch against a live queue is
+        # the race.
+        #
+        # The duplicate check is pure — it reads only the request — so it runs
+        # BEFORE the lock. Validating a caller-sized body inside the registry
+        # lock made every /jobs* request and the watchdog wait on it.
+        seen: set[str] = set()
+        duplicates = sorted({jid for jid in job_ids if jid in seen or seen.add(jid)})
+        if duplicates:
+            raise ValueError(
+                f"The queue order lists {_name_some(duplicates)} more than once; "
+                "each queued run must appear exactly once."
+            )
         with self._lock:
             current = [r.id for r in self._queued_records()]
-            # A MALFORMED list and a STALE one are different failures and must
-            # not share an answer. `sorted(a) != sorted(b)` collapses "you named
-            # a job that isn't queued", "you sent the same id twice" and "the
-            # queue moved under your drag" into one refusal whose message says
-            # "the list has been refreshed; try again" — advice that can never
-            # work for the first two, so a non-UI caller retries the same
-            # impossible body forever. Name the bad ids instead; only a genuine
-            # set mismatch against a live queue is the race.
-            seen: set[str] = set()
-            duplicates = sorted({jid for jid in job_ids if jid in seen or seen.add(jid)})
-            if duplicates:
-                raise ValueError(
-                    f"The queue order lists {', '.join(repr(d) for d in duplicates)} more "
-                    "than once; each queued run must appear exactly once."
-                )
             # "Not in the queue" is TWO different answers and they were sharing
             # one. An id the registry has never heard of is a malformed body:
             # 400, and retrying it unchanged can never work. An id that names a
@@ -5137,7 +5157,7 @@ class JobRegistry:
             never_a_job = [u for u in not_queued if u not in self._records]
             if never_a_job:
                 raise ValueError(
-                    f"{', '.join(repr(u) for u in never_a_job)} is not a run at all, so it "
+                    f"{_name_some(never_a_job)} is not a run at all, so it "
                     "cannot be given a place in the queue."
                 )
             # Left the queue, or the queue gained a run the client had not seen
