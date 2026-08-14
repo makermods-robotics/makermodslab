@@ -3988,26 +3988,47 @@ class JobRegistry:
                     self._finalize_prepare_locked(job_id, "failed", f"Failed to start runner: {exc}")
                     notify = True
                     return
-                if target.runner == "local":
-                    record.process_pid = runner.pid()
-                else:
-                    record.hf_job_id = runner.hf_job_id()
-                    record.hf_job_url = runner.hf_job_url()
-                    # config was mutated by HfCloudJobRunner.start to set
-                    # policy_repo_id; mirror it onto the record for the UI.
-                    record.hf_repo_id = record.config.policy_repo_id
-                self._runners[job_id] = runner
-                # A real trainer exists now, so the promoted-but-never-launched
-                # marker can go — and with it the transfer refs, which are the
-                # other half of that marker: `_drain_queue` leaves both set
-                # precisely so a crash during the transfer above returns the run
-                # to the queue WITH what it still needs to download, instead of
-                # filing it as a run that trained. A no-op for a direct submit,
-                # where they are already 0/None.
-                record.queue_seq = 0
-                record.queued_hub_ref = None
-                record.queued_resume_ref = None
-                self._persist(record, force=True)
+                # Inside a try for the same reason `_launch_locked` covers its
+                # WHOLE launch rather than `runner.start()` alone: the trainer is
+                # already live and detached here, so a throw between its birth
+                # and its pid reaching disk leaves the durable record saying
+                # `running`, `queue_seq > 0`, `process_pid: None` — precisely
+                # what `_load_from_disk` reads as "promoted but never launched".
+                # It would demote the run and hand the queue a SECOND trainer for
+                # the same output dir while the first is still on the GPU. This
+                # is the one path where a live trainer's pid can fail to reach
+                # disk, so the handler stops what it started rather than trusting
+                # a write that has already failed once.
+                try:
+                    if target.runner == "local":
+                        record.process_pid = runner.pid()
+                    else:
+                        record.hf_job_id = runner.hf_job_id()
+                        record.hf_job_url = runner.hf_job_url()
+                        # config was mutated by HfCloudJobRunner.start to set
+                        # policy_repo_id; mirror it onto the record for the UI.
+                        record.hf_repo_id = record.config.policy_repo_id
+                    self._runners[job_id] = runner
+                    # A real trainer exists now, so the promoted-but-never-launched
+                    # marker can go — and with it the transfer refs, which are the
+                    # other half of that marker: `_drain_queue` leaves both set
+                    # precisely so a crash during the transfer above returns the
+                    # run to the queue WITH what it still needs to download,
+                    # instead of filing it as a run that trained. A no-op for a
+                    # direct submit, where they are already 0/None.
+                    record.queue_seq = 0
+                    record.queued_hub_ref = None
+                    record.queued_resume_ref = None
+                    self._persist(record, force=True)
+                except Exception as exc:
+                    logger.exception("Failed to record the started runner for job %s", job_id)
+                    try:
+                        runner.stop()
+                    except Exception:
+                        logger.exception("Could not stop the half-recorded runner for job %s", job_id)
+                    self._finalize_prepare_locked(job_id, "failed", f"Failed to start runner: {exc}")
+                    notify = True
+                    return
                 notify = True
         finally:
             if notify:
