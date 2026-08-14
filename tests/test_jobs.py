@@ -16,6 +16,7 @@ LocalJobRunner.start() (see plan, "Discovered issue")."""
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import os
 import threading
@@ -7220,9 +7221,13 @@ def test_every_robot_feature_checks_for_a_running_training(  # noqa: D401
     has to close in both directions — `_robot_busy` is only half of it, and a
     one-directional gate let inference start on top of a promoted trainer.
 
-    This asserts on source text, which is blunt, but the behavioural half is
-    covered per-module in test_record.py / test_rollout.py and what this pins is
-    the thing most easily lost: a seventh feature, or a deleted call."""
+    This asserts on source text, which catches only the crudest loss: a seventh
+    feature that never wired itself in, or a deleted import. It CANNOT see a
+    check that is present but dead, present but in the wrong position (after the
+    active flag is claimed, or after Popen), or one whose branch no longer
+    returns. `test_each_feature_refuses_to_start_while_training_runs` below is
+    the half with teeth — five of the six guards this greps for were silently
+    deletable with a green suite until it existed."""
     import importlib
     import inspect
 
@@ -7663,3 +7668,118 @@ def test_a_direct_submit_queues_behind_a_busy_robot(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(rollout, "inference_active", False, raising=False)
     reg._drain_queue()
     assert reg.get(record.id).state == "running"
+
+
+def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
+    """The behavioural half of the mutex, one case per feature-side call site.
+
+    The source-text check above passed against five of these six guards rewritten
+    to `if False and ...` — the text survives a dead branch. Auto-calibration
+    matters most: it drives the arm under torque and WRITES SERVO EEPROM, and it
+    is the one feature with two independent entry points (single and batch), so
+    the batch manager can lose its guard while the single one keeps it.
+
+    Each case asserts the refusal names the training run, which is what makes the
+    message actionable — and is also what proves the training guard, rather than
+    some later validation, is what refused."""
+    import makermodslab.auto_calibrate as auto_calibrate
+    import makermodslab.calibrate as calibrate
+    import makermodslab.jobs as jobs_mod
+    import makermodslab.record as record_mod
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+    import makermodslab.wiggle as wiggle
+
+    # Every OTHER feature idle, so the training guard is the only thing that can
+    # refuse. Without this a passing test could be some earlier check firing.
+    monkeypatch.setattr(record_mod, "recording_active", False, raising=False)
+    monkeypatch.setattr(rollout, "inference_active", False, raising=False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False, raising=False)
+    monkeypatch.setattr(wiggle, "wiggle_active", False, raising=False)
+    monkeypatch.setattr(calibrate, "calibration_is_active", lambda: False, raising=False)
+    monkeypatch.setattr(auto_calibrate, "auto_calibration_is_active", lambda: False, raising=False)
+    monkeypatch.setattr(jobs_mod, "training_is_active", lambda: "ACT · user/ds")
+
+    def _refused(result) -> str:
+        assert result["success"] is False, "started the robot while a training run was live"
+        return result["message"]
+
+    assert "ACT · user/ds" in _refused(
+        teleop.handle_start_teleoperation(
+            teleop.TeleoperateRequest(
+                leader_port="/dev/l",
+                follower_port="/dev/f",
+                leader_config="L",
+                follower_config="F",
+            )
+        )
+    )
+
+    assert "ACT · user/ds" in _refused(
+        calibrate.calibration_manager.start_calibration(
+            calibrate.CalibrationRequest(device_type="robot", port="/dev/arm", config_file="c")
+        )
+    )
+
+    # Both auto-calibration entry points — this one writes EEPROM.
+    assert "ACT · user/ds" in _refused(
+        auto_calibrate.auto_calibration_manager.start(
+            auto_calibrate.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c")
+        )
+    )
+    assert "ACT · user/ds" in _refused(
+        auto_calibrate.auto_calibration_batch_manager.start(
+            auto_calibrate.AutoCalibrationBatchRequest(
+                arms=[
+                    auto_calibrate.AutoCalibrationBatchArm(
+                        device_type="robot", port="/dev/arm", config_file="c"
+                    )
+                ]
+            )
+        )
+    )
+
+    assert "ACT · user/ds" in _refused(asyncio.run(wiggle.wiggle_gripper("/dev/arm")))
+
+
+@pytest.mark.parametrize(
+    "module_name, attr, busy_value, label",
+    [
+        ("record", "recording_active", True, "a recording session"),
+        ("rollout", "inference_active", True, "an inference session"),
+        ("teleoperate", "teleoperation_active", True, "teleoperation"),
+        ("calibrate", "calibration_is_active", lambda: True, "calibration"),
+        ("auto_calibrate", "auto_calibration_is_active", lambda: True, "auto-calibration"),
+        ("wiggle", "wiggle_active", True, "a wiggle"),
+    ],
+)
+def test_every_robot_activity_holds_the_queue(
+    monkeypatch, tmp_path, module_name, attr, busy_value, label
+) -> None:
+    """`_robot_busy`'s six legs, one case each — the queue side of the mutex.
+
+    Only the `recording_active` leg was exercised; the other four could be
+    deleted outright with a green suite, which matters because they are read from
+    a WATCHDOG THREAD with nobody at the keyboard. The failure they prevent is a
+    trainer claiming several GB of VRAM and four dataloader workers underneath a
+    live rollout or recording session.
+
+    Also asserts the run WAITS rather than failing: it keeps its place and starts
+    once the robot is idle, which is the promise that distinguishes this from the
+    old 409."""
+    import importlib
+
+    module = importlib.import_module(f"makermodslab.{module_name}")
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    _inject_queued(reg, "waiting", seq=10)
+
+    monkeypatch.setattr(module, attr, busy_value, raising=False)
+    reg._drain_queue()
+    assert reg.get("waiting").state == "queued", f"{label} must hold the queue"
+
+    idle = (lambda: False) if callable(busy_value) else False
+    monkeypatch.setattr(module, attr, idle, raising=False)
+    reg._drain_queue()
+    assert reg.get("waiting").state == "running", f"the run must start once {label} ends"
