@@ -1246,10 +1246,25 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     trash_dir, manifest_path, trash_id = _new_trash_paths(target)
     try:
         os.rename(target, trash_dir)
-        _write_trash_manifest(manifest_path, kind="dataset", repo_id=repo_id)
     except Exception as e:
         logger.error(f"Failed to delete dataset {repo_id}: {e}")
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
+
+    if not _write_trash_manifest(manifest_path, kind="dataset", repo_id=repo_id):
+        # The dataset is currently sitting in an unnamed dot-directory with no
+        # manifest — invisible to list_local_datasets (dot-prefixed),
+        # list_deleted_datasets, and reap_expired_trash alike (both
+        # manifest-driven). Roll it back to its live path (best-effort)
+        # instead of reporting success over what would otherwise be silent,
+        # permanent data loss.
+        try:
+            os.rename(trash_dir, target)
+        except OSError as rollback_exc:
+            logger.error(
+                f"Failed to roll back {trash_dir} to {target} after a failed trash-manifest "
+                f"write for dataset delete of {repo_id}: {rollback_exc}"
+            )
+        return {"success": False, "message": "Failed to delete dataset: could not write trash manifest"}
 
     # The listing just changed — drop the cached /datasets listing so the delete
     # reflects immediately instead of after the TTL. Also drop the cached

@@ -444,13 +444,14 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
-_DOT_DIR_KINDS = ("delete-tmp", "pre-delete")
+_DOT_DIR_KINDS = ("delete-tmp", "pre-delete", "undo-tmp", "pre-undo")
 
 
 def _parse_orphaned_dot_dir(name: str) -> tuple[str, str] | None:
-    """If `name` matches the episode-delete worker's own tmp_dir/backup_dir
-    naming (".<dataset_name>.delete-tmp-<hex8>" or
-    ".<dataset_name>.pre-delete-<hex8>"), return (dataset_name, kind). Else
+    """If `name` matches the episode-delete/undo workers' own
+    tmp_dir/backup_dir naming (".<dataset_name>.delete-tmp-<hex8>",
+    ".<dataset_name>.pre-delete-<hex8>", ".<dataset_name>.undo-tmp-<hex8>",
+    or ".<dataset_name>.pre-undo-<hex8>"), return (dataset_name, kind). Else
     None."""
     if not name.startswith("."):
         return None
@@ -471,21 +472,24 @@ _swept_roots_lock = threading.Lock()
 
 
 def recover_orphaned_episode_delete_dirs(root: Path) -> None:
-    """Clean up or recover dot-prefixed dirs that the episode-delete worker
-    leaves behind ONLY if the process is killed mid-operation — a clean run
-    always removes its own tmp_dir/backup_dir via its except blocks or the
-    success path's final rmtree, so anything found here predates this process
-    (single-process app: nothing else could be mid-delete right now).
+    """Clean up or recover dot-prefixed dirs that the episode-delete/undo
+    workers leave behind ONLY if the process is killed mid-operation — a
+    clean run always removes its own tmp_dir/backup_dir via its except
+    blocks or the success path's final rmtree, so anything found here
+    predates this process (single-process app: nothing else could be
+    mid-delete/mid-undo right now).
 
-    ".<name>.delete-tmp-<hex8>" (the freshly re-encoded output) is always
+    ".<name>.delete-tmp-<hex8>" / ".<name>.undo-tmp-<hex8>" (the freshly
+    re-encoded output of a delete or an undo merge, respectively) are always
     disposable — removed outright.
 
-    ".<name>.pre-delete-<hex8>" (the pre-swap backup) needs more care: if
-    "<name>" already exists as a valid dataset dir, the swap had completed and
-    only the backup's cleanup was interrupted — remove the backup. If "<name>"
-    is missing, the crash landed between staging the original aside and
-    swapping the rewritten copy in — the backup is the only surviving copy of
-    the dataset, so it's renamed back into place instead of deleted.
+    ".<name>.pre-delete-<hex8>" / ".<name>.pre-undo-<hex8>" (the pre-swap
+    backup taken by the delete or undo worker, respectively) need more care:
+    if "<name>" already exists as a valid dataset dir, the swap had completed
+    and only the backup's cleanup was interrupted — remove the backup. If
+    "<name>" is missing, the crash landed between staging the original aside
+    and swapping the rewritten copy in — the backup is the only surviving
+    copy of the dataset, so it's renamed back into place instead of deleted.
     """
     if not root.is_dir():
         return
@@ -525,15 +529,15 @@ def recover_orphaned_episode_delete_dirs(root: Path) -> None:
         dataset_name, kind = parsed
         target = dot_dir.parent / dataset_name
 
-        if kind == "delete-tmp":
+        if kind in ("delete-tmp", "undo-tmp"):
             shutil.rmtree(dot_dir, ignore_errors=True)
-            logger.info("Removed orphaned episode-delete temp dir %s (an earlier crash)", dot_dir)
+            logger.info("Removed orphaned episode-delete/undo temp dir %s (an earlier crash)", dot_dir)
             continue
 
         if _is_dataset_dir(target):
             shutil.rmtree(dot_dir, ignore_errors=True)
             logger.info(
-                "Removed orphaned episode-delete backup %s — %s already reflects the completed swap",
+                "Removed orphaned episode-delete/undo backup %s — %s already reflects the completed swap",
                 dot_dir,
                 target,
             )
@@ -541,20 +545,20 @@ def recover_orphaned_episode_delete_dirs(root: Path) -> None:
             try:
                 os.rename(dot_dir, target)
                 logger.warning(
-                    "Recovered %s from an interrupted episode-delete backup after an earlier crash",
+                    "Recovered %s from an interrupted episode-delete/undo backup after an earlier crash",
                     target,
                 )
             except OSError as exc:
                 logger.error(
-                    "Found an orphaned episode-delete backup at %s but could not restore it to %s: %s",
+                    "Found an orphaned episode-delete/undo backup at %s but could not restore it to %s: %s",
                     dot_dir,
                     target,
                     exc,
                 )
         else:
             logger.error(
-                "Found an orphaned episode-delete backup %s but %s already exists and isn't a valid "
-                "dataset dir — leaving both for manual inspection",
+                "Found an orphaned episode-delete/undo backup %s but %s already exists and isn't a "
+                "valid dataset dir — leaving both for manual inspection",
                 dot_dir,
                 target,
             )
@@ -800,11 +804,15 @@ def _write_trash_manifest(
     episode_index: int | None = None,
     length: int | None = None,
     duration_s: float | None = None,
-) -> None:
+) -> bool:
     """Write a trash entry's manifest. `kind` is "episode" or "dataset".
 
-    Never raises — trash bookkeeping is cosmetic; a write failure degrades
-    silently (best-effort) to match _read_trash_manifest's error resilience."""
+    Never raises — an OSError is caught and logged — but DOES report success
+    via its return value (True/False) so callers that just moved something
+    into an unnamed dot-directory can tell whether that entry is actually
+    discoverable (list_deleted_datasets/episodes and reap_expired_trash are
+    both manifest-driven) and roll back if not, instead of reporting success
+    over what would otherwise be silent, permanent data loss."""
     payload = {
         "kind": kind,
         "repo_id": repo_id,
@@ -815,8 +823,10 @@ def _write_trash_manifest(
     }
     try:
         _atomic_write_text(str(manifest_path), json.dumps(payload))
+        return True
     except OSError as exc:
         logger.warning(f"Failed to write trash manifest {manifest_path}: {exc}")
+        return False
 
 
 def _read_trash_manifest(manifest_path: Path) -> dict[str, Any] | None:
@@ -890,9 +900,7 @@ def list_deleted_episodes(repo_id: str) -> list[dict[str, Any]]:
                     "trash_id": trash_id,
                     "episode_index": manifest["episode_index"],
                     "deleted_at": manifest["deleted_at"],
-                    "expires_at": (
-                        deleted_at.timestamp() + TRASH_RETENTION_SECONDS
-                    ),
+                    "expires_at": (deleted_at.timestamp() + TRASH_RETENTION_SECONDS),
                     "length": manifest["length"],
                     "duration_s": manifest["duration_s"],
                 }
@@ -1627,12 +1635,12 @@ def _episode_delete_worker(repo_id: str, episode_index: int, target: Path) -> No
         return
 
     total_episodes = dataset.meta.total_episodes
-    episode_row = dataset.meta.episodes[episode_index]
 
     trash_dir, manifest_path, trash_id = _new_trash_paths(target)
     try:
+        episode_row = dataset.meta.episodes[episode_index]
         split_dataset(dataset, {"trash": [episode_index]}, output_dir=trash_dir)
-        _write_trash_manifest(
+        wrote_manifest = _write_trash_manifest(
             manifest_path,
             kind="episode",
             repo_id=repo_id,
@@ -1640,6 +1648,8 @@ def _episode_delete_worker(repo_id: str, episode_index: int, target: Path) -> No
             length=int(episode_row["length"]),
             duration_s=float(episode_row["length"]) / dataset.meta.fps,
         )
+        if not wrote_manifest:
+            raise OSError(f"Failed to write trash manifest {manifest_path}")
     except Exception as exc:
         shutil.rmtree(trash_dir, ignore_errors=True)
         manifest_path.unlink(missing_ok=True)

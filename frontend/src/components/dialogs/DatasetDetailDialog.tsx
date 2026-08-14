@@ -553,12 +553,21 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
         if (!cancelled) setDeletedEpisodes(entries);
       })
       .catch(() => {
-        if (!cancelled) setDeletedEpisodes([]);
+        if (cancelled) return;
+        setDeletedEpisodes([]);
+        // A delete-success toast elsewhere in this component points the user
+        // at the "Deleted episodes" section for undo — if this fetch fails,
+        // that section silently isn't there, so surface the failure instead
+        // of leaving the user looking for a section that never rendered.
+        toast({
+          title: "Couldn't load deleted episodes",
+          variant: "destructive",
+        });
       });
     return () => {
       cancelled = true;
     };
-  }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey]);
+  }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey, toast]);
 
   useEffect(() => {
     if (!(deleteTarget || pendingDatasetDelete) || !repoId) {
@@ -904,7 +913,10 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   <>
                     Episode {deleteTarget?.episode_index} is the only episode
                     in <span className="font-mono text-foreground">{repoId}</span>.
-                    Deleting it deletes the whole dataset. This can't be undone.
+                    Deleting it deletes the whole dataset. This moves the
+                    dataset to trash — you can undo it from the Recently
+                    deleted list for 24 hours, but the disk space isn't
+                    freed until then.
                     {deleteHubStatus?.status === "on_hub" && (
                       <>
                         {" "}
@@ -915,9 +927,10 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   </>
                 ) : (
                   <>
-                    This removes episode {deleteTarget?.episode_index} from{" "}
+                    This moves episode {deleteTarget?.episode_index} from{" "}
                     <span className="font-mono text-foreground">{repoId}</span>{" "}
-                    and can't be undone.
+                    to trash. You can undo it for 24 hours, but the disk
+                    space isn't freed until then.
                     {deleteHubStatus?.status === "on_hub" && (
                       <>
                         {" "}

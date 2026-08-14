@@ -2072,6 +2072,39 @@ def test_handle_delete_dataset_moves_to_trash_instead_of_destroying(
     assert manifest["repo_id"] == "pusht"
 
 
+def test_handle_delete_dataset_rolls_back_when_manifest_write_fails(
+    tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If _write_trash_manifest fails after the target -> trash_dir rename
+    already succeeded, handle_delete_dataset must roll the rename back and
+    report failure rather than returning success over a dataset now sitting
+    in an unnamed, undiscoverable dot-directory (invisible to
+    list_local_datasets, list_deleted_datasets, and reap_expired_trash)."""
+    from unittest.mock import patch
+
+    from makermodslab.record import DatasetInfoRequest, handle_delete_dataset
+
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    target = tmp_lerobot_home / "pusht"
+    target.mkdir()
+    (target / "meta").mkdir()
+    (target / "meta" / "info.json").write_text('{"total_episodes": 2}')
+    (target / "marker.txt").write_text("still here")
+
+    with patch("makermodslab.datasets._write_trash_manifest", return_value=False):
+        result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id="pusht"))
+
+    assert result["success"] is False
+    assert "trash manifest" in result["message"].lower()
+    # Rolled back: the dataset is back at its live path, untouched, and no
+    # trash entry (dir or manifest) was left behind.
+    assert target.is_dir()
+    assert (target / "marker.txt").read_text() == "still here"
+    leftover_trash = [p.name for p in tmp_lerobot_home.iterdir() if ".trash-" in p.name]
+    assert leftover_trash == []
+
+
 def test_handle_undo_dataset_delete_renames_trash_back_to_live(
     tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
