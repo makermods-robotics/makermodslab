@@ -7601,3 +7601,26 @@ def test_reorder_calls_a_run_that_left_the_queue_a_race_not_a_bad_id(tmp_path) -
     with pytest.raises(ValueError) as bad:
         reg.reorder_queue(["b", "ghost"])
     assert not isinstance(bad.value, QueueChangedError)
+
+
+def test_rename_does_not_persist_a_derived_queue_position(tmp_path) -> None:
+    """`queue_position` is derived and stamped onto the LIVE record by every
+    read, so a rename that followed a queue read wrote that read's position into
+    job.json. Nothing in-repo believes the persisted value, but `reorder_queue`
+    goes out of its way to zero it for exactly this reason — "a job.json that
+    contradicts itself is a trap for the next reader" — and rename is a path
+    that fix did not consider."""
+    reg = _quiet_registry(tmp_path)
+    for jid, seq in (("a", 10), ("b", 20)):
+        _inject_queued(reg, jid, seq=seq, persist=True)
+
+    # A read stamps the derived position onto the live records.
+    assert [r.queue_position for r in reg.list_queue()] == [1, 2]
+
+    renamed = reg.rename("b", "second")
+
+    on_disk = _json.loads((tmp_path / "root" / "b" / "job.json").read_text())
+    assert on_disk["display_name"] == "second"
+    assert on_disk["queue_position"] == 0, "a derived field must not reach disk"
+    # The response still carries the real position for the caller.
+    assert renamed.queue_position == 2

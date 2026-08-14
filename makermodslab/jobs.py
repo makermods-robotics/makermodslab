@@ -4412,7 +4412,17 @@ class JobRegistry:
             if record is None:
                 raise JobNotFoundError(job_id)
             record.display_name = name
+            # Zeroed before the write, then restamped after it, exactly as
+            # `start` and `reorder_queue` do. `queue_position` is DERIVED and is
+            # stamped onto the live record by every read, so renaming a job that
+            # a `GET /jobs/queue` had just annotated wrote that read's position
+            # into job.json — the self-contradicting file `reorder_queue` calls
+            # "a trap for the next reader", reintroduced through a path that fix
+            # did not consider. Restamped afterwards because this record is the
+            # rename response, and an un-annotated one reports position 0.
+            record.queue_position = 0
             self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
         self._notify_change()
         return record
 
