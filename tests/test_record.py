@@ -2129,6 +2129,47 @@ def test_list_deleted_datasets_is_library_wide(
     assert repo_ids == {"pusht", "alice/aloha"}
 
 
+def test_list_deleted_datasets_skips_malformed_manifests(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """list_deleted_datasets never raises on a malformed trash manifest (missing
+    required fields or an invalid deleted_at); it silently skips them instead —
+    same degrade-to-None contract as list_deleted_episodes/reap_expired_trash.
+    This matters more here than for those two: this listing is library-wide, so
+    one bad manifest anywhere in the cache must not take out every dataset's
+    'Recently deleted' entry."""
+    import json
+
+    from makermodslab.datasets import _new_trash_paths, _write_trash_manifest
+    from makermodslab.record import list_deleted_datasets
+
+    monkeypatch.setattr("lerobot.utils.constants.HF_LEROBOT_HOME", str(tmp_lerobot_home))
+
+    # One valid manifest.
+    target = tmp_lerobot_home / "pusht"
+    trash_dir, valid_manifest, trash_id = _new_trash_paths(target)
+    trash_dir.mkdir(parents=True)
+    _write_trash_manifest(valid_manifest, kind="dataset", repo_id="pusht")
+
+    # One manifest missing "deleted_at" entirely (raises KeyError).
+    other_target = tmp_lerobot_home / "missing_field"
+    _, malformed_manifest1, _ = _new_trash_paths(other_target)
+    malformed_manifest1.write_text(json.dumps({"kind": "dataset", "repo_id": "missing_field"}))
+
+    # One manifest with a non-string "deleted_at" (raises TypeError from fromisoformat).
+    bad_type_target = tmp_lerobot_home / "bad_type"
+    _, malformed_manifest2, _ = _new_trash_paths(bad_type_target)
+    malformed_manifest2.write_text(
+        json.dumps({"kind": "dataset", "repo_id": "bad_type", "deleted_at": 12345})
+    )
+
+    entries = list_deleted_datasets()
+
+    assert len(entries) == 1
+    assert entries[0]["trash_id"] == trash_id
+    assert entries[0]["repo_id"] == "pusht"
+
+
 def _stub_recording_request(**overrides):
     """Minimal RecordingRequest for exercising handle_start_recording's
     precondition checks — none of these reach real hardware. Pass keyword

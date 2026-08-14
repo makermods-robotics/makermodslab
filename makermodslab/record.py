@@ -1310,7 +1310,13 @@ def handle_undo_dataset_delete(repo_id: str, trash_id: str) -> dict[str, Any]:
 
 def list_deleted_datasets() -> list[dict[str, Any]]:
     """Unexpired dataset-kind trash entries across the whole cache root,
-    newest first — powers the library's 'Recently deleted' toggle."""
+    newest first — powers the library's 'Recently deleted' toggle.
+
+    Silently skips entries with missing or malformed fields (never raises —
+    trash bookkeeping is cosmetic; a bad entry just makes that single item
+    invisible, it doesn't take down the listing). This scans the WHOLE cache
+    root rather than one repo_id's directory, so a single malformed manifest
+    anywhere must not take out every dataset's listing."""
     from pathlib import Path
 
     from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -1326,16 +1332,24 @@ def list_deleted_datasets() -> list[dict[str, Any]]:
         manifest = _read_trash_manifest(manifest_path)
         if manifest is None or manifest.get("kind") != "dataset":
             continue
-        deleted_at = datetime.fromisoformat(manifest["deleted_at"])
-        trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
-        out.append(
-            {
-                "trash_id": trash_id,
-                "repo_id": manifest["repo_id"],
-                "deleted_at": manifest["deleted_at"],
-                "expires_at": deleted_at.timestamp() + TRASH_RETENTION_SECONDS,
-            }
-        )
+        try:
+            deleted_at = datetime.fromisoformat(manifest["deleted_at"])
+            trash_id = manifest_path.name.removesuffix(".manifest.json").rsplit("-", 1)[-1]
+            out.append(
+                {
+                    "trash_id": trash_id,
+                    "repo_id": manifest["repo_id"],
+                    "deleted_at": manifest["deleted_at"],
+                    "expires_at": deleted_at.timestamp() + TRASH_RETENTION_SECONDS,
+                }
+            )
+        except (KeyError, ValueError, TypeError):
+            # Malformed manifest (missing required field or invalid deleted_at).
+            # Skip this entry rather than raising, matching _read_trash_manifest's
+            # degrade-to-None contract and the "trash bookkeeping must never raise"
+            # constraint. Same pattern as list_deleted_episodes/reap_expired_trash.
+            logger.warning(f"Skipping malformed trash manifest {manifest_path}")
+            continue
     out.sort(key=lambda e: e["deleted_at"], reverse=True)
     return out
 
