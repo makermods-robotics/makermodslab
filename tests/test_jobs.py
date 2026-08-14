@@ -7533,3 +7533,39 @@ def test_the_queue_endpoints_are_reachable_and_say_why_they_refuse(client, tmp_p
     finally:
         job_registry._records.clear()
         job_registry._records.update(original)
+
+
+def test_a_failed_reorder_leaves_the_previous_order_intact(monkeypatch, tmp_path) -> None:
+    """A reorder is all-or-nothing.
+
+    Each iteration mutated memory and then wrote, with no rollback, so a persist
+    that threw partway left three orders in play: the prefix that wrote, the
+    suffix that never moved, and an in-memory order matching neither disk nor
+    the drag. The user gets a 500 and reasonably concludes nothing happened —
+    while the head of the queue, the run `_drain_queue` promotes next, silently
+    changed under them."""
+    reg = _quiet_registry(tmp_path)
+    for jid, seq in (("a", 1), ("b", 2), ("c", 3)):
+        _inject_queued(reg, jid, seq=seq, persist=True)
+
+    real_persist = reg._persist
+    calls: list[str] = []
+
+    def _persist_failing_on_b(record, force):
+        calls.append(record.id)
+        # Fail on the SECOND write of the reorder, so a prefix has landed.
+        if record.id == "b" and calls.count("b") == 1:
+            raise OSError(28, "No space left on device")
+        return real_persist(record, force=force)
+
+    monkeypatch.setattr(reg, "_persist", _persist_failing_on_b)
+
+    with pytest.raises(OSError):
+        reg.reorder_queue(["c", "b", "a"])
+
+    # In memory: the order the user had before the drag, not a third one.
+    assert [r.id for r in reg._queued_records()] == ["a", "b", "c"]
+
+    # And on disk too, so a restart agrees with the running process.
+    reloaded = _quiet_registry(tmp_path)
+    assert [r.id for r in reloaded._queued_records()] == ["a", "b", "c"]

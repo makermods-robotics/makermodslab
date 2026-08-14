@@ -5134,17 +5134,43 @@ class JobRegistry:
             # than 1..N, so a reorder can never collide with a job enqueued
             # concurrently (which took a seq from the same counter).
             base = self._take_queue_seq(count=len(job_ids))
-            for offset, jid in enumerate(job_ids):
-                record = by_id[jid]
-                record.queue_seq = base + offset
-                # Cleared before the write: `_annotate_queue` stamps this onto
-                # the live record on every read, so without this the file keeps
-                # the PRE-drag position — after a reversal, exactly the inverted
-                # order. Nothing in-repo believes the persisted value (every
-                # path re-derives it), but a job.json that contradicts itself is
-                # a trap for the next reader.
-                record.queue_position = 0
-                self._persist(record, force=True)
+            # A reorder is all-or-nothing. Each iteration mutates memory and
+            # then writes, so a persist that throws partway (ENOSPC, EIO on an
+            # external volume — the failure class `_drain_queue` grew a handler
+            # for) used to leave THREE orders in play: the prefix that wrote,
+            # the suffix that never moved, and an in-memory order matching
+            # neither disk nor the drag. The user sees a 500 and reasonably
+            # concludes nothing happened, while the head of the queue — the run
+            # `_drain_queue` promotes next — has silently changed under them.
+            previous = {jid: by_id[jid].queue_seq for jid in job_ids}
+            try:
+                for offset, jid in enumerate(job_ids):
+                    record = by_id[jid]
+                    record.queue_seq = base + offset
+                    # Cleared before the write: `_annotate_queue` stamps this onto
+                    # the live record on every read, so without this the file keeps
+                    # the PRE-drag position — after a reversal, exactly the inverted
+                    # order. Nothing in-repo believes the persisted value (every
+                    # path re-derives it), but a job.json that contradicts itself is
+                    # a trap for the next reader.
+                    record.queue_position = 0
+                    self._persist(record, force=True)
+            except Exception:
+                # Memory first, so the queue is coherent even if re-writing the
+                # prefix fails too; the seq values are the authority and every
+                # position is re-derived from them. A record whose rewrite also
+                # throws is left for the next `_persist` to correct — it can
+                # only be one this call already touched, so disk cannot end up
+                # holding an order that was never requested.
+                logger.exception("Could not persist the queue reorder; restoring the previous order")
+                for jid, seq in previous.items():
+                    by_id[jid].queue_seq = seq
+                for jid in job_ids:
+                    try:
+                        self._persist(by_id[jid], force=True)
+                    except Exception:
+                        logger.exception("Could not restore the queue order of %s", jid)
+                raise
             snapshot = dict(self._records)
             ordered = self._queued_records()
         positions = self._queue_positions(snapshot)
