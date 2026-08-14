@@ -5121,13 +5121,29 @@ class JobRegistry:
                     f"The queue order lists {', '.join(repr(d) for d in duplicates)} more "
                     "than once; each queued run must appear exactly once."
                 )
-            unknown = sorted(set(job_ids) - set(current))
-            if unknown:
+            # "Not in the queue" is TWO different answers and they were sharing
+            # one. An id the registry has never heard of is a malformed body:
+            # 400, and retrying it unchanged can never work. An id that names a
+            # REAL run which merely LEFT the queue — it started, finished, or was
+            # cancelled between the drag and the request — is the ordinary race
+            # this endpoint exists to absorb, and it needs the 409 that says
+            # refresh, which is advice that succeeds on the next try. Answering
+            # it with 400 told the user their drag was malformed when the queue
+            # had simply moved on, and that is by far the likelier of the two:
+            # it is what happens every time the watchdog promotes the head
+            # mid-drag. It is also what this endpoint's docstring always claimed
+            # happened.
+            not_queued = sorted(set(job_ids) - set(current))
+            never_a_job = [u for u in not_queued if u not in self._records]
+            if never_a_job:
                 raise ValueError(
-                    f"{', '.join(repr(u) for u in unknown)} is not a queued run, so it "
+                    f"{', '.join(repr(u) for u in never_a_job)} is not a run at all, so it "
                     "cannot be given a place in the queue."
                 )
-            if sorted(job_ids) != sorted(current):
+            # Left the queue, or the queue gained a run the client had not seen
+            # (a subset). Both mean the client's picture is out of date, and
+            # both are answered the same way: refresh and drag again.
+            if not_queued or sorted(job_ids) != sorted(current):
                 raise QueueChangedError(current)
             by_id = {r.id: r for r in self._records.values()}
             # Renumbered from a fresh block at the TOP of the counter rather

@@ -7243,7 +7243,7 @@ def test_reorder_names_a_bad_id_instead_of_blaming_a_race(tmp_path) -> None:
     for jid, seq in (("a", 10), ("b", 20)):
         _inject_queued(reg, jid, seq=seq)
 
-    with pytest.raises(ValueError, match="not a queued run") as unknown:
+    with pytest.raises(ValueError, match="not a run at all") as unknown:
         reg.reorder_queue(["a", "b", "ghost"])
     assert "ghost" in str(unknown.value)
     assert not isinstance(unknown.value, QueueChangedError)
@@ -7569,3 +7569,35 @@ def test_a_failed_reorder_leaves_the_previous_order_intact(monkeypatch, tmp_path
     # And on disk too, so a restart agrees with the running process.
     reloaded = _quiet_registry(tmp_path)
     assert [r.id for r in reloaded._queued_records()] == ["a", "b", "c"]
+
+
+def test_reorder_calls_a_run_that_left_the_queue_a_race_not_a_bad_id(tmp_path) -> None:
+    """ "Not in the queue" is two different answers, and they used to share one.
+
+    An id the registry never heard of is a malformed body — 400, and retrying it
+    unchanged can never work. But an id naming a REAL run that merely left the
+    queue (it started, finished, or was cancelled between the drag and the
+    request) is the ordinary race this endpoint exists to absorb, and it needs
+    the 409 that says refresh — advice that succeeds on the next try. Answering
+    it with 400 told the user their drag was malformed when the queue had simply
+    moved on, which is the likelier of the two by far: it is what happens every
+    time the watchdog promotes the head mid-drag.
+
+    It is also what the endpoint docstring always claimed happened."""
+    from makermodslab.jobs import QueueChangedError
+
+    reg = _quiet_registry(tmp_path)
+    for jid, seq in (("a", 10), ("b", 20)):
+        _inject_queued(reg, jid, seq=seq)
+
+    # The watchdog promotes the head while the user is dragging. "a" is still a
+    # real record — it is just running now.
+    reg._records["a"].state = "running"
+
+    with pytest.raises(QueueChangedError):
+        reg.reorder_queue(["b", "a"])
+
+    # And a genuinely unknown id in the same position is still the 400.
+    with pytest.raises(ValueError) as bad:
+        reg.reorder_queue(["b", "ghost"])
+    assert not isinstance(bad.value, QueueChangedError)

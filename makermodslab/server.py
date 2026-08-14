@@ -1930,9 +1930,11 @@ def reorder_job_queue(body: ReorderQueueRequest):
     try:
         return {"jobs": job_registry.reorder_queue(body.job_ids)}
     except ValueError as exc:
-        # The request itself is wrong — an unknown id, or one listed twice.
-        # 400, not the 409 below: retrying it unchanged can never succeed, and
-        # the detail names the offending ids so a non-UI caller can fix them.
+        # The request itself is wrong — an id that names no run at all, or one
+        # listed twice. 400, not the 409 below: retrying it unchanged can never
+        # succeed, and the detail names the offending ids so a non-UI caller can
+        # fix them. An id that names a real run which has LEFT the queue is not
+        # this case: that is the race below, and it retries successfully.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except QueueChangedError as exc:
         # A well-formed list that lost its race. Retrying after a refetch is
