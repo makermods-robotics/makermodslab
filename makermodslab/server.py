@@ -73,6 +73,7 @@ from .jobs import (
     JobNotRunningError,
     JobRemovalFailedError,
     JobSourceOfQueuedRunError,
+    JobState,
     JobStateChangedError,
     JobTarget,
     QueueChangedError,
@@ -1956,13 +1957,19 @@ def reorder_job_queue(body: ReorderQueueRequest):
 
 
 @app.post("/jobs/{job_id}/stop")
-def stop_job(job_id: str, expect_state: str | None = None):
+def stop_job(job_id: str, expect_state: JobState | None = None):
     """Stop a running job, or cancel a queued one.
 
     `expect_state` is optional and is the caller's precondition: pass the state
     the UI was showing when it drew the button. Cancel and kill are the same
     request here, so a Cancel drawn against a stale queue would otherwise
     SIGTERM a run the watchdog promoted in the meantime.
+
+    Typed as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value
+    used to reach the comparison, fail it, and come back as a 409 saying the job
+    "changed while you were looking at it" — reporting a client's typo as a race,
+    which no retry can ever clear. It is now a 422, and `/openapi.json`
+    advertises the real member set instead of "any string".
     """
     try:
         return job_registry.stop(job_id, expect_state=expect_state)
