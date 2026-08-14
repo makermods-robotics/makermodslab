@@ -13,6 +13,7 @@ import {
   SkipBack,
   SkipForward,
   Trash2,
+  Undo2,
   VideoOff,
 } from "lucide-react";
 import {
@@ -49,6 +50,7 @@ import { DeleteResolution } from "@/lib/deleteSemantics";
 import {
   deleteDataset,
   deleteEpisode,
+  type DeletedEpisodeEntry,
   EpisodeJointSeries,
   EpisodeSummary,
   episodeVideoUrl,
@@ -56,7 +58,9 @@ import {
   getDatasetInfo,
   getEpisodeJoints,
   HubStatus,
+  listDeletedEpisodes,
   listEpisodes,
+  undoEpisodeDelete,
 } from "@/lib/replayApi";
 import { ApiError } from "@/lib/apiClient";
 
@@ -516,6 +520,8 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [pendingDatasetDelete, setPendingDatasetDelete] = useState(false);
+  const [deletedEpisodes, setDeletedEpisodes] = useState<DeletedEpisodeEntry[]>([]);
+  const [undoingTrashId, setUndoingTrashId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!repoId || !open) return;
@@ -534,6 +540,24 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       setEpisodesLoading(false);
     });
     return () => controller.abort();
+  }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey]);
+
+  useEffect(() => {
+    if (!repoId || !open) {
+      setDeletedEpisodes([]);
+      return;
+    }
+    let cancelled = false;
+    listDeletedEpisodes(baseUrl, fetchWithHeaders, repoId)
+      .then((entries) => {
+        if (!cancelled) setDeletedEpisodes(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setDeletedEpisodes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey]);
 
   useEffect(() => {
@@ -594,12 +618,33 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       // This also remounts DatasetInfoCard (its key includes reloadKey), so
       // it re-reads the now-stale episode/frame counts.
       setReloadKey((k) => k + 1);
+      toast({
+        title: "Episode deleted",
+        description: "You can undo this from the Deleted episodes section below for 24 hours.",
+      });
     } catch (err) {
       setDeleteError(
         err instanceof ApiError ? (err.detail ?? err.message) : "Something went wrong",
       );
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleUndoEpisodeDelete = async (trashId: string) => {
+    setUndoingTrashId(trashId);
+    try {
+      await undoEpisodeDelete(baseUrl, fetchWithHeaders, repoId, trashId);
+      setReloadKey((k) => k + 1);
+      toast({ title: "Episode restored" });
+    } catch (err) {
+      toast({
+        title: "Undo failed",
+        description: err instanceof ApiError ? (err.detail ?? err.message) : "Something went wrong",
+        variant: "destructive",
+      });
+    } finally {
+      setUndoingTrashId(null);
     }
   };
 
@@ -758,6 +803,49 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   </p>
                 )}
               </div>
+
+              {deletedEpisodes.length > 0 && (
+                <div className="mt-2 shrink-0 border-t border-border pt-2">
+                  <p className="eyebrow mb-2">deleted episodes ({deletedEpisodes.length})</p>
+                  <div className="space-y-0.5">
+                    {deletedEpisodes.map((entry) => {
+                      const hoursLeft = Math.max(
+                        0,
+                        (entry.expires_at * 1000 - Date.now()) / 3_600_000,
+                      );
+                      return (
+                        <div
+                          key={entry.trash_id}
+                          className="flex w-full items-center gap-1 rounded-md border border-transparent px-2 py-1.5 text-xs text-muted-foreground"
+                        >
+                          <span className="w-6 shrink-0 font-mono text-[11px]">
+                            {String(entry.episode_index).padStart(2, "0")}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">
+                            Episode {entry.episode_index}
+                          </span>
+                          <span className="shrink-0 font-mono text-[10.5px] tabular-nums">
+                            {entry.duration_s.toFixed(1)}s
+                          </span>
+                          <span className="shrink-0 font-mono text-[10.5px] tabular-nums">
+                            expires {hoursLeft < 1 ? "<1h" : `${Math.floor(hoursLeft)}h`}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleUndoEpisodeDelete(entry.trash_id)}
+                            disabled={undoingTrashId !== null}
+                            aria-label={`Undo delete of episode ${entry.episode_index}`}
+                            title="Undo delete"
+                            className="shrink-0 rounded p-1 hover:text-foreground disabled:opacity-50"
+                          >
+                            <Undo2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="p-3">
