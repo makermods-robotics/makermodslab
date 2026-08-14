@@ -2011,12 +2011,16 @@ def stop_job(job_id: str, expect_state: JobState | None = None):
         # the run is untouched, because the alternative reading — "cancel
         # half-worked" — is what would make a user walk away from a run that is
         # still going to train.
+        logger.exception("Could not cancel job %s", job_id)
         raise HTTPException(
             status_code=500,
+            # `strerror` only — see the delete twin below. The full OSError
+            # carries the job directory's absolute path, and this body is
+            # returned to the caller.
             detail=(
-                f"Could not cancel job {job_id!r}: {exc.reason}. The run is still queued "
-                "and will still start when the slot frees — nothing was removed, so it is "
-                "safe to try again."
+                f"Could not cancel job {job_id!r}: {exc.reason.strerror}. The run is still "
+                "queued and will still start when the slot frees — nothing was removed, so "
+                "it is safe to try again."
             ),
         ) from exc
 
@@ -2059,11 +2063,24 @@ def delete_job(job_id: str):
         # 500, not 409: nothing about the request was wrong. Say that the run is
         # untouched, because the alternative reading — "delete half-worked" — is
         # what would leave a user surprised to see it again after a restart.
+        # Where it is untouched depends on what it was: `delete` refuses only a
+        # RUNNING run, so a queued one reaches here, and telling that user it is
+        # "still in your history" describes the wrong place — it is still in the
+        # queue and still going to train, which is the part they need to act on.
+        logger.exception("Could not delete job %s", job_id)
+        still = (
+            "still queued and will still start when the slot frees"
+            if record.state == "queued"
+            else "untouched and still in your history"
+        )
         raise HTTPException(
             status_code=500,
+            # `strerror` only: the full OSError carries the absolute path of the
+            # job directory, and this body goes to whoever made the request —
+            # including anyone on the LAN under `--lan`. The path is in the log.
             detail=(
-                f"Could not delete job {job_id!r}: {exc.reason}. The run is untouched and "
-                "still in your history — nothing was removed, so it is safe to try again."
+                f"Could not delete job {job_id!r}: {exc.reason.strerror}. The run is "
+                f"{still} — nothing was removed, so it is safe to try again."
             ),
         ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job
