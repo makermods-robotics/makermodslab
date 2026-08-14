@@ -3222,6 +3222,28 @@ class JobRegistry:
             deferred_finetune_upload, hub_ref = self._resolve_upload_finetune(finetune_source, config)
             config.policy_pretrained_path = hub_ref
 
+        # Asked BEFORE the lock, and for the same reason `_drain_queue` phase 1
+        # asks before its own: `_robot_busy` reads six feature modules whose
+        # `training_is_active()` calls take THIS lock from inside their own
+        # `_state_lock`. Reading them while holding it closes the cycle and
+        # deadlocks. Never move this inside.
+        #
+        # Why `start` asks at all, when it historically did not: the mutex was
+        # one-way. All six features now refuse while a training run is live, but
+        # nothing stopped the reverse — a submit made during a recording or a
+        # rollout still launched a trainer straight on top of it, and inference
+        # is the pairing this file calls the worst one (both want several GB of
+        # VRAM; hours of work end as "exited with code 1"). The old rationale was
+        # that a direct submit meant the user was present and knew what else they
+        # had running, which is exactly the reasoning the six features stopped
+        # accepting from each other.
+        #
+        # It QUEUES rather than refuses, which is what makes this safe on a
+        # branch whose premise is that a busy machine queues: the run keeps its
+        # place and `_drain_queue` starts it when the robot is idle — the same
+        # thing that already happens when the slot itself is busy.
+        robot_busy = self._robot_busy() if (target.runner == "local") else None
+
         with self._lock:
             # Resume: turn the selected source run + step into the config_path
             # lerobot needs. Do this under the lock (source lookup) and before
@@ -3440,7 +3462,7 @@ class JobRegistry:
             # immediately and jump every run already waiting, which is the one
             # promise a queue exists to make.
             queued = target.runner == "local" and (
-                self._local_slot_busy() is not None or bool(self._queued_records())
+                self._local_slot_busy() is not None or bool(self._queued_records()) or robot_busy is not None
             )
 
             record = JobRecord(

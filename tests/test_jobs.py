@@ -7624,3 +7624,42 @@ def test_rename_does_not_persist_a_derived_queue_position(tmp_path) -> None:
     assert on_disk["queue_position"] == 0, "a derived field must not reach disk"
     # The response still carries the real position for the caller.
     assert renamed.queue_position == 2
+
+
+def test_a_direct_submit_queues_behind_a_busy_robot(monkeypatch, tmp_path) -> None:
+    """The mutex used to be one-way for a DIRECT submit.
+
+    All six robot features refuse while a training run is live, but nothing
+    stopped the reverse: with the slot free and the queue empty — the common
+    case — `start()` went straight to `_launch_locked` without ever asking
+    `_robot_busy()`, so clicking Start during a recording or a rollout put a
+    trainer on top of it. Inference is the pairing this file calls the worst
+    one: both want several GB of VRAM.
+
+    It QUEUES rather than refusing, matching what already happens when the slot
+    itself is busy — the run keeps its place and starts when the robot is idle.
+
+    The check must stay OUTSIDE the registry lock (`training_is_active()` takes
+    that lock from inside each feature's `_state_lock`); this test would deadlock
+    rather than fail if that regressed."""
+    import makermodslab.rollout as rollout
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+
+    # Slot free, queue empty — the path that had no guard at all.
+    assert reg._local_slot_busy() is None
+    assert reg._queued_records() == []
+
+    monkeypatch.setattr(rollout, "inference_active", True, raising=False)
+    cfg = TrainingRequest(dataset_repo_id="user/ds", policy_type="act")
+    record = reg.start(cfg, JobTarget(runner="local"))
+    assert record.state == "queued", "a submit must not launch on top of a live inference session"
+    assert record.queue_position == 1
+
+    # And it starts on its own once the robot frees up — it waited, it did not fail.
+    monkeypatch.setattr(rollout, "inference_active", False, raising=False)
+    reg._drain_queue()
+    assert reg.get(record.id).state == "running"
