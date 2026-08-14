@@ -5642,7 +5642,17 @@ class JobRegistry:
                         record.error_message = oom_reason or reason or f"Subprocess exited with code {rc}"
                 self._runners.pop(jid, None)
                 self._stop_requested.discard(jid)
-            self._persist(record, force=True)
+                # Inside the lock, unlike every other _persist-then-notify in
+                # this file, because this one races `delete()`. `_write_meta`
+                # opens with `mkdir(parents=True, exist_ok=True)`, so a persist
+                # that lands after a concurrent delete recreates the directory
+                # AND the job.json of a job the user just removed: it vanishes
+                # from the UI and returns on the next restart. That is the
+                # resurrection `_remove_locked` was written to end — it unlinks
+                # under the lock so no reader can see a record whose file is
+                # gone — but a WRITER holding a reference from a previous
+                # acquisition slipped past it.
+                self._persist(record, force=True)
             self._notify_change()
 
         self._notify_progress(progress_snapshots)
