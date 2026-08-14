@@ -203,6 +203,7 @@ interface EpisodeDeleteResult {
   repo_id: string;
   deleted_episode: number;
   total_episodes: number;
+  trash_id: string;
 }
 
 interface EpisodeDeleteStatus {
@@ -265,6 +266,115 @@ export async function deleteEpisode(
     }
     await sleep(EPISODE_DELETE_POLL_MS);
   }
+}
+
+export interface DeletedEpisodeEntry {
+  trash_id: string;
+  episode_index: number;
+  deleted_at: string;
+  expires_at: number;
+  length: number;
+  duration_s: number;
+}
+
+/** Unexpired (< 24h) episode-delete trash entries for repoId, newest first.
+ * GET /datasets/deleted-episodes. */
+export async function listDeletedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+): Promise<DeletedEpisodeEntry[]> {
+  return apiRequest<DeletedEpisodeEntry[]>(
+    baseUrl,
+    fetcher,
+    `/datasets/deleted-episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { action: "List deleted episodes" },
+  );
+}
+
+interface EpisodeUndoStatus {
+  state: "idle" | "running" | "done" | "error";
+  repo_id: string | null;
+  trash_id: string | null;
+  message: string | null;
+  result: { success: boolean; repo_id: string } | null;
+}
+
+/** Restore a deleted episode from its trash entry. Starts the restore then
+ * polls until it finishes, same start+poll shape as deleteEpisode. Throws
+ * ApiError (404 unknown/expired trash_id, 409 busy, 507 not enough disk
+ * space, or a background restore failure).
+ * POST /datasets/undo-episode-delete, polls GET /datasets/episode-undo-status. */
+export async function undoEpisodeDelete(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  trashId: string,
+): Promise<{ success: boolean; repo_id: string }> {
+  await apiRequest(baseUrl, fetcher, "/datasets/undo-episode-delete", {
+    method: "POST",
+    body: { repo_id: repoId, trash_id: trashId },
+    action: "Undo episode delete",
+  });
+
+  for (;;) {
+    let status: EpisodeUndoStatus | undefined;
+    try {
+      status = await apiRequest<EpisodeUndoStatus>(
+        baseUrl,
+        fetcher,
+        "/datasets/episode-undo-status",
+        { action: "Undo episode delete" },
+      );
+    } catch {
+      // transient — retry next tick
+    }
+    if (status?.state === "done" && status.result) return status.result;
+    if (status?.state === "error") {
+      throw new ApiError(
+        `Undo episode delete failed: ${status.message ?? "Unknown error"}`,
+        500,
+        status.message,
+      );
+    }
+    await sleep(EPISODE_DELETE_POLL_MS);
+  }
+}
+
+export interface DeletedDatasetEntry {
+  trash_id: string;
+  repo_id: string;
+  deleted_at: string;
+  expires_at: number;
+}
+
+/** Unexpired (< 24h) whole-dataset trash entries across the whole library,
+ * newest first. GET /datasets/deleted-datasets. */
+export async function listDeletedDatasets(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<DeletedDatasetEntry[]> {
+  return apiRequest<DeletedDatasetEntry[]>(baseUrl, fetcher, "/datasets/deleted-datasets", {
+    action: "List deleted datasets",
+  });
+}
+
+/** Restore a whole dataset from its trash entry. Runs synchronously on the
+ * backend (a rename, not a rewrite) so there's no polling here, unlike the
+ * episode case. Throws ApiError (404 unknown/expired trash_id, or a name
+ * collision if something now exists at the live path).
+ * POST /datasets/undo-dataset-delete. */
+export async function undoDatasetDelete(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  trashId: string,
+): Promise<{ success: boolean; message: string }> {
+  return apiRequest(baseUrl, fetcher, "/datasets/undo-dataset-delete", {
+    method: "POST",
+    body: { repo_id: repoId, trash_id: trashId },
+    action: "Undo dataset delete",
+  });
 }
 
 export interface EpisodeJointSeries {
