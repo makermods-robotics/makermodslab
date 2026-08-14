@@ -361,8 +361,10 @@ export async function listDeletedDatasets(
 
 /** Restore a whole dataset from its trash entry. Runs synchronously on the
  * backend (a rename, not a rewrite) so there's no polling here, unlike the
- * episode case. Throws ApiError (404 unknown/expired trash_id, or a name
- * collision if something now exists at the live path).
+ * episode case. Always resolves with { success, message }; check result.success
+ * to detect failures (unknown/expired trash_id, dataset busy, name collision, or
+ * OS errors) — none of these throw. May throw ApiError for transport/network
+ * failures via apiRequest.
  * POST /datasets/undo-dataset-delete. */
 export async function undoDatasetDelete(
   baseUrl: string,
