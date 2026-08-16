@@ -19,6 +19,8 @@ export default {
     loading: "正在加载数据集…",
     empty: "还没有数据集。使用“添加数据集”来录制、下载或导入。",
     deleteAria: "删除 {{repoId}}",
+    useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
+    useHubHint: "公开数据集 — 训练时按需拉取。",
   },
   modelPicker: {
     searchPlaceholder: "搜索模型…",

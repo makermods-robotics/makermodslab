@@ -31,6 +31,9 @@ export default {
     empty:
       "No datasets yet. Use “Add dataset” to record, download, or import one.",
     deleteAria: "Delete {{repoId}}",
+    // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
+    useHub: "Use <0>{{repoId}}</0> from the Hub",
+    useHubHint: "Public dataset — training fetches it on demand.",
   },
   modelPicker: {
     searchPlaceholder: "Search models…",

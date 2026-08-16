@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Trash2 } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
+import { Plus, Trash2 } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/command";
 import { DatasetItem } from "@/lib/replayApi";
 import { sortDatasets } from "@/lib/sortDatasets";
+import { HUB_REPO_ID_RE } from "@/lib/repoId";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 
 interface DatasetPickerProps {
@@ -32,14 +33,26 @@ interface DatasetPickerProps {
    * second search input would just duplicate it. The list still shows every
    * dataset, unfiltered. */
   hideSearch?: boolean;
+  /** Offer a typed, well-formed `org/name` that ISN'T in the listing as a
+   * public Hub dataset — one extra row, "Use org/name from the Hub".
+   *
+   * Opt-in, because it is a capability and not a decoration: the caller has to
+   * be somewhere that can act on an arbitrary public repo (Train fetches it on
+   * demand and pins it). Left out, the picker only selects what it lists, as
+   * it always has. */
+  onPickHubId?: (repoId: string) => void;
   children: React.ReactNode;
 }
 
 /**
  * Search-only dataset selector. The input filters the existing Local /
- * Hugging Face lists — it no longer creates new names or pins typed `org/name`
- * Hub ids. Those capabilities now live in the "Add dataset" menu on the Landing
- * page (Record / Add from Hugging Face / Import from disk).
+ * Hugging Face lists — it does not create new names, and creation lives in the
+ * "Add dataset" menu on the Landing page (Record / Add from Hugging Face /
+ * Import from disk).
+ *
+ * The one thing it can do beyond selecting what it lists is opt-in: pass
+ * `onPickHubId` and a typed, unlisted `org/name` is offered as a public Hub
+ * dataset (see below). Train uses it; nothing else does.
  */
 const DatasetPicker: React.FC<DatasetPickerProps> = ({
   datasets,
@@ -47,6 +60,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   onPickExisting,
   onDeleteItem,
   hideSearch = false,
+  onPickHubId,
   children,
 }) => {
   const { t } = useTranslation();
@@ -75,6 +89,18 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       ),
     [datasets, username],
   );
+
+  // A well-formed `org/name` the listing doesn't have, offered as a public Hub
+  // dataset — the affordance that ANY public dataset is usable, not just the
+  // user's own. (Lived in Train's own results list until its typed search was
+  // folded into this popover.)
+  const trimmedQuery = query.trim();
+  const hubCandidate = useMemo(() => {
+    if (!onPickHubId || !HUB_REPO_ID_RE.test(trimmedQuery)) return null;
+    const q = trimmedQuery.toLowerCase();
+    if (datasets.some((d) => d.repo_id.toLowerCase() === q)) return null;
+    return trimmedQuery;
+  }, [onPickHubId, datasets, trimmedQuery]);
 
   const reset = () => {
     setQuery("");
@@ -166,6 +192,39 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
             {localDatasets.length > 0 && (
               <CommandGroup heading={t("landing.picker.local")}>
                 {localDatasets.map(renderItem)}
+              </CommandGroup>
+            )}
+            {hubCandidate && (
+              // Last, under whatever the query did match: reaching for a repo
+              // by its full id is the rarer intent, and cmdk keeps this row
+              // visible because its value IS the query.
+              <CommandGroup>
+                <CommandItem
+                  value={hubCandidate}
+                  onSelect={() => {
+                    onPickHubId?.(hubCandidate);
+                    reset();
+                  }}
+                  className="items-start"
+                >
+                  <Plus className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">
+                      {/* The typed repo id is DATA — one <0> slot, not a
+                          sentence stitched around it. (Same two strings the
+                          Train panel rendered before its typed search folded
+                          into this popover.) */}
+                      <Trans
+                        i18nKey="landing.datasetPicker.useHub"
+                        values={{ repoId: hubCandidate }}
+                        components={[<span key="0" className="font-mono" />]}
+                      />
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      {t("landing.datasetPicker.useHubHint")}
+                    </span>
+                  </span>
+                </CommandItem>
               </CommandGroup>
             )}
           </CommandList>

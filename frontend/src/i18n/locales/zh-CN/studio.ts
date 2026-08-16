@@ -122,6 +122,7 @@ export default {
       episodeSubsetOfTotal:
         "将使用 {{total}} 个回合中的 {{used}} 个进行训练 — 可在「我的库」中该数据集的查看器里调整。",
       choose: "选择数据集",
+      pick: "选择数据集",
       useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
       useHubHint: "公开数据集 — 训练时按需拉取。",
       noMatches:
@@ -167,6 +168,10 @@ export default {
 
   deploy: {
     title: "运行",
+    entry: "运行技能",
+    skill: {
+      label: "技能 *",
+    },
     picker: {
       placeholder: "选择技能",
       loading: "正在加载技能…",
@@ -182,7 +187,7 @@ export default {
       local: "本地",
       both: "本地 · hub",
     },
-    intro: "在机器人上运行该技能，然后开始推理。",
+    intro: "选择技能及其检查点，设置运行时长，检查摄像头 — 然后开始。",
     noRobot: "选择要运行的机器人 — 使用本窗口右上角的机器人菜单。",
     robotNotReady_other:
       "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（推理只使用从臂 — 无需配置主臂。）",
@@ -237,6 +242,7 @@ export default {
     checkpoint: {
       label: "检查点",
       none: "该技能暂无可用的检查点。",
+      pickSkillFirst: "请先选择技能",
     },
     armMismatch: {
       bimanualCheckpoint:
@@ -248,6 +254,9 @@ export default {
       label: "任务描述",
       placeholder: "例如：拿起红色方块",
       hint: "该策略以语言为条件（{{policyType}}）。",
+      hintUnknown: "只有以语言为条件的策略才会使用该字段 — 选择技能后即可确认。",
+      hintNotConditioned:
+        "该策略（{{policyType}}）不以语言为条件 — 会忽略该字段。",
       // 当任务描述是从该检查点自己的训练数据集自动填入时，追加在 hint 之后。
       // 前面的空格由调用方补上。
       prefilled: "已根据它训练所用的数据集自动填入。",
@@ -296,6 +305,11 @@ export default {
       disconnected: "已断开 — 请重新连接后再开始",
       select: "选择摄像头",
       robotHasNone: "该机器人没有摄像头 — 请在机器人设置中添加",
+      noRobot: "请选择机器人以查看其摄像头。",
+      unmatched:
+        "策略需要摄像头 <0>{{name}}</0>，但该机器人没有名为“{{name}}”的摄像头 — 请在机器人设置中重命名。",
+      resolutionMismatch:
+        "<0>{{name}}</0> 在机器人设置中为 {{robotWidth}}×{{robotHeight}}，而策略是在 {{policyWidth}}×{{policyHeight}} 下训练的 — 运行时按策略的分辨率采集。",
     },
     thumbnail: {
       released: "已释放",

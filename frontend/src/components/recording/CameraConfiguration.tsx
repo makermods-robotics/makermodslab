@@ -742,6 +742,12 @@ interface SessionCameraListProps {
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>;
   /** Shown when the robot has no cameras. */
   emptyLabel?: string;
+  /** Drive the pause from outside instead of through releaseStreamsRef, for a
+   * caller whose "hand the devices over" state is derived rather than an event
+   * (the Run panel pauses while a rollout is submitting or active, and resumes
+   * on its own when it ends — the ref is one-way and would need a remount).
+   * Left undefined, the list keeps its own state and nothing changes. */
+  paused?: boolean;
 }
 
 /**
@@ -766,6 +772,7 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
   cameras,
   releaseStreamsRef,
   emptyLabel,
+  paused,
 }) => {
   const { t } = useTranslation();
   const eyebrow = useEyebrowClass();
@@ -775,8 +782,9 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
   // Same handover as the editable component: pausing unmounts the streams AND
   // stops the enumeration probe, so cv2 can open the devices exclusively.
   const [streamsPaused, setStreamsPaused] = useState(false);
+  const isPaused = paused ?? streamsPaused;
   const { cameras: availableCameras } = useAvailableCameras({
-    enabled: !streamsPaused,
+    enabled: !isPaused,
   });
 
   const releaseAllCameraStreams = useCallback(() => setStreamsPaused(true), []);
@@ -816,7 +824,7 @@ export const SessionCameraList: React.FC<SessionCameraListProps> = ({
                       : undefined
                   }
                   uniqueId={camera.unique_id}
-                  paused={streamsPaused}
+                  paused={isPaused}
                   emptyLabel={t("recording.cameras.disconnectedSettings")}
                 />
                 <div className="space-y-0.5 p-3">

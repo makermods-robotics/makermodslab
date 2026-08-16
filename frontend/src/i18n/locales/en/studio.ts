@@ -167,6 +167,8 @@ export default {
         "Training on {{used}} of {{total}} episodes — adjust which ones from this dataset's viewer in My Library.",
       // aria-label and title on the same button.
       choose: "Choose dataset",
+      // Placeholder on the picker trigger before a dataset is chosen.
+      pick: "Pick a dataset",
       // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
       useHub: "Use <0>{{repoId}}</0> from the Hub",
       useHubHint: "Public dataset — training fetches it on demand.",
@@ -230,6 +232,12 @@ export default {
 
   deploy: {
     title: "Run",
+    // The panel's entry control — the opener that slides the run form open,
+    // matching collect.entry / train.entry.
+    entry: "Run a skill",
+    skill: {
+      label: "Skill *",
+    },
     picker: {
       placeholder: "Pick a skill",
       loading: "Loading skills…",
@@ -250,7 +258,9 @@ export default {
       local: "local",
       both: "local · hub",
     },
-    intro: "Run this skill on your robot, then start inference.",
+    // The run form's one-line brief, in the slot and voice Train uses.
+    intro:
+      "Pick a skill and its checkpoint, set how long it runs, and check the cameras — then start.",
     noRobot:
       "Select a robot to run on — use the robot menu in the top-right corner of this window.",
     // <0> wraps the robot name; {{gap}} is the rendered follower-scoped setup
@@ -315,6 +325,8 @@ export default {
     checkpoint: {
       label: "Checkpoint",
       none: "No checkpoints available for this skill yet.",
+      // Placeholder on the disabled dropdown shown before a skill is picked.
+      pickSkillFirst: "Pick a skill first",
     },
     // Checkpoint/robot arm-count mismatch. Each branch is one complete
     // sentence pair so word order is the translator's to choose. <0> is the
@@ -330,7 +342,13 @@ export default {
       label: "Task description",
       placeholder: "e.g., pick up the red block",
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
+      // The field is always shown, so the helper answers "is this even read?"
+      // in all three states: no skill picked yet, conditioned, not conditioned.
       hint: "This policy is language-conditioned ({{policyType}}).",
+      hintUnknown:
+        "Only language-conditioned policies use this — pick a skill to see whether yours does.",
+      hintNotConditioned:
+        "This policy ({{policyType}}) isn't language-conditioned — it ignores this.",
       // Appended to `hint` when the task was auto-filled from the checkpoint's
       // own training dataset. Leading space is added by the caller.
       prefilled: "Filled in from the dataset it was trained on.",
@@ -391,6 +409,17 @@ export default {
       disconnected: "Disconnected — reconnect it before starting",
       select: "Select a camera",
       robotHasNone: "This robot has no cameras — add them in Robot settings",
+      // Empty state of the read-only camera list when no robot is selected.
+      noRobot: "Select a robot to see its cameras.",
+      // A camera the checkpoint names that the robot has nothing matching.
+      // <0> emphasises the name; the name itself is DATA (the robot record's
+      // own key), interpolated, never translated.
+      unmatched:
+        "The policy expects camera <0>{{name}}</0> but this robot has no camera named “{{name}}” — rename one in Robot settings.",
+      // Matched by name, but the robot captures at a different size than the
+      // checkpoint trained at. All four numbers are raw pixel dimensions.
+      resolutionMismatch:
+        "<0>{{name}}</0> is set to {{robotWidth}}×{{robotHeight}} in Robot settings, but the policy trained at {{policyWidth}}×{{policyHeight}} — the run captures at the policy's size.",
     },
     thumbnail: {
       // The preview tile's two placeholder states.

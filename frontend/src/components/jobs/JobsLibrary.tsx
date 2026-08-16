@@ -4,7 +4,7 @@ import { RefreshCw } from "lucide-react";
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import LibraryHeader from "@/components/library/LibraryHeader";
-import { GRID_H } from "@/components/library/CappedGrid";
+import { GRID_MIN_H } from "@/components/library/CappedGrid";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
@@ -384,7 +384,14 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           : null;
 
   return (
-    <Collapsible open={open} onOpenChange={onOpenChange} className="space-y-3">
+    // flex-1 + min-h-0 down the whole chain (see LibrarySection): the library
+    // fills the column's spare height and its bottom edge sits at the foot,
+    // instead of the slack pooling above the section's rule.
+    <Collapsible
+      open={open}
+      onOpenChange={onOpenChange}
+      className="flex min-h-0 flex-1 flex-col space-y-3"
+    >
       <LibraryHeader
         title={t("jobs.jobsLibrary.title")}
         count={activeCount}
@@ -404,8 +411,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         }
       />
 
-      <CollapsibleContent className={SLIDE}>
-        <div className="space-y-3">
+      <CollapsibleContent className={cn(SLIDE, "flex min-h-0 flex-1 flex-col")}>
+        <div className="flex min-h-0 flex-1 flex-col space-y-3">
           {isEmpty ? null : (
             <LibraryToolbar
               query={search}
@@ -459,16 +466,24 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               remote runs share one list, newest-first inside their launched-by
               group; each row's Local/Cloud/node chip says where it runs.
 
-              The block is held at the libraries' one reserved height (GRID_H —
-              the same measurement the dataset and model grids floor themselves
-              at). That reservation is what puts the three studio panels'
-              `mt-auto` action rows on one visual row, and this library lost it
-              when its card grid became a dropdown: the Train panel's Start
-              button then rose and fell with whether a run was selected and how
-              tall its card was. Held in BOTH directions, so an empty selection
-              reserves the same height a tall card does — the card scrolls
-              inside the box rather than growing it. */}
-          <div className={cn(GRID_H, "flex flex-col gap-2 overflow-hidden")}>
+              The block floors at the libraries' one reserved height (GRID_MIN_H
+              — the same measurement the dataset and model grids floor
+              themselves at) and then grows into whatever the section has
+              spare, so its bottom edge lands at the column foot like the other
+              two libraries' footers, and a tall detail card can't push it
+              there: the card scrolls inside the box rather than growing it.
+
+              A FLOOR, not a fixed height, is what changed — the block used to
+              be exactly GRID_H so it couldn't move the `mt-auto` action rows
+              the three panels hung off. Those are gone; the panels top-pack and
+              the libraries stretch instead. (min-h-0 belongs on the WRAPPERS
+              above, never here — it would cancel this floor.) */}
+          <div
+            className={cn(
+              GRID_MIN_H,
+              "flex flex-1 flex-col gap-2 overflow-hidden",
+            )}
+          >
             {isEmpty ? (
               // Inside the reserved block, not instead of it: the height is
               // what keeps the three studio panels' action rows on one row, so

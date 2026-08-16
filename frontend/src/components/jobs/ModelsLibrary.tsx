@@ -45,6 +45,12 @@ interface ModelsLibraryProps {
   /** Select this model (job record + optional checkpoint step) as the skill
    * to deploy — wired to the Deploy panel's picker state. */
   onPick: (job: JobRecord, step: number | null) => void;
+  /** Controlled disclosure, so the Deploy panel can fold this shelf down to
+   * its header while its run form is open — the same wiring JobsLibrary takes
+   * from Train and Collect's dataset library takes from Collect. Optional:
+   * left out, the library owns its own open state and starts expanded. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /**
@@ -55,7 +61,11 @@ interface ModelsLibraryProps {
  * entry point is always visible. Card Run actions select the model in the
  * Deploy panel instead of opening the legacy modal.
  */
-const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
+const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
+  onPick,
+  open: openProp,
+  onOpenChange,
+}) => {
   const { t } = useTranslation();
   const { openStudio } = useStudio();
   const { jobs, untrackedHubModels, refresh, stop, remove } = useJobsData();
@@ -68,7 +78,10 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   // untracked Hub repo resolves to a pseudo-job exactly as everywhere else.
   const { importSource } = useInferenceLaunch();
 
-  const [libraryOpen, setLibraryOpen] = useState(true);
+  // Uncontrolled fallback: only used when the caller passes neither prop.
+  const [ownOpen, setOwnOpen] = useState(true);
+  const libraryOpen = openProp ?? ownOpen;
+  const setLibraryOpen = onOpenChange ?? setOwnOpen;
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ModelsFilter>("all");
@@ -158,7 +171,10 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
     <Collapsible
       open={libraryOpen}
       onOpenChange={setLibraryOpen}
-      className="space-y-3"
+      // flex-1 + min-h-0 down the whole chain (see LibrarySection): the
+      // library fills the column's spare height and its footer sits at the
+      // foot, instead of the slack pooling above the section's rule.
+      className="flex min-h-0 flex-1 flex-col space-y-3"
     >
       <LibraryHeader
         title={t("jobs.modelsLibrary.title")}
@@ -177,7 +193,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
         }
       />
 
-      <CollapsibleContent className={SLIDE}>
+      <CollapsibleContent className={cn(SLIDE, "flex min-h-0 flex-1 flex-col")}>
         {count === 0 ? (
           <div
             className={cn(
@@ -188,7 +204,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
             {t("jobs.modelsLibrary.empty")}
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="flex min-h-0 flex-1 flex-col space-y-3">
             <LibraryToolbar
               query={search}
               onQueryChange={setSearch}
