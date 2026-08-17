@@ -349,6 +349,7 @@ def _clear_hub_status_cache() -> None:
 
     with ds._HUB_STATUS_LOCK:
         ds._HUB_STATUS_CACHE.clear()
+        ds._HUB_HAS_DATA_CACHE.clear()
 
 
 def test_get_hub_status_reports_on_hub_when_repo_exists() -> None:
@@ -2853,4 +2854,146 @@ def test_get_hub_dataset_info_caches_under_the_resolved_id(tmp_path: Path) -> No
 
     # The upload path holds the bare id; the sweep must still find the entry.
     ds.invalidate_hub_dataset_info("pick")
+    assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+# --- half-finished uploads --------------------------------------------------
+#
+# A repo can exist on the Hub and hold nothing: an upload is create-then-send,
+# and a failure after the create leaves the empty repo behind. "Exists" then
+# reads as "backed up" for a repo with no data in it — the one mistake that can
+# cost the user their only copy.
+
+
+def test_hub_copy_has_data_false_when_the_repo_is_empty() -> None:
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = [".gitattributes", "README.md"]
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is False
+
+
+def test_hub_copy_has_data_true_when_the_dataset_is_there() -> None:
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = ["README.md", "meta/info.json", "data/chunk-000/file-000.parquet"]
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+
+
+def test_hub_copy_has_data_returns_none_when_the_listing_fails() -> None:
+    """A degraded read must not manufacture an "empty repo" claim."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.list_repo_files.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is None
+
+
+def test_get_hub_status_flags_an_empty_hub_repo_with_a_local_copy() -> None:
+    """The case that costs data: the card would otherwise say "Uploaded to
+    HuggingFace" for a repo holding nothing, next to 25 local episodes."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.list_repo_files.return_value = ["README.md"]
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "on_hub"
+    assert result["hub_has_data"] is False
+
+
+def test_get_hub_status_makes_no_emptiness_claim_without_a_local_copy() -> None:
+    """An empty repo with nothing local is just litter on the Hub — no claim,
+    and no extra listing call on the common path."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=False),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "on_hub"
+    assert result["hub_has_data"] is None
+    fake_api.list_repo_files.assert_not_called()
+
+
+def test_get_hub_status_emptiness_claim_survives_the_status_cache_hit() -> None:
+    """status is memoized; the claim must still be attached on a cache hit, or
+    the warning would vanish on the card's second render."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.list_repo_files.return_value = ["README.md"]
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        ds.get_hub_status("alice/pick")
+        second = ds.get_hub_status("alice/pick")
+
+    assert fake_api.repo_exists.call_count == 1  # status came from the cache
+    assert second["hub_has_data"] is False
+
+
+def test_invalidate_hub_status_drops_the_emptiness_answer_too() -> None:
+    """After a successful upload the repo is no longer empty — both cached Hub
+    facts must go, or the card would keep warning about a finished upload."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = False
+
+    ds.invalidate_hub_status("pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_push_dataset_to_hub_invalidates_the_cached_hub_facts() -> None:
+    """A successful push falsifies both cached Hub answers for the dataset.
+
+    Invalidating inside the one push function rather than at each call site is
+    what keeps a caller from leaving the card insisting "Local only" — or
+    "Upload didn't finish" — about a dataset it just uploaded. The cloud
+    runner's implicit upload is exactly such a caller.
+    """
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    _clear_hub_dataset_info_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = False
+    ds._HUB_DATASET_INFO_CACHE["alice/pick"] = {"total_episodes": 0}
+
+    fake_dataset = MagicMock(num_episodes=25)
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("lerobot.datasets.LeRobotDataset", return_value=fake_dataset),
+    ):
+        assert ds.push_dataset_to_hub("pick", tags=["makermods"], private=False) == "alice/pick"
+
+    fake_dataset.push_to_hub.assert_called_once()
+    assert fake_dataset.repo_id == "alice/pick"
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
     assert ds._HUB_DATASET_INFO_CACHE == {}

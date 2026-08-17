@@ -490,6 +490,9 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   const { toast } = useToast();
   const [status, setStatus] = useState<HubStatusValue>("unknown");
   const [hubUrl, setHubUrl] = useState<string | null>(null);
+  // A repo of this name exists on the Hub but holds no dataset — an upload
+  // that never finished. It is not a backup. See HubStatus.hub_has_data.
+  const [uploadIncomplete, setUploadIncomplete] = useState(false);
   // Bumped after a visibility/tags edit to re-run the status fetch (the backend
   // invalidates its hub-status cache on a change, so this re-reads fresh).
   const [refreshKey, setRefreshKey] = useState(0);
@@ -500,6 +503,8 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     onDone: (url) => {
       setStatus("on_hub");
       setHubUrl(url);
+      // The push that just succeeded is what the Hub repo was missing.
+      setUploadIncomplete(false);
       toast({
         title: "Uploaded to Hub",
         description: (
@@ -544,10 +549,12 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     const controller = new AbortController();
     setStatus("unknown");
     setHubUrl(null);
+    setUploadIncomplete(false);
     getDatasetHubStatus(baseUrl, fetchWithHeaders, repoId, controller.signal)
       .then((data) => {
         setStatus(data.status);
         setHubUrl(data.url);
+        setUploadIncomplete(data.hub_has_data === false);
       })
       .catch(() => {
         // Degrade silently to "unknown" — no error spam on the card.
@@ -561,6 +568,40 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       <div className="flex items-center gap-1.5 text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" />
         <span>Uploading to Hub…</span>
+      </div>
+    );
+  }
+
+  // A repo of this name is on the Hub, but there is no dataset inside it: an
+  // earlier upload created the repo and then failed before sending the files.
+  // Saying "Uploaded to HuggingFace" here invites deleting the only real copy,
+  // so name the actual state and keep the upload one click away.
+  if (status === "on_hub" && uploadIncomplete) {
+    return (
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
+          Upload didn't finish — nothing on the Hub yet
+          {hubUrl && (
+            <a
+              href={hubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 hover:text-foreground"
+            >
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </span>
+        <UploadDatasetDialog repoId={repoId} start={start}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 gap-1 border-amber-500/50 px-2 text-xs text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+          >
+            <UploadIcon className="h-3 w-3" />
+            Upload to Hub
+          </Button>
+        </UploadDatasetDialog>
       </div>
     );
   }
