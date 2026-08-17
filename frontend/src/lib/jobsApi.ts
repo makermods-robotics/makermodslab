@@ -27,6 +27,9 @@ export type MetricsHistoryPoint = {
 // these; defaults on the server fill in the rest.
 export interface TrainingRequest {
   dataset_repo_id: string;
+  // Episode indices to train on; omitted ⇒ every episode (see
+  // TrainingConfig.dataset_episodes).
+  dataset_episodes?: number[];
   policy_type: string;
   // Optional user-supplied display name; blank ⇒ backend auto-names the run.
   job_name?: string;

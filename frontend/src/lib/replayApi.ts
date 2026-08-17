@@ -198,6 +198,45 @@ export async function listEpisodes(
   );
 }
 
+/** Episode indices excluded from training for a dataset (curation, not
+ * deletion — the episode stays on disk/Hub, it's just left out of the
+ * subset a training run is launched with). GET /datasets/excluded-episodes. */
+export async function getExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    `/datasets/excluded-episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Get excluded episodes" },
+  );
+  return body.episode_indices;
+}
+
+/** Replace the excluded-episode set for a dataset. NEVER touches the
+ * dataset's files or Hub copy. PUT /datasets/excluded-episodes. */
+export async function setExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndices: number[],
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    "/datasets/excluded-episodes",
+    {
+      method: "PUT",
+      body: { repo_id: repoId, episode_indices: episodeIndices },
+      action: "Set excluded episodes",
+    },
+  );
+  return body.episode_indices;
+}
+
 export interface EpisodeJointSeries {
   joint_names: string[];
   timestamps: number[];
