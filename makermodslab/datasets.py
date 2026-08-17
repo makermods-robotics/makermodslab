@@ -171,6 +171,54 @@ def resolve_hub_repo_id(repo_id: str) -> str:
     return f"{canonical}/{name}" if canonical else repo_id
 
 
+def push_dataset_to_hub(local_repo_id: str, *, tags: list[str] | None, private: bool) -> str:
+    """Push the local dataset at `local_repo_id` to the Hub. Returns the Hub id
+    it landed under.
+
+    The one place that works around ``LeRobotDataset.push_to_hub``'s split
+    behaviour on a bare repo_id. Inside a single push_to_hub call, create_repo
+    resolves a bare id to the caller's namespace and creates the repo THERE,
+    while the upload_folder and card/tag calls right after it reuse the bare id
+    literally and 404 against it — leaving a freshly-created empty repo behind
+    and reporting failure. Resolving up front makes every call inside push
+    target one repo.
+
+    ``dataset.repo_id`` is assigned rather than passed because push_to_hub
+    takes no repo_id argument — it reads the attribute. That's a reach into
+    lerobot's object, which is exactly why it lives here once instead of at
+    each upload site; when lerobot resolves this upstream, one function
+    changes.
+
+    Raises RuntimeError when there's no Hub identity to resolve a bare id
+    against. Unlike the read paths, an upload cannot degrade: with no token
+    there is nowhere to push, and a bare create_repo would fail anyway with a
+    far less legible error.
+    """
+    from lerobot.datasets import LeRobotDataset
+
+    hub_repo_id = resolve_hub_repo_id(local_repo_id)
+    if "/" not in hub_repo_id:
+        raise RuntimeError("Not authenticated with the Hugging Face Hub")
+
+    dataset = LeRobotDataset(local_repo_id)
+    logger.info(
+        "Uploading %s to the Hub as %s (%d episodes)", local_repo_id, hub_repo_id, dataset.num_episodes
+    )
+    dataset.repo_id = hub_repo_id
+    dataset.push_to_hub(tags=tags, private=private)
+
+    # The push just falsified both cached Hub facts for this dataset: it may
+    # have created the repo (status), and it certainly changed what is inside
+    # it (the summary read from meta/info.json). Invalidating HERE rather than
+    # at each call site is the point of this being the single push: a caller
+    # that forgot would leave the info card insisting "Local only" about a
+    # dataset it had just successfully uploaded, for the process lifetime.
+    # Callers may still invalidate their own extras (record's listing cache).
+    invalidate_hub_status(local_repo_id)
+    invalidate_hub_dataset_info(local_repo_id)
+    return hub_repo_id
+
+
 def hub_repo_exists(repo_id: str) -> bool | None:
     """Does a dataset repo with this id exist on the Hub?
 
