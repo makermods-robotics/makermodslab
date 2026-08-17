@@ -41,7 +41,12 @@ from queue import Empty, Queue
 from huggingface_hub import get_token
 from packaging.requirements import Requirement
 
-from ..datasets import hub_repo_exists, push_dataset_to_hub, resolve_hub_repo_id
+from ..datasets import (
+    hub_copy_has_data,
+    hub_repo_exists,
+    push_dataset_to_hub,
+    resolve_hub_repo_id,
+)
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makermodslab_tag
@@ -854,17 +859,32 @@ class HfCloudJobRunner:
         (offline / rate-limited / any transport error) we leave the Hub alone,
         because pushing into a repo we could not verify is worse than a pod
         that fails resolving a dataset.
+
+        An EXISTING but EMPTY repo counts as absent. A half-finished upload
+        leaves behind the empty repo its first call created; "the repo exists"
+        was enough to skip the push, so the pod would then die resolving a
+        dataset with no files in it. Refilling it is the whole remedy and needs
+        nothing from the user, so it happens silently rather than as a refusal
+        they'd have to act on.
         """
-        if hub_repo_exists(hub_repo_id) is not False:
+        exists = hub_repo_exists(hub_repo_id)
+        if exists is None:
+            return
+        if exists and hub_copy_has_data(hub_repo_id) is not False:
             return
 
         cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
         if not (cache_root / local_repo_id / "meta" / "info.json").is_file():
-            # Neither local nor on Hub. Let the trainer surface the error
-            # — same behaviour as before.
+            # Neither local nor usable on the Hub. Let the trainer surface the
+            # error — same behaviour as before.
             return
 
-        self._log_line(f"[upload] dataset {hub_repo_id} not on Hub; pushing local copy (public)...")
+        reason = (
+            "exists on the Hub but holds no data (an earlier upload didn't finish)"
+            if exists
+            else "not on Hub"
+        )
+        self._log_line(f"[upload] dataset {hub_repo_id} {reason}; pushing local copy (public)...")
         try:
             # Public by default: MakerMods Lab's global policy is that datasets it pushes
             # to the Hub are public and carry the required org/product tags (see
