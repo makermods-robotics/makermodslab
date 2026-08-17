@@ -102,6 +102,41 @@ def test_shutdown_stops_active_teleoperation(monkeypatch: pytest.MonkeyPatch) ->
     worker.join(timeout=2.0)
 
 
+def test_shutdown_stops_active_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server restart mid-replay must wait for the worker to actually
+    finish releasing the arm — same class of bug I8 fixed for teleoperation
+    (a plain kill or --reload restart otherwise orphans the in-process
+    worker thread mid-motion, with no return-to-rest and no torque release)."""
+    import makermodslab.record as record
+    import makermodslab.replay as replay
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    released = threading.Event()
+
+    def _worker() -> None:
+        while replay.replay_active:
+            time.sleep(0.01)
+        released.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(replay, "replay_active", True)
+    monkeypatch.setattr(replay, "replay_thread", worker)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(server_mod, "manager", None)
+    worker.start()
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert released.is_set(), "shutdown returned without waiting for replay to finish releasing"
+    assert replay.replay_active is False
+    worker.join(timeout=2.0)
+
+
 def test_shutdown_stops_active_recording(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same requirement as teleoperation, for recording_thread.
 

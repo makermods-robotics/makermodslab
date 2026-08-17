@@ -618,6 +618,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     from . import (
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
+        replay as _replay,
         rollout as _rollout,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
@@ -680,6 +681,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
             }
+        if _replay.replay_active:
+            return {"success": False, "message": "Replay is currently active. Stop it first."}
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".

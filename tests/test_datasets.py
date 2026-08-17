@@ -2566,6 +2566,90 @@ def test_get_episode_joint_series_hub_fallback_degrades_on_download_failure(
         assert ds.get_episode_joint_series("alice/hub_only", 0) is None
 
 
+def test_get_episode_action_series_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos", "gripper.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0],
+                "timestamp": [0.0, 0.033],
+                "action": [[10.0, 50.0], [10.5, 51.0]],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+
+    with patch("makermodslab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_action_series("alice/local", 0)
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result["action_names"] == ["shoulder_pan.pos", "gripper.pos"]
+    assert result["timestamps"] == [0.0, 0.033]
+    assert result["values"] == [[10.0, 50.0], [10.5, 51.0]]
+
+
+def test_get_episode_action_series_returns_none_on_malformed_chunk_index(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Mirrors get_episode_joint_series's malformed-index guard — a corrupt
+    or adversarial Hub dataset must 404 gracefully, not raise, since this
+    now feeds a hardware-driving code path."""
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [float("nan")], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 0) is None
+
+
+def test_get_episode_action_series_missing_episode_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "timestamp": [0.0], "action": [[1.0]]}),
+        data_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 7) is None
+
+
 # ---------------------------------------------------------------------------
 # End-to-end route coverage for Hub dataset viewer — Tasks 1–5 integrated
 # through the real FastAPI routes without production code changes.

@@ -97,6 +97,13 @@ from .record import (
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+from .replay import (
+    ReplayRequest,
+    handle_replay_status,
+    handle_start_replay,
+    handle_stop_replay,
+    stop_and_wait as stop_replay_and_wait,
+)
 from .rollout import (
     InferenceRequest,
     handle_inference_log,
@@ -600,6 +607,33 @@ def inference_log():
     most recent finished run of this server process) or null (nothing to show) —
     the caller must not present a "last_run" log as the live session's output."""
     return handle_inference_log()
+
+
+@app.post("/start-replay")
+def start_replay(request: ReplayRequest):
+    result = handle_start_replay(request, manager)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start replay"),
+        )
+    return result
+
+
+@app.post("/stop-replay")
+def stop_replay():
+    result = handle_stop_replay()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to stop replay"),
+        )
+    return result
+
+
+@app.get("/replay-status")
+def replay_status():
+    return handle_replay_status()
 
 
 @app.get("/health")
@@ -2897,9 +2931,17 @@ async def shutdown_event():
         asyncio.to_thread(auto_calibration_manager.stop_and_wait),
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
+        asyncio.to_thread(stop_replay_and_wait),
         return_exceptions=True,
     )
-    labels = ("teleoperation", "recording", "auto-calibration", "auto-calibration batch", "inference")
+    labels = (
+        "teleoperation",
+        "recording",
+        "auto-calibration",
+        "auto-calibration batch",
+        "inference",
+        "replay",
+    )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):
             logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)

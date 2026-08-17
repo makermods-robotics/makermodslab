@@ -935,6 +935,84 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
     }
 
 
+def get_episode_action_series(repo_id: str, episode_index: int) -> dict[str, Any] | None:
+    """Per-frame timestamp + ``action`` for one episode — the commanded
+    values, for driving a real robot during hardware replay (see
+    makermodslab/replay.py). Deliberately separate from
+    get_episode_joint_series (which reads observation.state, for the
+    viewer's chart display only): the two columns are usually close but not
+    identical, and the chart's reference trace intentionally keeps showing
+    observation.state unchanged even when a hardware replay is using this
+    function's action data to actually drive the arm.
+
+    None if it can't be resolved/read (not local, not the v3.0 parquet
+    layout, or the episode doesn't exist) — same semantics as
+    get_episode_joint_series, including the Hub data-chunk fallback.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    is_hub = path is None
+    if is_hub:
+        path = _ensure_hub_episodes_root(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    action_names = ((info.get("features") or {}).get("action") or {}).get("names") or []
+
+    episode_rows = _read_episode_rows(
+        path / "meta", columns=["episode_index", "data/chunk_index", "data/file_index"]
+    )
+    if episode_rows is None:
+        return None
+    row = next((r for r in episode_rows if _safe_int(r.get("episode_index")) == episode_index), None)
+    if row is None or row.get("data/chunk_index") is None or row.get("data/file_index") is None:
+        return None
+    chunk_index, file_index = _safe_int(row["data/chunk_index"]), _safe_int(row["data/file_index"])
+    if chunk_index is None or file_index is None:
+        logger.warning("Malformed data chunk/file index for %s episode %d", repo_id, episode_index)
+        return None
+
+    rel_data_path = Path("data") / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
+    if is_hub:
+        try:
+            data_path = Path(hf_hub_download(repo_id, filename=str(rel_data_path), repo_type="dataset"))
+        except Exception as exc:
+            logger.info("hub data chunk fetch for %s failed: %s", repo_id, exc)
+            return None
+    else:
+        data_path = path / rel_data_path
+        if not data_path.is_file():
+            return None
+    try:
+        table = pq.read_table(data_path, columns=["episode_index", "timestamp", "action"])
+    except Exception as e:
+        logger.warning(f"Could not read {data_path}: {e}")
+        return None
+
+    frames = sorted(
+        (
+            (float(ts), [float(v) for v in action])
+            for ep, ts, action in zip(
+                table.column("episode_index").to_pylist(),
+                table.column("timestamp").to_pylist(),
+                table.column("action").to_pylist(),
+                strict=True,
+            )
+            if _safe_int(ep) == episode_index
+        ),
+        key=lambda pair: pair[0],
+    )
+    if not frames:
+        return None
+    return {
+        "action_names": [str(n) for n in action_names],
+        "timestamps": [t for t, _ in frames],
+        "values": [v for _, v in frames],
+    }
+
+
 # In-process cache of per-repo Hub dataset summaries (the /datasets/info hub
 # fallback), mirroring _HUB_STATUS_CACHE conventions: successful answers are
 # memoized for the process lifetime; the offline/error degrade is NEVER cached,

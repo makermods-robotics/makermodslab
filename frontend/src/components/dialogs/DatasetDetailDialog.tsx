@@ -17,6 +17,7 @@ import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
+import EpisodeReplayPanel from "@/components/dialogs/EpisodeReplayPanel";
 import {
   EpisodeJointSeries,
   EpisodeSummary,
@@ -306,135 +307,153 @@ const EpisodeViewer: React.FC<{
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [gotoEpisode, handlePlayPause]);
 
-  if (cameras.length === 0) {
-    return (
-      <div className="flex flex-1 items-center justify-center rounded-md border border-border bg-muted/30 text-sm text-muted-foreground">
-        This dataset has no camera data to view.
-      </div>
-    );
-  }
+  // Drives the chart's scrubFrac from the replay's own local elapsed-time
+  // clock while a hardware replay is playing — the same prop that camera
+  // playback drives via currentTime, just a different clock source. Reset
+  // to null (falls back to the camera-driven currentTime) once the replay
+  // leaves the "playing" phase.
+  const [replayElapsedS, setReplayElapsedS] = useState<number | null>(null);
+  const handleReplayElapsedChange = useCallback((elapsedS: number, phase: string) => {
+    setReplayElapsedS(phase === "playing" ? elapsedS : null);
+  }, []);
+
+  const effectiveCurrentTime = replayElapsedS ?? currentTime;
+  const effectiveScrubFrac = episode?.duration ? effectiveCurrentTime / episode.duration : 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div
-        ref={gridWrapRef}
-        className="relative flex-1 overflow-auto rounded-md border border-border bg-[#0c0f14]"
-      >
+      {cameras.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center rounded-md border border-border bg-muted/30 text-sm text-muted-foreground">
+          This dataset has no camera footage — replay it on hardware or view the joint trace below.
+        </div>
+      ) : (
         <div
-          className="grid justify-center content-center gap-2 p-2"
-          style={{
-            gridTemplateColumns: `repeat(${layout.cols}, ${layout.tileW}px)`,
-            gridAutoRows: `${layout.tileH}px`,
-          }}
+          ref={gridWrapRef}
+          className="relative flex-1 overflow-auto rounded-md border border-border bg-[#0c0f14]"
         >
-          {cameras.map((camera) => (
+          <div
+            className="grid justify-center content-center gap-2 p-2"
+            style={{
+              gridTemplateColumns: `repeat(${layout.cols}, ${layout.tileW}px)`,
+              gridAutoRows: `${layout.tileH}px`,
+            }}
+          >
+            {cameras.map((camera) => (
+              <div
+                key={camera}
+                className="relative overflow-hidden rounded border border-white/10 bg-black"
+              >
+                <span className="absolute left-1.5 top-1.5 z-10 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-zinc-100">
+                  {camera}
+                </span>
+                {videoErrors[camera] ? (
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-3 text-center text-zinc-300">
+                    <VideoOff className="h-4 w-4" />
+                    <p className="text-[10px] leading-snug">
+                      Can't decode this camera's video in this browser.
+                    </p>
+                  </div>
+                ) : (
+                  <video
+                    key={`${repoId}:${selectedEpisode}:${camera}`}
+                    ref={(el) => {
+                      videoRefs.current[camera] = el;
+                    }}
+                    src={episodeVideoUrl(baseUrl, repoId, selectedEpisode, camera)}
+                    className="h-full w-full object-cover"
+                    muted
+                    playsInline
+                    onLoadedMetadata={(e) => {
+                      e.currentTarget.currentTime = offsetFor(camera);
+                    }}
+                    onTimeUpdate={
+                      camera === primaryCamera
+                        ? (e) => handlePrimaryTimeUpdate(e.currentTarget.currentTime)
+                        : undefined
+                    }
+                    onEnded={camera === primaryCamera ? handlePrimaryEnded : undefined}
+                    onError={() =>
+                      setVideoErrors((prev) => ({ ...prev, [camera]: true }))
+                    }
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {cameras.length > 0 ? (
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => gotoEpisode(-1)}
+            disabled={!episode || !hasPrev}
+            aria-label="Previous episode"
+          >
+            <SkipBack className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={handlePlayPause}
+            disabled={!episode}
+            aria-label={playing ? "Pause" : "Play"}
+          >
+            {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => gotoEpisode(1)}
+            disabled={!episode || !hasNext}
+            aria-label="Next episode"
+          >
+            <SkipForward className="h-3.5 w-3.5" />
+          </Button>
+          <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
+            {episode ? `${fmtTime(currentTime)} / ${fmtTime(episode.duration)}` : "—"}
+          </span>
+          <div
+            ref={scrubRef}
+            className="relative h-5 flex-1 cursor-pointer"
+            onPointerDown={(e) => {
+              draggingRef.current = true;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              forEachVideo((v) => v.pause());
+              setPlaying(false);
+              seekFromClientX(e.clientX);
+            }}
+            onPointerMove={(e) => {
+              if (draggingRef.current) seekFromClientX(e.clientX);
+            }}
+            onPointerUp={(e) => {
+              draggingRef.current = false;
+              e.currentTarget.releasePointerCapture(e.pointerId);
+            }}
+          >
+            <div className="absolute inset-y-0 my-auto h-1 w-full rounded-full bg-muted" />
             <div
-              key={camera}
-              className="relative overflow-hidden rounded border border-white/10 bg-black"
-            >
-              <span className="absolute left-1.5 top-1.5 z-10 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-zinc-100">
-                {camera}
-              </span>
-              {videoErrors[camera] ? (
-                <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-3 text-center text-zinc-300">
-                  <VideoOff className="h-4 w-4" />
-                  <p className="text-[10px] leading-snug">
-                    Can't decode this camera's video in this browser.
-                  </p>
-                </div>
-              ) : (
-                <video
-                  key={`${repoId}:${selectedEpisode}:${camera}`}
-                  ref={(el) => {
-                    videoRefs.current[camera] = el;
-                  }}
-                  src={episodeVideoUrl(baseUrl, repoId, selectedEpisode, camera)}
-                  className="h-full w-full object-cover"
-                  muted
-                  playsInline
-                  onLoadedMetadata={(e) => {
-                    e.currentTarget.currentTime = offsetFor(camera);
-                  }}
-                  onTimeUpdate={
-                    camera === primaryCamera
-                      ? (e) => handlePrimaryTimeUpdate(e.currentTarget.currentTime)
-                      : undefined
-                  }
-                  onEnded={camera === primaryCamera ? handlePrimaryEnded : undefined}
-                  onError={() =>
-                    setVideoErrors((prev) => ({ ...prev, [camera]: true }))
-                  }
-                />
-              )}
-            </div>
-          ))}
+              className="absolute inset-y-0 my-auto h-1 rounded-full bg-foreground"
+              style={{ width: `${scrubFrac * 100}%` }}
+            />
+            <div
+              className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-foreground shadow"
+              style={{ left: `calc(${scrubFrac * 100}% - 6px)` }}
+            />
+          </div>
         </div>
-      </div>
+      ) : null}
 
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={() => gotoEpisode(-1)}
-          disabled={!episode || !hasPrev}
-          aria-label="Previous episode"
-        >
-          <SkipBack className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={handlePlayPause}
-          disabled={!episode}
-          aria-label={playing ? "Pause" : "Play"}
-        >
-          {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={() => gotoEpisode(1)}
-          disabled={!episode || !hasNext}
-          aria-label="Next episode"
-        >
-          <SkipForward className="h-3.5 w-3.5" />
-        </Button>
-        <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
-          {episode ? `${fmtTime(currentTime)} / ${fmtTime(episode.duration)}` : "—"}
-        </span>
-        <div
-          ref={scrubRef}
-          className="relative h-5 flex-1 cursor-pointer"
-          onPointerDown={(e) => {
-            draggingRef.current = true;
-            e.currentTarget.setPointerCapture(e.pointerId);
-            forEachVideo((v) => v.pause());
-            setPlaying(false);
-            seekFromClientX(e.clientX);
-          }}
-          onPointerMove={(e) => {
-            if (draggingRef.current) seekFromClientX(e.clientX);
-          }}
-          onPointerUp={(e) => {
-            draggingRef.current = false;
-            e.currentTarget.releasePointerCapture(e.pointerId);
-          }}
-        >
-          <div className="absolute inset-y-0 my-auto h-1 w-full rounded-full bg-muted" />
-          <div
-            className="absolute inset-y-0 my-auto h-1 rounded-full bg-foreground"
-            style={{ width: `${scrubFrac * 100}%` }}
-          />
-          <div
-            className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-foreground shadow"
-            style={{ left: `calc(${scrubFrac * 100}% - 6px)` }}
-          />
-        </div>
-      </div>
-
-      <JointPositionChart joints={joints} episode={episode} scrubFrac={scrubFrac} />
+      <JointPositionChart joints={joints} episode={episode} scrubFrac={effectiveScrubFrac} />
+      <EpisodeReplayPanel
+        repoId={repoId}
+        episodeIndex={selectedEpisode}
+        onElapsedChange={handleReplayElapsedChange}
+      />
     </div>
   );
 };

@@ -75,7 +75,7 @@ Frontend checks (run from `frontend/`): `npm run lint`, `npx tsc --noEmit`, `npm
 
 ### State model & mutual exclusion
 
-Each feature module owns module-level globals (`recording_active`, `teleoperation_active`, `inference_active`, plus `calibrate.calibration_is_active()`, `auto_calibrate.auto_calibration_is_active()`, and `wiggle.wiggle_active`) protected by per-feature locks. Teleoperation, recording, inference, manual calibration, auto-calibration, and wiggle **are all mutually exclusive, enforced in code** — not by a shared lock, but by reciprocal active-flag checks at each feature's start (e.g. `handle_start_teleoperation` refuses while recording, inference, calibration, auto-calibration, or a wiggle is active). New features that drive the robot must add the same reciprocal checks against every existing one.
+Each feature module owns module-level globals (`recording_active`, `teleoperation_active`, `inference_active`, `replay.replay_active`, plus `calibrate.calibration_is_active()`, `auto_calibrate.auto_calibration_is_active()`, and `wiggle.wiggle_active`) protected by per-feature locks. Teleoperation, recording, inference, replay, manual calibration, auto-calibration, and wiggle **are all mutually exclusive, enforced in code** — not by a shared lock, but by reciprocal active-flag checks at each feature's start (e.g. `handle_start_teleoperation` refuses while recording, inference, replay, calibration, auto-calibration, or a wiggle is active). New features that drive the robot must add the same reciprocal checks against every existing one.
 
 ### WebSocket broadcast
 

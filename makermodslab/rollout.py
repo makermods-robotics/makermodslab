@@ -1650,6 +1650,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        replay as _replay,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
     )
@@ -1702,6 +1703,12 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+            }
+        if _replay.replay_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Replay is currently active. Stop it first.",
             }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first
