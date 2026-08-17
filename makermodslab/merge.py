@@ -568,12 +568,19 @@ def _ensure_local_source(repo_id: str, cache_root: Path) -> Path:
     local dataset by the time lerobot loads it — so lerobot takes its
     cache-load path and never runs the Hub version resolution that crashes
     under huggingface_hub >=1.x (see _cli_friendly_error). Raises on failure.
+
+    The Hub is addressed by the RESOLVED id (snapshot_download is a literal
+    lookup, so a bare locally-recorded id 404s) while the local directory keeps
+    the id the caller passed — the flat layout every other local path here
+    uses, and the one aggregate_datasets is handed below.
     """
+    from .datasets import resolve_hub_repo_id
+
     root = cache_root / repo_id
     if (root / "meta" / "info.json").exists():
         return root
     print(f"Downloading {repo_id} from the Hugging Face Hub…", flush=True)
-    snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=str(root))
+    snapshot_download(repo_id=resolve_hub_repo_id(repo_id), repo_type="dataset", local_dir=str(root))
     print(f"Downloaded {repo_id}.", flush=True)
     return root
 

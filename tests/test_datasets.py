@@ -2796,3 +2796,61 @@ def test_invalidate_hub_status_from_a_bare_id_drops_the_namespaced_entry() -> No
 
     assert "alice/pick" not in ds._HUB_STATUS_CACHE
     assert ds._HUB_STATUS_CACHE["alice/other"] == "on_hub"
+
+
+def test_get_hub_settings_reads_the_resolved_id() -> None:
+    """dataset_info is a literal-lookup call: the editor is offered exactly
+    when get_hub_status says on_hub, so it must resolve the same way or 404 on
+    a dataset the card just said is on the Hub."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=False, tags=["makermods"])
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = ds.get_hub_settings("pick")
+
+    fake_api.dataset_info.assert_called_once_with("alice/pick")
+    # The public contract is unchanged: repo_id echoes back as passed.
+    assert result["repo_id"] == "pick"
+
+
+def test_set_dataset_visibility_writes_to_the_resolved_id() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        ds.set_dataset_visibility("pick", True)
+
+    fake_api.update_repo_settings.assert_called_once_with("alice/pick", private=True, repo_type="dataset")
+
+
+def test_get_hub_dataset_info_caches_under_the_resolved_id(tmp_path: Path) -> None:
+    """Keyed by the id actually fetched, so the summary can't outlive the auth
+    state it came from — and a bare-id invalidation still finds it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = tmp_path / "info.json"
+    meta.write_text(json.dumps({"total_episodes": 3, "total_frames": 90, "fps": 30, "features": {}}))
+
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+    ):
+        assert ds.get_hub_dataset_info("pick")["total_episodes"] == 3
+
+    assert dl.call_args.args[0] == "alice/pick"
+    assert "alice/pick" in ds._HUB_DATASET_INFO_CACHE
+
+    # The upload path holds the bare id; the sweep must still find the entry.
+    ds.invalidate_hub_dataset_info("pick")
+    assert ds._HUB_DATASET_INFO_CACHE == {}
