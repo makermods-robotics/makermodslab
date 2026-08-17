@@ -60,6 +60,8 @@ import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
 import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
+import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 
 /**
  * Studio panel 3 · Deploy — run a skill (local trained checkpoint or an
@@ -172,7 +174,7 @@ const DeployPanel: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { open, deployPrefill, clearDeployPrefill } = useStudio();
-  const { openInferenceSession } = useInferenceSession();
+  const { openInferenceSession, sessionOpen } = useInferenceSession();
   const { selectedRecord: robot } = useRobots();
   // Reuse the shared lazy-import (husk-repo messaging + idempotent registration)
   // so a Hub skill resolves to a pseudo-job exactly as the Jobs cards do.
@@ -243,6 +245,23 @@ const DeployPanel: React.FC = () => {
   // rollout is actually active.
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [stopping, setStopping] = useState(false);
+
+  // Edge-triggered "consume once": handleStart sets the pending flag, and the
+  // effect below latches it into showDeployMilestone the first time the live
+  // InferenceSessionDialog closes, then clears the pending flag so it can't
+  // re-trigger — sessionOpen cycling true→false again later (a normal
+  // redeploy from this same panel) must not resurrect this banner.
+  const { seen: hasSeenDeployMilestone, markSeen: markDeployMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-deploy");
+  const [deployMilestonePending, setDeployMilestonePending] = useState(false);
+  const [showDeployMilestone, setShowDeployMilestone] = useState(false);
+
+  useEffect(() => {
+    if (!sessionOpen && deployMilestonePending) {
+      setShowDeployMilestone(true);
+      setDeployMilestonePending(false);
+    }
+  }, [sessionOpen, deployMilestonePending]);
 
   // The settings block (robot, checkpoint, run parameters, cameras) collapses
   // as one so a configured deploy can be folded down to picker + actions.
@@ -673,6 +692,10 @@ const DeployPanel: React.FC = () => {
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
       openInferenceSession();
+      if (!hasSeenDeployMilestone) {
+        setDeployMilestonePending(true);
+        markDeployMilestoneSeen();
+      }
       // The POST claims the inference slot synchronously, so a status fetch
       // issued now reflects THIS run — hand the released-previews / disabled-
       // Start duty from `submitting` to `inferenceActive` (kept fresh by the
@@ -719,7 +742,7 @@ const DeployPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="3" title="Run">
+      <PanelHeader step="3" title="Run" dataTour="studio-deploy">
         {resolving ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         ) : null}
@@ -1131,6 +1154,21 @@ const DeployPanel: React.FC = () => {
           ) : null}
         </div>
       ) : null}
+
+      {/* Deploy-started milestone — the effect above latches this true the
+          first time the live InferenceSessionDialog closes after handleStart
+          sets deployMilestonePending. Gated on the latched flag alone (not
+          live on !sessionOpen) so a later, unrelated session close (a normal
+          redeploy from this same panel — the banner's own copy invites
+          exactly that) can't resurrect an already-dismissed-or-shown
+          banner. */}
+      {showDeployMilestone && (
+        <MilestoneReveal
+          title="First skill deployed!"
+          description="Your robot just ran a trained policy. Come back here anytime to redeploy it, swap checkpoints, or run a different skill."
+          onDismiss={() => setShowDeployMilestone(false)}
+        />
+      )}
 
       {/* Actions — pinned directly above the skill library. Side by side so
           the row sits level with Collect's and Train's single Start. -------- */}

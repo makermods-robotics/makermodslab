@@ -17,6 +17,7 @@ import InferenceSessionDialog from "@/components/inference/InferenceSessionDialo
  */
 interface InferenceSessionContextValue {
   openInferenceSession: () => void;
+  sessionOpen: boolean;
 }
 
 const InferenceSessionContext =
@@ -31,8 +32,8 @@ export const InferenceSessionProvider: React.FC<{
   const handleExit = useCallback(() => setSessionOpen(false), []);
 
   const value = useMemo(
-    () => ({ openInferenceSession }),
-    [openInferenceSession],
+    () => ({ openInferenceSession, sessionOpen }),
+    [openInferenceSession, sessionOpen],
   );
 
   return (

@@ -9,6 +9,9 @@ import TrainPanel from "@/components/studio/TrainPanel";
 import DeployPanel from "@/components/studio/DeployPanel";
 import { JobsDataProvider } from "@/components/jobs/JobsDataContext";
 import { useStudio } from "@/contexts/StudioContext";
+import { useOnboarding } from "@/contexts/OnboardingContext";
+import { studioTour } from "@/lib/onboarding/tours";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 import { cn } from "@/lib/utils";
 
 /**
@@ -19,6 +22,9 @@ import { cn } from "@/lib/utils";
 const StudioOverlay: React.FC = () => {
   const { open, activePanel, closeStudio } = useStudio();
   const overlayRef = useRef<HTMLDivElement>(null);
+  const { seen: hasSeenStudioTour, markSeen: markStudioTourSeen } =
+    useOnceFlag("makerlab:seen-studio-tour");
+  const { start: startTour } = useOnboarding();
 
   // Lock page scroll while the studio is up.
   useEffect(() => {
@@ -28,6 +34,12 @@ const StudioOverlay: React.FC = () => {
     return () => {
       document.body.style.overflow = prev;
     };
+  }, [open]);
+
+  // First time the studio is opened, walk through its three panels.
+  useEffect(() => {
+    if (open && !hasSeenStudioTour) startTour(studioTour, markStudioTourSeen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // ESC closes the studio — unless a dialog above it already handled the key

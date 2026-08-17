@@ -52,6 +52,8 @@ import {
   PanelHeader,
   SLIDE,
 } from "@/components/studio/panel/primitives";
+import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 
 const NONE = "__none__";
 
@@ -146,6 +148,27 @@ const TrainPanel: React.FC = () => {
   // mutation the studio performs (stop, delete, rename, hub dismiss) already
   // pulls the list afterwards rather than trusting the broadcast.
   const { refresh: refreshJobs } = useJobsData();
+
+  const { seen: hasSeenTrainingMilestone, markSeen: markTrainingMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-training");
+  // Edge-triggered "consume once": onStarted sets the pending job id, and the
+  // effect below latches it into showTrainingMilestone the first time the
+  // monitor dialog (opened right after onStarted, see launchJob) closes, then
+  // clears the pending id so it can't re-trigger — openJobMonitor is also
+  // called from ActivityStrip, JobCard and the /training/:jobId deep link, so
+  // monitorJobId cycling non-null→null again later (e.g. opening/closing the
+  // monitor for an unrelated job) must not resurrect this banner.
+  const [pendingMilestoneJobId, setPendingMilestoneJobId] = useState<
+    string | null
+  >(null);
+  const [showTrainingMilestone, setShowTrainingMilestone] = useState(false);
+
+  useEffect(() => {
+    if (!monitorJobId && pendingMilestoneJobId) {
+      setShowTrainingMilestone(true);
+      setPendingMilestoneJobId(null);
+    }
+  }, [monitorJobId, pendingMilestoneJobId]);
 
   // The new-training form slides open in place; the jobs library folds to its
   // header while the form is open (still expandable by hand).
@@ -420,7 +443,7 @@ const TrainPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="2" title="Train" />
+      <PanelHeader step="2" title="Train" dataTour="studio-train" />
 
       {/* Start a new training — the form slides open in place (no dialog),
           mirroring Collect's "Record new dataset". */}
@@ -641,9 +664,13 @@ const TrainPanel: React.FC = () => {
               // it once and the run stays invisible until the next mount
               // (page reload). This is the same after-mutation refetch every
               // other studio action (stop, delete, rename) already does.
-              onStarted={() => {
+              onStarted={(jobId) => {
                 toggleForm(false);
                 refreshJobs();
+                if (!hasSeenTrainingMilestone) {
+                  setPendingMilestoneJobId(jobId);
+                  markTrainingMilestoneSeen();
+                }
               }}
               actionsContainer={actionsEl}
             />
@@ -670,6 +697,22 @@ const TrainPanel: React.FC = () => {
       <LibrarySection className="mt-0">
         <JobsLibrary open={jobsOpen} onOpenChange={setJobsOpen} />
       </LibrarySection>
+
+      {/* Training-started milestone — launchJob opens the monitor dialog
+          immediately after onStarted fires, so the effect above waits for it
+          to close before latching showTrainingMilestone true, mirroring
+          CollectHandoff's "show after returning from the session" pattern.
+          Gated on the latched flag alone (not live on !monitorJobId) so a
+          later, unrelated monitor open/close (another job's card, the
+          activity strip, a deep link, or a second training run) can't
+          resurrect an already-dismissed-or-shown banner. */}
+      {showTrainingMilestone && (
+        <MilestoneReveal
+          title="Training started!"
+          description="Watch progress from the jobs list above. Once it finishes, run it on your robot from the Deploy panel."
+          onDismiss={() => setShowTrainingMilestone(false)}
+        />
+      )}
 
       {/* Job monitor as a dialog over the studio (same pattern as Collect's
           RecordingSessionDialog) — closing it lands back on this panel. */}

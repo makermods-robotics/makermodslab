@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronUp, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
@@ -15,8 +15,12 @@ import CollectHandoff from "@/components/studio/CollectHandoff";
 import StudioOverlay from "@/components/studio/StudioOverlay";
 import { useStudio } from "@/contexts/StudioContext";
 import { isHostedSpace } from "@/lib/isHostedSpace";
+import { useOnboarding } from "@/contexts/OnboardingContext";
+import { useOnceFlag } from "@/lib/onboarding/storage";
+import { launchpadTour } from "@/lib/onboarding/tours";
 
 const ON_SPACE = isHostedSpace();
+const ONBOARDING_KEY = "makerlab:onboarding-completed";
 
 /**
  * Layout D "Launchpad" — the single dashboard route. Marketplace-first hero
@@ -29,6 +33,15 @@ const Launchpad = () => {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [search, setSearch] = useState("");
   const { openStudio } = useStudio();
+  const { start } = useOnboarding();
+  const { seen, markSeen } = useOnceFlag(ONBOARDING_KEY);
+
+  useEffect(() => {
+    if (!seen) start(launchpadTour, markSeen);
+    // Start exactly once on first mount — re-running on every `seen`/`start`
+    // identity change would restart the tour mid-flow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
@@ -41,13 +54,19 @@ const Launchpad = () => {
           <Button
             variant="ghost"
             size="sm"
+            data-tour="launchpad-library"
             className="h-8 gap-1.5 rounded-full px-3"
             onClick={() => setLibraryOpen(true)}
           >
             <Library className="h-3.5 w-3.5" />
             My library
           </Button>
-          <RobotCorner />
+          {/* Wrapped (rather than tagging RobotCorner.tsx itself) since the
+              same component also renders inside StudioOverlay's header —
+              tagging it directly would give the tour two matching elements. */}
+          <div data-tour="launchpad-robot-corner">
+            <RobotCorner />
+          </div>
         </div>
       </header>
 

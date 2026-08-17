@@ -6,6 +6,8 @@ import { DragAndDropProvider } from "@/contexts/DragAndDropContext";
 import { Toaster } from "@/components/ui/toaster";
 import { StudioProvider } from "@/contexts/StudioContext";
 import { InferenceSessionProvider } from "@/contexts/InferenceSessionContext";
+import { OnboardingProvider } from "@/contexts/OnboardingContext";
+import Spotlight from "@/components/onboarding/Spotlight";
 import Launchpad from "@/pages/Launchpad";
 import Teleoperation from "@/pages/Teleoperation";
 import Training from "@/pages/Training";
@@ -32,7 +34,8 @@ function App() {
                   <BrowserRouter>
                     <StudioProvider>
                      <InferenceSessionProvider>
-                      <SingleTabGuard>
+                      <OnboardingProvider>
+                       <SingleTabGuard>
                         <TeleopStopNotice />
                         <UpdateNotice />
                         <MockHubBanner />
@@ -59,7 +62,9 @@ function App() {
 
                           <Route path="*" element={<NotFound />} />
                         </Routes>
-                      </SingleTabGuard>
+                       </SingleTabGuard>
+                       <Spotlight />
+                      </OnboardingProvider>
                      </InferenceSessionProvider>
                       <Toaster />
                     </StudioProvider>

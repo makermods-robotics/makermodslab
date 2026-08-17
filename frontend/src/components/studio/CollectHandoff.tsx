@@ -7,6 +7,8 @@ import { useStudio } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
+import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 
 /** Router-state payload left by the Recording page when a session ends (see
  * Recording.tsx). Replaces the old /upload page hop. */
@@ -39,11 +41,32 @@ const CollectHandoff: React.FC = () => {
   // link, preselect, or upload.
   const repoId = discardedEmpty ? null : (recorded?.repo_id ?? null);
 
+  const { seen: hasSeenRecordingMilestone, markSeen: markRecordingMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-recording");
+  const { seen: hasSeenHubUploadMilestone, markSeen: markHubUploadMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-hub-upload");
+  const [showRecordingMilestone, setShowRecordingMilestone] = useState(false);
+  const [showHubMilestone, setShowHubMilestone] = useState(false);
+
   // Preserve the old Upload page's effect: preselect the just-recorded dataset
   // so the Train panel (useSelectedDataset) opens straight onto it.
   useEffect(() => {
     if (repoId) setSelectedDataset(repoId);
   }, [repoId, setSelectedDataset]);
+
+  useEffect(() => {
+    if (
+      !discardedEmpty &&
+      (recorded?.saved_episodes ?? 0) > 0 &&
+      !hasSeenRecordingMilestone
+    ) {
+      setShowRecordingMilestone(true);
+      markRecordingMilestoneSeen();
+    }
+    // Runs once for this recorded payload — hasSeenRecordingMilestone and
+    // markRecordingMilestoneSeen are stable for the component's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!recorded || dismissed) return null;
 
@@ -61,68 +84,90 @@ const CollectHandoff: React.FC = () => {
   };
 
   return (
-    <div className="w-full rounded-lg border border-border bg-card p-4 shadow-1">
-      <div className="flex items-start gap-3">
-        {discardedEmpty ? (
-          <Trash2 className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
-        ) : (
-          <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-        )}
-        <div className="min-w-0 flex-1">
+    <div className="w-full space-y-3">
+      <div className="w-full rounded-lg border border-border bg-card p-4 shadow-1">
+        <div className="flex items-start gap-3">
           {discardedEmpty ? (
-            <>
-              <p className="font-medium text-foreground">
-                No episodes were recorded
-              </p>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Nothing was saved — the empty dataset was discarded so it
-                doesn't take up disk space.
-              </p>
-            </>
+            <Trash2 className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
           ) : (
-            <>
-              <p className="font-medium text-foreground">
-                Dataset{" "}
-                <span className="break-all font-mono text-foreground">
-                  {repoId}
-                </span>{" "}
-                saved
-                {recorded.saved_episodes != null && (
-                  <span className="text-muted-foreground">
-                    {" · "}
-                    {recorded.saved_episodes} episode
-                    {recorded.saved_episodes === 1 ? "" : "s"}
-                  </span>
-                )}
-              </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <Button size="sm" onClick={trainOnThis}>
-                  Train on this dataset
-                </Button>
-                {repoId && (
-                  <UploadToHubAction
-                    repoId={repoId}
-                    // Kick off the Hub push automatically when the Collect
-                    // form's advanced toggle (default on) says so. A repo id
-                    // without a namespace means the user wasn't logged in at
-                    // record time — the push would only 401, so stay manual.
-                    autoStart={collectForm.pushToHub && repoId.includes("/")}
-                  />
-                )}
-              </div>
-            </>
+            <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
           )}
+          <div className="min-w-0 flex-1">
+            {discardedEmpty ? (
+              <>
+                <p className="font-medium text-foreground">
+                  No episodes were recorded
+                </p>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Nothing was saved — the empty dataset was discarded so it
+                  doesn't take up disk space.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium text-foreground">
+                  Dataset{" "}
+                  <span className="break-all font-mono text-foreground">
+                    {repoId}
+                  </span>{" "}
+                  saved
+                  {recorded.saved_episodes != null && (
+                    <span className="text-muted-foreground">
+                      {" · "}
+                      {recorded.saved_episodes} episode
+                      {recorded.saved_episodes === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button size="sm" onClick={trainOnThis}>
+                    Train on this dataset
+                  </Button>
+                  {repoId && (
+                    <UploadToHubAction
+                      repoId={repoId}
+                      // Kick off the Hub push automatically when the Collect
+                      // form's advanced toggle (default on) says so. A repo id
+                      // without a namespace means the user wasn't logged in at
+                      // record time — the push would only 401, so stay manual.
+                      autoStart={collectForm.pushToHub && repoId.includes("/")}
+                      onUploaded={() => {
+                        if (!hasSeenHubUploadMilestone) {
+                          setShowHubMilestone(true);
+                          markHubUploadMilestoneSeen();
+                        }
+                      }}
+                    />
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Dismiss"
+            onClick={dismiss}
+            className="h-7 w-7 shrink-0 text-muted-foreground"
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Dismiss"
-          onClick={dismiss}
-          className="h-7 w-7 shrink-0 text-muted-foreground"
-        >
-          <X className="h-4 w-4" />
-        </Button>
       </div>
+      {showRecordingMilestone && (
+        <MilestoneReveal
+          title="Nice, your first episodes are recorded!"
+          description="Train a policy on this dataset from the Train panel, or upload it to the Hub to share it or train in the cloud."
+          onDismiss={() => setShowRecordingMilestone(false)}
+        />
+      )}
+      {showHubMilestone && (
+        <MilestoneReveal
+          title="Uploaded to the Hub!"
+          description="Your dataset is public and shareable — reference its repo id anywhere in MakerLab, or fine-tune a skill on it from the Train panel."
+          onDismiss={() => setShowHubMilestone(false)}
+        />
+      )}
     </div>
   );
 };
@@ -137,10 +182,11 @@ const autoPushed = new Set<string>();
  * only when there's a local dataset to upload, so the hook has a real repoId.
  * With `autoStart`, the upload kicks off on mount (no tags, public — the
  * dialog's own defaults) instead of waiting for a click. */
-const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
-  repoId,
-  autoStart = false,
-}) => {
+const UploadToHubAction: React.FC<{
+  repoId: string;
+  autoStart?: boolean;
+  onUploaded?: () => void;
+}> = ({ repoId, autoStart = false, onUploaded }) => {
   const { toast } = useToast();
   const { uploading, start } = useDatasetUpload({
     repoId,
@@ -161,6 +207,7 @@ const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
           </span>
         ),
       });
+      onUploaded?.();
     },
     onError: (message, docsUrl) => {
       toast({
