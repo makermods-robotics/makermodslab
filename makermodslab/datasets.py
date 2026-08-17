@@ -1000,6 +1000,24 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     return row
 
 
+def is_dataset_private(repo_id: str) -> bool | None:
+    """Whether `repo_id` is a private Hub dataset repo — used to decide
+    whether a skill's training-episode provenance may be shown (see
+    models._gate_dataset_episodes). None when it can't be resolved (offline,
+    doesn't exist, or no access — including a dataset that was never pushed to
+    the Hub at all): callers must treat that as private, not as "public",
+    since an unresolvable repo is exactly the case with no way to confirm
+    it's safe to show."""
+    if hf_hub_offline():
+        return None
+    try:
+        info = shared_hf_api().dataset_info(repo_id, expand=["private"])
+    except Exception as exc:
+        logger.info("dataset_info(%s) failed while checking privacy: %s", repo_id, exc)
+        return None
+    return bool(getattr(info, "private", False))
+
+
 def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
     """The RAW ``features`` map from a dataset's ``meta/info.json``.
 

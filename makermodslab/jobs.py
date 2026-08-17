@@ -1957,6 +1957,40 @@ def _read_checkpoint_config(ckpt: JobCheckpoint) -> dict[str, object]:
         return json.load(f)
 
 
+def read_checkpoint_train_config(ckpt: JobCheckpoint) -> dict[str, object]:
+    """Load one checkpoint's pretrained_model/train_config.json (dataset repo
+    id + episode subset, policy, steps) — the training-pipeline config lerobot
+    writes alongside config.json, not to be confused with that lighter file.
+
+    Same ref-shape handling as _read_checkpoint_config, but degrades to {}
+    instead of raising: an imported flat model repo ('repo@root', laid out by
+    push_to_hub rather than a checkpoint save) legitimately lacks this file,
+    and this is read for a display nicety (models.get_model_info), not
+    something the caller can't function without."""
+    try:
+        if ckpt.source == "local":
+            with open(Path(ckpt.ref) / "train_config.json") as f:
+                return json.load(f)
+        from huggingface_hub import hf_hub_download
+
+        m = _HUB_CKPT_REF_RE.match(ckpt.ref)
+        if m:
+            repo_id = m.group("repo")
+            filename = f"checkpoints/{m.group('step_dir')}/pretrained_model/train_config.json"
+        else:
+            m = _HUB_ROOT_REF_RE.match(ckpt.ref)
+            if not m:
+                return {}
+            repo_id = m.group("repo")
+            filename = "train_config.json"
+        local_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
+        with open(local_path) as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.info("Could not read train_config.json for checkpoint ref %r: %s", ckpt.ref, exc)
+        return {}
+
+
 def _flat_feature_dim(feat: object) -> int | None:
     """Flat width of a policy feature (e.g. observation.state, action).
 

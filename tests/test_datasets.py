@@ -1812,6 +1812,103 @@ def test_pin_route_auto_unhides(
 
 
 # ---------------------------------------------------------------------------
+# Excluded episodes — persistent per-dataset training-curation filter.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def excluded_episodes_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect EXCLUDED_EPISODES_FILE into a tmp file so these tests never
+    touch the developer's real ~/.cache."""
+    from makermodslab.utils import config as cfg
+
+    path = tmp_path / "excluded_episodes.json"
+    monkeypatch.setattr(cfg, "EXCLUDED_EPISODES_FILE", str(path))
+    return path
+
+
+def test_excluded_episodes_round_trip(excluded_episodes_file: Path) -> None:
+    from makermodslab.utils.config import get_excluded_episodes, set_excluded_episodes
+
+    assert get_excluded_episodes("alice/pick") == []
+
+    set_excluded_episodes("alice/pick", [3, 1, 1, 2])
+    assert get_excluded_episodes("alice/pick") == [1, 2, 3]  # deduped, sorted
+    assert get_excluded_episodes("bob/place") == []  # other datasets untouched
+
+    set_excluded_episodes("alice/pick", [])
+    assert get_excluded_episodes("alice/pick") == []  # empty list clears the entry
+
+
+def test_excluded_episodes_corrupt_file_degrades_to_empty(excluded_episodes_file: Path) -> None:
+    from makermodslab.utils.config import get_excluded_episodes
+
+    excluded_episodes_file.write_text("{not json")
+    assert get_excluded_episodes("alice/pick") == []
+    excluded_episodes_file.write_text(json.dumps(["not", "an", "object"]))
+    assert get_excluded_episodes("alice/pick") == []
+
+
+def test_excluded_episodes_endpoints_round_trip(client: TestClient, excluded_episodes_file: Path) -> None:
+    resp = client.get("/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    assert resp.json() == {"repo_id": "alice/pick", "episode_indices": []}
+
+    resp = client.put(
+        "/datasets/excluded-episodes",
+        json={"repo_id": "alice/pick", "episode_indices": [2, 0]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"success": True, "repo_id": "alice/pick", "episode_indices": [0, 2]}
+
+    resp = client.get("/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    assert resp.json()["episode_indices"] == [0, 2]
+
+
+# ---------------------------------------------------------------------------
+# is_dataset_private — the marketplace-visibility gate for a skill's
+# dataset_episodes (see models._gate_dataset_episodes).
+# ---------------------------------------------------------------------------
+
+
+def test_is_dataset_private_true() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=True)
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/pick") is True
+    fake_api.dataset_info.assert_called_once_with("alice/pick", expand=["private"])
+
+
+def test_is_dataset_private_false() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=False)
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/pick") is False
+
+
+def test_is_dataset_private_none_when_unresolvable() -> None:
+    """Never pushed to the Hub, deleted, or no access — callers must treat
+    this the same as an explicit private=True, not as public."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.side_effect = RuntimeError("404")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/local-only") is None
+
+
+def test_is_dataset_private_none_offline() -> None:
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.hf_hub_offline", return_value=True):
+        assert ds.is_dataset_private("alice/pick") is None
+
+
+# ---------------------------------------------------------------------------
 # Hub dataset summary — the /datasets/info hub fallback (meta/info.json only).
 # ---------------------------------------------------------------------------
 
