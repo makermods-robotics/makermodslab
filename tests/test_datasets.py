@@ -2667,3 +2667,132 @@ def test_hub_dataset_viewer_endpoints_404_without_video(
 
     assert resp.status_code == 404
     dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info
+
+
+# --- Hub identity: resolve_hub_repo_id + hub_repo_exists --------------------
+#
+# Every Hub call in the app addresses a dataset through resolve_hub_repo_id and
+# asks whether it exists through hub_repo_exists, so both contracts are pinned
+# here once rather than at each call site.
+
+
+def test_resolve_hub_repo_id_qualifies_a_bare_id() -> None:
+    """A locally-recorded dataset's id has no namespace — the literal-lookup
+    Hub calls would 404 on it."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}):
+        assert ds.resolve_hub_repo_id("pick") == "alice/pick"
+
+
+def test_resolve_hub_repo_id_canonicalises_casing_of_an_owned_namespace() -> None:
+    """A locally-recorded "MyOrg/foo" must reach the Hub as the canonical
+    "myorg/foo" the account actually owns."""
+    from makermodslab import datasets as ds
+
+    who = {"name": "alice", "orgs": [{"name": "myorg", "roleInGroup": "write"}]}
+    with patch("makermodslab.datasets.cached_whoami", return_value=who):
+        assert ds.resolve_hub_repo_id("MyOrg/foo") == "myorg/foo"
+
+
+def test_resolve_hub_repo_id_leaves_a_third_party_id_alone() -> None:
+    """A downloaded third-party dataset is already the right id; ownership is
+    irrelevant to reading it."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}):
+        assert ds.resolve_hub_repo_id("lerobot/pusht") == "lerobot/pusht"
+
+
+def test_resolve_hub_repo_id_degrades_when_unauthenticated() -> None:
+    """No token → no namespace to resolve against. Callers degrade rather than
+    raise."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value=None):
+        assert ds.resolve_hub_repo_id("pick") == "pick"
+
+
+def test_hub_repo_exists_looks_up_the_resolved_id() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert ds.hub_repo_exists("pick") is True
+
+    fake_api.repo_exists.assert_called_once_with("alice/pick", repo_type="dataset")
+
+
+def test_hub_repo_exists_returns_none_on_transport_error() -> None:
+    """Offline / rate-limited / anything else is "no claim" (None), never a
+    soft False — callers must not block or overwrite on it."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_repo_exists("alice/pick") is None
+
+
+def test_get_hub_status_url_uses_the_resolved_id() -> None:
+    """A url built from the bare id would 404."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = ds.get_hub_status("pick")
+
+    # The public contract is unchanged: repo_id echoes back exactly as passed.
+    assert result["repo_id"] == "pick"
+    assert result["status"] == "on_hub"
+    assert result["url"] == "https://huggingface.co/datasets/alice/pick"
+
+
+def test_get_hub_status_cache_does_not_survive_an_account_switch() -> None:
+    """Keyed by the resolved id, so an answer never outlives the auth state it
+    came from — logging in as someone else re-checks instead of serving the
+    previous account's answer."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert ds.get_hub_status("pick")["url"].endswith("alice/pick")
+
+    fake_api.repo_exists.return_value = False
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "bob", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        assert ds.get_hub_status("pick")["status"] == "local_only"
+
+    assert fake_api.repo_exists.call_args_list[-1].args[0] == "bob/pick"
+
+
+def test_invalidate_hub_status_from_a_bare_id_drops_the_namespaced_entry() -> None:
+    """The upload path holds the bare id; the cache is keyed by the resolved
+    one. Without the suffix sweep the card would stay on "Local only"."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "local_only"
+    ds._HUB_STATUS_CACHE["alice/other"] = "on_hub"
+
+    ds.invalidate_hub_status("pick")
+
+    assert "alice/pick" not in ds._HUB_STATUS_CACHE
+    assert ds._HUB_STATUS_CACHE["alice/other"] == "on_hub"

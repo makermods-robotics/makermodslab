@@ -293,18 +293,29 @@ def test_merge_source_problem_missing_data_parquet(tmp_lerobot_home: Path) -> No
 
 
 def test_merge_source_problem_not_found_on_hub(tmp_lerobot_home: Path, monkeypatch) -> None:
+    """A confirmed 404 blocks the merge.
+
+    The existence check now lives in datasets.hub_repo_exists (shared with the
+    info card), so the seam patched here is the HfApi call that helper makes,
+    not a merge-private one.
+    """
     from unittest.mock import MagicMock
 
+    from huggingface_hub import HfApi
     from huggingface_hub.utils import RepositoryNotFoundError
 
     from makermodslab import merge
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")
 
-    def _raise_not_found(self, repo_id):
+    def _raise_not_found(self, repo_id, **kwargs):
         raise RepositoryNotFoundError(f"404 for {repo_id}", response=MagicMock())
 
-    monkeypatch.setattr(merge.HfApi, "dataset_info", _raise_not_found)
+    # repo_exists() maps RepositoryNotFoundError to False itself; patch the
+    # repo_info underneath it rather than stubbing repo_exists, so the taxonomy
+    # under test is the real one. The shared client is an HfApi instance, so
+    # patching the class reaches it.
+    monkeypatch.setattr(HfApi, "repo_info", _raise_not_found)
     msg = merge._merge_source_problem(["a/one", "a/hub-only"])
     assert msg is not None
     assert "a/hub-only" in msg
@@ -313,14 +324,17 @@ def test_merge_source_problem_not_found_on_hub(tmp_lerobot_home: Path, monkeypat
 
 
 def test_merge_source_problem_offline_does_not_block(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from huggingface_hub import HfApi
+
     from makermodslab import merge
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")
 
-    def _raise_network(self, repo_id):
+    def _raise_network(self, repo_id, **kwargs):
         # Simulate offline / transient connection failure.
         raise OSError("connection failed")
 
-    monkeypatch.setattr(merge.HfApi, "dataset_info", _raise_network)
-    # Offline / transient error → must NOT block the merge.
+    monkeypatch.setattr(HfApi, "repo_info", _raise_network)
+    # Offline / transient error → hub_repo_exists returns None ("no claim"),
+    # which must NOT block the merge.
     assert merge._merge_source_problem(["a/one", "a/hub-only"]) is None

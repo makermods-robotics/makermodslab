@@ -36,9 +36,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import snapshot_download
 from huggingface_hub.utils import (
-    HfHubHTTPError,
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
@@ -161,22 +160,6 @@ def _missing_local_file(repo_id: str, info: dict[str, Any]) -> str | None:
     return None
 
 
-def _hub_repo_missing(repo_id: str) -> bool | None:
-    """Return True if ``repo_id`` is confirmed absent from the Hugging Face Hub
-    (404 / private-without-auth), False if it exists, or None if we couldn't
-    tell (offline / transient HTTP error) — in which case we must NOT block.
-    """
-    try:
-        HfApi().dataset_info(repo_id)
-        return False
-    except RepositoryNotFoundError:
-        return True
-    except (HfHubHTTPError, OSError, ValueError):
-        # Offline or transient network/HTTP error — don't wrongly block; the
-        # subprocess + backstop will surface a real failure if one exists.
-        return None
-
-
 def _merge_source_problem(repo_ids: list[str]) -> str | None:
     """Return a friendly message for the first source that is not-found (Type A)
     or corrupt/incomplete (Type B), or None if every source is retrievable.
@@ -195,8 +178,15 @@ def _merge_source_problem(repo_ids: list[str]) -> str | None:
             # sidesteps lerobot's broken in-merge Hub version resolution
             # (lerobot 0.5.2 raises RevisionNotFoundError positionally, which
             # huggingface_hub >=1.x rejects → a cryptic `response`-arg TypeError).
-            missing = _hub_repo_missing(repo_id)
-            if missing is True:
+            # Lazy import: this module also runs as a subprocess CLI (_run_cli),
+            # and datasets pulls in httpx/pyarrow the CLI path never needs.
+            from .datasets import hub_repo_exists
+
+            # Only a *confirmed* absence blocks; None ("couldn't tell") falls
+            # through, as before. Unlike the old merge-private check, the id is
+            # resolved first, so a locally-recorded dataset that IS on the Hub
+            # stops being reported as missing.
+            if hub_repo_exists(repo_id) is False:
                 return (
                     f"Dataset \"{repo_id}\" wasn't found — it isn't in your local "
                     "cache or on the Hugging Face Hub. Check the name (or log in "
