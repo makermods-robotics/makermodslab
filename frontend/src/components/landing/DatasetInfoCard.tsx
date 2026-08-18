@@ -43,7 +43,10 @@ import {
   formatCount,
   formatDuration,
 } from "@/lib/datasetFormat";
-import { validateDatasetName } from "@/lib/datasetName";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
 import VisibilityToggle from "@/components/landing/VisibilityToggle";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
@@ -693,12 +696,16 @@ const RenameDatasetDialog: React.FC<{
   }, [open, currentName]);
 
   const trimmed = value.trim();
-  const validationError = trimmed === "" ? null : validateDatasetName(trimmed);
+  const validationIssue = trimmed === "" ? null : datasetNameIssue(trimmed);
+  const validationError = validationIssue
+    ? formatDatasetNameIssue(t, validationIssue)
+    : null;
   const unchanged = trimmed === currentName;
 
   const doRename = async () => {
     const next = value.trim();
-    const nameError = validateDatasetName(next);
+    const nextIssue = datasetNameIssue(next);
+    const nameError = nextIssue ? formatDatasetNameIssue(t, nextIssue) : null;
     if (nameError) {
       setError(nameError);
       return;

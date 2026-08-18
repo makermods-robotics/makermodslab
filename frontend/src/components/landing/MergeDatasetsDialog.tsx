@@ -13,7 +13,10 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Loader2, CheckCircle2, XCircle, GitMerge } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
-import { validateDatasetRepoId } from "@/lib/datasetName";
+import {
+  datasetRepoIdIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import {
   DatasetItem,
   MergeStatus,
@@ -112,7 +115,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     trimmedOutput && !trimmedOutput.includes("/") && commonNamespace
       ? `${commonNamespace}/${trimmedOutput}`
       : trimmedOutput;
-  const outputError = effectiveOutput ? validateDatasetRepoId(effectiveOutput) : null;
+  const outputIssue = effectiveOutput
+    ? datasetRepoIdIssue(effectiveOutput)
+    : null;
+  const outputError = outputIssue
+    ? formatDatasetNameIssue(t, outputIssue)
+    : null;
   const canMerge =
     selected.size >= 2 &&
     effectiveOutput.length > 0 &&

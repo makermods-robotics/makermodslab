@@ -12,7 +12,10 @@ import {
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { RobotRecord } from "@/hooks/useRobots";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
-import { validateDatasetName } from "@/lib/datasetName";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 
 interface RecordingFormProps {
   robot: RobotRecord | null;
@@ -68,7 +71,8 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
 
   // null when the name is valid; a message otherwise (incl. empty). Mirrors the
   // backend, so Start can't fire a recording the recorder will reject.
-  const nameError = validateDatasetName(datasetName);
+  const nameIssue = datasetNameIssue(datasetName);
+  const nameError = nameIssue ? formatDatasetNameIssue(t, nameIssue) : null;
 
   return (
     <div className="space-y-6">

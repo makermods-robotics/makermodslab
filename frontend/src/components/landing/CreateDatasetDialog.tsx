@@ -12,7 +12,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { validateDatasetName } from "@/lib/datasetName";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 
 interface CreateDatasetDialogProps {
@@ -66,7 +69,8 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
       bare.toLowerCase() === trimmed.toLowerCase()
     );
   });
-  const nameError = trimmed === "" ? null : validateDatasetName(trimmed);
+  const nameIssue = trimmed === "" ? null : datasetNameIssue(trimmed);
+  const nameError = nameIssue ? formatDatasetNameIssue(t, nameIssue) : null;
   const canCreate = trimmed !== "" && nameError === null && !matchesExisting;
 
   // Live preview of the resulting repo id. Only shown when we know the

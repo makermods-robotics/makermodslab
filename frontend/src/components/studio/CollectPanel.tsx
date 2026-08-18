@@ -15,7 +15,10 @@ import { useRobots } from "@/hooks/useRobots";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
-import { validateDatasetName } from "@/lib/datasetName";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import { useStudio } from "@/contexts/StudioContext";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import RecordingForm from "@/components/studio/RecordingForm";
@@ -173,7 +176,8 @@ const CollectPanel: React.FC = () => {
       });
       return;
     }
-    const nameError = validateDatasetName(datasetName);
+    const nameIssue = datasetNameIssue(datasetName);
+    const nameError = nameIssue ? formatDatasetNameIssue(t, nameIssue) : null;
     if (nameError) {
       toast({
         title: t("studio.collect.toast.invalidNameTitle"),
@@ -267,7 +271,7 @@ const CollectPanel: React.FC = () => {
   const canStart =
     !!selectedRecord &&
     selectedRecord.is_clean &&
-    validateDatasetName(datasetName) === null &&
+    datasetNameIssue(datasetName) === null &&
     singleTask.trim().length > 0;
 
   return (
