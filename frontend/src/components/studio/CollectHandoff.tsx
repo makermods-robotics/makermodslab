@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CheckCircle, Loader2, Trash2, Upload as UploadIcon, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ interface RecordedInfo {
  * doesn't resurrect on re-render.
  */
 const CollectHandoff: React.FC = () => {
+  const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
   const { setSelectedDataset } = useSelectedDataset();
@@ -96,32 +98,39 @@ const CollectHandoff: React.FC = () => {
             {discardedEmpty ? (
               <>
                 <p className="font-medium text-foreground">
-                  No episodes were recorded
+                  {t("studio.handoff.emptyTitle")}
                 </p>
                 <p className="mt-0.5 text-sm text-muted-foreground">
-                  Nothing was saved — the empty dataset was discarded so it
-                  doesn't take up disk space.
+                  {t("studio.handoff.emptyBody")}
                 </p>
               </>
             ) : (
               <>
                 <p className="font-medium text-foreground">
-                  Dataset{" "}
-                  <span className="break-all font-mono text-foreground">
-                    {repoId}
-                  </span>{" "}
-                  saved
+                  {/* The repo id is DATA: interpolated whole into the <0> slot
+                      rather than concatenated around translated fragments. */}
+                  <Trans
+                    i18nKey="studio.handoff.savedTitle"
+                    values={{ repoId: repoId ?? "" }}
+                    components={[
+                      <span
+                        key="0"
+                        className="break-all font-mono text-foreground"
+                      />,
+                    ]}
+                  />
                   {recorded.saved_episodes != null && (
                     <span className="text-muted-foreground">
                       {" · "}
-                      {recorded.saved_episodes} episode
-                      {recorded.saved_episodes === 1 ? "" : "s"}
+                      {t("studio.handoff.episodes", {
+                        count: recorded.saved_episodes,
+                      })}
                     </span>
                   )}
                 </p>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <Button size="sm" onClick={trainOnThis}>
-                    Train on this dataset
+                    {t("studio.handoff.trainOnThis")}
                   </Button>
                   {repoId && (
                     <UploadToHubAction
@@ -146,7 +155,7 @@ const CollectHandoff: React.FC = () => {
           <Button
             variant="ghost"
             size="icon"
-            aria-label="Dismiss"
+            aria-label={t("studio.common.dismiss")}
             onClick={dismiss}
             className="h-7 w-7 shrink-0 text-muted-foreground"
           >
@@ -156,15 +165,15 @@ const CollectHandoff: React.FC = () => {
       </div>
       {showRecordingMilestone && (
         <MilestoneReveal
-          title="Nice, your first episodes are recorded!"
-          description="Train a policy on this dataset from the Train panel, or upload it to the Hub to share it or train in the cloud."
+          title={t("studio.handoff.milestone.recording.title")}
+          description={t("studio.handoff.milestone.recording.description")}
           onDismiss={() => setShowRecordingMilestone(false)}
         />
       )}
       {showHubMilestone && (
         <MilestoneReveal
-          title="Uploaded to the Hub!"
-          description="Your dataset is public and shareable — reference its repo id anywhere in MakerLab, or fine-tune a skill on it from the Train panel."
+          title={t("studio.handoff.milestone.hubUpload.title")}
+          description={t("studio.handoff.milestone.hubUpload.description")}
           onDismiss={() => setShowHubMilestone(false)}
         />
       )}
@@ -187,23 +196,28 @@ const UploadToHubAction: React.FC<{
   autoStart?: boolean;
   onUploaded?: () => void;
 }> = ({ repoId, autoStart = false, onUploaded }) => {
+  const { t } = useTranslation();
   const { toast } = useToast();
   const { uploading, start } = useDatasetUpload({
     repoId,
     onDone: (url) => {
       toast({
-        title: "Uploaded to Hub",
+        title: t("studio.handoff.upload.doneTitle"),
         description: (
           <span>
-            {repoId} is now on the Hub.{" "}
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium underline"
-            >
-              View dataset
-            </a>
+            <Trans
+              i18nKey="studio.handoff.upload.doneBody"
+              values={{ repoId }}
+              components={[
+                <a
+                  key="0"
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium underline"
+                />,
+              ]}
+            />
           </span>
         ),
       });
@@ -211,7 +225,9 @@ const UploadToHubAction: React.FC<{
     },
     onError: (message, docsUrl) => {
       toast({
-        title: "Upload failed",
+        title: t("studio.handoff.upload.failedTitle"),
+        // `message` is the backend's own failure text and stays as sent —
+        // only the link label beside it is translated.
         description: docsUrl ? (
           <span>
             {message}{" "}
@@ -221,7 +237,7 @@ const UploadToHubAction: React.FC<{
               rel="noopener noreferrer"
               className="font-medium underline"
             >
-              Open setup guide
+              {t("studio.handoff.upload.setupGuide")}
             </a>
           </span>
         ) : (
@@ -241,18 +257,19 @@ const UploadToHubAction: React.FC<{
     start([], false).then((error) => {
       if (error) {
         toast({
-          title: "Automatic Hub upload not started",
+          title: t("studio.handoff.upload.autoFailedTitle"),
+          // `error` comes from useDatasetUpload / the backend — shown as sent.
           description: error,
         });
       }
     });
-  }, [autoStart, repoId, start, toast]);
+  }, [autoStart, repoId, start, toast, t]);
 
   if (uploading) {
     return (
       <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Uploading to Hub…
+        {t("studio.handoff.upload.uploading")}
       </span>
     );
   }
@@ -261,7 +278,7 @@ const UploadToHubAction: React.FC<{
     <UploadDatasetDialog repoId={repoId} start={start}>
       <Button size="sm" variant="outline" className="gap-1.5">
         <UploadIcon className="h-3.5 w-3.5" />
-        Upload to Hub
+        {t("studio.handoff.upload.button")}
       </Button>
     </UploadDatasetDialog>
   );
