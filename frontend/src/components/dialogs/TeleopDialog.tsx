@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import UrdfViewer from "@/components/UrdfViewer";
 import { useToast } from "@/hooks/use-toast";
@@ -18,6 +19,7 @@ export interface TeleopDialogProps {
  * and a mid-loop death surfaces as an inline banner.
  */
 const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
+  const { t } = useTranslation();
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
   // The teleop session is for the currently-selected robot; show two arms when
@@ -99,7 +101,8 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
         // Cleanup could not release an arm — torque may still be enabled and
         // the arm can stay rigid. Make this loud instead of claiming success.
         toast({
-          title: "Teleoperation stopped — check the arm",
+          title: t("dialogs.teleop.toast.stoppedCheckArm"),
+          // `data.warning` is backend prose — rendered verbatim.
           description: data.warning,
           variant: "destructive",
         });
@@ -107,10 +110,10 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
         // The backend drives the follower straight back to its session-start
         // pose (no timed hold), then releases torque.
         toast({
-          title: "Teleoperation stopped",
-          description:
-            data.message ??
-            "The arm returns to its starting position, then goes limp.",
+          title: t("dialogs.teleop.toast.stopped"),
+          // The backend's own message wins; only the fallback is a catalog
+          // string.
+          description: data.message ?? t("dialogs.teleop.toast.releasing"),
         });
         // The release happens after this response returns, so check once
         // after the return (progress-based, 10 s ceiling) whether it actually
@@ -123,7 +126,7 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
             ).then((r) => r.json());
             if (status?.last_cleanup_error) {
               toast({
-                title: "Check the arm",
+                title: t("dialogs.teleop.toast.checkArm"),
                 // Lead with the plain-language hint when the backend mapped
                 // one (e.g. gripper overload) — the raw text follows.
                 description: status.hint
@@ -138,14 +141,14 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
         }, 13000);
       } else if (data?.success) {
         toast({
-          title: "Teleoperation stopped",
-          description: "The arm was disconnected cleanly.",
+          title: t("dialogs.teleop.toast.stopped"),
+          description: t("dialogs.teleop.toast.disconnected"),
         });
       }
     } catch {
       /* best-effort */
     }
-  }, [baseUrl, fetchWithHeaders, toast]);
+  }, [baseUrl, fetchWithHeaders, toast, t]);
 
   // Cover every exit path while a session is live so it can't keep running and
   // block the next start with "already active":
@@ -199,27 +202,31 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
 
   const finishedWarn = finished?.outcome === "ran_with_warning";
 
+  // One string for the window's aria-label and its visible heading — the
+  // robot's own name is data, interpolated verbatim.
+  const title = selectedRecord
+    ? t("dialogs.teleop.titleWithRobot", { robot: selectedRecord.name })
+    : t("dialogs.teleop.title");
+
   if (!open) return null;
 
   return (
     <div
       role="dialog"
-      aria-label={`Teleoperation${selectedRecord ? ` — ${selectedRecord.name}` : ""}`}
+      aria-label={title}
       className={`fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl ${
         bimanual ? "w-[min(94vw,1000px)]" : "w-[min(92vw,640px)]"
       }`}
     >
       <div className="flex items-center gap-2 border-b border-border px-4 py-2">
         <span className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
-        <span className="text-sm font-semibold text-foreground">
-          Teleoperation{selectedRecord ? ` — ${selectedRecord.name}` : ""}
-        </span>
+        <span className="text-sm font-semibold text-foreground">{title}</span>
         <Button
           size="sm"
           onClick={handleDone}
           className="ml-auto bg-destructive text-destructive-foreground hover:bg-destructive/90"
         >
-          Done
+          {t("dialogs.teleop.done")}
         </Button>
       </div>
 
@@ -243,8 +250,8 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
                 }`}
               />
               {finishedWarn
-                ? "Teleoperation ended with a cleanup warning"
-                : "Teleoperation failed"}
+                ? t("dialogs.teleop.endedWithWarning")
+                : t("dialogs.teleop.failed")}
             </div>
             {finished.hint && (
               <p
@@ -267,7 +274,7 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
           <div className="flex gap-3">
             <div className="flex-1">
               <span className="mb-1 block text-xs text-muted-foreground">
-                Left arm
+                {t("dialogs.teleop.leftArm")}
               </span>
               <div className="h-[400px] overflow-hidden rounded-md border border-border">
                 <UrdfViewer jointsKey="joints" variant="light" compact />
@@ -275,7 +282,7 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
             </div>
             <div className="flex-1">
               <span className="mb-1 block text-xs text-muted-foreground">
-                Right arm
+                {t("dialogs.teleop.rightArm")}
               </span>
               <div className="h-[400px] overflow-hidden rounded-md border border-border">
                 <UrdfViewer jointsKey="joints_right" variant="light" compact />
