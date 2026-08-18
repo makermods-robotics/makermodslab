@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import {
   AlertTriangle,
   ChevronDown,
@@ -84,6 +85,7 @@ const Row: React.FC<{ label: string; children: React.ReactNode }> = ({
  * "N tasks", open it lists each task with its episode count right-aligned.
  */
 const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
 
   if (tasks.length === 1) {
@@ -94,7 +96,9 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
           {task}
         </span>
         {num_episodes > 0 && (
-          <span className="shrink-0 text-muted-foreground">· {num_episodes} ep</span>
+          <span className="shrink-0 text-muted-foreground">
+            · {t("landing.datasetInfo.tasks.episodeCount", { n: num_episodes })}
+          </span>
         )}
       </span>
     );
@@ -103,7 +107,7 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger className="flex items-center gap-1 text-foreground hover:text-foreground">
-        {tasks.length} tasks
+        {t("landing.datasetInfo.tasks.count", { count: tasks.length })}
         <ChevronDown
           className={`h-3 w-3 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
         />
@@ -116,7 +120,9 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
                 {task}
               </span>
               <span className="shrink-0 text-muted-foreground">
-                {num_episodes} ep
+                {t("landing.datasetInfo.tasks.episodeCount", {
+                  n: num_episodes,
+                })}
               </span>
             </li>
           ))}
@@ -188,6 +194,7 @@ const HubSettingsEditor: React.FC<{
   repoId: string;
   onChanged?: () => void;
 }> = ({ repoId, onChanged }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
@@ -226,13 +233,16 @@ const HubSettingsEditor: React.FC<{
       .catch((e) => {
         if (controller.signal.aborted) return;
         setLoadError(
+          // `e.detail` is the backend's own message — surfaced verbatim; only
+          // the client-side fallback beside it is translated.
           e instanceof ApiError && e.detail
             ? e.detail
-            : "Couldn't load Hub settings.",
+            : t("landing.datasetInfo.hubSettings.loadError"),
         );
         setLoading(false);
       });
     return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, baseUrl, fetchWithHeaders, repoId]);
 
   const errText = (e: unknown): string =>
@@ -254,8 +264,12 @@ const HubSettingsEditor: React.FC<{
       );
       setInitialPrivate(res.private);
       toast({
-        title: "Visibility updated",
-        description: `${repoId} is now ${res.private ? "private" : "public"}.`,
+        title: t("landing.datasetInfo.hubSettings.visibilityUpdatedTitle"),
+        // Two whole sentences rather than an interpolated adjective — no
+        // translation can inflect a word handed to it mid-sentence.
+        description: res.private
+          ? t("landing.datasetInfo.hubSettings.nowPrivate", { repoId })
+          : t("landing.datasetInfo.hubSettings.nowPublic", { repoId }),
       });
       onChanged?.();
     } catch (e) {
@@ -298,7 +312,10 @@ const HubSettingsEditor: React.FC<{
       setTags(res.tags);
       setInitialTags(res.tags);
       setNewTag("");
-      toast({ title: "Tags updated", description: repoId });
+      toast({
+        title: t("landing.datasetInfo.hubSettings.tagsUpdatedTitle"),
+        description: repoId,
+      });
       onChanged?.();
     } catch (e) {
       setTagsError(errText(e));
@@ -318,12 +335,12 @@ const HubSettingsEditor: React.FC<{
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label="Edit visibility and tags on the Hub"
-          title="Edit visibility and tags on the Hub"
+          aria-label={t("landing.datasetInfo.hubSettings.trigger")}
+          title={t("landing.datasetInfo.hubSettings.trigger")}
           className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-xs font-medium text-foreground hover:border-foreground/30 hover:bg-accent hover:text-foreground"
         >
           <Settings2 className="h-3 w-3 shrink-0" />
-          Visibility &amp; tags
+          {t("landing.datasetInfo.hubSettings.trigger")}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -337,7 +354,7 @@ const HubSettingsEditor: React.FC<{
         {loading ? (
           <div className="flex items-center gap-1.5 text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />
-            <span>Loading Hub settings…</span>
+            <span>{t("landing.datasetInfo.hubSettings.loading")}</span>
           </div>
         ) : loadError ? (
           <p className="text-destructive">{loadError}</p>
@@ -348,7 +365,7 @@ const HubSettingsEditor: React.FC<{
                 id={`hub-edit-visibility-${repoId}`}
                 className="font-normal text-muted-foreground"
               >
-                Visibility
+                {t("landing.datasetInfo.hubSettings.visibility")}
               </Label>
               <VisibilityToggle
                 value={isPrivate}
@@ -358,8 +375,8 @@ const HubSettingsEditor: React.FC<{
               />
               <p className="leading-snug text-muted-foreground">
                 {isPrivate
-                  ? "Only you can see this dataset."
-                  : "Anyone can see this dataset — recordings include your camera footage."}
+                  ? t("landing.datasetInfo.hubSettings.privateNote")
+                  : t("landing.datasetInfo.hubSettings.publicNote")}
               </p>
               {visibilityError && (
                 <p className="text-destructive">{visibilityError}</p>
@@ -373,10 +390,10 @@ const HubSettingsEditor: React.FC<{
                 {savingVisibility ? (
                   <>
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    Saving…
+                    {t("landing.datasetInfo.hubSettings.saving")}
                   </>
                 ) : (
-                  "Save visibility"
+                  t("landing.datasetInfo.hubSettings.saveVisibility")
                 )}
               </Button>
             </div>
@@ -386,7 +403,7 @@ const HubSettingsEditor: React.FC<{
                 htmlFor={`hub-edit-tags-${repoId}`}
                 className="font-normal text-muted-foreground"
               >
-                Tags
+                {t("landing.datasetInfo.hubSettings.tags")}
               </Label>
               {tags.length > 0 && (
                 <div className="flex flex-wrap gap-1">
@@ -397,7 +414,7 @@ const HubSettingsEditor: React.FC<{
                       // (the backend always re-adds it on save).
                       <span
                         key={tag}
-                        title="Always kept — can't be removed"
+                        title={t("landing.datasetInfo.hubSettings.lockedTag")}
                         className="inline-flex items-center gap-1 rounded-full border border-info/40 bg-info/10 px-2 py-0.5 text-xs text-info"
                       >
                         <Lock className="h-2.5 w-2.5 shrink-0" />
@@ -412,8 +429,14 @@ const HubSettingsEditor: React.FC<{
                         <button
                           type="button"
                           onClick={() => removeTag(tag)}
-                          aria-label={`Remove tag ${tag}`}
-                          title={`Remove tag ${tag}`}
+                          aria-label={t(
+                            "landing.datasetInfo.hubSettings.removeTag",
+                            { tag },
+                          )}
+                          title={t(
+                            "landing.datasetInfo.hubSettings.removeTag",
+                            { tag },
+                          )}
                           className="-mr-0.5 rounded-full text-muted-foreground hover:text-foreground"
                         >
                           <X className="h-3 w-3" />
@@ -444,11 +467,13 @@ const HubSettingsEditor: React.FC<{
                   }
                 }}
                 onBlur={commitNewTag}
-                placeholder="Add a tag, then press Enter"
+                placeholder={t(
+                  "landing.datasetInfo.hubSettings.tagPlaceholder",
+                )}
                 className="h-7 text-xs"
               />
               <p className="leading-snug text-muted-foreground">
-                The makermods, openbooth, and MakerModsLab tags are always kept.
+                {t("landing.datasetInfo.hubSettings.requiredTagsNote")}
               </p>
               {tagsError && <p className="text-destructive">{tagsError}</p>}
               <Button
@@ -460,10 +485,10 @@ const HubSettingsEditor: React.FC<{
                 {savingTags ? (
                   <>
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    Saving…
+                    {t("landing.datasetInfo.hubSettings.saving")}
                   </>
                 ) : (
-                  "Save tags"
+                  t("landing.datasetInfo.hubSettings.saveTags")
                 )}
               </Button>
             </div>
@@ -486,6 +511,7 @@ const HubSettingsEditor: React.FC<{
  * on completion it flips to "On Hub" and toasts the Hub URL.
  */
 const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const [status, setStatus] = useState<HubStatusValue>("unknown");
@@ -501,36 +527,46 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       setStatus("on_hub");
       setHubUrl(url);
       toast({
-        title: "Uploaded to Hub",
+        title: t("landing.datasetInfo.hubSync.uploadedTitle"),
         description: (
           <span>
-            {repoId} is now on the Hub.{" "}
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline font-medium"
-            >
-              View dataset
-            </a>
+            <Trans
+              i18nKey="landing.datasetInfo.hubSync.uploadedBody"
+              values={{ repoId }}
+              components={[
+                <a
+                  key="0"
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline font-medium"
+                />,
+              ]}
+            />
           </span>
         ),
       });
     },
     onError: (message, docsUrl) => {
       toast({
-        title: "Upload failed",
+        title: t("landing.datasetInfo.hubSync.uploadFailedTitle"),
+        // `message` is the backend's own failure text — rendered verbatim;
+        // only the guide link's wording around it is ours.
         description: docsUrl ? (
           <span>
-            {message}{" "}
-            <a
-              href={docsUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline font-medium"
-            >
-              Open setup guide
-            </a>
+            <Trans
+              i18nKey="landing.datasetInfo.hubSync.uploadFailedWithGuide"
+              values={{ message }}
+              components={[
+                <a
+                  key="0"
+                  href={docsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline font-medium"
+                />,
+              ]}
+            />
           </span>
         ) : (
           message
@@ -560,7 +596,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     return (
       <div className="flex items-center gap-1.5 text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" />
-        <span>Uploading to Hub…</span>
+        <span>{t("landing.datasetInfo.hubSync.uploading")}</span>
       </div>
     );
   }
@@ -568,7 +604,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   if (status === "on_hub") {
     return (
       <div className="flex items-center gap-1.5 text-muted-foreground">
-        <span>Uploaded to HuggingFace</span>
+        <span>{t("landing.datasetInfo.hubSync.onHub")}</span>
         {hubUrl && (
           <a
             href={hubUrl}
@@ -594,7 +630,9 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   // signal that used to be mislabeled "local_only").
   if (status === "absent") {
     return (
-      <span className="text-muted-foreground">Not on the Hub, no local copy</span>
+      <span className="text-muted-foreground">
+        {t("landing.datasetInfo.hubSync.absent")}
+      </span>
     );
   }
 
@@ -603,7 +641,9 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   return (
     <div className="flex items-center justify-between gap-2">
       <span className="text-muted-foreground">
-        {status === "local_only" ? "Local only" : "Hub status unknown"}
+        {status === "local_only"
+          ? t("landing.datasetInfo.hubSync.localOnly")
+          : t("landing.datasetInfo.hubSync.unknown")}
       </span>
       <UploadDatasetDialog repoId={repoId} start={start}>
         <Button
@@ -612,7 +652,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
           className="h-6 gap-1 border-teal-500/50 px-2 text-xs text-teal-700 dark:text-teal-300 hover:bg-teal-500/10"
         >
           <UploadIcon className="h-3 w-3" />
-          Upload to Hub
+          {t("landing.datasetInfo.hubSync.upload")}
         </Button>
       </UploadDatasetDialog>
     </div>
@@ -632,6 +672,7 @@ const RenameDatasetDialog: React.FC<{
   repoId: string;
   onRenamed: (newRepoId: string) => void;
 }> = ({ open, onOpenChange, repoId, onRenamed }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
 
@@ -675,16 +716,23 @@ const RenameDatasetDialog: React.FC<{
        * rename on "skipped" (offline / logged out / unwritable namespace). */
       if (res.hub === "renamed") {
         toast({
-          title: "Dataset renamed",
-          description: `${res.repo_id} — the Hub copy was renamed too.`,
+          title: t("landing.datasetInfo.rename.renamedTitle"),
+          description: t("landing.datasetInfo.rename.renamedHub", {
+            repoId: res.repo_id,
+          }),
         });
       } else if (res.hub === "skipped") {
         toast({
-          title: "Dataset renamed locally",
-          description: `${res.repo_id} — any copy on the Hub still has the old name.`,
+          title: t("landing.datasetInfo.rename.renamedLocallyTitle"),
+          description: t("landing.datasetInfo.rename.renamedLocally", {
+            repoId: res.repo_id,
+          }),
         });
       } else {
-        toast({ title: "Dataset renamed", description: res.repo_id });
+        toast({
+          title: t("landing.datasetInfo.rename.renamedTitle"),
+          description: res.repo_id,
+        });
       }
       onOpenChange(false);
       onRenamed(res.repo_id);
@@ -705,10 +753,9 @@ const RenameDatasetDialog: React.FC<{
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Rename dataset</DialogTitle>
+          <DialogTitle>{t("landing.datasetInfo.rename.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Renames the local dataset directory. If this dataset also has a
-            copy on the Hub, it's renamed there too.
+            {t("landing.datasetInfo.rename.description")}
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center gap-1">
@@ -730,7 +777,7 @@ const RenameDatasetDialog: React.FC<{
               }
             }}
             autoFocus
-            placeholder="New name"
+            placeholder={t("landing.datasetInfo.rename.placeholder")}
           />
         </div>
         {(error ?? validationError) && (
@@ -741,7 +788,7 @@ const RenameDatasetDialog: React.FC<{
             variant="outline"
             onClick={() => onOpenChange(false)}
           >
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button
             disabled={
@@ -749,7 +796,9 @@ const RenameDatasetDialog: React.FC<{
             }
             onClick={doRename}
           >
-            {renaming ? "Renaming…" : "Rename"}
+            {renaming
+              ? t("landing.datasetInfo.rename.submitting")
+              : t("landing.datasetInfo.rename.submit")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -769,19 +818,21 @@ const HubDownloadRow: React.FC<{
   repoId: string;
   onDownloaded: () => void;
 }> = ({ repoId, onDownloaded }) => {
+  const { t } = useTranslation();
   const { toast } = useToast();
   const { downloading, start } = useDatasetDownload({
     repoId,
     onDone: () => {
       toast({
-        title: "Downloaded to this machine",
-        description: `${repoId} is now in your local cache.`,
+        title: t("landing.datasetInfo.download.doneTitle"),
+        description: t("landing.datasetInfo.download.doneBody", { repoId }),
       });
       onDownloaded();
     },
     onError: (message) => {
       toast({
-        title: "Download failed",
+        // `message` comes from the backend / the hook's own fallback.
+        title: t("landing.datasetInfo.download.failedTitle"),
         description: message,
         variant: "destructive",
       });
@@ -792,14 +843,16 @@ const HubDownloadRow: React.FC<{
     return (
       <div className="flex items-center gap-1.5 text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" />
-        <span>Downloading to this machine…</span>
+        <span>{t("landing.datasetInfo.download.inProgress")}</span>
       </div>
     );
   }
 
   return (
     <div className="flex items-center justify-between gap-2">
-      <span className="text-muted-foreground">Not downloaded</span>
+      <span className="text-muted-foreground">
+        {t("landing.datasetInfo.download.notDownloaded")}
+      </span>
       <Button
         size="sm"
         variant="outline"
@@ -807,7 +860,7 @@ const HubDownloadRow: React.FC<{
           const err = await start();
           if (err) {
             toast({
-              title: "Couldn't start download",
+              title: t("landing.datasetInfo.download.startFailedTitle"),
               description: err,
               variant: "destructive",
             });
@@ -816,7 +869,7 @@ const HubDownloadRow: React.FC<{
         className="h-6 gap-1 border-blue-500/50 px-2 text-xs text-blue-700 dark:text-blue-300 hover:bg-blue-500/10"
       >
         <DownloadIcon className="h-3 w-3" />
-        Download to this machine
+        {t("landing.datasetInfo.download.button")}
       </Button>
     </div>
   );
@@ -840,6 +893,7 @@ const NotDownloadedView: React.FC<{
   repoId: string;
   onDownloaded: () => void;
 }> = ({ repoId, onDownloaded }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [status, setStatus] = useState<HubStatusValue | "loading">("loading");
 
@@ -862,7 +916,9 @@ const NotDownloadedView: React.FC<{
     return (
       <div className="space-y-1.5">
         {header}
-        <p className="text-muted-foreground">Checking availability…</p>
+        <p className="text-muted-foreground">
+          {t("landing.datasetInfo.notDownloaded.checking")}
+        </p>
       </div>
     );
   }
@@ -874,8 +930,7 @@ const NotDownloadedView: React.FC<{
       <div className="space-y-1.5">
         {header}
         <p className="text-muted-foreground">
-          This dataset is on this machine, but its details couldn't be read — the
-          local copy looks incomplete or corrupt. Re-record or re-download it.
+          {t("landing.datasetInfo.notDownloaded.localUnreadable")}
         </p>
         <div className="mt-1.5 border-t border-border pt-1.5">
           <HubSyncRow repoId={repoId} />
@@ -891,8 +946,7 @@ const NotDownloadedView: React.FC<{
       <div className="space-y-1.5">
         {header}
         <p className="text-muted-foreground">
-          This dataset couldn't be found — there's no local copy and it isn't on
-          the Hugging Face Hub. It may have been deleted or renamed.
+          {t("landing.datasetInfo.notDownloaded.absent")}
         </p>
       </div>
     );
@@ -904,8 +958,8 @@ const NotDownloadedView: React.FC<{
       {header}
       <p className="text-muted-foreground">
         {status === "on_hub"
-          ? "Hub dataset — not downloaded locally. Training will fetch it from the Hub on demand; per-episode details show once it's cached."
-          : "Not downloaded locally, and the Hub couldn't be reached to confirm. Training will try to fetch it from the Hub on demand."}
+          ? t("landing.datasetInfo.notDownloaded.onHub")
+          : t("landing.datasetInfo.notDownloaded.unknown")}
       </p>
       <div className="mt-1.5 border-t border-border pt-1.5">
         <HubDownloadRow repoId={repoId} onDownloaded={onDownloaded} />
@@ -947,6 +1001,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
   onDelete,
   onDownloaded,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [info, setInfo] = useState<DatasetInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -979,7 +1034,10 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
   return (
     <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
       {loading && (
-        <div className="animate-pulse space-y-2 py-0.5" aria-label="Loading dataset details">
+        <div
+          className="animate-pulse space-y-2 py-0.5"
+          aria-label={t("landing.datasetInfo.loadingAria")}
+        >
           <div className="h-3 w-3/4 rounded bg-muted" />
           <div className="h-3 w-1/2 rounded bg-muted" />
           <div className="h-3 w-2/3 rounded bg-muted" />
@@ -1002,7 +1060,9 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
       )}
 
       {!loading && error && !error.notLocal && (
-        <p className="text-muted-foreground">Couldn't load dataset details.</p>
+        <p className="text-muted-foreground">
+          {t("landing.datasetInfo.loadError")}
+        </p>
       )}
 
       {!loading &&
@@ -1017,17 +1077,27 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
               <div className="flex items-start justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
                   <span>
-                    {info.total_episodes} episode
-                    {info.total_episodes === 1 ? "" : "s"}
+                    {/* A real plural (i18next _one/_other) for the episode
+                        count; the frame count arrives pre-formatted ("16.7k"),
+                        so it rides in as a plain variable, never as `count`.
+                        The duration string itself is produced unchanged by
+                        formatDuration. */}
+                    {t("landing.datasetInfo.episodes", {
+                      count: info.total_episodes,
+                    })}
                     {" · "}
-                    {formatCount(info.total_frames)} frames
+                    {t("landing.datasetInfo.frames", {
+                      frames: formatCount(info.total_frames),
+                    })}
                     {(() => {
                       const d = formatDuration(info.total_frames, info.fps);
                       return d ? ` · ${d}` : "";
                     })()}
                   </span>
                   {info.total_episodes === 0 && !isHubOnly && (
-                    <WarningBadge>No episodes recorded</WarningBadge>
+                    <WarningBadge>
+                      {t("landing.datasetInfo.noEpisodes")}
+                    </WarningBadge>
                   )}
                 </div>
                 <div className="-mr-1 -mt-0.5 flex shrink-0 items-center gap-0.5">
@@ -1038,8 +1108,8 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                     <button
                       type="button"
                       onClick={() => setRenameOpen(true)}
-                      aria-label="Rename dataset"
-                      title="Rename dataset"
+                      aria-label={t("landing.datasetInfo.renameAria")}
+                      title={t("landing.datasetInfo.renameAria")}
                       className="rounded p-1 text-muted-foreground hover:text-foreground"
                     >
                       <Pencil className="h-3.5 w-3.5" />
@@ -1052,8 +1122,8 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                     <button
                       type="button"
                       onClick={onDelete}
-                      aria-label="Delete dataset"
-                      title="Delete dataset"
+                      aria-label={t("landing.datasetInfo.deleteAria")}
+                      title={t("landing.datasetInfo.deleteAria")}
                       className="rounded p-1 text-muted-foreground hover:text-destructive"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -1067,12 +1137,12 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                   training). For a hub summary with none, omit the row — a hub
                   summary may simply lack features, and "unknown" is noise. */}
               {(info.cameras.length > 0 || !isHubOnly) && (
-                <Row label="Cameras">
+                <Row label={t("landing.datasetInfo.rowCameras")}>
                   {info.cameras.length > 0 ? (
                     info.cameras.join(", ")
                   ) : (
                     <WarningBadge>
-                      No camera data — unusable for vision training
+                      {t("landing.datasetInfo.noCameras")}
                     </WarningBadge>
                   )}
                 </Row>
@@ -1080,23 +1150,26 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
 
               {/* Robot type: omit when unknown rather than render "unknown". */}
               {info.robot_type && (
-                <Row label="Robot">{info.robot_type}</Row>
+                <Row label={t("landing.datasetInfo.rowRobot")}>
+                  {info.robot_type}
+                </Row>
               )}
 
               {info.tasks.length > 0 && (
-                <Row label="Tasks">
+                <Row label={t("landing.datasetInfo.rowTasks")}>
                   <TaskList tasks={info.tasks} />
                 </Row>
               )}
 
               {info.size_bytes != null && (
-                <Row label="Size">{formatBytes(info.size_bytes)}</Row>
+                <Row label={t("landing.datasetInfo.rowSize")}>
+                  {formatBytes(info.size_bytes)}
+                </Row>
               )}
 
               {isHubOnly && (
                 <p className="text-muted-foreground">
-                  Hub dataset — not downloaded locally. Training will fetch it
-                  from the Hub on demand.
+                  {t("landing.datasetInfo.hubOnlyNote")}
                 </p>
               )}
 
