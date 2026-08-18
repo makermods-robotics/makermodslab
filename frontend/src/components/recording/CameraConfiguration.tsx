@@ -21,8 +21,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
 import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
-import { useLanguage } from "@/contexts/LanguageContext";
-import { isCaselessScript } from "@/i18n/config";
+import { useEyebrowClass } from "@/hooks/useEyebrowClass";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -53,21 +52,6 @@ const BACKEND_OPTIONS = [
 // not copy. Same reasoning for the sentinels around it.
 const CAMERA_NAME_PRESETS = ["wrist", "top", "front", "side"];
 const CAMERA_NAME_CUSTOM = "__custom_name__";
-
-/**
- * The class an eyebrow heading wears, given the active language.
- *
- * `.eyebrow` bundles `uppercase` with `tracking-[0.08em]`. On a caseless
- * script the uppercase is a no-op but the letter-spacing is not — it renders
- * CJK headings visibly over-spaced — so the whole utility comes off and only
- * its size/weight/colour is kept. Mirrors the studio's `useEyebrowClass`.
- */
-function useEyebrowClass(): string {
-  const { language } = useLanguage();
-  return isCaselessScript(language)
-    ? "text-[11px] font-semibold text-muted-foreground"
-    : "eyebrow";
-}
 
 export interface CameraConfig {
   id: string;

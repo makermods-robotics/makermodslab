@@ -24,7 +24,9 @@
  * catalog, and the resolver only says WHICH one: see `titleKey` below.
  */
 
-import enLibrary from "@/i18n/locales/en/library";
+// Type-only: the catalog shape constrains COPY_GROUP so a renamed group is a
+// compile error rather than a key that silently resolves to nothing.
+import type enLibrary from "@/i18n/locales/en/library";
 
 export type DeleteAction = "delete-local" | "delete-local-copy" | "unpin" | "hide";
 
@@ -50,16 +52,6 @@ export interface DeleteResolution {
   descriptionKey: string;
   /** i18next key for the destructive confirm button's label. */
   confirmKey: string;
-  /**
-   * @deprecated English fallbacks for call sites that have not moved to the
-   * keys above. Read straight out of the English catalog so the two can't
-   * drift; delete these three fields once every caller uses `t()`.
-   */
-  titlePrefix: string;
-  /** @deprecated Use `descriptionKey` with `t()`. */
-  description: string;
-  /** @deprecated Use `confirmKey` with `t()`. */
-  confirmLabel: string;
   /** True when a confirmed action removes the row from the listing entirely
    * (hide / unpin / local-only delete) — the persisted selection should then
    * be cleared. False for the both→hub flip, where the row stays listed and
@@ -76,26 +68,13 @@ const COPY_GROUP = {
   "delete-local": "local",
 } as const satisfies Record<DeleteAction, keyof typeof enLibrary.delete>;
 
-/** Legacy English title prefixes, kept only for the `titlePrefix` fallback —
- * the translated titles are whole sentences and have no prefix form. */
-const LEGACY_TITLE_PREFIX: Record<DeleteAction, string> = {
-  "delete-local-copy": "Remove local copy of",
-  unpin: "Remove",
-  hide: "Remove",
-  "delete-local": "Delete",
-};
-
-/** The catalog keys (and their English fallbacks) for one action × kind. */
+/** The catalog keys for one action × kind. */
 function copyFor(action: DeleteAction, kind: DeletableKind) {
   const group = COPY_GROUP[action];
-  const en = enLibrary.delete[group][kind];
   return {
     titleKey: `library.delete.${group}.${kind}.title`,
     descriptionKey: `library.delete.${group}.${kind}.description`,
     confirmKey: `library.delete.${group}.${kind}.confirm`,
-    titlePrefix: LEGACY_TITLE_PREFIX[action],
-    description: en.description as string,
-    confirmLabel: en.confirm as string,
   };
 }
 

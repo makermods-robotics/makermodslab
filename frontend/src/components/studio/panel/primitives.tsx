@@ -7,27 +7,13 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { useLanguage } from "@/contexts/LanguageContext";
-import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 
-/**
- * The class an eyebrow heading wears, given the active language.
- *
- * `.eyebrow` bundles `uppercase` with `tracking-[0.08em]`. On a caseless
- * script the uppercase is a no-op but the letter-spacing is not — it renders
- * CJK headings as visibly over-spaced — and `.eyebrow` lives in Tailwind's
- * utilities layer, so a `tracking-normal` override beside it would be a
- * source-order coin flip. Drop the whole utility instead and keep only its
- * size/weight/colour. Exported because every studio eyebrow needs the same
- * decision (ActivityStrip makes it inline for its one pill).
- */
-export function useEyebrowClass(): string {
-  const { language } = useLanguage();
-  return isCaselessScript(language)
-    ? "text-[11px] font-semibold text-muted-foreground"
-    : "eyebrow";
-}
+import { useEyebrowClass } from "@/hooks/useEyebrowClass";
+
+// Re-exported from its neutral home so the many existing
+// `from "@/components/studio/panel/primitives"` imports keep working.
+export { useEyebrowClass };
 
 /** Slide animation shared by every studio collapsible — the panels' entry
  * forms and all three libraries. The single home for this animation string;
