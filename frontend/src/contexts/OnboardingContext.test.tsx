@@ -6,8 +6,16 @@ import type { Tour } from "@/lib/onboarding/types";
 const tour: Tour = {
   id: "test-tour",
   steps: [
-    { target: "[data-tour=a]", title: "A", description: "a" },
-    { target: "[data-tour=b]", title: "B", description: "b" },
+    {
+      target: "[data-tour=a]",
+      titleKey: "onboarding.launchpad.search.title",
+      descriptionKey: "onboarding.launchpad.search.description",
+    },
+    {
+      target: "[data-tour=b]",
+      titleKey: "onboarding.launchpad.skills.title",
+      descriptionKey: "onboarding.launchpad.skills.description",
+    },
   ],
 };
 
@@ -86,7 +94,13 @@ describe("OnboardingContext", () => {
     const secondDone = vi.fn();
     const secondTour: Tour = {
       id: "second-tour",
-      steps: [{ target: "[data-tour=c]", title: "C", description: "c" }],
+      steps: [
+        {
+          target: "[data-tour=c]",
+          titleKey: "onboarding.studio.collect.title",
+          descriptionKey: "onboarding.studio.collect.description",
+        },
+      ],
     };
 
     act(() => result.current.start(tour, firstDone));

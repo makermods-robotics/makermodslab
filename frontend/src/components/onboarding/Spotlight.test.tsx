@@ -71,8 +71,16 @@ describe("Spotlight", () => {
     const tour: Tour = {
       id: "regression-tour",
       steps: [
-        { target: "[data-tour=step-a]", title: "Step A", description: "desc a" },
-        { target: "[data-tour=step-b]", title: "Step B", description: "desc b" },
+        {
+          target: "[data-tour=step-a]",
+          titleKey: "onboarding.launchpad.search.title",
+          descriptionKey: "onboarding.launchpad.search.description",
+        },
+        {
+          target: "[data-tour=step-b]",
+          titleKey: "onboarding.launchpad.skills.title",
+          descriptionKey: "onboarding.launchpad.skills.description",
+        },
       ],
     };
 
@@ -96,7 +104,7 @@ describe("Spotlight", () => {
       );
 
       expect(screen.getByText("Step 1 of 2")).toBeInTheDocument();
-      expect(screen.getByText("Step A")).toBeInTheDocument();
+      expect(screen.getByText("Find a skill")).toBeInTheDocument();
     } finally {
       document.body.removeChild(targetA);
       document.body.removeChild(targetB);
@@ -118,7 +126,11 @@ describe("Spotlight", () => {
     const tour: Tour = {
       id: "square-tour",
       steps: [
-        { target: "[data-tour=square-target]", title: "Square", description: "desc" },
+        {
+          target: "[data-tour=square-target]",
+          titleKey: "onboarding.launchpad.search.title",
+          descriptionKey: "onboarding.launchpad.search.description",
+        },
       ],
     };
 

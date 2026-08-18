@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Gamepad2,
   Plus,
@@ -47,7 +48,10 @@ import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { useRobots, RobotRecord, RobotMode, robotSetupGap } from "@/hooks/useRobots";
+import { useRobots, RobotRecord, RobotMode } from "@/hooks/useRobots";
+import { formatRobotSetupGap } from "@/lib/robotSetupGap";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 
 /** Status dot: calibrated (ok) vs needs setup (warn ring). */
@@ -76,6 +80,8 @@ const StatusDot: React.FC<{ ready: boolean; className?: string }> = ({
 const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
+  const { language } = useLanguage();
   const {
     records,
     selectedName,
@@ -183,15 +189,16 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         // arm's servos hold a different saved calibration). Make it visible.
         if (data.warning) {
           toast({
-            title: "Started with a warning",
+            title: t("robot.teleop.startedWarningTitle"),
             description: data.warning,
             duration: 10000,
           });
         } else {
           toast({
-            title: "Teleoperation started",
+            title: t("robot.teleop.startedTitle"),
             description:
-              data.message || `Started teleoperation for ${robot.name}.`,
+              data.message ||
+              t("robot.teleop.startedFallback", { name: robot.name }),
           });
         }
         setTeleopOpen(true);
@@ -200,22 +207,22 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         // disabled torque and is reporting whether that succeeded. Surface it
         // alongside the failure reason instead of dropping it silently.
         toast({
-          title: "Couldn't start teleoperation — check the arm",
-          description: `${data.message || "Failed to start."} ${data.warning}`,
+          title: t("robot.teleop.failedWithWarningTitle"),
+          description: `${data.message || t("robot.teleop.failedFallback")} ${data.warning}`,
           variant: "destructive",
           duration: 10000,
         });
       } else {
         toast({
-          title: "Couldn't start teleoperation",
-          description: data.message || "Failed to start.",
+          title: t("robot.teleop.failedTitle"),
+          description: data.message || t("robot.teleop.failedFallback"),
           variant: "destructive",
         });
       }
     } catch {
       toast({
-        title: "Connection error",
-        description: "Could not connect to the backend server.",
+        title: t("common.connectionError.title"),
+        description: t("common.connectionError.description"),
         variant: "destructive",
       });
     } finally {
@@ -224,9 +231,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   };
 
   const teleopDisabledReason = !selectedRecord
-    ? "Select a robot first"
+    ? t("robot.corner.selectFirst")
     : !selectedRecord.is_clean
-      ? `${selectedRecord.name} ${robotSetupGap(selectedRecord)} — open Robot settings`
+      ? t("robot.teleop.disabledReason", {
+          name: selectedRecord.name,
+          gap: formatRobotSetupGap(t, selectedRecord),
+        })
       : null;
 
   return (
@@ -249,10 +259,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
             className="h-7 gap-1.5 rounded-full px-2.5"
           >
             <Plus className="h-3.5 w-3.5" />
-            Robot
+            {t("robot.corner.create")}
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="bottom">Create robot</TooltipContent>
+        <TooltipContent side="bottom">
+          {t("robot.corner.createTooltip")}
+        </TooltipContent>
       </Tooltip>
 
       <Tooltip>
@@ -263,7 +275,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
               size="sm"
               disabled={!selectedName}
               onClick={() => openSettings(selectedName)}
-              aria-label="Robot settings"
+              aria-label={t("robot.corner.settings")}
               className="h-7 w-7 rounded-full p-0"
             >
               <Settings className="h-3.5 w-3.5" />
@@ -272,8 +284,8 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         </TooltipTrigger>
         <TooltipContent side="bottom">
           {selectedName
-            ? `Robot settings for ${selectedName}`
-            : "Select a robot first"}
+            ? t("robot.corner.settingsFor", { name: selectedName })
+            : t("robot.corner.selectFirst")}
         </TooltipContent>
       </Tooltip>
 
@@ -290,16 +302,18 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
               <>
                 <StatusDot ready={selectedRecord.is_clean} />
                 <span className="max-w-[180px] truncate">
-                  <span className="text-muted-foreground">Robot: </span>
+                  <span className="text-muted-foreground">
+                    {t("robot.corner.activeLabel")}
+                  </span>
                   {selectedRecord.name}
                 </span>
               </>
             ) : hasRobots ? (
-              <span>Select a robot</span>
+              <span>{t("robot.corner.selectRobot")}</span>
             ) : (
               <>
                 <Plus className="h-3.5 w-3.5" />
-                <span>Set up your robot</span>
+                <span>{t("robot.corner.setUp")}</span>
               </>
             )}
             <ChevronDown className="h-3 w-3 text-muted-foreground" />
@@ -308,7 +322,9 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         <DropdownMenuContent align="end" className="w-72">
           {hasRobots ? (
             <>
-              <DropdownMenuLabel className="eyebrow">Robots</DropdownMenuLabel>
+              <DropdownMenuLabel className="eyebrow">
+                {t("robot.corner.robots")}
+              </DropdownMenuLabel>
               {availableNames.map((name) => {
                 const rec = records[name];
                 if (!rec) return null;
@@ -321,10 +337,21 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                   >
                     <StatusDot ready={rec.is_clean} />
                     <span className="flex-1 truncate">{name}</span>
-                    <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                      {rec.mode === "bimanual" ? "bimanual" : "single"}
+                    <span
+                      className={cn(
+                        "font-mono text-[10px] text-muted-foreground",
+                        isCaselessScript(language)
+                          ? ""
+                          : "uppercase tracking-wider",
+                      )}
+                    >
+                      {rec.mode === "bimanual"
+                        ? t("robot.corner.mode.bimanual")
+                        : t("robot.corner.mode.single")}
                       {" · "}
-                      {rec.is_clean ? "ready" : "needs setup"}
+                      {rec.is_clean
+                        ? t("robot.corner.status.ready")
+                        : t("robot.corner.status.needsSetup")}
                     </span>
                   </DropdownMenuItem>
                 );
@@ -333,13 +360,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
             </>
           ) : (
             <DropdownMenuLabel className="text-sm font-normal text-muted-foreground">
-              No robots yet. Create one to get started — you'll set up ports,
-              calibration, and cameras next.
+              {t("robot.corner.empty")}
             </DropdownMenuLabel>
           )}
           <DropdownMenuItem onSelect={() => setCreateOpen(true)} className="gap-2">
             <Plus className="h-4 w-4" />
-            Create robot…
+            {t("robot.corner.createItem")}
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={!selectedName}
@@ -347,7 +373,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
             className="gap-2"
           >
             <Pencil className="h-4 w-4" />
-            Rename robot…
+            {t("robot.corner.renameItem")}
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={!selectedName}
@@ -355,7 +381,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
             className="gap-2 text-destructive focus:text-destructive"
           >
             <Trash2 className="h-4 w-4" />
-            Delete robot…
+            {t("robot.corner.deleteItem")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -375,7 +401,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
               ) : (
                 <Gamepad2 className="h-3.5 w-3.5" />
               )}
-              Teleop
+              {t("robot.corner.teleop")}
             </Button>
           </span>
         </TooltipTrigger>
@@ -403,9 +429,9 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Rename robot</DialogTitle>
+            <DialogTitle>{t("robot.rename.title")}</DialogTitle>
             <DialogDescription>
-              Calibration assignments, ports, and cameras move with the robot.
+              {t("robot.rename.description")}
             </DialogDescription>
           </DialogHeader>
           <form
@@ -416,7 +442,9 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
             className="space-y-4"
           >
             <div>
-              <Label htmlFor="rename-robot-name">New name</Label>
+              <Label htmlFor="rename-robot-name">
+                {t("robot.rename.newName")}
+              </Label>
               <Input
                 id="rename-robot-name"
                 autoFocus
@@ -431,15 +459,16 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                 variant="outline"
                 onClick={() => setRenameOpen(false)}
               >
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button type="submit" disabled={renaming || !renameValue.trim()}>
                 {renaming ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Renaming…
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />{" "}
+                    {t("robot.rename.submitting")}
                   </>
                 ) : (
-                  "Rename"
+                  t("robot.rename.submit")
                 )}
               </Button>
             </DialogFooter>
@@ -451,21 +480,21 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Delete {selectedName ?? "robot"}?
+              {t("robot.delete.title", {
+                name: selectedName ?? t("robot.delete.fallbackName"),
+              })}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This removes the robot's saved configuration (ports, calibration
-              assignments, cameras). Calibration files themselves stay in the
-              library. This can't be undone.
+              {t("robot.delete.description")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDeleteConfirm}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Delete robot
+              {t("robot.delete.confirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
