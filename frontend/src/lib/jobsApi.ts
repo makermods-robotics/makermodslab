@@ -1,3 +1,4 @@
+import i18n from "@/i18n";
 import { ApiError, Fetcher, apiRequest } from "./apiClient";
 
 export type JobState = "running" | "done" | "failed" | "interrupted";
@@ -239,7 +240,10 @@ export async function startTrainingJob(
       e.status === 409 &&
       (e.detail ?? "").startsWith("Job already running")
     ) {
-      throw new Error("Another training is already running. Stop it first.");
+      // The substitute is OUR sentence, not the server's, so it is translated;
+      // every other refusal's `detail` is backend prose and passes through as
+      // the server wrote it.
+      throw new Error(i18n.t("jobs.errors.trainingAlreadyRunning"));
     }
     throw e;
   }
@@ -283,19 +287,31 @@ export function jobDisplayName(job: JobRecord): string {
  * those legitimately differ — but the WORDS have to agree, and they did not:
  * the card said "Interrupted" while the monitor dialog showed the raw wire
  * string for the same run.
+ *
+ * Holds translation KEY PATHS, not words. This map is built once at import
+ * time, so resolved copy here would freeze whichever language happened to load
+ * first and never follow a language switch; the components resolve these keys
+ * through `useTranslation()` at render time instead.
  */
-export const JOB_STATE_LABELS: Record<JobState, string> = {
-  running: "Running",
-  done: "Done",
-  failed: "Failed",
-  interrupted: "Stopped",
-};
+export const JOB_STATE_LABELS = {
+  running: "jobs.jobState.running",
+  done: "jobs.jobState.done",
+  failed: "jobs.jobState.failed",
+  interrupted: "jobs.jobState.interrupted",
+} as const satisfies Record<JobState, string>;
 
 /** `JOB_STATE_LABELS` for a state that may not be one — a state added by a
  * newer backend than this bundle falls back to the raw wire word rather than
- * rendering blank. */
+ * rendering blank.
+ *
+ * Resolves through the i18next instance rather than taking a `t`, so the
+ * signature stays what its non-component callers already pass. It is resolved
+ * per CALL (not at import), so the language in force at render time wins; a
+ * component that re-renders on language change — anything using
+ * `useTranslation()` — picks the new word up on the spot. */
 export function jobStateLabel(state: JobState): string {
-  return JOB_STATE_LABELS[state] ?? state;
+  const key = JOB_STATE_LABELS[state];
+  return key ? i18n.t(key) : state;
 }
 
 /** Set a job's display alias. Metadata-only — the job id, output dir, and

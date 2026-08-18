@@ -7,6 +7,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useJobsChangedSignal } from "@/hooks/useJobsChangedSignal";
@@ -74,6 +75,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
 
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   // Ancestors referenced via resume_from_job_id but paged out of the list, so a
@@ -232,34 +234,35 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     async (id: string) => {
       try {
         await stopJob(baseUrl, fetchWithHeaders, id);
-        toast({ title: "Job stopping" });
+        toast({ title: t("jobs.jobsData.stopping") });
         refresh();
       } catch (e) {
         toast({
-          title: "Stop failed",
+          title: t("jobs.jobsData.stopFailed"),
+          // Backend/network prose — shown as the server wrote it.
           description: e instanceof Error ? e.message : String(e),
           variant: "destructive",
         });
       }
     },
-    [baseUrl, fetchWithHeaders, toast, refresh],
+    [baseUrl, fetchWithHeaders, toast, refresh, t],
   );
 
   const remove = useCallback(
     async (id: string) => {
       try {
         await deleteJob(baseUrl, fetchWithHeaders, id);
-        toast({ title: "Job removed" });
+        toast({ title: t("jobs.jobsData.removed") });
         refresh();
       } catch (e) {
         toast({
-          title: "Delete failed",
+          title: t("jobs.jobsData.deleteFailed"),
           description: e instanceof Error ? e.message : String(e),
           variant: "destructive",
         });
       }
     },
-    [baseUrl, fetchWithHeaders, toast, refresh],
+    [baseUrl, fetchWithHeaders, toast, refresh, t],
   );
 
   // Untracked hub jobs aren't deletable on the Hub (the Jobs API has no
@@ -268,17 +271,17 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     async (id: string) => {
       try {
         await dismissHubJob(baseUrl, fetchWithHeaders, id);
-        toast({ title: "Job removed from list" });
+        toast({ title: t("jobs.jobsData.dismissed") });
         refresh();
       } catch (e) {
         toast({
-          title: "Remove failed",
+          title: t("jobs.jobsData.dismissFailed"),
           description: e instanceof Error ? e.message : String(e),
           variant: "destructive",
         });
       }
     },
-    [baseUrl, fetchWithHeaders, toast, refresh],
+    [baseUrl, fetchWithHeaders, toast, refresh, t],
   );
 
   const localJobs = useMemo(
