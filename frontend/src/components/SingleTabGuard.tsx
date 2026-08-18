@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 
 type Peer = { id: string; openedAt: number; lastSeen: number };
@@ -16,6 +17,7 @@ const newTabId = (): string =>
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 const SingleTabGuard = ({ children }: { children: ReactNode }) => {
+  const { t } = useTranslation();
   const [isPrimary, setIsPrimary] = useState(true);
   const peersRef = useRef<Map<string, Peer>>(new Map());
   const myIdRef = useRef<string>("");
@@ -127,13 +129,12 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
         >
           <div className="mx-4 max-w-md space-y-4 rounded-lg border bg-background p-6 text-center shadow-lg">
             <h2 className="text-lg font-semibold">
-              MakerMods Lab is already open in another tab
+              {t("shared.singleTab.title")}
             </h2>
             <p className="text-sm text-muted-foreground">
-              Only one tab can control the robot at a time. Switch back to the
-              original tab, or take over here — the other tab will lock.
+              {t("shared.singleTab.body")}
             </p>
-            <Button onClick={takeOver}>Use this tab</Button>
+            <Button onClick={takeOver}>{t("shared.singleTab.takeOver")}</Button>
           </div>
         </div>
       )}

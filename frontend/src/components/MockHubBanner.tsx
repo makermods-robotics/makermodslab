@@ -1,4 +1,5 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { disableMockHub, mockHubEnabled } from "@/lib/mockHub";
 
 /**
@@ -9,19 +10,17 @@ import { disableMockHub, mockHubEnabled } from "@/lib/mockHub";
  * that remounts the app anyway.
  */
 const MockHubBanner: React.FC = () => {
+  const { t } = useTranslation();
   if (!mockHubEnabled()) return null;
   return (
     <div className="fixed inset-x-0 bottom-0 z-[100] flex items-center justify-center gap-3 bg-warn px-4 py-1.5 text-xs font-semibold text-white shadow-2">
-      <span>
-        MOCK HUB DATA — jobs, models, and Hugging Face auth on this page are
-        fake (dev fixture).
-      </span>
+      <span>{t("shared.mockHub.banner")}</span>
       <button
         type="button"
         onClick={disableMockHub}
         className="rounded border border-current px-2 py-0.5 font-semibold underline-offset-2 hover:underline"
       >
-        Turn off
+        {t("shared.mockHub.turnOff")}
       </button>
     </div>
   );
