@@ -1701,12 +1701,74 @@ def test_cloud_start_allows_hub_dataset(tmp_path) -> None:
             "makermodslab.datasets.get_hub_status",
             return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
         ),
+        patch("makermodslab.datasets.hub_copy_has_data", return_value=True),
         patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", _fake_runner_factory),
     ):
         record = reg.start(cfg, target)
 
     assert record.runner == "hf_cloud"
     fake_runner.start.assert_called_once()
+
+
+def test_cloud_start_rejects_empty_hub_copy(tmp_path) -> None:
+    """A cloud run on a dataset whose Hub repo exists but has no data (an
+    interrupted upload left the empty repo behind) raises
+    DatasetHubCopyEmptyError before any record/runner is created — the pod
+    trains on the HUB copy, so an empty one would fail remotely instead of
+    here with an actionable message."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import DatasetHubCopyEmptyError, JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/empty_upload", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/empty_upload", "status": "on_hub", "url": "u"},
+        ),
+        patch("makermodslab.datasets.hub_copy_has_data", return_value=False),
+        pytest.raises(DatasetHubCopyEmptyError) as exc,
+    ):
+        reg.start(cfg, target)
+
+    assert exc.value.repo_id == "user/empty_upload"
+    assert "no data in it" in str(exc.value)
+    # Nothing was registered — the guard fires before the record is created.
+    assert reg.list(limit=10) == []
+
+
+def test_cloud_start_allows_hub_copy_with_unknown_data_status(tmp_path) -> None:
+    """hub_copy_has_data returning None (offline / transport error) does NOT
+    block the run — same "only a definitive answer blocks" rule as the
+    local_only guard. A network blip must not wrongly refuse a real dataset."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch("makermodslab.datasets.hub_copy_has_data", return_value=None),
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner),
+    ):
+        record = reg.start(cfg, target)
+
+    assert record.runner == "hf_cloud"
 
 
 def test_cloud_start_allows_unknown_status_dataset(tmp_path) -> None:
@@ -1774,6 +1836,7 @@ def test_cloud_start_passes_resume_total_to_the_runner(tmp_path) -> None:
             "makermodslab.datasets.get_hub_status",
             return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
         ),
+        patch("makermodslab.datasets.hub_copy_has_data", return_value=True),
         patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", _factory),
     ):
         reg.start(cfg, target)
@@ -1811,6 +1874,7 @@ def test_start_seeds_a_resumed_records_progress_at_the_checkpoint_step(tmp_path)
             "makermodslab.datasets.get_hub_status",
             return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
         ),
+        patch("makermodslab.datasets.hub_copy_has_data", return_value=True),
         patch(
             "makermodslab.runners.hf_cloud.HfCloudJobRunner",
             lambda *a, **k: fake_runner,
@@ -1843,6 +1907,7 @@ def test_start_leaves_a_fresh_records_progress_at_zero(tmp_path) -> None:
             "makermodslab.datasets.get_hub_status",
             return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
         ),
+        patch("makermodslab.datasets.hub_copy_has_data", return_value=True),
         patch(
             "makermodslab.runners.hf_cloud.HfCloudJobRunner",
             lambda *a, **k: fake_runner,
@@ -2591,6 +2656,7 @@ def cloud_preflight(monkeypatch):
     """Keep the cloud dataset preflight off the network — it sits ahead of the
     resume block, so without this it, not the code under test, is what fails."""
     monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    monkeypatch.setattr("makermodslab.datasets.hub_copy_has_data", lambda repo_id: True)
 
 
 # ── cloud parent → Local ─────────────────────────────────────────────────────
@@ -3422,6 +3488,7 @@ def test_finetune_start_cloud_keeps_the_step_ref(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
     monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    monkeypatch.setattr("makermodslab.datasets.hub_copy_has_data", lambda repo_id: True)
     monkeypatch.setattr("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock())
 
     reg = JobRegistry(tmp_path / "root")
@@ -5036,6 +5103,7 @@ def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> 
         lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
     )
     monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    monkeypatch.setattr("makermodslab.datasets.hub_copy_has_data", lambda repo_id: True)
     fake_runner = MagicMock()
     fake_runner.hf_job_id.return_value = "hfjob-1"
     with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
