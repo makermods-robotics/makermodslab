@@ -79,6 +79,14 @@ SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/save
 SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
 SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
 
+# Per-dataset episode indices the user excluded from training (curation, not
+# deletion — the episode stays on disk and in every listing/upload, it's just
+# left out of the --dataset.episodes subset a training run is launched with).
+# JSON object keyed by repo_id -> list[int], unlike the flat repo-id lists
+# above, since the thing being persisted is per-dataset state, not membership
+# in one shared collection.
+EXCLUDED_EPISODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/excluded_episodes.json")
+
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
 MAKERMODSLAB_TAG = "MakerModsLab"
@@ -1105,6 +1113,48 @@ def remove_hidden_model(repo_id: str) -> bool:
     """Unhide a model. Returns True if it was hidden, False if it wasn't. Also
     called by the pin route so re-adding a hidden repo makes it visible again."""
     return _HIDDEN_MODELS.remove(repo_id)
+
+
+def _read_excluded_episodes_file() -> dict[str, list[int]]:
+    """The whole excluded-episodes map. A missing/corrupt/non-object file
+    degrades to empty — this is cosmetic curation state, so it must never
+    raise or block training."""
+    path = EXCLUDED_EPISODES_FILE
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read excluded episodes: {e}")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[int]] = {}
+    for repo_id, indices in data.items():
+        if isinstance(repo_id, str) and isinstance(indices, list):
+            out[repo_id] = sorted({i for i in indices if isinstance(i, int)})
+    return out
+
+
+def get_excluded_episodes(repo_id: str) -> list[int]:
+    """Episode indices excluded from training for this dataset. Empty for a
+    dataset with no exclusions, or when the file is missing/corrupt."""
+    return _read_excluded_episodes_file().get(repo_id, [])
+
+
+def set_excluded_episodes(repo_id: str, episode_indices: list[int]) -> None:
+    """Replace the excluded-episode set for one dataset. An empty list clears
+    the dataset's entry entirely rather than persisting a blank one. NEVER
+    touches the dataset's files or Hub copy — this is a training-time filter
+    applied client-side when building the run request, not a deletion."""
+    data = _read_excluded_episodes_file()
+    cleaned = sorted({i for i in episode_indices if isinstance(i, int)})
+    if cleaned:
+        data[repo_id] = cleaned
+    else:
+        data.pop(repo_id, None)
+    _atomic_write_text(EXCLUDED_EPISODES_FILE, json.dumps(data, indent=2))
 
 
 # ---------------------------------------------------------------------------

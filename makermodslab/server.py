@@ -141,6 +141,7 @@ from .utils.config import (
     find_available_ports,
     get_default_robot_port,
     get_dismissed_hub_jobs,
+    get_excluded_episodes,
     get_robot_record,
     get_saved_robot_port,
     is_robot_record_clean,
@@ -156,6 +157,7 @@ from .utils.config import (
     rename_robot_record,
     save_imported_calibration,
     save_robot_record,
+    set_excluded_episodes,
 )
 from .utils.hf_auth import (
     cached_whoami,
@@ -695,6 +697,32 @@ def datasets_episodes(repo_id: str):
     if episodes is None:
         raise HTTPException(status_code=404, detail=f"No viewable episode list for '{repo_id}'")
     return episodes
+
+
+@app.get("/datasets/excluded-episodes")
+def datasets_excluded_episodes(repo_id: str):
+    """Episode indices the user excluded from training for this dataset
+    (curation, not deletion — see set_excluded_episodes). Empty list for a
+    dataset with no exclusions."""
+    return {"repo_id": repo_id, "episode_indices": get_excluded_episodes(repo_id)}
+
+
+class ExcludedEpisodesRequest(BaseModel):
+    repo_id: str
+    episode_indices: list[int]
+
+
+@app.put("/datasets/excluded-episodes")
+def datasets_set_excluded_episodes(request: ExcludedEpisodesRequest):
+    """Replace the excluded-episode set for one dataset. NEVER deletes or
+    mutates the dataset — the viewer computes the training subset from this
+    and sends it as dataset_episodes when launching a run."""
+    set_excluded_episodes(request.repo_id, request.episode_indices)
+    return {
+        "success": True,
+        "repo_id": request.repo_id,
+        "episode_indices": get_excluded_episodes(request.repo_id),
+    }
 
 
 @app.get("/datasets/episode-joints")
