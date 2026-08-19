@@ -2639,6 +2639,24 @@ class DatasetNotOnHubError(Exception):
         )
 
 
+class DatasetHubCopyEmptyError(Exception):
+    """Raised by JobRegistry.start when a cloud (hf_cloud) run is requested on a
+    dataset whose Hub repo exists but holds no dataset — an interrupted upload
+    left behind the empty repo its first call created (see
+    datasets.hub_copy_has_data). HF Jobs pods train on the HUB copy, so this
+    would submit a job that fails once the pod tries to load a dataset that
+    isn't there, instead of failing here with an actionable message.
+    `repo_id` is the offending dataset."""
+
+    def __init__(self, repo_id: str) -> None:
+        self.repo_id = repo_id
+        super().__init__(
+            f"The Hub copy of '{repo_id}' exists but has no data in it — an "
+            "earlier upload was interrupted before it finished. Re-upload the "
+            "dataset before starting a cloud run."
+        )
+
+
 class JobRegistry:
     """Owns the registry of training jobs and their persistence.
 
@@ -2868,10 +2886,22 @@ class JobRegistry:
         # browser flow uploads-then-trains before ever reaching here, so this
         # path is primarily for non-UI callers.
         if target.runner == "hf_cloud":
-            from .datasets import get_hub_status
+            from .datasets import get_hub_status, hub_copy_has_data
 
-            if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
+            status = get_hub_status(config.dataset_repo_id).get("status")
+            if status == "local_only":
                 raise DatasetNotOnHubError(config.dataset_repo_id)
+            # The repo existing isn't enough: an interrupted upload can leave
+            # an empty repo on the Hub (see hub_copy_has_data), and the pod
+            # trains on the HUB copy regardless of what's local. Called
+            # directly rather than through get_hub_status's hub_has_data
+            # field, which is only populated when a local copy also exists —
+            # this must also catch an imported, Hub-only dataset whose repo
+            # is empty. Same "only a definitive answer blocks" rule as above:
+            # None (offline/transport error) falls through to the existing
+            # fallback instead of wrongly refusing a real dataset.
+            if status == "on_hub" and hub_copy_has_data(config.dataset_repo_id) is False:
+                raise DatasetHubCopyEmptyError(config.dataset_repo_id)
 
         # Resume and fine-tune are distinct and mutually exclusive: resume
         # continues optimizer+step from a checkpoint (needs training_state);

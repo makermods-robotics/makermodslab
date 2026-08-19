@@ -66,6 +66,7 @@ from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
+    DatasetHubCopyEmptyError,
     DatasetNotOnHubError,
     JobAlreadyContinuedError,
     JobAlreadyRunningError,
@@ -1311,6 +1312,11 @@ async def create_training_job(req: Request):
         # Cloud run on a local-only dataset. 409: the caller must upload the
         # dataset first (the browser flow does this automatically before
         # submitting, so this fires for non-UI callers).
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DatasetHubCopyEmptyError as exc:
+        # Cloud run on a dataset whose Hub repo exists but is empty (an
+        # interrupted upload). 409 for the same reason as the local-only
+        # case above: the caller must re-upload before the run can proceed.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except JobAlreadyContinuedError as exc:
         # Sticks only: the source already has a continuation, so a second one
