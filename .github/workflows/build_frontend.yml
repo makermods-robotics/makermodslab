@@ -2,7 +2,7 @@ name: Rebuild frontend/dist
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
     paths:
       - 'frontend/**'
       - '!frontend/dist/**'
@@ -20,8 +20,11 @@ jobs:
       # Mint a short-lived token from the dist-bot GitHub App. The default
       # GITHUB_TOKEN / github-actions[bot] cannot be granted PR-bypass on a
       # protected branch (GitHub blocks the first-party token), so it can't
-      # push the rebuilt dist back to `main`. A real GitHub App can be added to
-      # the branch's PR-bypass list, and its token expires when the job ends.
+      # push the rebuilt dist back to a protected branch. A real GitHub App can
+      # be added to the branch's PR-bypass list, and its token expires when the
+      # job ends. `staging` is unprotected today, so only `main` needs the
+      # bypass entry — if `staging` ever gets protected, add the App there too
+      # or this job starts failing on it.
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
@@ -61,7 +64,9 @@ jobs:
             git add frontend/dist
             git commit -m "ci: rebuild frontend/dist [skip ci]"
             # Pushes as the App (credentials persisted by checkout above), which
-            # is on main's PR-bypass list. dist is path-excluded from this
+            # is on main's PR-bypass list. GITHUB_REF_NAME keeps this correct on
+            # every branch the workflow runs for, so it lands on staging when
+            # staging is what was pushed. dist is path-excluded from this
             # workflow's triggers and the message carries [skip ci], so this push
             # does not start another run.
             git push origin "HEAD:${GITHUB_REF_NAME}"

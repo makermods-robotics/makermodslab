@@ -1,10 +1,10 @@
 # Builds the frontend on every pull request, so a lockfile or source change that
 # breaks the build is caught *before* it reaches main.
 #
-# Why this exists: build_frontend.yml only runs on push to main, so until this
-# workflow the first thing to run `npm ci` on Linux was the job that fires after
-# a merge. Its failure is silent — frontend/dist just never gets rebuilt and prod
-# keeps serving the previous bundle. That has bitten us three times (e345e61,
+# Why this exists: build_frontend.yml only runs on push to main or staging, so
+# until this workflow the first thing to run `npm ci` on Linux was the job that
+# fires after a merge. Its failure is silent — frontend/dist just never gets
+# rebuilt and prod keeps serving the previous bundle. That has bitten us three times (e345e61,
 # 944cb05, c18d42c), each a different flavour of the same root cause: a lockfile
 # generated on a developer's machine that ubuntu-latest cannot install.
 #
