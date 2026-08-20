@@ -48,6 +48,7 @@ on:
   pull_request:
     branches:
       - main
+      - staging
 
 # Ensures that only the latest commit for a PR or branch is built, canceling older runs.
 concurrency:
