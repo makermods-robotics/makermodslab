@@ -62,7 +62,7 @@ jobs:
         run: npm ci
 
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: npx tsc --noEmit -p tsconfig.app.json
 
       # Non-blocking: `npm run lint` currently reports 3 pre-existing errors, all
       # `require()`-style imports in tailwind.config.ts, plus 24 warnings. Per
