@@ -51,7 +51,7 @@ interface CalibrationLibraryProps {
    */
   excludeConfigField?: string;
   /** Called after a successful reassignment so the parent can refetch the robot. */
-  onAssigned?: () => void | Promise<void>;
+  onAssigned?: () => void | Promise<unknown>;
   /**
    * Called after an operation that changes the FILE LIBRARY itself (rename /
    * delete / import). Each arm row renders its own CalibrationLibrary with a
