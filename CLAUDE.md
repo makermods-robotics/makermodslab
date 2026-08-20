@@ -36,7 +36,13 @@ When `frontend/**` (excluding `frontend/dist/**`) changes on `main`, [`.github/w
 
 Test with `pytest` (install `.[test]`), lint with `ruff check` / `ruff format` (config for both in [pyproject.toml](pyproject.toml)). Tests in [tests/](tests/) cover request schemas, pure helpers, and idle/mutex branches; subprocess/thread happy paths and HF Jobs integration are **deliberately** not unit-tested — don't add coverage there. There is no Python build step; for end-to-end validation, run `makermodslab` and exercise endpoints.
 
-Frontend checks (run from `frontend/`): `npm run lint`, `npx tsc --noEmit -p tsconfig.app.json`, `npm run build`. **The `-p tsconfig.app.json` is not optional** — the root `tsconfig.json` is a solution file (`"files": []` plus project references), so a bare `npx tsc --noEmit` checks nothing and always exits 0. Some type/lint errors pre-date any given change — record the baseline before you start and compare against it; don't fix pre-existing errors unrelated to your change.
+Frontend checks (run from `frontend/`): `npm run lint`, `npx tsc --noEmit -p tsconfig.app.json`, `npm run build`. Some type/lint errors pre-date any given change — record the baseline before you start and compare against it; don't fix pre-existing errors unrelated to your change.
+
+### Branches and CI
+
+`main` is the release branch; `staging` is a permanent integration branch in front of it — feature branches PR into `staging`, and `staging` is promoted to `main` by PR. Both run the same workflows, so what passes on `staging` is what `main` will do.
+
+**Never commit `frontend/dist` by hand** — it is rebuilt and committed automatically on a push to either branch, and a hand-built bundle turns a clean merge into a binary conflict. [`sync_staging.yml`](.github/workflows/sync_staging.yml) merges `main` into `staging` on every push to `main` and resolves that for you, so the promotion PR stays clean.
 
 ## Architecture
 

@@ -1,0 +1,129 @@
+# Keeps `staging` continuously fast-forwarded onto `main`, so the eventual
+# staging -> main promotion PR is conflict-free by construction.
+#
+# Why this exists: both branches auto-commit frontend/dist (build_frontend.yml
+# runs on a push to either), and dist is marked `-merge` in
+# frontend/.gitattributes, so a bundle touched on both sides conflicts as a
+# binary file. GitHub's web conflict editor refuses binary conflicts outright,
+# which means the promotion PR would dead-end in the UI and every promotion
+# would need a hand-resolved local merge. Relying on each contributor to
+# remember the right incantation is not a plan.
+#
+# So resolve it on a schedule nobody has to think about: every push to `main`
+# merges straight into `staging` here, with one narrow automatic policy —
+# frontend/dist resolves to staging's copy. That choice is safe because dist is
+# self-healing: this job's push touches frontend/** source, which re-triggers
+# build_frontend.yml on staging, which rebuilds the bundle from the merged tree
+# and commits the real answer. The pick only decides which bundle staging
+# serves for the ~40s until that lands.
+#
+# The policy is deliberately scoped to frontend/dist and nothing else. A
+# conflict anywhere in source aborts the merge and fails the run rather than
+# picking a side — silently resolving a source conflict is how a hotfix on main
+# gets thrown away with no trace.
+
+name: Sync main into staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The App token does the writing; the workflow's own GITHUB_TOKEN needs nothing.
+permissions:
+  contents: read
+
+# Never let two syncs race: they would both merge the same main commit into
+# staging from different checkouts and the loser would fail on a stale push.
+concurrency:
+  group: sync-main-to-staging
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # Same dist-bot App as build_frontend.yml. The first-party GITHUB_TOKEN is
+      # deliberately not used: a push made with it does not trigger further
+      # workflow runs, and this job's whole point is to trigger the staging
+      # rebuild that follows it.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.DIST_BOT_APP_ID }}
+          private-key: ${{ secrets.DIST_BOT_PRIVATE_KEY }}
+
+      # Credentials are persisted on purpose — the `git push` at the end reuses
+      # them on the origin remote. The token is minted per-run and dies with the
+      # job. fetch-depth: 0 because a merge needs real history, not a shallow
+      # clone.
+      - uses: actions/checkout@v7.0.0  # zizmor: ignore[artipacked]
+        with:
+          ref: staging
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Merge main into staging
+        id: merge
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          git config user.name  "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
+
+          if git merge --no-edit origin/main; then
+            echo "outcome=clean" >> "$GITHUB_OUTPUT"
+          else
+            unmerged=$(git diff --name-only --diff-filter=U)
+            outside=$(grep -v '^frontend/dist/' <<<"$unmerged" || true)
+
+            if [[ -n "$outside" ]]; then
+              git merge --abort
+              {
+                echo "outcome=source-conflict"
+                echo "conflicts<<EOF"
+                echo "$outside"
+                echo "EOF"
+              } >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+
+            # dist only: take staging's bundle, then let build_frontend.yml
+            # rebuild it from the merged tree on the push below.
+            git checkout --ours -- frontend/dist
+            git add frontend/dist
+            git commit --no-edit -q
+            echo "outcome=dist-resolved" >> "$GITHUB_OUTPUT"
+          fi
+
+          git push origin HEAD:staging
+
+      # Fires only on the source-conflict path. Puts the runbook on the run's
+      # landing page, which is what the failure notification links to.
+      - name: Explain a source conflict
+        if: failure() && steps.merge.outputs.outcome == 'source-conflict'
+        env:
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+        run: |
+          {
+            echo "### :warning: \`main\` and \`staging\` disagree outside \`frontend/dist\`"
+            echo
+            echo "The merge was aborted and \`staging\` is untouched. These files conflict:"
+            echo
+            echo '```'
+            echo "$CONFLICTS"
+            echo '```'
+            echo
+            echo "This is not something to automate away — resolve it by hand:"
+            echo
+            echo '```bash'
+            echo 'git checkout staging && git pull'
+            echo 'git merge main'
+            echo 'git checkout --ours -- frontend/dist   # keep the dist policy'
+            echo '# resolve the source conflicts above, then:'
+            echo 'git add -A && git commit && git push origin staging'
+            echo '```'
+            echo
+            echo "Re-running this workflow after that push is harmless — it will be a no-op."
+          } >> "$GITHUB_STEP_SUMMARY"
