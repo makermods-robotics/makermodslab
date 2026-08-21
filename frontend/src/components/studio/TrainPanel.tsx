@@ -61,6 +61,15 @@ const NONE = "__none__";
  * read — a display label, not an architecture. */
 const UNKNOWN_POLICY_TYPE = "model";
 
+/** Policies with no real "from scratch": each builds a pretrained backbone
+ * (a vision-language model for smolvla, a PaliGemma+expert stack for
+ * pi0/pi05/pi0_fast) that only receives real weights via an explicit
+ * pretrained path, so leaving Starting point unset fine-tunes the matching
+ * public foundation checkpoint instead of training with random weights (see
+ * jobs.start's `_POLICY_FOUNDATION_BASE_REPO_ID`). Keep in sync with that
+ * dict's keys. Every other policy's from-scratch run is normal. */
+const FOUNDATION_POLICY_TYPES = new Set(["smolvla", "pi0", "pi05", "pi0_fast"]);
+
 /** The architecture a job record trains (imported models record their
  * checkpoint's own `type`), or null when the record doesn't know it. Never
  * returns the "model" placeholder — pushing that into the form would select a
@@ -442,13 +451,9 @@ const TrainPanel: React.FC = () => {
       });
   };
 
-  // SmolVLA has no real "from scratch": its vision-language backbone is a
-  // pretrained VLM, so leaving Starting point unset fine-tunes the public
-  // SmolVLA base rather than training with random weights (see jobs.start's
-  // _SMOLVLA_BASE_REPO_ID default). Every other policy keeps the literal
-  // scratch label — a from-scratch ACT/diffusion/vqbet/tdmpc run is normal.
-  const noStartingPointLabel =
-    policyType === "smolvla" ? "SmolVLA base" : "Train from scratch";
+  const noStartingPointLabel = FOUNDATION_POLICY_TYPES.has(policyType)
+    ? "Train from base"
+    : "Train from scratch";
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
@@ -624,8 +629,8 @@ const TrainPanel: React.FC = () => {
                   </span>
                 ) : finetuneSeed ? (
                   "Fine-tunes from this skill's latest checkpoint."
-                ) : policyType === "smolvla" ? (
-                  "Fine-tune an existing skill, or the public SmolVLA base."
+                ) : FOUNDATION_POLICY_TYPES.has(policyType) ? (
+                  "Fine-tune an existing skill, or train from its public base."
                 ) : (
                   "Fine-tune an existing skill, or start fresh."
                 )}
