@@ -683,6 +683,16 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             }
         if _replay.replay_active:
             return {"success": False, "message": "Replay is currently active. Stop it first."}
+
+        # Lazy, because jobs imports this module back the same way.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+            }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".
