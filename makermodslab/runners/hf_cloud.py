@@ -36,13 +36,13 @@ import time
 import tomllib
 from importlib.metadata import requires
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 
 from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
-from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
+from ..jobs import LogLine, StepFloor, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makermodslab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
@@ -603,6 +603,82 @@ _TAIL_CLEAN_END_WAIT_S = 15.0
 # (transient network blip during a long training).
 _TAIL_RECONNECT_BACKOFF_S = 5.0
 
+# How long a single connection may deliver NOTHING before we abandon it and
+# reconnect (MT47). `fetch_job_logs(follow=True)` can block inside one read
+# forever — no line, no StopIteration, no exception — and a plain `for` over it
+# has no way to notice. Generous on purpose: a job still QUEUED/BUILDING is
+# legitimately silent for minutes, and a needless reconnect is cheap now that
+# the replay is deduped by content rather than by position.
+_TAIL_SILENCE_TIMEOUT_S = 600.0
+
+# How many emitted lines are remembered for replay de-duplication on reconnect
+# (MT47). This set NEVER EVICTS, and that is the whole point: an eviction
+# policy makes a replay LONGER than the window pathological, because a
+# from-zero replay hits the oldest entries first — exactly the ones an LRU has
+# already dropped. Each such line then looks novel, is accepted, and evicts the
+# next one, so the entire history is re-accepted in order and the metrics
+# parser walks the run's progress backwards (review of PR #71).
+#
+# Never evicting removes that mode entirely: however long a replay is, its
+# leading lines are still recognised. The cap is a memory backstop, not a
+# window — cloud log volume is small (a 2.5-hour run's log.jsonl held ~275
+# lines, and HF's SSE batches many tqdm frames per message), so a real job uses
+# a few thousand entries. Past the cap we stop REMEMBERING new lines rather
+# than forgetting old ones: recent duplicates may slip through, which is
+# cosmetic, while the early history stays recognised forever.
+#
+# The cap is sized on measured cost, not a guess: a full set of 200k hashes
+# holds ~15.5 MB. That is the ceiling a pathological run would pay, and it is
+# why the cap exists at all — a real cloud job never approaches it.
+_TAIL_DEDUPE_MAX_LINES = 200_000
+
+# How often the consumer wakes to re-check `_stop_event` while waiting for a
+# line. Without this it sat in a single 600s `get`, so a stop signalled by the
+# status poller was not observed until the silence timeout expired — which
+# _tail_loop's docstring and _set_terminal's "wakes the tail loop" comment both
+# claim it is.
+_TAIL_READER_POLL_S = 1.0
+
+# Hand-off queue depth between a connection's reader thread and the consumer.
+# Bounded so an ABANDONED reader whose stream later recovers cannot retain an
+# unbounded backlog nobody will ever read (the reviewer measured 50k retained
+# lines against the old unbounded queue).
+_TAIL_READER_QUEUE_MAX = 256
+
+# How many reader threads this runner may have alive at once before it gives up
+# rather than opening another.
+#
+# This bounds a regression THIS BRANCH INTRODUCED. On main the tail iterated
+# `fetch_job_logs` directly in the single tail thread, so a read that never
+# returned stranded exactly one thread and killed logging for that job —
+# permanent, but singly. Moving the read onto a per-connection thread so the
+# silence timeout could break that stall means every timeout starts ANOTHER
+# reader, and a parked one cannot be retired: the flag is only observed at the
+# boundaries of a read, and a read that never returns has no boundary. Left
+# uncapped that turns one stranded thread into one per timeout, each holding an
+# HTTP connection too.
+#
+# Three, not one: a healthy runner holds exactly one live reader, so the cap has
+# to leave room for the ordinary case plus a stray or two before declaring the
+# situation pathological. Small because each stray costs a thread AND a socket,
+# and because a runner needing a fourth concurrent reader is not recovering —
+# it is accumulating.
+_TAIL_MAX_LIVE_READERS = 3
+
+# How long a reader blocks trying to hand a line over before re-checking
+# whether its connection has been abandoned. Only a liveness knob: it bounds
+# how long an abandoned reader lingers once its queue is full.
+_TAIL_READER_PUT_TIMEOUT_S = 1.0
+
+
+class _TailReaderCapError(RuntimeError):
+    """Raised instead of opening reader N+1 when the cap is already reached.
+
+    Distinct from every other tail failure because it means the opposite thing:
+    other failures are transient and the loop should reconnect, this one says
+    reconnecting is exactly what must stop.
+    """
+
 
 def resolve_wandb_api_key() -> str | None:
     """Look up the host's wandb API key for forwarding to a cloud job.
@@ -645,6 +721,15 @@ class HfCloudJobRunner:
         # construction sites in jobs.py must supply it or a resumed cloud run
         # reports resume-relative steps (e.g. 4251/11000 instead of 8251/15000).
         self._resume_total = resume_total
+        # One floor per RUNNER, not per connection: surviving a reconnect is
+        # exactly what makes it a replay guard.
+        self._step_floor = StepFloor()
+        # Live reader threads for this runner — incremented when one starts and
+        # decremented when it actually EXITS, so the count reflects threads that
+        # are genuinely still parked rather than connections we have opened. A
+        # reader whose read eventually returns retires itself and stops counting.
+        self._live_readers = 0
+        self._live_readers_lock = threading.Lock()
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -666,9 +751,18 @@ class HfCloudJobRunner:
         # registry can surface it to the UI instead of a synthetic exit code.
         self._terminal_message: str | None = None
         self._wandb_run_url: str | None = None
-        # Count of log lines processed across (possibly multiple) SSE
-        # connections, so reconnects skip the replayed prefix.
-        self._lines_processed: int = 0
+        # Hashes of every line emitted this run, for de-duplicating the prefix
+        # an SSE reconnect replays (MT47). Content, not position: `seen`-vs-total
+        # counting assumed every reconnect replays the whole log from line 1,
+        # and silently dropped every subsequent line whenever it didn't.
+        #
+        # A SET that never evicts, not an LRU window — see
+        # _TAIL_DEDUPE_MAX_LINES for why eviction turned a long replay into a
+        # progress rewind. Hashes rather than the lines themselves so the cap
+        # costs single-digit MB at worst; a collision would drop one log line,
+        # which is cosmetic and cannot move the metrics (the monotonic guard in
+        # parse_metrics_into owns that).
+        self._emitted_hashes: set[int] = set()
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # output_dir is the host-local path the registry pins for local jobs;
@@ -864,31 +958,229 @@ class HfCloudJobRunner:
             raise RuntimeError(msg) from exc
         self._log_line(f"[upload] dataset {repo_id} uploaded.")
 
+    def _is_replayed(self, stripped: str) -> bool:
+        """Whether this line was already emitted, so a reconnect's replayed
+        prefix isn't teed to disk and the UI twice (MT47).
+
+        Content-based, deliberately replacing the positional
+        `seen <= _lines_processed` scheme this used to use. That scheme was only
+        correct if EVERY reconnect replayed the whole log from line 1; when a
+        reconnect replayed less than that (or nothing at all, following from
+        "now"), the per-connection counter never caught up with the
+        cross-connection total and every subsequent line was skipped — silently,
+        forever, while the job ran happily to completion.
+
+        The memory is a never-evicting set, which is what makes it correct for a
+        replay of ANY length. The first version bounded it as an LRU window and
+        a replay longer than that window thrashed it end to end: the oldest line
+        had been evicted, so it read as novel, and accepting it evicted the next
+        one, and so on through the entire history (review of PR #71). Every
+        stale line was accepted and the metrics walked backwards. Nothing is
+        forgotten now; past the cap we simply stop learning new lines, so the
+        early history a full replay starts with is always recognised.
+        """
+        fingerprint = hash(stripped)
+        if fingerprint in self._emitted_hashes:
+            return True
+        if len(self._emitted_hashes) < _TAIL_DEDUPE_MAX_LINES:
+            self._emitted_hashes.add(fingerprint)
+        return False
+
+    def _iter_job_logs(self):
+        """Yield raw log lines, abandoning a connection that goes silent (MT47).
+
+        `fetch_job_logs(follow=True)` can block inside a single read
+        indefinitely — no line, no StopIteration, no exception — when the SSE
+        connection is half-open (NAT eviction, laptop sleep, proxy idle
+        timeout). A plain `for` over that iterator has no way to notice: it
+        cannot even observe `_stop_event`, because the loop body never runs.
+
+        So the blocking iteration happens on a reader thread and is consumed
+        through a queue with a timeout. On silence we raise, which the caller
+        already handles as "reconnect".
+
+        The reader cannot be force-killed while it sits in that blocking read —
+        nothing in Python can do that — but it MUST NOT outlive its usefulness
+        either, which the first version of this got wrong (review of PR #71):
+        every timeout stranded another live thread, and an abandoned reader
+        whose stream later recovered went on consuming into a private unbounded
+        queue nobody would ever drain. Two mechanisms fix that, and both are
+        about what happens the moment the read finally returns:
+
+          * `abandoned` is set by this generator's `finally`, i.e. as soon as
+            the consumer stops iterating (timeout, stop, or plain GC). The
+            reader checks it around every hand-off, so the next line it manages
+            to read is its last.
+          * the queue is BOUNDED, so a reader that is still producing while
+            nobody consumes blocks on `put` within a few hundred lines instead
+            of accumulating them. That block is itself interruptible: `put`
+            times out, the flag is re-checked, and the thread exits.
+
+        Between them an abandoned reader retains at most one queue's worth of
+        lines and exits at its next opportunity — and it can never deliver to
+        the live consumer, which by then is draining a different queue.
+
+        "At its next opportunity" is the honest limit, and it only exists for a
+        read that EVENTUALLY RETURNS. A read that never returns has no boundary
+        at which the flag can be observed, so that reader never retires. We
+        cannot reach its socket to break it: the response is a local inside a
+        `with` two generator frames below the iterator we hold
+        (huggingface_hub hf_api.py:8385), and HfApi exposes no per-instance
+        client. The log stream itself is bounded upstream — a 120s httpx read
+        timeout (hf_api.py:11935) — but the job-status GET the client issues
+        between iterations carries NO timeout (hf_api.py:11851, shared client
+        built with timeout=None), and that is the read that can park forever.
+        Reported upstream; unfixable from here.
+
+        So the number of such readers is CAPPED instead — see
+        _TAIL_MAX_LIVE_READERS. Bounding the damage is the guarantee this makes;
+        eliminating the strand is not.
+        """
+        assert self._hf_job_id is not None
+
+        # Refuse to open reader N+1. Checked BEFORE anything is allocated, and
+        # against the count of readers still ALIVE — a reader whose read came
+        # back has already retired itself and does not count here.
+        #
+        # `_stop_event` first: a shutdown racing the cap is an ordinary exit,
+        # not a pathology, and must not be reported as one.
+        if self._stop_event.is_set():
+            return
+        with self._live_readers_lock:
+            live = self._live_readers
+            if live >= _TAIL_MAX_LIVE_READERS:
+                raise _TailReaderCapError(
+                    f"{live} log-reader threads for job {self._hf_job_id} are still parked in "
+                    f"reads that never returned (cap {_TAIL_MAX_LIVE_READERS}); refusing to open "
+                    "another"
+                )
+            self._live_readers = live + 1
+
+        queue: Queue = Queue(maxsize=_TAIL_READER_QUEUE_MAX)
+        abandoned = threading.Event()
+        # The terminator lives OUTSIDE the bounded queue, and that is not a
+        # style choice. Putting it in meant a stream that ended — cleanly or
+        # with an error — while the queue happened to be full had its
+        # terminator dropped by `suppress(Full)`. The consumer then drained the
+        # backlog, found nothing more, and sat out the full silence timeout
+        # before raising "no log output for 600s" — inventing a stall where
+        # there was a real, immediately-knowable error, and misreporting its
+        # cause. A slot the reader can always write is the fix.
+        finished = threading.Event()
+        error: list[BaseException] = []
+        # A best-effort NUDGE so the common case stays instant. Correctness
+        # never depends on it landing: if the queue is full the consumer is
+        # mid-drain and will observe `finished` within one poll tick. It exists
+        # only so a normal stream end or error doesn't wait out a poll tick.
+        wake = object()
+
+        def _finished() -> bool:
+            return abandoned.is_set() or self._stop_event.is_set()
+
+        def _reader() -> None:
+            try:
+                for raw in self._api.fetch_job_logs(job_id=self._hf_job_id, follow=True):
+                    while not _finished():
+                        try:
+                            queue.put(raw, timeout=_TAIL_READER_PUT_TIMEOUT_S)
+                            break
+                        except Full:
+                            continue  # nobody draining yet — re-check the flag
+                    if _finished():
+                        return
+            except Exception as exc:  # surfaced on the consuming thread
+                error.append(exc)
+            finally:
+                # Reaching here IS the retirement: this thread is about to die,
+                # so it stops counting against the cap. A reader parked forever
+                # never gets here, which is exactly what the cap is counting.
+                with self._live_readers_lock:
+                    self._live_readers -= 1
+                # Never blocked, never dropped: unlike a queue slot, this always
+                # lands, so the consumer learns the connection is over as soon
+                # as it has drained whatever the reader managed to hand over.
+                finished.set()
+                with contextlib.suppress(Full):
+                    queue.put_nowait(wake)
+
+        try:
+            threading.Thread(target=_reader, name=f"hf-job-{self._hf_job_id}-sse", daemon=True).start()
+        except BaseException:
+            # The reader's own `finally` is what normally decrements; if it
+            # never ran, the reservation would leak and shrink the cap forever.
+            with self._live_readers_lock:
+                self._live_readers -= 1
+            raise
+
+        try:
+            deadline = time.monotonic() + _TAIL_SILENCE_TIMEOUT_S
+            while True:
+                if self._stop_event.is_set():
+                    return
+                remaining = deadline - time.monotonic()
+                try:
+                    item = queue.get(timeout=max(0.0, min(_TAIL_READER_POLL_S, remaining)))
+                except Empty as empty:
+                    # An empty queue is the ONLY point at which the terminator
+                    # may be honoured: it means everything the reader handed
+                    # over has been delivered, so a real error or a clean end
+                    # can now be reported without losing lines ahead of it.
+                    if finished.is_set():
+                        if error:
+                            raise error[0] from None
+                        return
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"no log output for {_TAIL_SILENCE_TIMEOUT_S:.0f}s; reconnecting"
+                        ) from empty
+                    continue
+                if item is wake:
+                    # FIFO, so this arrives only after every line the reader
+                    # handed over — the connection really is drained.
+                    if error:
+                        raise error[0] from None
+                    return
+                # Only REAL output counts as liveness. A half-open connection
+                # that still dribbles blank keepalive frames would otherwise
+                # reset this deadline forever and never be reconnected — which
+                # is the exact stall the timeout exists to break, so timing
+                # keepalives as though they were log lines would have left the
+                # motivating failure uncovered. The line is still yielded;
+                # _tail_loop discards blanks itself a few lines later.
+                if item.strip():
+                    deadline = time.monotonic() + _TAIL_SILENCE_TIMEOUT_S
+                yield item
+        finally:
+            # Reached on every exit path — the silence timeout, a clean end, a
+            # stream error, and the GeneratorExit of a consumer that simply
+            # stopped iterating. This is what makes the reader's lifetime the
+            # connection's lifetime rather than the process's.
+            abandoned.set()
+
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the
-        in-memory queue. Reconnects on stream end or transient error while
-        the status poller still says the job is alive — SSE death is no
-        longer fatal. Exits when _stop_event is set (status poller saw a
-        terminal stage, or stop() was called).
+        in-memory queue. Reconnects on stream end, transient error, or a
+        silent connection while the status poller still says the job is alive
+        — SSE death is no longer fatal. Exits when _stop_event is set (status
+        poller saw a terminal stage, or stop() was called).
         """
         assert self._hf_job_id is not None
         try:
             while not self._stop_event.is_set():
                 clean_end = False
                 try:
-                    seen = 0
-                    for raw in self._api.fetch_job_logs(job_id=self._hf_job_id, follow=True):
+                    for raw in self._iter_job_logs():
                         if self._stop_event.is_set():
                             return
-                        seen += 1
-                        # Skip the replayed prefix from a reconnect.
-                        if seen <= self._lines_processed:
-                            continue
-                        self._lines_processed = seen
                         stripped = raw.rstrip()
                         if not stripped:
                             continue
-                        parse_metrics_into(stripped, self._metrics, self._resume_total)
+                        # Drop the prefix a reconnect replayed. Deliberately
+                        # AFTER the blank-line skip and on the stripped text, so
+                        # the window holds exactly what was emitted.
+                        if self._is_replayed(stripped):
+                            continue
+                        parse_metrics_into(stripped, self._metrics, self._resume_total, self._step_floor)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(stripped)
                             if url is not None:
@@ -904,6 +1196,25 @@ class HfCloudJobRunner:
                                 self._log_queue.get_nowait()
                         self._log_queue.put(log_line)
                     clean_end = True
+                except _TailReaderCapError as exc:
+                    # The one failure that must NOT reconnect: reconnecting is
+                    # what got us here. Loud, because this is silent otherwise —
+                    # logs simply stop arriving and nothing says why.
+                    #
+                    # Deliberately NOT a job failure. The status poller runs
+                    # independently and still finalises this run correctly, and
+                    # _settle_terminal_metrics still applies at finalise; what is
+                    # lost is live log streaming and the metrics parsed from it,
+                    # not the run. Marking the job failed here would turn a
+                    # telemetry outage into a fake training failure.
+                    logger.error(
+                        "HF log tail for job %s is giving up: %s. Live logs and parsed "
+                        "progress stop here; the run itself is unaffected and will still "
+                        "be finalised by the status poller.",
+                        self._hf_job_id,
+                        exc,
+                    )
+                    return
                 except Exception as exc:
                     logger.info("HF log tail disconnected, will reconnect: %s", exc)
 

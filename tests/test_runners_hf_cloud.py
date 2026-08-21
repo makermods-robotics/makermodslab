@@ -891,3 +891,764 @@ def test_stop_is_a_noop_before_submission(tmp_path) -> None:
 
     assert api.cancelled == []
     assert runner.terminal_stage() is None
+
+
+# ---------------------------------------------------------------------------
+# MT47: the log tail must not go permanently silent mid-run.
+# ---------------------------------------------------------------------------
+
+
+def test_is_replayed_skips_a_repeated_line_but_not_a_new_one(tmp_path) -> None:
+    """The replay de-dupe, as a pure function. Content-based, so it is correct
+    whether a reconnect replays the whole log, part of it, or none of it — the
+    three cases the old positional counter could not tell apart."""
+    from unittest.mock import MagicMock
+
+    runner = _runner_with(MagicMock(), tmp_path)
+
+    assert runner._is_replayed("first") is False
+    assert runner._is_replayed("second") is False
+    # The reconnect replays both, then delivers something genuinely new.
+    assert runner._is_replayed("first") is True
+    assert runner._is_replayed("second") is True
+    assert runner._is_replayed("third") is False
+
+
+def test_is_replayed_never_forgets_so_a_long_replay_cannot_thrash_it(tmp_path) -> None:
+    """The de-dupe must not evict. The first version used an LRU window, and a
+    replay LONGER than that window thrashed it end to end: the oldest line had
+    aged out, so it read as novel, and accepting it evicted the next one, and so
+    on through the whole history — every stale line accepted (review of PR #71).
+
+    Never forgetting is what makes the length of a replay irrelevant.
+    """
+    from unittest.mock import MagicMock
+
+    runner = _runner_with(MagicMock(), tmp_path)
+
+    history = [f"line-{i}" for i in range(1001)]
+    for line in history:
+        assert runner._is_replayed(line) is False
+
+    # A full replay of a history longer than the old 1,000-line window: every
+    # single line must still be recognised, including the very first.
+    assert [runner._is_replayed(line) for line in history] == [True] * len(history)
+
+
+def test_is_replayed_stops_learning_at_the_cap_rather_than_forgetting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap is a memory backstop, not a window: past it we stop remembering
+    NEW lines instead of dropping old ones, so the early history a from-zero
+    replay starts with stays recognised forever."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_DEDUPE_MAX_LINES", 3)
+    runner = _runner_with(MagicMock(), tmp_path)
+
+    for line in ("a", "b", "c"):
+        assert runner._is_replayed(line) is False
+    assert len(runner._emitted_hashes) == 3
+
+    # Past the cap: "d" is emitted and NOT remembered...
+    assert runner._is_replayed("d") is False
+    assert runner._is_replayed("d") is False  # so it can repeat — cosmetic
+    # ...but nothing already learned was forgotten, which is the property that
+    # matters: a replay still starts by hitting lines we recognise.
+    assert runner._is_replayed("a") is True
+    assert len(runner._emitted_hashes) == 3
+
+
+def _drain(runner) -> list[str]:
+    from queue import Empty as _Empty
+
+    out = []
+    while True:
+        try:
+            out.append(runner._log_queue.get_nowait().message)
+        except _Empty:
+            return out
+
+
+def _run_tail_briefly(runner, monkeypatch, *, silence=30.0, seconds=1.0) -> list[str]:
+    """Drive _tail_loop on a thread, then stop it from THIS thread.
+
+    The stop always comes from the test, never from inside the fake stream: the
+    loop consumes its reader through a queue, so a fake that set the event
+    mid-yield would race the consumer and make the assertion meaningless."""
+    import threading
+    import time
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", silence)
+
+    thread = threading.Thread(target=runner._tail_loop, daemon=True)
+    thread.start()
+    time.sleep(seconds)
+    lines = _drain(runner)
+    runner._stop_event.set()
+    thread.join(timeout=5)
+    return lines
+
+
+def test_tail_loop_keeps_delivering_after_a_reconnect_replays_less_than_it_had(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MT47, the exact regression. A reconnect that replays FEWER lines than
+    were already processed used to leave a per-connection counter permanently
+    behind a cross-connection total, so every later line was skipped — the job
+    ran to completion while progress and charts froze at the drop."""
+    import time
+    from unittest.mock import MagicMock
+
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield from [f"L{i}" for i in range(1, 7)]
+            raise RuntimeError("SSE dropped mid-run")
+        # HF replays only a short tail, then the run continues.
+        yield from ["L5", "L6", "L7", "L8", "L9"]
+        while True:
+            time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch)
+
+    assert calls["n"] == 2, "expected exactly one reconnect"
+    # The new lines arrive...
+    assert [x for x in lines if x in ("L7", "L8", "L9")] == ["L7", "L8", "L9"]
+    # ...and the replayed prefix is not teed a second time.
+    assert lines == ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"]
+
+
+def test_tail_loop_reconnects_when_a_connection_stops_yielding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of MT47. `fetch_job_logs(follow=True)` can block inside a
+    single read forever — no line, no StopIteration, no exception — and a plain
+    `for` over it cannot even observe _stop_event, because the loop body never
+    runs again. The silence timeout is what notices."""
+    import time
+    from unittest.mock import MagicMock
+
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield "L1"
+            while True:  # half-open socket
+                time.sleep(0.02)
+        else:
+            yield "L2"  # the reconnect recovers the stream
+            while True:
+                time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch, silence=0.3, seconds=2.0)
+
+    assert calls["n"] >= 2, "a silent connection must be abandoned and retried"
+    assert lines == ["L1", "L2"]
+
+
+def test_tail_loop_does_not_reconnect_while_a_connection_is_still_talking(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The silence timer must measure silence, not connection age — otherwise a
+    long run would be torn down and re-replayed on a fixed cadence."""
+    import time
+    from unittest.mock import MagicMock
+
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        for i in range(40):
+            yield f"L{i}"
+            time.sleep(0.05)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    _run_tail_briefly(runner, monkeypatch, silence=0.3, seconds=1.0)
+
+    assert calls["n"] == 1
+
+
+def test_tail_loop_still_scrapes_the_wandb_url_after_the_rewrite(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewrite moved the de-dupe but must not have dropped the W&B scrape
+    that already rode this loop."""
+    import time
+    from unittest.mock import MagicMock
+
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        yield "Track this run --> https://wandb.ai/me/proj/runs/abc123"
+        while True:
+            time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    _run_tail_briefly(runner, monkeypatch)
+
+    assert runner.wandb_run_url() == "https://wandb.ai/me/proj/runs/abc123"
+
+
+# ---------------------------------------------------------------------------
+# The two defects the PR #71 review found, as reproductions.
+# ---------------------------------------------------------------------------
+
+
+def _live_sse_threads() -> int:
+    import threading
+
+    return sum(1 for t in threading.enumerate() if t.name.endswith("-sse") and t.is_alive())
+
+
+def test_repeated_silence_timeouts_do_not_strand_reader_threads(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer repro 1: four silent intervals produced four concurrent live
+    reader threads.
+
+    COVERS THE RELEASED CASE ONLY — reads that eventually come back. This test
+    releases its parked readers precisely so they can reach a boundary and
+    observe the abandon flag, which is what makes it a test OF that flag. It
+    therefore says nothing about a read that never returns; that case has no
+    boundary, is not fixable from here, and is bounded instead by the cap (see
+    test_readers_parked_in_a_never_returning_read_stop_at_the_cap). Do not read
+    a green result here as "readers can always be retired".
+
+    `_stop_event` is deliberately NEVER set here. It is the other arm of
+    `_finished()`, so setting it would retire the parked readers on its own and
+    the test would pass with the `abandoned` mechanism deleted entirely — which
+    is exactly what an earlier version of this test did. The tail loop is left
+    running and only the connections are abandoned, so the ONLY thing that can
+    retire these readers is the per-connection flag.
+    """
+    import threading
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    before = _live_sse_threads()
+    released = threading.Event()
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        # Silent long enough to be abandoned, then the stream "recovers" — the
+        # exact shape that used to leave a reader consuming forever.
+        released.wait(timeout=10)
+        while True:
+            yield "recovered-line"
+            time.sleep(0.01)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 0.2)
+    thread = threading.Thread(target=runner._tail_loop, daemon=True)
+    thread.start()
+    time.sleep(1.6)  # several connections opened, gone silent, been abandoned
+
+    # Wake every parked reader while the tail loop is STILL RUNNING.
+    released.set()
+    deadline = time.time() + 5
+    stranded = _live_sse_threads()
+    while time.time() < deadline and stranded > before + 1:
+        time.sleep(0.05)
+        # Captured INSIDE the loop: the still-running tail loop opens a fresh
+        # connection every backoff, so re-reading after the loop can catch one
+        # that was born in the gap and fail on a count that was fine.
+        stranded = _live_sse_threads()
+
+    runner._stop_event.set()
+    thread.join(timeout=5)
+
+    # At most the one live connection the still-running loop legitimately holds.
+    assert stranded <= before + 1, "abandoned readers must not accumulate"
+
+
+def test_an_abandoned_reader_retains_a_bounded_backlog_and_delivers_nothing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer repro 1, the memory half: an abandoned reader whose stream
+    recovers consumed and retained 50,000 unobserved lines against the old
+    unbounded queue.
+
+    The reader is released BEFORE it is abandoned and produces without pause, so
+    it genuinely runs at a queue nobody drains — the bound is what stops it, not
+    the abandon flag arriving first. An earlier version of this test released
+    the reader only after abandoning it, so it produced exactly one line and
+    would have passed with the cap set to a million.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_PUT_TIMEOUT_S", 0.05)
+    produced = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        while True:
+            produced["n"] += 1
+            yield f"stale-{produced['n']}"
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    gen = runner._iter_job_logs()
+    next(gen)  # one line delivered; the reader now races ahead of the consumer
+    time.sleep(0.4)  # …and fills the queue, because nobody is draining it
+    filled = produced["n"]
+    assert filled >= hf_cloud._TAIL_READER_QUEUE_MAX, (
+        f"reader never reached the bound ({filled}) — the test isn't exercising it"
+    )
+    # THE bound assertion. Without it the test passes with an unbounded queue:
+    # a reviewer set _TAIL_READER_QUEUE_MAX = 0 and the reader retained
+    # 1,069,101 lines while every other assertion here still held, because they
+    # only constrain what happens AFTER abandonment.
+    assert filled <= hf_cloud._TAIL_READER_QUEUE_MAX + 5, (
+        f"queue did not bound retention: {filled} lines held"
+    )
+
+    gen.close()  # abandon the connection
+    time.sleep(0.4)
+    after = produced["n"]
+
+    # Retention is bounded by the queue, not by the stream: once abandoned the
+    # reader stops within a put-timeout instead of running on.
+    assert after - filled <= 5, f"abandoned reader kept consuming: {filled} -> {after}"
+    assert runner._log_queue.qsize() == 0, "an abandoned connection delivers nothing onward"
+
+
+def test_a_full_replay_of_the_whole_history_is_recognised_and_never_rewinds(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer repro 2, at the size that broke the ORIGINAL 1,000-line window.
+
+    Named for what it is: 1,001 lines is longer than the window this replaced,
+    not longer than the 200k cap. Past-cap behaviour is covered separately
+    below, where the cap is actually lowered.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    total = 1001
+    history = [
+        f"Training:  {i * 100 // total}%|##| {i}/{total} [00:10<00:10,  1.00step/s]"
+        for i in range(1, total + 1)
+    ]
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield from history
+            raise RuntimeError("SSE dropped after the whole history")
+        yield from history  # the reconnect replays EVERYTHING from line 1
+        while True:
+            time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch, seconds=2.0)
+
+    assert calls["n"] == 2, "expected exactly one reconnect"
+    assert lines == sorted(set(lines), key=history.index)
+    assert lines == history[-len(lines) :]
+    assert runner._metrics.current_step == total
+    assert runner._metrics.total_steps == total
+
+
+def test_past_the_dedupe_cap_duplicates_slip_through_but_progress_still_cannot_rewind(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap's real failure mode, with the cap actually lowered.
+
+    Past it we stop LEARNING new lines, so a replay of those un-learned lines is
+    re-delivered — the acknowledged cosmetic cost. What must still hold is that
+    the monotonic guard, which remembers no lines at all, refuses to let any of
+    those duplicates drag progress backwards.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_DEDUPE_MAX_LINES", 3)
+
+    total = 8
+    history = [
+        f"Training:  {i * 10}%|##| {i}/{total} [00:10<00:10,  1.00step/s]" for i in range(1, total + 1)
+    ]
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield from history
+            raise RuntimeError("SSE dropped")
+        # A PREFIX replay, not the whole history: this is what makes the final
+        # assertion falsifiable. Replaying everything ends at the max step no
+        # matter what the guard does, so `current_step == total` would hold even
+        # with the guard deleted. Ending the replay at step 4 means an
+        # unguarded parser finishes at 4, and only the guard keeps it at 8.
+        yield from history[:4]
+        while True:
+            time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch, seconds=1.5)
+
+    assert calls["n"] == 2
+    # Only the first 3 lines were ever learned, so the 4th repeats — cosmetic,
+    # and the honest cost of a bounded memory.
+    assert len(lines) > total, "expected un-learned lines to be re-delivered past the cap"
+    # The guarantee that survives it: progress never moved backwards.
+    assert runner._metrics.current_step == total
+
+
+def test_parse_metrics_into_ignores_a_replayed_frame() -> None:
+    """The monotonic guard as the backstop that remembers no lines: a stale
+    frame moves nothing — not the step, and not the ETA/loss/LR that would
+    otherwise ride along with it."""
+    from makermodslab.jobs import StepFloor, TrainingMetrics, parse_metrics_into
+
+    m, floor = TrainingMetrics(), StepFloor()
+    parse_metrics_into(
+        "Training:  90%|#########| 900/1000 [10:00<01:00,  1.00step/s]"
+        "INFO step:900 loss:0.10 grdn:0.5 lr:1.0e-05",
+        m,
+        None,
+        floor,
+    )
+    assert (m.current_step, m.current_loss, m.eta_seconds) == (900, 0.10, 60)
+
+    parse_metrics_into(
+        "Training:  10%|#| 100/1000 [01:00<09:00,  1.00step/s]INFO step:100 loss:9.99 grdn:9.9 lr:9.9e-01",
+        m,
+        None,
+        floor,
+    )
+    assert m.current_step == 900, "a replayed frame must not rewind progress"
+    assert m.current_loss == 0.10, "nor drag an obsolete loss along with it"
+    assert m.eta_seconds == 60, "nor an obsolete ETA"
+
+
+def test_the_first_frame_may_correct_an_overstated_resume_seed_downward() -> None:
+    """The other direction, and the contract the guard must NOT break.
+
+    `_initial_metrics` seeds `current_step` from the step the REQUEST named, and
+    documents it as "a floor, not a claim about progress: the parser still owns
+    the value from the first tqdm frame onwards" — because the bar reflects the
+    checkpoint lerobot ACTUALLY restored. Guarding against the seed instead of
+    against accepted progress would freeze a run whose seed overstated the
+    restore (10,000 seeded, 8,000 restored ⇒ nothing moves for 2,000 steps),
+    which is the MT47 symptom by another route.
+    """
+    from makermodslab.jobs import StepFloor, TrainingMetrics, parse_metrics_into
+
+    # Seeded at 10,000; lerobot really restored 8,000 (bar total 2,000 of
+    # 10,000 ⇒ 10000 − 2000 + 0).
+    m = TrainingMetrics(current_step=10000, total_steps=10000)
+    floor = StepFloor()
+
+    parse_metrics_into("Training:   0%|| 0/2000 [00:00<20:00,  1.00step/s]", m, 10000, floor)
+    assert m.current_step == 8000, "the first real frame must own the value"
+
+    # …and from then on the guard is live: a replayed frame is still refused.
+    parse_metrics_into("Training:   0%|| 0/2000 [00:00<20:00,  1.00step/s]", m, 10000, floor)
+    parse_metrics_into("Training:  50%|#####| 1000/2000 [10:00<10:00,  1.00step/s]", m, 10000, floor)
+    assert m.current_step == 9000
+    parse_metrics_into("Training:  10%|#| 200/2000 [02:00<18:00,  1.00step/s]", m, 10000, floor)
+    assert m.current_step == 9000, "a replay after real progress is still rejected"
+
+
+def test_a_keepalive_only_connection_still_times_out_and_reconnects(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blank frames are not output.
+
+    A half-open SSE connection commonly keeps dribbling empty keepalive frames.
+    While those reset the silence deadline, such a connection is immortal — it
+    never delivers a log line and never times out — which would have left the
+    very run that motivated MT47 uncovered: its log simply stopped, and if the
+    transport was still emitting keepalives nothing would have noticed.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    calls = {"n": 0}
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield "Training:  10%|#| 100/1000 [00:10<01:30,  1.00step/s]"
+            while True:  # …and from here on, only keepalives
+                yield ""
+                time.sleep(0.01)
+        else:
+            yield "recovered"
+            while True:
+                time.sleep(0.02)
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    lines = _run_tail_briefly(runner, monkeypatch, silence=0.3, seconds=1.5)
+
+    assert calls["n"] >= 2, "a keepalive-only connection must still be abandoned"
+    assert "recovered" in lines
+
+
+def test_a_stream_error_surfaces_even_when_the_queue_is_full(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The highest-severity finding of the first review, pinned.
+
+    The terminator used to be a queue item dropped under `suppress(Full)`. If
+    the stream ended or errored while the bounded queue was full, both the error
+    and the end-sentinel vanished; the consumer drained the backlog and then sat
+    out the FULL silence timeout before raising "no log output for 600s" —
+    inventing a stall and misreporting the cause of a real, immediately
+    knowable error.
+
+    Deliberately explicit about both halves: the real error arrives, and it
+    arrives without the backlog being truncated to make room for it.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_QUEUE_MAX", 2)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 30.0)
+    api = MagicMock()
+
+    def fetch_job_logs(job_id, follow):
+        yield from ["a", "b", "c"]
+        raise RuntimeError("stream blew up while the queue was full")
+
+    api.fetch_job_logs = fetch_job_logs
+    runner = _runner_with(api, tmp_path)
+
+    gen = runner._iter_job_logs()
+    time.sleep(0.3)  # reader fills the 2-slot queue and then errors
+
+    started = time.monotonic()
+    delivered = []
+    with pytest.raises(RuntimeError, match="stream blew up"):
+        for line in gen:
+            delivered.append(line)
+    elapsed = time.monotonic() - started
+
+    assert delivered == ["a", "b", "c"], "lines must not be dropped to make room"
+    assert elapsed < 5.0, f"error waited on the silence timeout ({elapsed:.1f}s)"
+
+
+def test_a_batched_burst_cannot_walk_progress_backwards_within_one_line(
+    tmp_path,
+) -> None:
+    """One SSE message commonly batches a burst spanning several log_freq
+    boundaries, so the LAST tqdm frame and the FIRST `step:` token describe
+    different moments.
+
+    The floor is read fresh at each comparison for exactly this: reading it once
+    at the top let the earlier INFO segment be judged against a pre-tqdm floor,
+    accepted, and applied — walking `current_step` backwards inside a single
+    line and pulling the floor down with it, which reopened the skipped range to
+    any genuine replay the content de-dupe misses.
+    """
+    from makermodslab.jobs import StepFloor, TrainingMetrics, parse_metrics_into
+
+    m, floor = TrainingMetrics(), StepFloor()
+    batched = (
+        "Training:  25%|##  | 250/1000 [02:30<07:30,  1.00step/s]"
+        "INFO step:250 loss:0.50 grdn:0.5 lr:1.0e-05"
+        "Training:  50%|#### | 500/1000 [05:00<05:00,  1.00step/s]"
+        "INFO step:500 loss:0.25 grdn:0.4 lr:9.0e-06"
+    )
+    parse_metrics_into(batched, m, None, floor)
+
+    assert m.current_step == 500, "the last frame in the burst owns the step"
+    assert floor.value == 500, "and the floor must not be dragged back with it"
+
+
+# ---------------------------------------------------------------------------
+# The reader cap: a read that NEVER returns (PR #71, third review round).
+#
+# Every other reader-lifetime test here releases its parked readers so they can
+# observe the abandon flag — which is precisely the case the flag handles, and
+# precisely why those tests missed this one. The tests below never release
+# anything: their reads block until the process exits.
+# ---------------------------------------------------------------------------
+
+
+class _NeverReturningStream:
+    """A `fetch_job_logs` whose read never comes back.
+
+    DELIBERATE LEAK: threads parked in `park.wait()` stay parked for the rest of
+    the pytest session, because that is the situation under test — a read with
+    no boundary at which the abandon flag could be observed. They are daemons
+    holding a `threading.Event` and no other resource, and the cap is what keeps
+    their number small (3), so the leak is bounded and cheap by construction.
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self.connections = 0
+        self._park = threading.Event()  # never set, by design
+
+    def __call__(self, job_id, follow):
+        self.connections += 1
+        self._park.wait()  # never returns
+        yield "unreachable"  # pragma: no cover
+
+
+def _live_reader_threads(job_id: str) -> int:
+    import threading
+
+    return sum(1 for t in threading.enumerate() if t.name == f"hf-job-{job_id}-sse" and t.is_alive())
+
+
+def test_readers_parked_in_a_never_returning_read_stop_at_the_cap(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The regression this branch introduced, bounded.
+
+    On main the tail iterated `fetch_job_logs` in the single tail thread, so a
+    read that never returned stranded ONE thread and killed logging for that
+    job. Moving the read onto a per-connection thread — which is what lets the
+    silence timeout break that stall — means every timeout starts another
+    reader, and a parked one can never retire. Uncapped, that is one stranded
+    thread and one HTTP connection per timeout, forever.
+
+    So: connections stop at the cap, not cap+k, and no new reader appears after
+    it trips.
+    """
+    import logging
+    import threading
+    import time
+    from unittest.mock import MagicMock
+
+    from makermodslab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_POLL_S", 0.05)
+
+    stream = _NeverReturningStream()
+    api = MagicMock()
+    api.fetch_job_logs = stream
+    runner = _runner_with(api, tmp_path)
+    # Other tests here park readers under the same job id on purpose, so the
+    # absolute count is not ours to assert on — only what THIS runner adds.
+    before = _live_reader_threads(runner._hf_job_id)
+
+    with caplog.at_level(logging.ERROR, logger="makermodslab.runners.hf_cloud"):
+        thread = threading.Thread(target=runner._tail_loop, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+
+    assert not thread.is_alive(), "the tail loop must give up rather than spin forever"
+    # (a) it stopped opening connections AT the cap.
+    assert stream.connections == hf_cloud._TAIL_MAX_LIVE_READERS, (
+        f"opened {stream.connections} connections against a cap of {hf_cloud._TAIL_MAX_LIVE_READERS}"
+    )
+    # (c) and no reader appeared afterwards.
+    settled = _live_reader_threads(runner._hf_job_id)
+    time.sleep(0.3)
+    assert _live_reader_threads(runner._hf_job_id) == settled
+    assert settled - before <= hf_cloud._TAIL_MAX_LIVE_READERS
+
+    # (b) it said so, loudly and precisely.
+    give_up = [
+        r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR and "giving up" in r.getMessage()
+    ]
+    assert give_up, f"expected a loud give-up line, got {[r.getMessage() for r in caplog.records]}"
+    # Precise, not just loud: it must name the count and say why.
+    assert "parked in reads that never returned" in give_up[0]
+    assert str(hf_cloud._TAIL_MAX_LIVE_READERS) in give_up[0]
+
+
+def test_the_tail_giving_up_does_not_fail_the_job(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boundary that matters most: losing the logs is not losing the run.
+
+    The status poller is deliberately independent of the tail, so a run whose
+    log stream has been abandoned must still finalise through it — and finalise
+    as `done`, not as a failure. Marking the job failed here would turn a
+    telemetry outage into a fake training failure, which is the opposite of what
+    MT47 is for.
+    """
+    import threading
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.runners import hf_cloud
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(hf_cloud, "_TAIL_CLEAN_END_WAIT_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_RECONNECT_BACKOFF_S", 0.01)
+    monkeypatch.setattr(hf_cloud, "_TAIL_SILENCE_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(hf_cloud, "_TAIL_READER_POLL_S", 0.05)
+
+    api = MagicMock()
+    api.fetch_job_logs = _NeverReturningStream()
+    runner = _runner_with(api, tmp_path)
+
+    thread = threading.Thread(target=runner._tail_loop, daemon=True)
+    thread.start()
+    thread.join(timeout=10)
+    assert not thread.is_alive(), "the tail must have given up for this test to mean anything"
+
+    # The tail is dead. The status path still finalises the run, exactly as it
+    # would have if the tail had never existed.
+    reg = JobRegistry(tmp_path / "root")
+    record = JobRecord(
+        id="J",
+        name="j",
+        state="running",
+        config=TrainingRequest(dataset_repo_id="d", steps=100),
+        output_dir=str(tmp_path / "root" / "J" / "run"),
+        started_at=0.0,
+        runner="hf_cloud",
+    )
+    reg._records["J"] = record
+    runner._set_terminal("COMPLETED")
+    reg._runners["J"] = runner
+    reg._tick()
+
+    assert record.state == "done", "a dead log tail must not change the job's outcome"
+    assert record.error_message is None

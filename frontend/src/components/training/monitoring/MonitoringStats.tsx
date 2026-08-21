@@ -219,8 +219,13 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   const stepLabel = isStarting
     ? "Training starting…"
     : `${trainingStatus.current_step.toLocaleString()} / ${trainingStatus.total_steps.toLocaleString()}`;
+  // Only a RUNNING job has time remaining. `eta_seconds` is the last value the
+  // log parser extrapolated, and it survives on the record after the run ends —
+  // so a finished job whose log stream died mid-flight (MT47) would otherwise
+  // render a confident countdown next to its "Done" badge, which is how a stale
+  // reading reads as a live one.
   const etaLabel =
-    trainingStatus.eta_seconds != null
+    trainingStatus.training_active && trainingStatus.eta_seconds != null
       ? formatTime(trainingStatus.eta_seconds)
       : "—";
 

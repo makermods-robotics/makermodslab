@@ -74,6 +74,33 @@ class TrainingMetrics(BaseModel):
     eta_seconds: float | None = None
 
 
+class StepFloor:
+    """The highest step a runner's parser has ACCEPTED, for the replay guard.
+
+    Deliberately NOT `metrics.current_step`, and that distinction is the whole
+    point. `_initial_metrics` SEEDS `current_step` for a resumed run before any
+    line is parsed, and documents that seed as "a floor, not a claim about
+    progress: the parser still owns the value from the first tqdm frame
+    onwards" — because the bar-derived value reflects the checkpoint lerobot
+    ACTUALLY restored, while the seed only reflects what the request asked for.
+
+    Guarding against `current_step` would invert that contract: a seed that
+    overstates the restored step would reject every real frame until training
+    climbed past it, freezing progress, ETA, loss and grad-norm for the
+    difference — the very symptom MT47 exists to remove, reintroduced through
+    another door.
+
+    So the floor starts UNSET. The first frame a runner parses is always
+    accepted and may correct the seed downward; only frames after that are held
+    to monotonicity, which is exactly where replays live.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value: int | None = None
+
+
 class LogLine(BaseModel):
     timestamp: float
     message: str
@@ -370,7 +397,12 @@ def extract_wandb_run_url(line: str) -> str | None:
     return match.group(0) if match else None
 
 
-def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | None = None) -> None:
+def parse_metrics_into(
+    line: str,
+    metrics: TrainingMetrics,
+    resume_total: int | None = None,
+    floor: StepFloor | None = None,
+) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
@@ -395,6 +427,29 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
     carries the true global step, so it needs no rebasing.
     """
     try:
+        # Progress only ever moves FORWARD once this parser has seen a frame.
+        # Training steps are monotonic in a run's own output, so a line
+        # reporting a step already passed did not come from the future of this
+        # run — it came from a reconnect replaying the past. Applying it would
+        # rewind current_step and drag an obsolete ETA/loss/LR along with it,
+        # which the monitor reads as a new run and answers by clearing the
+        # chart's history (review of PR #71).
+        #
+        # Held against `floor` — the highest step THIS PARSER has accepted —
+        # never against `metrics.current_step`, which is seeded before parsing
+        # begins and is explicitly documented as a floor the first real frame is
+        # allowed to correct downward (see StepFloor and _initial_metrics).
+        # Without a floor object there is no guard at all, which is what
+        # history re-parsing wants: it feeds an ordered file through a fresh
+        # accumulator.
+        #
+        # The de-dupe upstream is what normally stops a replay reaching here;
+        # this is the backstop that does not depend on remembering every line.
+        # Safe against the resume rebase either way: `resume_total − total +
+        # bar` holds both of its other terms fixed for a runner's lifetime, so
+        # it is monotonic in the bar exactly as a fresh run's raw bar is.
+        stale = False
+
         tqdm_frames = _TQDM_RE.findall(line)
         if tqdm_frames:
             try:
@@ -402,25 +457,61 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | 
                 tqdm_step = int(raw_step)
                 total = int(raw_total)
                 if resume_total is not None and total > 0:
-                    metrics.current_step = resume_total - total + tqdm_step
-                    metrics.total_steps = resume_total
+                    candidate_step = resume_total - total + tqdm_step
+                    candidate_total = resume_total
                 else:
-                    metrics.current_step = tqdm_step
-                    if total > 0:
-                        metrics.total_steps = total
-                eta = _parse_duration(raw_eta)
-                if eta is not None:
-                    metrics.eta_seconds = eta
+                    candidate_step = tqdm_step
+                    candidate_total = total if total > 0 else metrics.total_steps
+                step_floor = floor.value if floor is not None else None
+                if step_floor is not None and candidate_step < step_floor:
+                    # Replayed frame. Mark the whole LINE stale: the INFO
+                    # branch below belongs to this same tqdm burst, and its
+                    # step token is often the unparsable "4K" form that could
+                    # not be judged on its own.
+                    stale = True
+                else:
+                    metrics.current_step = candidate_step
+                    metrics.total_steps = candidate_total
+                    if floor is not None:
+                        floor.value = candidate_step
+                    eta = _parse_duration(raw_eta)
+                    if eta is not None:
+                        metrics.eta_seconds = eta
             except (ValueError, IndexError):
                 pass
 
-        if "step:" in line and "loss:" in line:
+        if not stale and "step:" in line and "loss:" in line:
             # Only useful below 1000 steps: lerobot renders this through
             # format_big_number, so the token becomes "4K" and int() raises —
             # suppressed, leaving the (now correct) tqdm step in place. Don't
             # try to expand the K suffix; it's rounded, hence lossy.
+            #
+            # DEPENDS ON LEROBOT'S ORDERING: this branch trusts that the tqdm
+            # bar is printed before the INFO line it belongs to (true for the
+            # pin — lerobot_train.py:588-606). A bump that swaps those two
+            # statements would make every sub-1000-step INFO line arrive
+            # BEFORE its bar, be judged stale against the newer floor, and
+            # silently stop contributing loss/lr points.
             with contextlib.suppress(ValueError):
-                metrics.current_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+                info_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+                # Re-read, never a snapshot from the top of the function: the
+                # tqdm branch above has just MOVED the floor. One SSE message
+                # commonly batches a burst spanning several log_freq boundaries
+                # (see this function's docstring), so `line.split("step:")[1]`
+                # is the FIRST INFO segment while tqdm_frames[-1] was the LAST
+                # frame. Comparing that earlier step against a pre-tqdm floor
+                # accepted it, walking current_step BACKWARDS within a single
+                # line and dragging the floor down with it — which reopened the
+                # skipped range to any genuine replay the de-dupe misses.
+                step_floor = floor.value if floor is not None else None
+                if step_floor is not None and info_step < step_floor:
+                    stale = True
+                else:
+                    metrics.current_step = info_step
+                    if floor is not None:
+                        floor.value = info_step
+
+        if not stale and "step:" in line and "loss:" in line:
             with contextlib.suppress(ValueError):
                 metrics.current_loss = float(line.split("loss:")[1].split()[0])
             if "lr:" in line:
@@ -501,6 +592,34 @@ def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
     return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
+def _settle_terminal_metrics(record: JobRecord) -> None:
+    """Reconcile a finished run's progress with the fact that it finished.
+
+    `metrics` only ever advances when a log line is parsed, so a run whose log
+    stream died mid-flight keeps the last frame it saw forever. That produced
+    the MT47 symptom: a `done` run rendering "3,650 / 10,000" beside a live
+    countdown ("00:53:05 remaining") while its step-10,000 checkpoint sat on the
+    Hub — three surfaces of one record disagreeing.
+
+    Two changes, both about not asserting what we no longer believe:
+
+      * `done` means the trainer reached its target, so progress is the target.
+        Only claimed when a target is actually known (`total_steps > 0`), and
+        only for `done` — a `failed`/`interrupted` run genuinely stopped where
+        the last frame said, and rounding that up to the target would invent
+        training that never happened.
+      * The ETA is cleared for EVERY terminal state. A finished run has no
+        remaining time, whatever the last frame extrapolated.
+
+    A mitigation, not the fix: the root cause is the log tail going silent
+    (MT47), and a repaired tail leaves this a no-op on a healthy run.
+    """
+    if record.metrics.eta_seconds is not None:
+        record.metrics.eta_seconds = None
+    if record.state == "done" and record.metrics.total_steps > 0:
+        record.metrics.current_step = record.metrics.total_steps
+
+
 def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
@@ -566,6 +685,9 @@ class LocalJobRunner:
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
+        # One floor per RUNNER, not per connection: surviving a reconnect is
+        # exactly what makes it a replay guard.
+        self._step_floor = StepFloor()
         # True only once we have actually signalled a LIVE process. Lets the
         # registry tell "we killed this" from "it had already died", which the
         # exit code alone cannot express.
@@ -713,7 +835,7 @@ class LocalJobRunner:
                 stripped = line.rstrip()
                 if not stripped:
                     continue
-                parse_metrics_into(stripped, self._metrics, self._resume_total)
+                parse_metrics_into(stripped, self._metrics, self._resume_total, self._step_floor)
                 if self._wandb_run_url is None:
                     url = extract_wandb_run_url(stripped)
                     if url is not None:
@@ -760,6 +882,9 @@ class TailingJobRunner:
         self._pid = pid
         self._status_path = status_path
         self._resume_total = resume_total
+        # One floor per RUNNER, not per connection: surviving a reconnect is
+        # exactly what makes it a replay guard.
+        self._step_floor = StepFloor()
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -884,7 +1009,9 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(log_line.message, self._metrics, self._resume_total)
+                        parse_metrics_into(
+                            log_line.message, self._metrics, self._resume_total, self._step_floor
+                        )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -4420,6 +4547,14 @@ class JobRegistry:
                                 record.error_message = f"Subprocess exited with code {rc}"
                         if record.ended_at is None:
                             record.ended_at = time.time()
+                        # The watchdog's twin (MT47), for the restart route into
+                        # a terminal state. This record's `metrics` were last
+                        # written while it was live, so it carries whatever ETA
+                        # the parser had extrapolated — a countdown that would
+                        # otherwise render beside a run that has already ended.
+                        # Same rule as the watchdog: `done` snaps to target,
+                        # `interrupted`/`failed` only lose the stale ETA.
+                        _settle_terminal_metrics(record)
                         self._write_meta(record)
                 elif record.runner == "hf_cloud" and record.hf_job_id and record.hf_flavor:
                     # Always reattach; the status poller is the source of truth
@@ -4653,6 +4788,17 @@ class JobRegistry:
                 record.state = state
                 record.ended_at = time.time()
                 record.exit_code = rc
+                # Deliberately AFTER `record.state` is assigned and before
+                # anything reads the record again: it keys on the state, so one
+                # call here covers every outcome this block can produce —
+                # `done` snaps progress to the target, while `failed` and both
+                # flavours of `interrupted` (a stop we asked for, and the
+                # unconfirmed disappearance above) only get their stale ETA
+                # cleared. Never snapping without a CONFIRMED completion is the
+                # point: an unconfirmed run has no evidence it reached its
+                # target, and claiming it did would be the same lie MT10 exists
+                # to stop telling.
+                _settle_terminal_metrics(record)
                 if record.error_message is None:
                     if state == "interrupted":
                         # Never the synthetic exit-code text here: that message
