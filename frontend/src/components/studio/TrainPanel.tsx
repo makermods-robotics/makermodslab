@@ -198,9 +198,10 @@ const TrainPanel: React.FC = () => {
     // Closing the form is the way out of a resume: resume mode hides the
     // dataset and starting-point controls (both are the parent run's and not
     // editable), so unlike a fine-tune — which can be dropped by setting
-    // Starting point back to "Train from scratch" — it has no in-form escape
-    // hatch. Reopening then gives a fresh form, which is also what the user
-    // gets after a launch (onStarted folds the form the same way).
+    // Starting point back to its no-selection state (NONE) — it has no
+    // in-form escape hatch. Reopening then gives a fresh form, which is also
+    // what the user gets after a launch (onStarted folds the form the same
+    // way).
     if (!open) setResumeSeed(null);
   };
 
@@ -441,6 +442,14 @@ const TrainPanel: React.FC = () => {
       });
   };
 
+  // SmolVLA has no real "from scratch": its vision-language backbone is a
+  // pretrained VLM, so leaving Starting point unset fine-tunes the public
+  // SmolVLA base rather than training with random weights (see jobs.start's
+  // _SMOLVLA_BASE_REPO_ID default). Every other policy keeps the literal
+  // scratch label — a from-scratch ACT/diffusion/vqbet/tdmpc run is normal.
+  const noStartingPointLabel =
+    policyType === "smolvla" ? "SmolVLA base" : "Train from scratch";
+
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
       <PanelHeader step="2" title="Train" dataTour="studio-train" />
@@ -595,11 +604,11 @@ const TrainPanel: React.FC = () => {
                   {baseModelId !== NONE && finetuneSeed ? (
                     <span className="truncate">{finetuneSeed.name}</span>
                   ) : (
-                    <SelectValue placeholder="Train from scratch" />
+                    <SelectValue placeholder={noStartingPointLabel} />
                   )}
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={NONE}>Train from scratch</SelectItem>
+                  <SelectItem value={NONE}>{noStartingPointLabel}</SelectItem>
                   {models.map((m) => (
                     <SelectItem key={m.id} value={m.id}>
                       {m.name}
@@ -615,6 +624,8 @@ const TrainPanel: React.FC = () => {
                   </span>
                 ) : finetuneSeed ? (
                   "Fine-tunes from this skill's latest checkpoint."
+                ) : policyType === "smolvla" ? (
+                  "Fine-tune an existing skill, or the public SmolVLA base."
                 ) : (
                   "Fine-tune an existing skill, or start fresh."
                 )}
