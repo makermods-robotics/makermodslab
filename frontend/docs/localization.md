@@ -22,14 +22,14 @@ Concretely, a localization change must **never**:
 
 - alter a request body, a header, or a query parameter (there is no `Accept-Language`);
 - alter anything written to `localStorage`, `sessionStorage`, or disk;
-- alter a value submitted by a form (a `<select>` may *display* Chinese while
-  *submitting* the original English value);
+- alter a value submitted by a form (a `<select>` may _display_ Chinese while
+  _submitting_ the original English value);
 - alter a string that any code parses, compares, `startsWith`-matches, or re-reads;
 - touch the Python backend at all.
 
 The backend is not localized. Server-generated prose (`data.message`, `status.error`,
 `status.hint`, `ApiError.detail`) renders in English in every language. You translate the
-*client-side fallback* next to it, never the server's text.
+_client-side fallback_ next to it, never the server's text.
 
 ```tsx
 // Correct: server text wins, our fallback is translated.
@@ -81,16 +81,16 @@ npm test
 
 Everything lives under `frontend/src/i18n/`.
 
-| File | What it is |
-|---|---|
-| `config.ts` | Language identity, detection, persistence. No i18next import, so it is testable on its own. |
-| `index.ts` | Boots i18next. Exports the `resources` object. |
-| `types.d.ts` | Makes the **English catalog the source of truth for key types**. This is what turns a typo into a compile error. |
-| `locales/en/*.ts` | One file per feature area, plus `index.ts` that combines them. |
-| `locales/zh-CN/*.ts` | Same tree, translated. |
-| `catalogs.test.ts` | Key parity, orphans, empty values, placeholder drift. |
-| `keyUsage.test.ts` | Every key referenced in source actually resolves. |
-| `config.test.ts` | Detection and persistence. |
+| File                 | What it is                                                                                                       |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `config.ts`          | Language identity, detection, persistence. No i18next import, so it is testable on its own.                      |
+| `index.ts`           | Boots i18next. Exports the `resources` object.                                                                   |
+| `types.d.ts`         | Makes the **English catalog the source of truth for key types**. This is what turns a typo into a compile error. |
+| `locales/en/*.ts`    | One file per feature area, plus `index.ts` that combines them.                                                   |
+| `locales/zh-CN/*.ts` | Same tree, translated.                                                                                           |
+| `catalogs.test.ts`   | Key parity, orphans, empty values, placeholder drift.                                                            |
+| `keyUsage.test.ts`   | Every key referenced in source actually resolves.                                                                |
+| `config.test.ts`     | Detection and persistence.                                                                                       |
 
 Two more files outside that directory:
 
@@ -145,14 +145,14 @@ These are the 90% you can convert without thinking hard.
 
 **Plain JSX text**
 
-```tsx
+```diff
 - <p>No skills match your search.</p>
 + <p>{t("launchpad.skills.empty")}</p>
 ```
 
 **Attributes** — `aria-label`, `title`, `alt`, `placeholder`
 
-```tsx
+```diff
 - <input placeholder="Clean my desk…" aria-label="Search skills" />
 + <input
 +   placeholder={t("launchpad.hero.searchPlaceholder")}
@@ -166,7 +166,7 @@ both sites. Two keys will drift. Keep two only when the strings genuinely differ
 
 **Interpolation**
 
-```tsx
+```diff
 - `Started teleoperation for ${robot.name}.`
 + t("robot.teleop.startedFallback", { name: robot.name })
 ```
@@ -203,6 +203,7 @@ const STEPS = [{ label: "1 · Collect" }];
 
 Keep the array at module scope but store **keys**, and resolve during render:
 
+<!-- prettier-ignore -->
 ```tsx
 const STEPS = [
   { labelKey: "launchpad.newSkill.steps.collect.label",
@@ -242,7 +243,7 @@ poweredBy: "Powered by <1>LeRobot</1>",
 
 The numbers in the string are indices into the `components` array.
 
-> **⚠️ `<Trans>` does not resolve *nested* slots when you pass an index array.**
+> **⚠️ `<Trans>` does not resolve _nested_ slots when you pass an index array.**
 > A string like `<0>text<1/></0>` silently drops the inner element. This bit the
 > external-link icon in `HfAuthBanner`. If you need markup inside markup, extract a small
 > local component and flatten the string to top-level slots.
@@ -264,12 +265,12 @@ episodesTotal_other: "{{count}} 个回合",
 ```
 
 ```tsx
-t("inference.eval.episodesTotal", { count: n })
+t("inference.eval.episodesTotal", { count: n });
 ```
 
 Replace both escape hatches you will find in old code:
 
-```tsx
+```diff
 - `${n} camera stream(s)`
 - `arm${labels.length > 1 ? "s" : ""}`
 ```
@@ -296,13 +297,13 @@ const subtitle = isRunning
 **Never call `.toLowerCase()` / `.toUpperCase()` on translated text.** It is a no-op in
 Chinese and actively wrong in several languages (Turkish dotted/dotless i).
 
-Sometimes a singular/plural pair is really *two different sentences*, not one plural. Keep
+Sometimes a singular/plural pair is really _two different sentences_, not one plural. Keep
 those as separate keys — Chinese's single plural category would otherwise collapse them
 into one.
 
 ### 5.5 Sentence-fragment builders — the genuinely hard case
 
-Some helpers return a *piece* of a sentence that a caller splices into a larger one. That
+Some helpers return a _piece_ of a sentence that a caller splices into a larger one. That
 shape cannot be translated. It has to be **restructured**, not extracted.
 
 The reference example is `robotSetupGap` (`frontend/src/lib/robotSetupGap.ts`). It used to
@@ -311,12 +312,13 @@ return an English verb phrase assembled from arm lists:
 ```ts
 // BEFORE — subject, verb, conjunction, list separator and plural are all
 // English-shaped and spliced together at four different call sites.
-const armList = (labels) => `${labels.join(" and ")} arm${labels.length > 1 ? "s" : ""}`;
+const armList = (labels) =>
+  `${labels.join(" and ")} arm${labels.length > 1 ? "s" : ""}`;
 parts.push(`is missing a calibration for the ${armList(noConfig)}`);
 return parts.join(" and ");
 
 // caller:
-`${robot.name} ${robotSetupGap(robot)} — open Robot settings`
+`${robot.name} ${robotSetupGap(robot)} — open Robot settings`;
 ```
 
 The fix has three parts:
@@ -333,15 +335,15 @@ The fix has three parts:
    test** so the restructure provably changes nothing for English users.
 
 `lib/robotSetupGap.test.ts` and `lib/datasetName.test.ts` are that freeze — assert the
-exact current strings *before* you touch the function.
+exact current strings _before_ you touch the function.
 
 Three helpers in the codebase already went through this. Reuse them; do not re-derive:
 
-| Module | Structured | Localized renderer | English (frozen) |
-|---|---|---|---|
-| `lib/robotSetupGap.ts` | `robotSetupGaps()` | `formatRobotSetupGap(t, …)` | `robotSetupGap()` |
-| `lib/datasetName.ts` | `datasetNameIssue()`, `datasetRepoIdIssue()` | `formatDatasetNameIssue(t, …)` | `validateDatasetName()`, `validateDatasetRepoId()` |
-| `lib/deleteSemantics.ts` | `resolveDeleteAction()` → `titleKey` / `descriptionKey` / `confirmKey` | render with `t()` at the call site | — |
+| Module                   | Structured                                                             | Localized renderer                 | English (frozen)                                   |
+| ------------------------ | ---------------------------------------------------------------------- | ---------------------------------- | -------------------------------------------------- |
+| `lib/robotSetupGap.ts`   | `robotSetupGaps()`                                                     | `formatRobotSetupGap(t, …)`        | `robotSetupGap()`                                  |
+| `lib/datasetName.ts`     | `datasetNameIssue()`, `datasetRepoIdIssue()`                           | `formatDatasetNameIssue(t, …)`     | `validateDatasetName()`, `validateDatasetRepoId()` |
+| `lib/deleteSemantics.ts` | `resolveDeleteAction()` → `titleKey` / `descriptionKey` / `confirmKey` | render with `t()` at the call site | —                                                  |
 
 `datasetName.ts` is worth reading as a cautionary tale: it used to produce its
 "Namespace…" messages by running `.replace("Dataset name", "Namespace")` over its own
@@ -363,6 +365,7 @@ export function skillDisplayTitle(t: TFunction, m: ModelItem): string { … }
 `SkillSlider`'s filter then matches the English title **and** the translated one — a
 strict superset, so nothing that matched before stops matching:
 
+<!-- prettier-ignore -->
 ```tsx
 skillTitle(m).toLowerCase().includes(q) ||
 skillDisplayTitle(t, m).toLowerCase().includes(q) ||
@@ -379,6 +382,7 @@ Same pattern: `skillAuthorLabel` / `skillDisplayAuthorLabel`.
 The enum **value** is data and never changes. Only the label does. Always keep a fallback
 so an unmapped value renders its raw string rather than a key path:
 
+<!-- prettier-ignore -->
 ```tsx
 {t(`launchpad.jobState.${job.state}` as never, { defaultValue: job.state })}
 ```
@@ -406,11 +410,11 @@ function AdvancedSection({ title }) {
 
 ```tsx
 // Copy passed into a hook
-useSessionExitGuard({ confirmMessage: t("dialogs.replay.leaveConfirm") })
+useSessionExitGuard({ confirmMessage: t("dialogs.replay.leaveConfirm") });
 ```
 
 `RobotStatus` in `studio/panel/primitives.tsx` shows the shape to prefer: it takes copy as
-`children` — *"the caller owns the copy, this owns the look."*
+`children` — _"the caller owns the copy, this owns the look."_
 
 ### 5.9 Text the CSS shouts, and text the CSS renders
 
@@ -423,11 +427,15 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 
 const { language } = useLanguage();
-<span className={cn("text-[10px] font-semibold",
-  isCaselessScript(language) ? "" : "uppercase tracking-wide")} />
+<span
+  className={cn(
+    "text-[10px] font-semibold",
+    isCaselessScript(language) ? "" : "uppercase tracking-wide",
+  )}
+/>;
 ```
 
-For the shared `.eyebrow` utility use the hook — `.eyebrow` bundles `uppercase` *and*
+For the shared `.eyebrow` utility use the hook — `.eyebrow` bundles `uppercase` _and_
 `tracking-[0.08em]` and lives in Tailwind's utilities layer, where a `tracking-normal`
 override beside it would be a source-order coin flip:
 
@@ -444,7 +452,10 @@ Translate it by setting the attribute from `t()` in the component — never by e
 stylesheet:
 
 ```tsx
-<div className="media-slot" data-label={t("launchpad.skills.previewPlaceholder")} />
+<div
+  className="media-slot"
+  data-label={t("launchpad.skills.previewPlaceholder")}
+/>
 ```
 
 ### 5.10 `window.confirm` — leave it in English
@@ -470,25 +481,25 @@ comparison reads it — it is **data**. Leave it in English.
 
 Real examples from this codebase, all deliberately untranslated:
 
-| String | Why it is data |
-|---|---|
-| `CAMERA_NAME_PRESETS` — `wrist`, `top`, `front`, `side` | The label **is** the camera name written into the robot record and used as a dataset feature key. Translating stores a Chinese camera name on disk. |
-| `formatDurationShort()` output — `2h30m` | Written into an input and re-parsed against a regex mirroring `_DURATION_FULL_RE` in `makermodslab/train.py`. A translated `h` makes the field reject its own suggestion. |
-| `FOURCC_OPTIONS`, `BACKEND_OPTIONS` | Codec ids and lerobot `Cv2Backends` enum names, sent verbatim. |
-| `DISCONTINUITY_ERROR_PREFIX` | Matched with `startsWith()` against backend error text. |
-| Calibration file names, `device_type` (`teleop`/`robot`) | Build API paths and pick config fields. |
-| Policy-type identifiers (`act`, `smolvla`) | Wire identifiers. Their display names are product names anyway. |
-| `org/name`, `my_dataset`, `hf_…`, `/path/to/…` placeholders | Literal shapes the user must type or match. |
-| `SPACE`, `ENTER`, `DEL` legends | Names of physical keys. |
-| `HF_HUB_OFFLINE`, `Torque_Limit`, `job.read` | Identifiers quoted inside a sentence. Keep them literal inside the `<Trans>` slot. |
-| Product names — MakerMods, LeRobot, Hugging Face, W&B, ACT, SmolVLA, GitHub, Discord | Names. |
+| String                                                                               | Why it is data                                                                                                                                                            |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CAMERA_NAME_PRESETS` — `wrist`, `top`, `front`, `side`                              | The label **is** the camera name written into the robot record and used as a dataset feature key. Translating stores a Chinese camera name on disk.                       |
+| `formatDurationShort()` output — `2h30m`                                             | Written into an input and re-parsed against a regex mirroring `_DURATION_FULL_RE` in `makermodslab/train.py`. A translated `h` makes the field reject its own suggestion. |
+| `FOURCC_OPTIONS`, `BACKEND_OPTIONS`                                                  | Codec ids and lerobot `Cv2Backends` enum names, sent verbatim.                                                                                                            |
+| `DISCONTINUITY_ERROR_PREFIX`                                                         | Matched with `startsWith()` against backend error text.                                                                                                                   |
+| Calibration file names, `device_type` (`teleop`/`robot`)                             | Build API paths and pick config fields.                                                                                                                                   |
+| Policy-type identifiers (`act`, `smolvla`)                                           | Wire identifiers. Their display names are product names anyway.                                                                                                           |
+| `org/name`, `my_dataset`, `hf_…`, `/path/to/…` placeholders                          | Literal shapes the user must type or match.                                                                                                                               |
+| `SPACE`, `ENTER`, `DEL` legends                                                      | Names of physical keys.                                                                                                                                                   |
+| `HF_HUB_OFFLINE`, `Torque_Limit`, `job.read`                                         | Identifiers quoted inside a sentence. Keep them literal inside the `<Trans>` slot.                                                                                        |
+| Product names — MakerMods, LeRobot, Hugging Face, W&B, ACT, SmolVLA, GitHub, Discord | Names.                                                                                                                                                                    |
 
 **The label/value split.** Where a constant currently serves as both, split it — translate
 the label, keep the value:
 
 ```tsx
 const MODE_OPTIONS = [
-  { value: "single",   labelKey: "landing.createRobot.modeSingle" },
+  { value: "single", labelKey: "landing.createRobot.modeSingle" },
   { value: "bimanual", labelKey: "landing.createRobot.modeBimanual" },
 ] as const;
 ```
@@ -515,9 +526,9 @@ Chinese, has one plural category: keep `_other`, drop `_one`).
 
 ```ts
 export const SUPPORTED_LANGUAGES = [
-  { code: "en",    label: "English" },
+  { code: "en", label: "English" },
   { code: "zh-CN", label: "简体中文" },
-  { code: "ja",    label: "日本語" },
+  { code: "ja", label: "日本語" },
 ] as const;
 ```
 
@@ -574,6 +585,7 @@ parallel without colliding on a shared file.
 Three tests. Know what each catches, because together they are why this is safe to change.
 
 **`i18n/catalogs.test.ts`** — the most valuable one.
+
 - every language has a catalog;
 - no key in English is **missing** from another language;
 - no **orphan** key that English does not define (catches a stale key after a rename);
@@ -686,8 +698,8 @@ Do **not** type it as `ReturnType<typeof useTranslation>["t"]` — that triggers
 
 ### Storage
 
-| Key | Value |
-|---|---|
+| Key                 | Value                                            |
+| ------------------- | ------------------------------------------------ |
 | `makerlab:language` | `"en"` \| `"zh-CN"` — always an ASCII locale tag |
 
 ### Detection order

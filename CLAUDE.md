@@ -111,7 +111,7 @@ React + Vite + TypeScript with shadcn/radix primitives. Four pages (`Launchpad`,
 
 The UI ships English and Simplified Chinese via `react-i18next`; catalogs live in [`frontend/src/i18n/locales/`](frontend/src/i18n/locales/), one namespace file per feature area. **Read [frontend/docs/localization.md](frontend/docs/localization.md) before touching user-facing strings** — it is written to be the only thing you need.
 
-The governing rule is that localization is **cosmetic only**: no request/response, storage, form-value or on-disk change, and the Python backend is never localized (server prose renders in English in every language). A great many strings here are *data* wearing a label — camera-name presets, codec ids, calibration file names, `formatDurationShort` output — and translating one corrupts a payload or a file on disk. Three tests enforce the invariants: catalog key parity, dynamic-key resolution, and frozen-English output for the helpers that had to be restructured.
+The governing rule is that localization is **cosmetic only**: no request/response, storage, form-value or on-disk change, and the Python backend is never localized (server prose renders in English in every language). A great many strings here are _data_ wearing a label — camera-name presets, codec ids, calibration file names, `formatDurationShort` output — and translating one corrupts a payload or a file on disk. Three tests enforce the invariants: catalog key parity, dynamic-key resolution, and frozen-English output for the helpers that had to be restructured.
 
 ## Hardware target
 
