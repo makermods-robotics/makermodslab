@@ -90,15 +90,15 @@ export default {
         "Select or create a robot first — use the robot menu in the top-right corner.",
       notReadyTitle: "Robot not ready",
       // {{gap}} is the rendered setup-gap phrase; {{name}} the robot's name.
-      notReadyBody:
-        "{{name}} {{gap}}. Open Robot settings before recording.",
+      notReadyBody: "{{name}} {{gap}}. Open Robot settings before recording.",
       missingDetailsTitle: "Missing dataset details",
       missingDetailsBody: "Please enter a dataset name and task description.",
       // The body is validateDatasetName's own message — client-side, but owned
       // by lib/datasetName.ts, so only this title is a key.
       invalidNameTitle: "Invalid dataset name",
       preparingCamerasTitle: "Preparing camera resources",
-      releasingStreams_one: "Releasing {{count}} camera stream for recording...",
+      releasingStreams_one:
+        "Releasing {{count}} camera stream for recording...",
       releasingStreams_other:
         "Releasing {{count}} camera streams for recording...",
       camerasReadyTitle: "Camera resources ready",
@@ -184,9 +184,16 @@ export default {
       // Both the <Select> placeholder and the "no base model" option's label.
       // The submitted option VALUE ("__none__") is untouched.
       scratch: "Train from scratch",
+      // Shown instead of `scratch` for the foundation policies, which have no
+      // real from-scratch: leaving Starting point unset fine-tunes their
+      // public base checkpoint rather than training random weights.
+      fromBase: "Train from base",
       loading: "Loading checkpoints…",
       finetuneHint: "Fine-tunes from this skill's latest checkpoint.",
       hint: "Fine-tune an existing skill, or start fresh.",
+      // The `hint` counterpart for those same foundation policies.
+      foundationHint:
+        "Fine-tune an existing skill, or train from its public base.",
     },
     toast: {
       noCheckpointsTitle: "No checkpoints in this skill",

@@ -41,18 +41,39 @@ function relativeTime(iso: string | null): string {
  * loaded instead of following a language switch.
  */
 const stagePresentation = {
-  RUNNING: { labelKey: "jobs.stage.running", color: "text-ok", Icon: Loader2, spin: true },
+  RUNNING: {
+    labelKey: "jobs.stage.running",
+    color: "text-ok",
+    Icon: Loader2,
+    spin: true,
+  },
   QUEUED: { labelKey: "jobs.stage.queued", color: "text-warn", Icon: Clock },
-  SCHEDULING: { labelKey: "jobs.stage.scheduling", color: "text-warn", Icon: Clock },
+  SCHEDULING: {
+    labelKey: "jobs.stage.scheduling",
+    color: "text-warn",
+    Icon: Clock,
+  },
   COMPLETED: {
     labelKey: "jobs.stage.completed",
     color: "text-muted-foreground",
     Icon: CheckCircle2,
   },
-  FAILED: { labelKey: "jobs.stage.failed", color: "text-destructive", Icon: XCircle },
+  FAILED: {
+    labelKey: "jobs.stage.failed",
+    color: "text-destructive",
+    Icon: XCircle,
+  },
   // HF API uses "CANCELED" (single L); accept both spellings.
-  CANCELED: { labelKey: "jobs.stage.cancelled", color: "text-warn", Icon: AlertTriangle },
-  CANCELLED: { labelKey: "jobs.stage.cancelled", color: "text-warn", Icon: AlertTriangle },
+  CANCELED: {
+    labelKey: "jobs.stage.cancelled",
+    color: "text-warn",
+    Icon: AlertTriangle,
+  },
+  CANCELLED: {
+    labelKey: "jobs.stage.cancelled",
+    color: "text-warn",
+    Icon: AlertTriangle,
+  },
 } as const;
 
 const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
@@ -71,7 +92,12 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
   const stageLabel = present.labelKey
     ? t(present.labelKey)
     : stage || t("jobs.stage.unknown");
+  // The run name when the Hub could give us one. The image name is the last
+  // resort: every cloud run uses the same image, so titling by it makes every
+  // untracked job on the account read as "huggingface/lerobot-gpu:latest".
+  // All three are data; only the final fallback is a translated sentence.
   const title =
+    job.name ??
     job.docker_image ??
     job.space_id ??
     t("jobs.hubJob.fallbackTitle", { id: job.id.slice(0, 12) });
@@ -82,6 +108,10 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
     [t("jobs.meta.created"), relativeTime(job.created_at)],
   ];
   if (job.owner) metaRows.push([t("jobs.meta.owner"), job.owner]);
+  // Only worth a row once it isn't the title; keeps the image visible for the
+  // "which image did this run on" question without spending a row twice.
+  if (job.name && job.docker_image)
+    metaRows.push([t("jobs.meta.image"), job.docker_image]);
 
   return (
     <Card
@@ -90,8 +120,12 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
     >
       <CardContent className="flex h-full flex-col gap-2.5 p-3">
         <div className="flex items-start justify-between gap-2">
-          <div className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}>
-            <Icon className={`w-3.5 h-3.5 ${present.spin ? "animate-spin" : ""}`} />
+          <div
+            className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
+          >
+            <Icon
+              className={`w-3.5 h-3.5 ${present.spin ? "animate-spin" : ""}`}
+            />
             {stageLabel}
           </div>
           <div className="flex items-center gap-0.5">
@@ -144,7 +178,10 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
         </div>
         <MetaRows rows={metaRows} />
         {job.status?.message ? (
-          <div className="text-xs text-muted-foreground truncate" title={job.status.message}>
+          <div
+            className="text-xs text-muted-foreground truncate"
+            title={job.status.message}
+          >
             {job.status.message}
           </div>
         ) : null}

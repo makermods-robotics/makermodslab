@@ -140,8 +140,10 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const filteredHub = useMemo(
     () =>
       showOnline
-        ? untrackedHubJobs.filter((h) =>
-            matchesQuery(h.docker_image ?? h.space_id ?? h.id),
+        ? untrackedHubJobs.filter(
+            (h) =>
+              matchesQuery(h.name) ||
+              matchesQuery(h.docker_image ?? h.space_id ?? h.id),
           )
         : [],
     [untrackedHubJobs, matchesQuery, showOnline],

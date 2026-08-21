@@ -36,8 +36,7 @@ export default {
     },
     form: {
       intro: "为数据集命名并设置采集参数，然后在所选机器人上开始录制。",
-      noRobot:
-        "录制前请先选择或创建机器人 — 使用本窗口右上角的机器人菜单。",
+      noRobot: "录制前请先选择或创建机器人 — 使用本窗口右上角的机器人菜单。",
       robotNotReady:
         "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再开始录制。",
       datasetName: "数据集名称 *",
@@ -134,9 +133,11 @@ export default {
     startingPoint: {
       label: "起点",
       scratch: "从零开始训练",
+      fromBase: "基于基础模型训练",
       loading: "正在加载检查点…",
       finetuneHint: "基于该技能的最新检查点进行微调。",
       hint: "微调已有技能，或从零开始。",
+      foundationHint: "微调已有技能，或基于其公开的基础模型训练。",
     },
     toast: {
       noCheckpointsTitle: "该技能没有检查点",
@@ -197,7 +198,8 @@ export default {
       label: "推理引擎",
       sync: "Sync（默认）",
       rtc: "RTC — 实验性，控制更平滑",
-      syncHint: "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
+      syncHint:
+        "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
       rtcHint:
         "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
     },

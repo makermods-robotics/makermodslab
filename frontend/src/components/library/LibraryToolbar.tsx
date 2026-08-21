@@ -28,7 +28,7 @@ interface LibraryToolbarProps<K extends string> {
   searchPlaceholder: string;
   filters: Array<LibraryFilterOption<K>>;
   filter: K;
-  onFilterChange: (filter: K) => void;
+  onFilterChange: (filter: NoInfer<K>) => void;
 }
 
 /**

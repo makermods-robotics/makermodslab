@@ -43,6 +43,7 @@ export default {
     flavor: "机型",
     created: "创建于",
     owner: "所有者",
+    image: "镜像",
     updated: "更新于",
   },
   actions: {
@@ -60,8 +61,7 @@ export default {
   },
   rename: {
     title: "重命名模型",
-    description:
-      "仅设置显示名称 —— 底层的{{target}}（<0/>）不会被移动或更改。",
+    description: "仅设置显示名称 —— 底层的{{target}}（<0/>）不会被移动或更改。",
     targetRun: "运行记录",
     targetHubRepo: "Hub 仓库",
     placeholder: "新名称",
@@ -224,8 +224,7 @@ export default {
     title: "你的技能",
     importSkill: "导入技能",
     searchPlaceholder: "搜索技能",
-    empty:
-      "还没有技能。训练一个，或用“导入技能”从 Hub 或本地文件夹添加一个。",
+    empty: "还没有技能。训练一个，或用“导入技能”从 Hub 或本地文件夹添加一个。",
     noMatch: "没有匹配的模型。",
     filters: {
       all: "全部",

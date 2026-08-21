@@ -59,6 +59,7 @@ export default {
     flavor: "Flavor",
     created: "Created",
     owner: "Owner",
+    image: "Image",
     updated: "Updated",
   },
   // Card action controls, shared between the job card, the model card and the
@@ -97,7 +98,8 @@ export default {
   // Client-side substitutes raised by lib/jobsApi.ts. Only OUR sentences live
   // here — every other refusal shows the backend's own `detail` verbatim.
   errors: {
-    trainingAlreadyRunning: "Another training is already running. Stop it first.",
+    trainingAlreadyRunning:
+      "Another training is already running. Stop it first.",
   },
   // Hub-only jobs, shared by the Hub job card and the run dropdown.
   hubJob: {

@@ -10,6 +10,5 @@ if (typeof globalThis.ResizeObserver === "undefined") {
     unobserve() {}
     disconnect() {}
   }
-  // @ts-expect-error jsdom has no ResizeObserver
   globalThis.ResizeObserver = ResizeObserverStub;
 }

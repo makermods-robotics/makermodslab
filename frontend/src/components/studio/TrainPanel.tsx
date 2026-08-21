@@ -62,6 +62,15 @@ const NONE = "__none__";
  * read — a display label, not an architecture. */
 const UNKNOWN_POLICY_TYPE = "model";
 
+/** Policies with no real "from scratch": each builds a pretrained backbone
+ * (a vision-language model for smolvla, a PaliGemma+expert stack for
+ * pi0/pi05/pi0_fast) that only receives real weights via an explicit
+ * pretrained path, so leaving Starting point unset fine-tunes the matching
+ * public foundation checkpoint instead of training with random weights (see
+ * jobs.start's `_POLICY_FOUNDATION_BASE_REPO_ID`). Keep in sync with that
+ * dict's keys. Every other policy's from-scratch run is normal. */
+const FOUNDATION_POLICY_TYPES = new Set(["smolvla", "pi0", "pi05", "pi0_fast"]);
+
 /** The architecture a job record trains (imported models record their
  * checkpoint's own `type`), or null when the record doesn't know it. Never
  * returns the "model" placeholder — pushing that into the form would select a
@@ -154,8 +163,10 @@ const TrainPanel: React.FC = () => {
   // pulls the list afterwards rather than trusting the broadcast.
   const { refresh: refreshJobs } = useJobsData();
 
-  const { seen: hasSeenTrainingMilestone, markSeen: markTrainingMilestoneSeen } =
-    useOnceFlag("makerlab:milestone-first-training");
+  const {
+    seen: hasSeenTrainingMilestone,
+    markSeen: markTrainingMilestoneSeen,
+  } = useOnceFlag("makerlab:milestone-first-training");
   // Edge-triggered "consume once": onStarted sets the pending job id, and the
   // effect below latches it into showTrainingMilestone the first time the
   // monitor dialog (opened right after onStarted, see launchJob) closes, then
@@ -203,9 +214,10 @@ const TrainPanel: React.FC = () => {
     // Closing the form is the way out of a resume: resume mode hides the
     // dataset and starting-point controls (both are the parent run's and not
     // editable), so unlike a fine-tune — which can be dropped by setting
-    // Starting point back to "Train from scratch" — it has no in-form escape
-    // hatch. Reopening then gives a fresh form, which is also what the user
-    // gets after a launch (onStarted folds the form the same way).
+    // Starting point back to its no-selection state (NONE) — it has no
+    // in-form escape hatch. Reopening then gives a fresh form, which is also
+    // what the user gets after a launch (onStarted folds the form the same
+    // way).
     if (!open) setResumeSeed(null);
   };
 
@@ -333,7 +345,10 @@ const TrainPanel: React.FC = () => {
     }
     // Local runs already have a job id; Hub-only models resolve via import.
     if (model.source === "hub") {
-      resolveFinetune({ repoId: model.hf_repo_id ?? model.id, name: model.name });
+      resolveFinetune({
+        repoId: model.hf_repo_id ?? model.id,
+        name: model.name,
+      });
     } else {
       if (model.policy_type) setPolicyType(model.policy_type);
       resolveFinetune({ jobId: model.id, name: model.name });
@@ -447,6 +462,12 @@ const TrainPanel: React.FC = () => {
       });
   };
 
+  // Both the <Select> placeholder and the "no base model" option's label. The
+  // submitted option VALUE ("__none__") is untouched.
+  const noStartingPointLabel = FOUNDATION_POLICY_TYPES.has(policyType)
+    ? t("studio.train.startingPoint.fromBase")
+    : t("studio.train.startingPoint.scratch");
+
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
       <PanelHeader
@@ -457,7 +478,11 @@ const TrainPanel: React.FC = () => {
 
       {/* Start a new training — the form slides open in place (no dialog),
           mirroring Collect's "Record new dataset". */}
-      <Collapsible open={formOpen} onOpenChange={toggleForm} className="space-y-5">
+      <Collapsible
+        open={formOpen}
+        onOpenChange={toggleForm}
+        className="space-y-5"
+      >
         <CollapsibleTrigger asChild>
           <PanelEntryControl open={formOpen} dotClassName="bg-emerald-500">
             {t("studio.train.entry")}
@@ -493,110 +518,110 @@ const TrainPanel: React.FC = () => {
                 </p>
               </div>
             ) : (
-            <div className="space-y-2">
-              <Label htmlFor="train-dataset-search">
-                {t("studio.train.dataset.label")}
-              </Label>
-              {selectedId ? (
-                <div className="flex flex-wrap gap-1.5">
-                  <span className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-muted/40 py-1 pl-2 pr-1 font-mono text-xs text-foreground">
-                    <span className="truncate">{selectedId}</span>
-                    <button
-                      type="button"
-                      aria-label={t("studio.train.dataset.remove", {
-                        repoId: selectedId,
-                      })}
-                      onClick={() => setSelectedId(null)}
-                      className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </span>
-                </div>
-              ) : null}
-              <div className="relative">
-                <Input
-                  id="train-dataset-search"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={t("studio.train.dataset.searchPlaceholder")}
-                  className="h-8 pr-8 text-sm"
-                />
-                {/* "Choose dataset" — browse the full Local/Hugging Face list
+              <div className="space-y-2">
+                <Label htmlFor="train-dataset-search">
+                  {t("studio.train.dataset.label")}
+                </Label>
+                {selectedId ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    <span className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-muted/40 py-1 pl-2 pr-1 font-mono text-xs text-foreground">
+                      <span className="truncate">{selectedId}</span>
+                      <button
+                        type="button"
+                        aria-label={t("studio.train.dataset.remove", {
+                          repoId: selectedId,
+                        })}
+                        onClick={() => setSelectedId(null)}
+                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  </div>
+                ) : null}
+                <div className="relative">
+                  <Input
+                    id="train-dataset-search"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder={t("studio.train.dataset.searchPlaceholder")}
+                    className="h-8 pr-8 text-sm"
+                  />
+                  {/* "Choose dataset" — browse the full Local/Hugging Face list
                     instead of typing a search term. Docked on the right edge
                     of the search bar itself (a sibling overlay, not nested in
                     the <input>) so it's reachable without typing anything. */}
-                <DatasetPicker
-                  datasets={datasets}
-                  loading={datasetsLoading}
-                  onPickExisting={(item) => pickDataset(item.repo_id)}
-                  hideSearch
-                >
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute right-0.5 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    title={t("studio.train.dataset.choose")}
-                    aria-label={t("studio.train.dataset.choose")}
+                  <DatasetPicker
+                    datasets={datasets}
+                    loading={datasetsLoading}
+                    onPickExisting={(item) => pickDataset(item.repo_id)}
+                    hideSearch
                   >
-                    <ChevronsUpDown className="h-3.5 w-3.5" />
-                  </Button>
-                </DatasetPicker>
-              </div>
-              {trimmedQuery ? (
-                <div className="max-h-56 divide-y divide-border overflow-auto rounded-md border border-border">
-                  {matches.map((d) => (
-                    <DatasetResultRow
-                      key={d.repo_id}
-                      item={d}
-                      selected={selectedId === d.repo_id}
-                      onPick={() => pickDataset(d.repo_id)}
-                    />
-                  ))}
-                  {hubCandidate ? (
-                    <button
+                    <Button
                       type="button"
-                      onClick={() => addHubDataset(hubCandidate)}
-                      className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-muted/50"
+                      variant="ghost"
+                      size="icon"
+                      className="absolute right-0.5 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      title={t("studio.train.dataset.choose")}
+                      aria-label={t("studio.train.dataset.choose")}
                     >
-                      <Plus className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate">
-                          {/* The typed repo id is DATA — one <0> slot, not a
-                              sentence stitched around it. */}
-                          <Trans
-                            i18nKey="studio.train.dataset.useHub"
-                            values={{ repoId: hubCandidate }}
-                            components={[
-                              <span key="0" className="font-mono" />,
-                            ]}
-                          />
-                        </span>
-                        <span className="block text-xs text-muted-foreground">
-                          {t("studio.train.dataset.useHubHint")}
-                        </span>
-                      </span>
-                    </button>
-                  ) : null}
-                  {matches.length === 0 && !hubCandidate ? (
-                    <p className="px-3 py-4 text-sm text-muted-foreground">
-                      {/* <0> holds the literal `org/name` id shape — syntax,
-                          so it is not translated. */}
-                      <Trans
-                        i18nKey="studio.train.dataset.noMatches"
-                        components={[<span key="0" className="font-mono" />]}
-                      />
-                    </p>
-                  ) : null}
+                      <ChevronsUpDown className="h-3.5 w-3.5" />
+                    </Button>
+                  </DatasetPicker>
                 </div>
-              ) : null}
-              {!selectedId ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("studio.train.dataset.hint")}
-                </p>
-              ) : null}
-            </div>
+                {trimmedQuery ? (
+                  <div className="max-h-56 divide-y divide-border overflow-auto rounded-md border border-border">
+                    {matches.map((d) => (
+                      <DatasetResultRow
+                        key={d.repo_id}
+                        item={d}
+                        selected={selectedId === d.repo_id}
+                        onPick={() => pickDataset(d.repo_id)}
+                      />
+                    ))}
+                    {hubCandidate ? (
+                      <button
+                        type="button"
+                        onClick={() => addHubDataset(hubCandidate)}
+                        className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-muted/50"
+                      >
+                        <Plus className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">
+                            {/* The typed repo id is DATA — one <0> slot, not a
+                              sentence stitched around it. */}
+                            <Trans
+                              i18nKey="studio.train.dataset.useHub"
+                              values={{ repoId: hubCandidate }}
+                              components={[
+                                <span key="0" className="font-mono" />,
+                              ]}
+                            />
+                          </span>
+                          <span className="block text-xs text-muted-foreground">
+                            {t("studio.train.dataset.useHubHint")}
+                          </span>
+                        </span>
+                      </button>
+                    ) : null}
+                    {matches.length === 0 && !hubCandidate ? (
+                      <p className="px-3 py-4 text-sm text-muted-foreground">
+                        {/* <0> holds the literal `org/name` id shape — syntax,
+                          so it is not translated. */}
+                        <Trans
+                          i18nKey="studio.train.dataset.noMatches"
+                          components={[<span key="0" className="font-mono" />]}
+                        />
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {!selectedId ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t("studio.train.dataset.hint")}
+                  </p>
+                ) : null}
+              </div>
             )}
 
             {/* Starting point — the optional fine-tune base. Sits directly
@@ -608,50 +633,51 @@ const TrainPanel: React.FC = () => {
                 would make it a fine-tune, not a resume — and the configurator's
                 "Continuing <name> from step N" banner already names it. */}
             {resumeSeed ? null : (
-            <div className="space-y-2">
-              <Label htmlFor="train-starting-point">
-                {t("studio.train.startingPoint.label")}
-              </Label>
-              <Select value={baseModelId} onValueChange={handleBaseModelChange}>
-                <SelectTrigger id="train-starting-point" className="w-full">
-                  {/* A prefilled base (job card's Fine-tune) may not exist as
+              <div className="space-y-2">
+                <Label htmlFor="train-starting-point">
+                  {t("studio.train.startingPoint.label")}
+                </Label>
+                <Select
+                  value={baseModelId}
+                  onValueChange={handleBaseModelChange}
+                >
+                  <SelectTrigger id="train-starting-point" className="w-full">
+                    {/* A prefilled base (job card's Fine-tune) may not exist as
                       an item in the models listing — render the resolved
                       seed's name so the trigger is never blank (same pattern
                       as the Run panel's skill picker). */}
-                  {baseModelId !== NONE && finetuneSeed ? (
-                    <span className="truncate">{finetuneSeed.name}</span>
-                  ) : (
-                    <SelectValue
-                      placeholder={t("studio.train.startingPoint.scratch")}
-                    />
-                  )}
-                </SelectTrigger>
-                <SelectContent>
-                  {/* The option VALUE stays `__none__` — only its label is
+                    {baseModelId !== NONE && finetuneSeed ? (
+                      <span className="truncate">{finetuneSeed.name}</span>
+                    ) : (
+                      <SelectValue placeholder={noStartingPointLabel} />
+                    )}
+                  </SelectTrigger>
+                  <SelectContent>
+                    {/* The option VALUE stays `__none__` — only its label is
                       translated. */}
-                  <SelectItem value={NONE}>
-                    {t("studio.train.startingPoint.scratch")}
-                  </SelectItem>
-                  {models.map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      {m.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {resolvingBase ? (
-                  <span className="inline-flex items-center gap-1">
-                    <Loader2 className="h-3 w-3 animate-spin" />{" "}
-                    {t("studio.train.startingPoint.loading")}
-                  </span>
-                ) : finetuneSeed ? (
-                  t("studio.train.startingPoint.finetuneHint")
-                ) : (
-                  t("studio.train.startingPoint.hint")
-                )}
-              </p>
-            </div>
+                    <SelectItem value={NONE}>{noStartingPointLabel}</SelectItem>
+                    {models.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {resolvingBase ? (
+                    <span className="inline-flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" />{" "}
+                      {t("studio.train.startingPoint.loading")}
+                    </span>
+                  ) : finetuneSeed ? (
+                    t("studio.train.startingPoint.finetuneHint")
+                  ) : FOUNDATION_POLICY_TYPES.has(policyType) ? (
+                    t("studio.train.startingPoint.foundationHint")
+                  ) : (
+                    t("studio.train.startingPoint.hint")
+                  )}
+                </p>
+              </div>
             )}
 
             {/* Shared configuration form: compute target, run configuration,
