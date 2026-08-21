@@ -59,8 +59,11 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
     Icon: HelpCircle,
   };
   const Icon = present.Icon;
+  // The run name when the Hub could give us one. The image name is the last
+  // resort: every cloud run uses the same image, so titling by it makes every
+  // untracked job on the account read as "huggingface/lerobot-gpu:latest".
   const title =
-    job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`;
+    job.name ?? job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`;
 
   // Unified metadata rows (same format as the dataset/job/model cards).
   const metaRows: Array<[string, string]> = [
@@ -68,6 +71,9 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
     ["Created", relativeTime(job.created_at)],
   ];
   if (job.owner) metaRows.push(["Owner", job.owner]);
+  // Only worth a row once it isn't the title; keeps the image visible for the
+  // "which image did this run on" question without spending a row twice.
+  if (job.name && job.docker_image) metaRows.push(["Image", job.docker_image]);
 
   return (
     <Card
