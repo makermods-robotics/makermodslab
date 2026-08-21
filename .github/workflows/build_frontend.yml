@@ -10,8 +10,10 @@ on:
       - '.github/workflows/build_frontend.yml'
   workflow_dispatch:
 
+# Read-only by default. The privileged write is done by the dist-bot App token,
+# minted in the `commit` job below and nowhere else.
 permissions:
-  contents: write
+  contents: read
 
 # Shared with sync_staging.yml, which also pushes to `staging`. Concurrency
 # groups are repo-scoped rather than workflow-scoped, so keying the group on the
@@ -19,13 +21,65 @@ permissions:
 # interleave and whichever pushes second is rejected as a non-fast-forward, with
 # no retry on either side. Keyed by ref so a main rebuild and a staging rebuild
 # still run in parallel: they write different branches.
+#
+# `queue: max` is load-bearing, not decoration. GitHub's default is
+# `queue: single`: at most one run may be *pending* per group, and a newer
+# pending run cancels the older one. Since this workflow shares a group with the
+# sync, the default would let a staging rebuild silently evict a pending
+# main -> staging sync — which never retries, stranding main's commits and
+# breaking the very invariant the sync exists to hold. (`queue: max` may not be
+# combined with `cancel-in-progress: true`; that is a validation error.)
 concurrency:
   group: branch-write-${{ github.ref_name }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
+  # Deliberately unprivileged, and deliberately a separate job from the push.
+  #
+  # `npm ci` and `npm run build` execute code from the repository — lifecycle
+  # scripts, the vite config, every transitive dependency. If the dist-bot
+  # credential were present on this runner it would sit in `.git/config` as a
+  # basic-auth header for any of that code to read. That App is on `main`'s
+  # PR-bypass list, and this workflow also runs on `staging`, which is
+  # unprotected: anyone able to push to `staging` could then push to protected
+  # `main` as the App. Splitting the job is what makes that impossible — the
+  # build never holds a credential that can write anywhere.
   build:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        with:
+          # Vite 8 requires ^20.19.0 or >=22.12.0; on Node 18 `npm run build`
+          # fails, which silently stops dist from being rebuilt.
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+      - name: Hand the bundle to the commit job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          include-hidden-files: true
+          retention-days: 1
+
+  # The only job that holds a credential, and it runs no repository code.
+  commit:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read  # download-artifact
     steps:
       # Mint a short-lived token from the dist-bot GitHub App. The default
       # GITHUB_TOKEN / github-actions[bot] cannot be granted PR-bypass on a
@@ -43,25 +97,26 @@ jobs:
       # Persisting the App credential is the whole mechanism here: the `git push`
       # below reuses it on the origin remote. The token is minted per-run by the
       # App and expires when the job ends, so it cannot outlive the workflow.
+      # No `npm` runs on this runner, so nothing from the repository ever
+      # executes alongside it. lfs is not fetched: nothing under frontend/dist
+      # is LFS-tracked (`dist/** -filter` in frontend/.gitattributes), and this
+      # job stages nothing else.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:  # zizmor: ignore[artipacked]
-          lfs: true
-          # Check out with the App token; persist-credentials defaults to true
-          # so the final `git push` reuses it on the origin remote.
           token: ${{ steps.app-token.outputs.token }}
-      - uses: actions/setup-node@v6
+
+      # Emptied first so files the build *removed* are actually removed. The
+      # bundle is content-hash-named, so a stale chunk left behind would be
+      # committed forever otherwise. (The old single-job version got this free:
+      # vite's own emptyOutDir did it in place.)
+      - name: Clear the committed bundle
+        run: rm -rf frontend/dist
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
         with:
-          # Vite 8 requires ^20.19.0 or >=22.12.0; on Node 18 `npm run build`
-          # fails, which silently stops dist from being rebuilt.
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install
-        working-directory: frontend
-        run: npm ci
-      - name: Build
-        working-directory: frontend
-        run: npm run build
+          name: frontend-dist
+          path: frontend/dist
+
       - name: Commit dist if changed
         # `app-slug` goes through env rather than being interpolated straight
         # into the shell, so the run block holds no expansion sites.
@@ -71,7 +126,8 @@ jobs:
           git config user.name  "${APP_SLUG}[bot]"
           git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
           if [[ -n "$(git status --porcelain frontend/dist)" ]]; then
-            git add frontend/dist
+            # -A so deletions are staged, not just additions and edits.
+            git add -A -- frontend/dist
             git commit -m "ci: rebuild frontend/dist [skip ci]"
             # Pushes as the App (credentials persisted by checkout above), which
             # is on main's PR-bypass list. GITHUB_REF_NAME keeps this correct on

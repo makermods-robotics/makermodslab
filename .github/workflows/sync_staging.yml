@@ -58,9 +58,21 @@ permissions:
 # push to `staging`, and neither retries, so an interleaved pair would leave one
 # run red on a non-fast-forward and its work undone. A queued run has not
 # checked out yet, so whichever goes second always starts from a fresh HEAD.
+#
+# `queue: max` is load-bearing. GitHub's default is `queue: single` — at most one
+# run may be *pending* per group, and a newer pending run cancels the older one.
+# With build_frontend.yml sharing this group, that default would let a staging
+# rebuild silently evict a pending sync. Nothing retries it, so main's commits
+# would simply be stranded: the exact divergence this workflow exists to prevent,
+# now caused by the mechanism meant to prevent it. (Evicting a sync with another
+# sync would have been harmless — the newer one merges a newer main that already
+# subsumes the older commits — which is why the default was survivable before the
+# group was shared.) `queue: max` may not be combined with
+# `cancel-in-progress: true`; that is a validation error.
 concurrency:
   group: branch-write-staging
   cancel-in-progress: false
+  queue: max
 
 jobs:
   sync:
@@ -196,7 +208,19 @@ jobs:
             echo '```bash'
             echo 'git checkout staging && git pull'
             echo 'git merge main'
-            echo 'git checkout --ours -- frontend/dist   # keep the dist policy'
+            echo
+            echo '# Keep the dist policy: resolve frontend/dist to staging'"'"'s side.'
+            echo '# Driven off the index because a plain `git checkout --ours` exits 1'
+            echo '# on a modify/delete conflict, which is a shape dist really does hit.'
+            echo 'git diff -z --name-only --diff-filter=U -- frontend/dist |'
+            echo '  while IFS= read -r -d "" p; do'
+            echo '    if git show ":2:$p" >/dev/null 2>&1; then'
+            echo '      git checkout --ours -- "$p" && git add -- "$p"'
+            echo '    else'
+            echo '      git rm -qf -- "$p"'
+            echo '    fi'
+            echo '  done'
+            echo
             echo '# resolve the source conflicts above, then:'
             echo 'git add -A && git commit && git push origin staging'
             echo '```'
