@@ -13,6 +13,16 @@ on:
 permissions:
   contents: write
 
+# Shared with sync_staging.yml, which also pushes to `staging`. Concurrency
+# groups are repo-scoped rather than workflow-scoped, so keying the group on the
+# branch being written serializes the two against each other — without it they
+# interleave and whichever pushes second is rejected as a non-fast-forward, with
+# no retry on either side. Keyed by ref so a main rebuild and a staging rebuild
+# still run in parallel: they write different branches.
+concurrency:
+  group: branch-write-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -25,7 +35,7 @@ jobs:
       # job ends. `staging` is unprotected today, so only `main` needs the
       # bypass entry — if `staging` ever gets protected, add the App there too
       # or this job starts failing on it.
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
         id: app-token
         with:
           app-id: ${{ secrets.DIST_BOT_APP_ID }}
@@ -33,8 +43,8 @@ jobs:
       # Persisting the App credential is the whole mechanism here: the `git push`
       # below reuses it on the origin remote. The token is minted per-run by the
       # App and expires when the job ends, so it cannot outlive the workflow.
-      - uses: actions/checkout@v7.0.0  # zizmor: ignore[artipacked]
-        with:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:  # zizmor: ignore[artipacked]
           lfs: true
           # Check out with the App token; persist-credentials defaults to true
           # so the final `git push` reuses it on the origin remote.
@@ -68,7 +78,9 @@ jobs:
             # every branch the workflow runs for, so it lands on staging when
             # staging is what was pushed. dist is path-excluded from this
             # workflow's triggers and the message carries [skip ci], so this push
-            # does not start another run.
+            # does not start another run — including sync_staging.yml, which is
+            # why that workflow also triggers on this one's `workflow_run`
+            # rather than relying on the push alone.
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
             echo "frontend/dist already up to date"
