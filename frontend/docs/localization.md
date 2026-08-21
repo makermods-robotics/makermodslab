@@ -614,8 +614,8 @@ npm run build          # then: git checkout -- dist
 
 > **⚠️ The `-p tsconfig.app.json` flag is not optional.** The root `tsconfig.json` has
 > `"files": []` and only project references, so a bare `npx tsc --noEmit` type-checks
-> **nothing** and always "passes". CI currently runs the bare form, so type errors will
-> not be caught for you.
+> **nothing** and always "passes". CI runs the project form on every PR (#87), so a
+> type error you skip past here fails the build later rather than never.
 
 Record the baseline **before** you start and compare against it — some lint and type
 errors pre-date any given change, and `npm test` has pre-existing failures in
@@ -623,7 +623,7 @@ errors pre-date any given change, and `npm test` has pre-existing failures in
 and lacks `.clear()`).
 
 Do **not** commit `frontend/dist/` — `npm run build` rewrites it and CI rebuilds it on
-`main`. Revert it if a build dirtied your tree.
+`main` and `staging`. Revert it if a build dirtied your tree.
 
 > **⚠️ Do not run `makermodslab --dev` on a branch you are about to push.** It runs
 > `npm install` on every start (`makermodslab/scripts/makermodslab.py:381`), which on
