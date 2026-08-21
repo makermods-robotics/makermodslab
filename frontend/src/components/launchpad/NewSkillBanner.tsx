@@ -1,11 +1,23 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { useStudio } from "@/contexts/StudioContext";
 
-const STEPS: { label: string; sub: string }[] = [
-  { label: "1 · Collect", sub: "record a dataset — or pick an existing one" },
-  { label: "2 · Train", sub: "datasets → policy → training job" },
-  { label: "3 · Deploy", sub: "run a skill on your robot" },
-];
+/** Keys, not copy: this array is built once at import time, so resolved
+ * strings here would never follow a language change. */
+const STEPS = [
+  {
+    labelKey: "launchpad.newSkill.steps.collect.label",
+    subKey: "launchpad.newSkill.steps.collect.sub",
+  },
+  {
+    labelKey: "launchpad.newSkill.steps.train.label",
+    subKey: "launchpad.newSkill.steps.train.sub",
+  },
+  {
+    labelKey: "launchpad.newSkill.steps.deploy.label",
+    subKey: "launchpad.newSkill.steps.deploy.sub",
+  },
+] as const;
 
 /**
  * The "＋ New Skill" workbench banner — Layout D's signature element. Resting, it
@@ -17,6 +29,7 @@ const STEPS: { label: string; sub: string }[] = [
  */
 const NewSkillBanner: React.FC = () => {
   const { openStudio } = useStudio();
+  const { t } = useTranslation();
 
   return (
     <button
@@ -24,15 +37,15 @@ const NewSkillBanner: React.FC = () => {
       data-tour="launchpad-new-skill"
       onClick={() => openStudio("collect")}
       className="group w-full rounded-lg border border-border bg-card px-6 py-7 text-left shadow-1 transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none"
-      aria-label="Open the skill studio — collect, train, and deploy a new skill"
+      aria-label={t("launchpad.newSkill.aria")}
     >
       <span className="font-display text-xl font-semibold tracking-tight">
-        ＋ New Skill
+        {t("launchpad.newSkill.title")}
       </span>
 
       {/* Resting subtitle: fades out as the steps expand in. */}
       <span className="mt-1 block text-sm text-muted-foreground transition-opacity duration-300 group-hover:opacity-0 group-focus-visible:opacity-0">
-        Collect, train, deploy — without leaving this page.
+        {t("launchpad.newSkill.subtitle")}
       </span>
 
       {/* Steps: collapsed to zero height at rest, expanding on hover/focus. */}
@@ -40,13 +53,13 @@ const NewSkillBanner: React.FC = () => {
         <div className="overflow-hidden">
           <div className="mt-3 flex flex-col gap-3 opacity-0 transition-opacity duration-300 group-hover:opacity-100 group-focus-visible:opacity-100 sm:flex-row sm:items-stretch">
             {STEPS.map((step, i) => (
-              <React.Fragment key={step.label}>
+              <React.Fragment key={step.labelKey}>
                 <div className="flex flex-1 flex-col gap-0.5 rounded-md border border-border bg-background px-3 py-2">
                   <span className="font-mono text-xs font-semibold text-foreground">
-                    {step.label}
+                    {t(step.labelKey)}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    {step.sub}
+                    {t(step.subKey)}
                   </span>
                 </div>
                 {i < STEPS.length - 1 && (

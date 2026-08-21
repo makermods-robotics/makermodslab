@@ -1,11 +1,30 @@
 import React, { useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { AlertCircle, ExternalLink, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 
+/** The token-settings link. The trailing external-link icon lives here rather
+ * than in the catalog string: <Trans> resolves only top-level slots, so an
+ * icon nested inside another slot is silently dropped. */
+const TokenSettingsLink: React.FC<{ children?: React.ReactNode }> = ({
+  children,
+}) => (
+  <a
+    href="https://huggingface.co/settings/tokens"
+    target="_blank"
+    rel="noreferrer"
+    className="underline hover:text-amber-900 dark:hover:text-amber-50 inline-flex items-center gap-1"
+  >
+    {children}
+    <ExternalLink className="w-3 h-3" />
+  </a>
+);
+
 const HfAuthBanner: React.FC = () => {
+  const { t } = useTranslation();
   const { auth, refetch } = useHfAuth();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [token, setToken] = useState("");
@@ -47,21 +66,19 @@ const HfAuthBanner: React.FC = () => {
         <div className="flex-1 space-y-3">
           <div>
             <p className="text-sm text-amber-800 dark:text-amber-100 font-medium">
-              Hugging Face access required for cloud training
+              {t("landing.hfAuthBanner.title")}
             </p>
             <p className="text-xs text-amber-700/90 dark:text-amber-200/80 mt-1">
-              Create a token at{" "}
-              <a
-                href="https://huggingface.co/settings/tokens"
-                target="_blank"
-                rel="noreferrer"
-                className="underline hover:text-amber-900 dark:hover:text-amber-50 inline-flex items-center gap-1"
-              >
-                huggingface.co/settings/tokens
-                <ExternalLink className="w-3 h-3" />
-              </a>
-              {" "}with <span className="font-mono">Write</span> access (so trained
-              policies can upload to your account), then paste it below.
+              {/* One sentence with an embedded link, icon, and mono span —
+                  <Trans> so the translator controls the word order instead of
+                  us concatenating fragments. */}
+              <Trans
+                i18nKey="landing.hfAuthBanner.tokenHint"
+                components={[
+                  <TokenSettingsLink key="0" />,
+                  <span key="1" className="font-mono" />,
+                ]}
+              />
             </p>
           </div>
           <form
@@ -88,10 +105,10 @@ const HfAuthBanner: React.FC = () => {
               {submitting ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  Saving…
+                  {t("landing.hfAuthBanner.saving")}
                 </>
               ) : (
-                "Save token"
+                t("landing.hfAuthBanner.save")
               )}
             </Button>
           </form>

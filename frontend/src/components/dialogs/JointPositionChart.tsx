@@ -1,4 +1,7 @@
 import React, { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
 import { EpisodeJointSeries, EpisodeSummary } from "@/lib/replayApi";
 
 // Six SO-101 joints, in the dataset's fixed column order — a validated
@@ -34,6 +37,13 @@ const JointPositionChart: React.FC<{
   episode: EpisodeSummary | null;
   scrubFrac: number;
 }> = ({ joints, episode, scrubFrac }) => {
+  const { t } = useTranslation();
+  const { language } = useLanguage();
+  // `.eyebrow` bundles `uppercase` with letter-spacing: the uppercase is a
+  // no-op on Chinese but the tracking is not, so both come off together.
+  const eyebrow = isCaselessScript(language)
+    ? "text-[11px] font-semibold text-muted-foreground"
+    : "eyebrow";
   const [hoverT, setHoverT] = useState<number | null>(null);
   const [selectedJoints, setSelectedJoints] = useState<Set<number>>(new Set());
 
@@ -79,9 +89,13 @@ const JointPositionChart: React.FC<{
   return (
     <div className="rounded-md border border-border bg-muted/40 p-2">
       <div className="mb-1 flex items-baseline justify-between select-none">
-        <span className="eyebrow">joint positions — synced to playhead</span>
-        <span className="eyebrow">
-          {episode ? `episode ${episode.episode_index}` : "—"}
+        <span className={eyebrow}>{t("dialogs.jointChart.heading")}</span>
+        <span className={eyebrow}>
+          {episode
+            ? t("dialogs.jointChart.episode", {
+                index: episode.episode_index,
+              })
+            : "—"}
         </span>
       </div>
       <div
@@ -140,7 +154,9 @@ const JointPositionChart: React.FC<{
           </svg>
         ) : (
           <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-            {episode ? "Loading joint data…" : "No episode selected"}
+            {episode
+              ? t("dialogs.jointChart.loading")
+              : t("dialogs.jointChart.noEpisode")}
           </div>
         )}
         {hoverT != null && joints && episode && (

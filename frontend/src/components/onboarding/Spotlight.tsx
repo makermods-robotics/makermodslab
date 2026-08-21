@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import * as Popover from "@radix-ui/react-popover";
+import { useTranslation } from "react-i18next";
 import { useOnboarding } from "@/contexts/OnboardingContext";
 import { useSpotlightTarget } from "@/hooks/useSpotlightTarget";
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,7 @@ const PLACEMENT_TO_SIDE: Record<
  */
 const Spotlight: React.FC = () => {
   const { activeTour, stepIndex, advance, back, skip } = useOnboarding();
+  const { t } = useTranslation();
   const step = activeTour?.steps[stepIndex] ?? null;
   const rect = useSpotlightTarget(step?.target ?? "[data-tour=__none__]");
   const spotlightRef = useRef<HTMLDivElement>(null);
@@ -111,7 +113,7 @@ const Spotlight: React.FC = () => {
     <div
       ref={spotlightRef}
       role="dialog"
-      aria-label="Feature tour"
+      aria-label={t("onboarding.tour.aria")}
       className="fixed inset-0 z-[60]"
     >
       {/* Cutout backdrop: a huge box-shadow punches a hole over the target
@@ -153,27 +155,30 @@ const Spotlight: React.FC = () => {
           >
             <div aria-live="polite">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Step {stepIndex + 1} of {activeTour.steps.length}
+                {t("onboarding.tour.stepCounter", {
+                  current: stepIndex + 1,
+                  total: activeTour.steps.length,
+                })}
               </p>
               <h2 className="mt-1 font-display text-base font-semibold">
-                {step.title}
+                {t(step.titleKey)}
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                {step.description}
+                {t(step.descriptionKey)}
               </p>
             </div>
             <div className="mt-4 flex items-center justify-between gap-2">
               <Button variant="ghost" size="sm" onClick={skip}>
-                Skip
+                {t("onboarding.tour.skip")}
               </Button>
               <div className="flex gap-2">
                 {stepIndex > 0 && (
                   <Button variant="outline" size="sm" onClick={back}>
-                    Back
+                    {t("onboarding.tour.back")}
                   </Button>
                 )}
                 <Button size="sm" autoFocus onClick={advance}>
-                  {isLast ? "Done" : "Next"}
+                  {isLast ? t("onboarding.tour.done") : t("onboarding.tour.next")}
                 </Button>
               </div>
             </div>

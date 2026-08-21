@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronUp, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import Footer from "@/components/Footer";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
@@ -33,6 +35,7 @@ const Launchpad = () => {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [search, setSearch] = useState("");
   const { openStudio } = useStudio();
+  const { t } = useTranslation();
   const { start } = useOnboarding();
   const { seen, markSeen } = useOnceFlag(ONBOARDING_KEY);
 
@@ -59,8 +62,9 @@ const Launchpad = () => {
             onClick={() => setLibraryOpen(true)}
           >
             <Library className="h-3.5 w-3.5" />
-            My library
+            {t("launchpad.header.myLibrary")}
           </Button>
+          <LanguageSwitcher />
           {/* Wrapped (rather than tagging RobotCorner.tsx itself) since the
               same component also renders inside StudioOverlay's header —
               tagging it directly would give the tour two matching elements. */}
@@ -93,8 +97,8 @@ const Launchpad = () => {
       <button
         type="button"
         onClick={() => openStudio()}
-        aria-label="Open the skill studio"
-        title="Open the skill studio"
+        aria-label={t("launchpad.header.openStudio")}
+        title={t("launchpad.header.openStudio")}
         className="fixed bottom-3 left-1/2 z-30 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background/90 text-muted-foreground shadow-1 backdrop-blur-sm transition-colors hover:text-foreground"
       >
         <ChevronUp className="h-5 w-5 animate-bounce" />

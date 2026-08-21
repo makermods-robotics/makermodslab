@@ -4,6 +4,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { Boxes, Pause, Play, SkipBack, SkipForward, VideoOff } from "lucide-react";
 import {
   Dialog,
@@ -15,6 +16,9 @@ import { Button } from "@/components/ui/button";
 import { useStudio } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
+import { cn } from "@/lib/utils";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
 import EpisodeReplayPanel from "@/components/dialogs/EpisodeReplayPanel";
@@ -85,6 +89,7 @@ const EpisodeViewer: React.FC<{
   selectedEpisode: number;
   onSelectEpisode: (episodeIndex: number) => void;
 }> = ({ repoId, cameras, episodes, selectedEpisode, onSelectEpisode }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [joints, setJoints] = useState<EpisodeJointSeries | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -324,7 +329,7 @@ const EpisodeViewer: React.FC<{
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       {cameras.length === 0 ? (
         <div className="flex flex-1 items-center justify-center rounded-md border border-border bg-muted/30 text-sm text-muted-foreground">
-          This dataset has no camera footage — replay it on hardware or view the joint trace below.
+          {t("dialogs.datasetDetail.noCameras")}
         </div>
       ) : (
         <div
@@ -350,7 +355,7 @@ const EpisodeViewer: React.FC<{
                   <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-3 text-center text-zinc-300">
                     <VideoOff className="h-4 w-4" />
                     <p className="text-[10px] leading-snug">
-                      Can't decode this camera's video in this browser.
+                      {t("dialogs.datasetDetail.videoDecodeError")}
                     </p>
                   </div>
                 ) : (
@@ -391,7 +396,7 @@ const EpisodeViewer: React.FC<{
             className="h-8 w-8 shrink-0"
             onClick={() => gotoEpisode(-1)}
             disabled={!episode || !hasPrev}
-            aria-label="Previous episode"
+            aria-label={t("dialogs.datasetDetail.previousEpisode")}
           >
             <SkipBack className="h-3.5 w-3.5" />
           </Button>
@@ -400,7 +405,11 @@ const EpisodeViewer: React.FC<{
             className="h-8 w-8 shrink-0"
             onClick={handlePlayPause}
             disabled={!episode}
-            aria-label={playing ? "Pause" : "Play"}
+            aria-label={
+              playing
+                ? t("dialogs.datasetDetail.pause")
+                : t("dialogs.datasetDetail.play")
+            }
           >
             {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
           </Button>
@@ -410,7 +419,7 @@ const EpisodeViewer: React.FC<{
             className="h-8 w-8 shrink-0"
             onClick={() => gotoEpisode(1)}
             disabled={!episode || !hasNext}
-            aria-label="Next episode"
+            aria-label={t("dialogs.datasetDetail.nextEpisode")}
           >
             <SkipForward className="h-3.5 w-3.5" />
           </Button>
@@ -464,6 +473,13 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   onOpenChange,
   onStudioAction,
 }) => {
+  const { t } = useTranslation();
+  const { language } = useLanguage();
+  // `.eyebrow` bundles `uppercase` with letter-spacing; the uppercase is a
+  // no-op on Chinese but the tracking is not, so both come off together.
+  const eyebrow = isCaselessScript(language)
+    ? "text-[11px] font-semibold text-muted-foreground"
+    : "eyebrow";
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio } = useStudio();
   const { setSelectedDataset } = useSelectedDataset();
@@ -506,7 +522,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
-          <p className="eyebrow">MakerMods Lab Dataset Viewer</p>
+          <p className={eyebrow}>{t("dialogs.datasetDetail.eyebrow")}</p>
           <DialogTitle className="break-all pt-1 font-mono text-base font-semibold">
             {repoId}
           </DialogTitle>
@@ -516,7 +532,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
           <div className="flex min-h-0 min-w-0 flex-col gap-3 p-4">
             {episodesLoading ? (
               <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                Loading episodes…
+                {t("dialogs.datasetDetail.loadingEpisodes")}
               </div>
             ) : episodes && episodes.length > 0 && selectedEpisode != null ? (
               <EpisodeViewer
@@ -531,13 +547,13 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                 <VideoOff className="h-6 w-6 text-muted-foreground" />
                 <p className="text-sm font-medium text-foreground">
                   {episodes && episodes.length === 0
-                    ? "No episodes recorded yet"
-                    : "No viewable footage yet"}
+                    ? t("dialogs.datasetDetail.noEpisodesTitle")
+                    : t("dialogs.datasetDetail.noFootageTitle")}
                 </p>
                 <p className="max-w-sm text-xs text-muted-foreground">
                   {episodes && episodes.length === 0
-                    ? "Record at least one episode into this dataset to view its camera footage here."
-                    : "A Hub dataset with video streams on demand here — a first-time view of a new episode may take a moment to fetch. This message means the dataset predates the viewer's format, or has no video to show."}
+                    ? t("dialogs.datasetDetail.noEpisodesBody")
+                    : t("dialogs.datasetDetail.noFootageBody")}
                 </p>
               </div>
             )}
@@ -545,7 +561,13 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
           <div className="flex min-h-0 flex-col divide-y divide-border overflow-y-auto border-l border-border">
             <div className="flex min-h-0 flex-1 flex-col p-3">
-              <p className="eyebrow mb-2">episodes {episodes ? `(${episodes.length})` : ""}</p>
+              <p className={cn(eyebrow, "mb-2")}>
+                {episodes
+                  ? t("dialogs.datasetDetail.episodesHeadingWithCount", {
+                      total: episodes.length,
+                    })
+                  : t("dialogs.datasetDetail.episodesHeading")}
+              </p>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {episodes && episodes.length > 0 ? (
                   <div className="space-y-0.5">
@@ -564,7 +586,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                           {String(ep.episode_index).padStart(2, "0")}
                         </span>
                         <span className="min-w-0 flex-1 truncate">
-                          Episode {ep.episode_index}
+                          {t("dialogs.datasetDetail.episodeRow", {
+                            index: ep.episode_index,
+                          })}
                         </span>
                         <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
                           {ep.duration.toFixed(1)}s
@@ -574,8 +598,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   </div>
                 ) : (
                   <p className="px-1 text-xs leading-relaxed text-muted-foreground">
-                    Episodes appear here once this dataset is downloaded to your
-                    machine.
+                    {t("dialogs.datasetDetail.episodesEmpty")}
                   </p>
                 )}
               </div>
@@ -591,7 +614,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
             <div className="p-3">
               <Button onClick={handleTrain} className="w-full gap-2">
                 <Boxes className="h-4 w-4" />
-                Train a skill from this
+                {t("dialogs.datasetDetail.trainSkill")}
               </Button>
             </div>
           </div>
