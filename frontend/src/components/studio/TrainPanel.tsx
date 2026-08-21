@@ -61,6 +61,15 @@ const NONE = "__none__";
  * read — a display label, not an architecture. */
 const UNKNOWN_POLICY_TYPE = "model";
 
+/** Policies with no real "from scratch": each builds a pretrained backbone
+ * (a vision-language model for smolvla, a PaliGemma+expert stack for
+ * pi0/pi05/pi0_fast) that only receives real weights via an explicit
+ * pretrained path, so leaving Starting point unset fine-tunes the matching
+ * public foundation checkpoint instead of training with random weights (see
+ * jobs.start's `_POLICY_FOUNDATION_BASE_REPO_ID`). Keep in sync with that
+ * dict's keys. Every other policy's from-scratch run is normal. */
+const FOUNDATION_POLICY_TYPES = new Set(["smolvla", "pi0", "pi05", "pi0_fast"]);
+
 /** The architecture a job record trains (imported models record their
  * checkpoint's own `type`), or null when the record doesn't know it. Never
  * returns the "model" placeholder — pushing that into the form would select a
@@ -198,9 +207,10 @@ const TrainPanel: React.FC = () => {
     // Closing the form is the way out of a resume: resume mode hides the
     // dataset and starting-point controls (both are the parent run's and not
     // editable), so unlike a fine-tune — which can be dropped by setting
-    // Starting point back to "Train from scratch" — it has no in-form escape
-    // hatch. Reopening then gives a fresh form, which is also what the user
-    // gets after a launch (onStarted folds the form the same way).
+    // Starting point back to its no-selection state (NONE) — it has no
+    // in-form escape hatch. Reopening then gives a fresh form, which is also
+    // what the user gets after a launch (onStarted folds the form the same
+    // way).
     if (!open) setResumeSeed(null);
   };
 
@@ -441,6 +451,10 @@ const TrainPanel: React.FC = () => {
       });
   };
 
+  const noStartingPointLabel = FOUNDATION_POLICY_TYPES.has(policyType)
+    ? "Train from base"
+    : "Train from scratch";
+
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
       <PanelHeader step="2" title="Train" dataTour="studio-train" />
@@ -595,11 +609,11 @@ const TrainPanel: React.FC = () => {
                   {baseModelId !== NONE && finetuneSeed ? (
                     <span className="truncate">{finetuneSeed.name}</span>
                   ) : (
-                    <SelectValue placeholder="Train from scratch" />
+                    <SelectValue placeholder={noStartingPointLabel} />
                   )}
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={NONE}>Train from scratch</SelectItem>
+                  <SelectItem value={NONE}>{noStartingPointLabel}</SelectItem>
                   {models.map((m) => (
                     <SelectItem key={m.id} value={m.id}>
                       {m.name}
@@ -615,6 +629,8 @@ const TrainPanel: React.FC = () => {
                   </span>
                 ) : finetuneSeed ? (
                   "Fine-tunes from this skill's latest checkpoint."
+                ) : FOUNDATION_POLICY_TYPES.has(policyType) ? (
+                  "Fine-tune an existing skill, or train from its public base."
                 ) : (
                   "Fine-tune an existing skill, or start fresh."
                 )}
