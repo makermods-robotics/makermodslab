@@ -1551,6 +1551,15 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
 
 _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
 
+# SmolVLA has no legitimate from-scratch mode: its vision-language backbone is
+# a full pretrained VLM, and lerobot only random-inits that backbone when no
+# pretrained_path is given (SmolVLAConfig.load_vlm_weights defaults to False —
+# see modeling_smolvla's own "unlikely to yield good results" warning). A
+# request that names neither a fine-tune source nor an explicit
+# policy_pretrained_path is defaulted onto this public foundation checkpoint
+# instead, in JobRegistry.start.
+_SMOLVLA_BASE_REPO_ID = "lerobot/smolvla_base"
+
 
 _HUB_CKPT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
 _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
@@ -2971,6 +2980,14 @@ class JobRegistry:
             config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                 source, config.finetune_from_step
             )
+        elif config.policy_type == "smolvla" and not config.policy_pretrained_path and not config.resume:
+            # No starting point selected: default to the public SmolVLA
+            # foundation checkpoint rather than random weights (see
+            # _SMOLVLA_BASE_REPO_ID). Runs the same pretrained-path checks
+            # below as any other fine-tune — the placeholder-camera exemption
+            # in _check_pretrained_feature_space exists for exactly this
+            # checkpoint.
+            config.policy_pretrained_path = _SMOLVLA_BASE_REPO_ID
 
         # Whatever put a pretrained_path on this request — the fine-tune
         # resolution above, or a caller setting the public field directly —

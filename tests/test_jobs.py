@@ -2429,6 +2429,86 @@ def test_start_refuses_a_finetune_step_without_a_finetune_source(tmp_path) -> No
         )
 
 
+def test_start_defaults_a_scratch_smolvla_run_to_the_public_base(tmp_path) -> None:
+    """SmolVLA has no legitimate from-scratch mode — its vision-language
+    backbone is a full pretrained VLM that lerobot only random-inits when no
+    pretrained_path is given. A request naming neither a fine-tune source nor
+    an explicit policy_pretrained_path must still land on the public
+    foundation checkpoint, not train that backbone from noise."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import _SMOLVLA_BASE_REPO_ID, JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    fake_policy_type = MagicMock(return_value=None)
+    fake_feature_space = MagicMock(return_value=None)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        patch("makermodslab.jobs.read_pretrained_policy_type", fake_policy_type),
+        patch("makermodslab.jobs.read_pretrained_feature_space", fake_feature_space),
+    ):
+        record = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="smolvla"),
+            JobTarget(runner="local"),
+        )
+
+    assert record.config.policy_pretrained_path == _SMOLVLA_BASE_REPO_ID
+    # The defaulted path must run through the same pretrained-path checks as
+    # any other fine-tune — not skip them because it was assigned rather than
+    # user-selected.
+    fake_policy_type.assert_called_once_with(_SMOLVLA_BASE_REPO_ID)
+    fake_feature_space.assert_called_once_with(_SMOLVLA_BASE_REPO_ID)
+
+
+def test_start_leaves_non_smolvla_scratch_runs_alone(tmp_path) -> None:
+    """The default is scoped to SmolVLA specifically: ACT, diffusion, vqbet
+    and tdmpc all have a genuine from-scratch mode, so a bare `policy_type`
+    request for one of them must not gain a pretrained_path it never asked
+    for."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()):
+        record = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+            JobTarget(runner="local"),
+        )
+
+    assert record.config.policy_pretrained_path is None
+
+
+def test_start_keeps_an_explicit_smolvla_pretrained_path(tmp_path) -> None:
+    """A caller who already named a pretrained_path directly (bypassing
+    finetune_from_job_id, same hole `_check_pretrained_policy_type`'s
+    docstring calls out) must not have it silently overwritten by the
+    public-base default."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        patch("makermodslab.jobs.read_pretrained_policy_type", lambda p: None),
+        patch("makermodslab.jobs.read_pretrained_feature_space", lambda p: None),
+    ):
+        record = reg.start(
+            TrainingRequest(
+                dataset_repo_id="user/ds",
+                policy_type="smolvla",
+                policy_pretrained_path="someone/custom_smolvla_run",
+            ),
+            JobTarget(runner="local"),
+        )
+
+    assert record.config.policy_pretrained_path == "someone/custom_smolvla_run"
+
+
 def test_start_refuses_to_resume_an_already_continued_run(tmp_path) -> None:
     """The sticks rule: one continuation per run. A second would fork the
     lineage, so it is refused — naming the child, which is what lets the HTTP
