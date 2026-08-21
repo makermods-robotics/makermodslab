@@ -4307,6 +4307,49 @@ def test_check_feature_space_exempts_a_generic_base_from_the_disjoint_rule(tmp_p
     assert "generic-base camera names" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "base_repo_id,checkpoint_dim,dataset_dim",
+    [
+        ("lerobot/smolvla_base", 6, 12),
+        ("lerobot/pi0_base", 32, 6),
+        ("lerobot/pi0_base", 32, 12),
+        ("lerobot/pi05_base", 32, 6),
+        ("lerobot/pi05_base", 32, 12),
+        ("lerobot/pi0fast-base", 32, 6),
+        ("lerobot/pi0fast-base", 32, 12),
+    ],
+)
+def test_check_feature_space_allows_foundation_base_dimension_padding(
+    base_repo_id, checkpoint_dim, dataset_dim, caplog
+) -> None:
+    """Foundation policies pad single-arm and bimanual vectors to their
+    configured maxima. A public base's published feature width is therefore
+    not evidence that it came from a different robot."""
+    import logging
+    from unittest.mock import patch
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    feature_space = (
+        {
+            "observation.state": {"type": "STATE", "shape": [checkpoint_dim]},
+            "observation.images.front": {"type": "VISUAL", "shape": [3, 480, 640]},
+        },
+        {"action": {"type": "ACTION", "shape": [checkpoint_dim]}},
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
+        patch("makermodslab.jobs.read_pretrained_feature_space", lambda p: feature_space),
+        _patch_dataset_features(
+            _dataset_features(state_dim=dataset_dim, action_dim=dataset_dim, cameras=("front",))
+        ),
+    ):
+        _check_pretrained_feature_space(base_repo_id, "user/lerobot_v3_ds")
+    assert "known foundation base" in caplog.text
+    assert "because LeRobot pads foundation policies" in caplog.text
+    assert f"{dataset_dim}-dim robot state" in caplog.text
+
+
 def test_check_feature_space_exempts_a_known_foundation_base_by_repo_id(tmp_path, caplog) -> None:
     """pi0/pi05/pi0_fast's public checkpoints name their OWN pretraining rig's
     cameras (e.g. observation.images.base_0_rgb) — real mount names, not
@@ -4334,6 +4377,25 @@ def test_check_feature_space_exempts_a_known_foundation_base_by_repo_id(tmp_path
     ):
         _check_pretrained_feature_space("lerobot/pi0_base", "user/so101_ds")
     assert "generic-base camera names" in caplog.text
+
+
+def test_check_feature_space_does_not_exempt_unknown_repo_from_dimension_rule() -> None:
+    """Only the public foundation bases get padding semantics. A normal
+    checkpoint with a different width still identifies a different robot."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    feature_space = (
+        {"observation.state": {"type": "STATE", "shape": [32]}},
+        {"action": {"type": "ACTION", "shape": [32]}},
+    )
+    with (
+        patch("makermodslab.jobs.read_pretrained_feature_space", lambda p: feature_space),
+        _patch_dataset_features(_dataset_features(state_dim=6, action_dim=6, cameras=())),
+        pytest.raises(ValueError, match="32-dim robot state"),
+    ):
+        _check_pretrained_feature_space("someone/random_checkpoint", "user/so101_ds")
 
 
 def test_check_feature_space_does_not_exempt_an_unknown_repo_id(tmp_path) -> None:

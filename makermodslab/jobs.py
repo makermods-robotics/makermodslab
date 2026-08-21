@@ -2169,7 +2169,16 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
       traceback after the dataset download. SmolVLA/pi0/pi05 pad the
       proprioceptive dims to 32, so a 6-dof checkpoint loads CLEANLY into a
       12-dof (bimanual) run and trains garbage that is recorded as a
-      fine-tune. Refused.
+      fine-tune. Refused for ordinary checkpoints.
+
+      KNOWN FOUNDATION BASE EXEMPTION: the public PI checkpoints publish
+      32-wide state/action features because 32 is their padding capacity, not
+      the degree of freedom of one robot. LeRobot deliberately pads a normal
+      6-dof SO-101 or 12-dof bimanual dataset to that width. SmolVLA uses the
+      same max-dimension padding. The exact repo ids in
+      _KNOWN_FOUNDATION_BASE_REPO_IDS therefore warn and continue; applying
+      the ordinary checkpoint rule to them would reject the canonical base
+      fine-tune before LeRobot gets a chance to pad the data.
     * RENAMED CAMERAS — the same number of cameras under different keys (the
       bimanual ``left_``-prefix case). Refused as a SELECTION mistake, not an
       architectural one: ACT drives every camera through one shared backbone
@@ -2232,9 +2241,13 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
     if not dataset_features:
         return
 
+    is_known_foundation_base = pretrained_path in _KNOWN_FOUNDATION_BASE_REPO_IDS
+
     # -- state / action width ------------------------------------------------
     # The dataset's own dims are what lerobot will build the policy from, so a
-    # difference here is exactly the width the loaded weights won't fit.
+    # difference here is exactly the width the loaded weights won't fit for an
+    # ordinary checkpoint. Known foundation bases are different: LeRobot pads
+    # their dataset vectors to the policy's configured maximum width.
     for label, ckpt_feature, dataset_key in (
         ("robot state", ckpt_inputs.get("observation.state"), "observation.state"),
         ("action", ckpt_outputs.get("action"), "action"),
@@ -2242,6 +2255,19 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
         ckpt_dim = _flat_feature_dim(ckpt_feature)
         dataset_dim = _flat_feature_dim(dataset_features.get(dataset_key))
         if ckpt_dim is None or dataset_dim is None or ckpt_dim == dataset_dim:
+            continue
+        if is_known_foundation_base:
+            logger.warning(
+                "Fine-tune feature space: checkpoint %s is a known foundation "
+                "base; allowing dataset %s's %d-dim %s to bind to its %d-dim "
+                "published feature because LeRobot pads foundation policies to "
+                "their configured maxima.",
+                pretrained_path,
+                dataset_repo_id,
+                dataset_dim,
+                label,
+                ckpt_dim,
+            )
             continue
         raise ValueError(
             f"The checkpoint this run starts from ({pretrained_path}) was trained "
@@ -2266,9 +2292,7 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
     # to `renamed` first (its wording is accurate there), so this branch is in
     # practice the unequal-count case the rename rule alone would let through.
     disjoint = bool(ckpt_names) and bool(dataset_names) and ckpt_names.isdisjoint(dataset_names)
-    is_generic_base = (
-        _is_placeholder_camera_set(ckpt_names) or pretrained_path in _KNOWN_FOUNDATION_BASE_REPO_IDS
-    )
+    is_generic_base = _is_placeholder_camera_set(ckpt_names) or is_known_foundation_base
     if (renamed or disjoint) and is_generic_base:
         # A generic base being bound to a named rig for the first time — the
         # canonical fine-tune for whichever foundation model this is.
