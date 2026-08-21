@@ -61,7 +61,10 @@ export const loadMeshFile = (
     case "dae":
       new ColladaLoader(manager).load(
         path,
-        (result) => done(result.scene),
+        (result) =>
+          result
+            ? done(result.scene)
+            : done(null, new Error(`Failed to parse COLLADA file: ${path}`)),
         undefined,
         (err) => done(null, err as Error)
       );
