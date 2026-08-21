@@ -2429,15 +2429,26 @@ def test_start_refuses_a_finetune_step_without_a_finetune_source(tmp_path) -> No
         )
 
 
-def test_start_defaults_a_scratch_smolvla_run_to_the_public_base(tmp_path) -> None:
-    """SmolVLA has no legitimate from-scratch mode — its vision-language
-    backbone is a full pretrained VLM that lerobot only random-inits when no
+@pytest.mark.parametrize(
+    "policy_type,base_repo_id",
+    [
+        ("smolvla", "lerobot/smolvla_base"),
+        ("pi0", "lerobot/pi0_base"),
+        ("pi05", "lerobot/pi05_base"),
+        ("pi0_fast", "lerobot/pi0fast-base"),
+    ],
+)
+def test_start_defaults_a_scratch_foundation_run_to_the_public_base(
+    tmp_path, policy_type, base_repo_id
+) -> None:
+    """None of smolvla/pi0/pi05/pi0_fast has a legitimate from-scratch mode —
+    each builds a pretrained backbone that lerobot only random-inits when no
     pretrained_path is given. A request naming neither a fine-tune source nor
-    an explicit policy_pretrained_path must still land on the public
+    an explicit policy_pretrained_path must still land on the matching public
     foundation checkpoint, not train that backbone from noise."""
     from unittest.mock import MagicMock, patch
 
-    from makermodslab.jobs import _SMOLVLA_BASE_REPO_ID, JobRegistry, JobTarget
+    from makermodslab.jobs import JobRegistry, JobTarget
     from makermodslab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path / "root")
@@ -2449,23 +2460,24 @@ def test_start_defaults_a_scratch_smolvla_run_to_the_public_base(tmp_path) -> No
         patch("makermodslab.jobs.read_pretrained_feature_space", fake_feature_space),
     ):
         record = reg.start(
-            TrainingRequest(dataset_repo_id="user/ds", policy_type="smolvla"),
+            TrainingRequest(dataset_repo_id="user/ds", policy_type=policy_type),
             JobTarget(runner="local"),
         )
 
-    assert record.config.policy_pretrained_path == _SMOLVLA_BASE_REPO_ID
+    assert record.config.policy_pretrained_path == base_repo_id
     # The defaulted path must run through the same pretrained-path checks as
     # any other fine-tune — not skip them because it was assigned rather than
     # user-selected.
-    fake_policy_type.assert_called_once_with(_SMOLVLA_BASE_REPO_ID)
-    fake_feature_space.assert_called_once_with(_SMOLVLA_BASE_REPO_ID)
+    fake_policy_type.assert_called_once_with(base_repo_id)
+    fake_feature_space.assert_called_once_with(base_repo_id)
 
 
-def test_start_leaves_non_smolvla_scratch_runs_alone(tmp_path) -> None:
-    """The default is scoped to SmolVLA specifically: ACT, diffusion, vqbet
-    and tdmpc all have a genuine from-scratch mode, so a bare `policy_type`
-    request for one of them must not gain a pretrained_path it never asked
-    for."""
+def test_start_leaves_non_foundation_scratch_runs_alone(tmp_path) -> None:
+    """The default is scoped to the four foundation policies: ACT, diffusion,
+    vqbet and tdmpc all have a genuine from-scratch mode (a real torchvision
+    backbone or no pretrained-checkpoint concept at all), so a bare
+    `policy_type` request for one of them must not gain a pretrained_path it
+    never asked for."""
     from unittest.mock import MagicMock, patch
 
     from makermodslab.jobs import JobRegistry, JobTarget
@@ -2481,7 +2493,7 @@ def test_start_leaves_non_smolvla_scratch_runs_alone(tmp_path) -> None:
     assert record.config.policy_pretrained_path is None
 
 
-def test_start_keeps_an_explicit_smolvla_pretrained_path(tmp_path) -> None:
+def test_start_keeps_an_explicit_foundation_pretrained_path(tmp_path) -> None:
     """A caller who already named a pretrained_path directly (bypassing
     finetune_from_job_id, same hole `_check_pretrained_policy_type`'s
     docstring calls out) must not have it silently overwritten by the
@@ -4250,7 +4262,7 @@ def test_check_feature_space_exempts_a_generic_base_from_the_rename_rule(tmp_pat
         _patch_dataset_features(_dataset_features(cameras=("front", "wrist", "top"))),
     ):
         _check_pretrained_feature_space(str(ckpt), "user/named_rig_ds")
-    assert "placeholder camera names" in caplog.text
+    assert "generic-base camera names" in caplog.text
     assert "front, top, wrist" in caplog.text
 
 
@@ -4292,7 +4304,60 @@ def test_check_feature_space_exempts_a_generic_base_from_the_disjoint_rule(tmp_p
         _patch_dataset_features(_dataset_features(cameras=("front", "wrist"))),
     ):
         _check_pretrained_feature_space(str(ckpt), "user/two_cam_ds")
-    assert "placeholder camera names" in caplog.text
+    assert "generic-base camera names" in caplog.text
+
+
+def test_check_feature_space_exempts_a_known_foundation_base_by_repo_id(tmp_path, caplog) -> None:
+    """pi0/pi05/pi0_fast's public checkpoints name their OWN pretraining rig's
+    cameras (e.g. observation.images.base_0_rgb) — real mount names, not
+    placeholders — so _is_placeholder_camera_set can't recognize them as a
+    generic base. They're exempted by repo id instead: JobRegistry.start
+    chose these exact ids itself (its no-starting-point default), so the
+    match is exact, not a heuristic."""
+    import logging
+    from unittest.mock import patch
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    feature_space = (
+        {
+            "observation.state": {"type": "STATE", "shape": [32]},
+            "observation.images.base_0_rgb": {"type": "VISUAL", "shape": [3, 480, 640]},
+            "observation.images.left_wrist_0_rgb": {"type": "VISUAL", "shape": [3, 480, 640]},
+        },
+        {"action": {"type": "ACTION", "shape": [32]}},
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="makermodslab.jobs"),
+        patch("makermodslab.jobs.read_pretrained_feature_space", lambda p: feature_space),
+        _patch_dataset_features(_dataset_features(state_dim=32, action_dim=32, cameras=("top", "wrist"))),
+    ):
+        _check_pretrained_feature_space("lerobot/pi0_base", "user/so101_ds")
+    assert "generic-base camera names" in caplog.text
+
+
+def test_check_feature_space_does_not_exempt_an_unknown_repo_id(tmp_path) -> None:
+    """The repo-id exemption is a closed list (_KNOWN_FOUNDATION_BASE_REPO_IDS)
+    — an arbitrary Hub-hosted checkpoint with real camera names must still be
+    refused like any other rig mismatch, not waved through just for not being
+    a local path."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import _check_pretrained_feature_space
+
+    feature_space = (
+        {
+            "observation.state": {"type": "STATE", "shape": [6]},
+            "observation.images.front": {"type": "VISUAL", "shape": [3, 480, 640]},
+        },
+        {"action": {"type": "ACTION", "shape": [6]}},
+    )
+    with (
+        patch("makermodslab.jobs.read_pretrained_feature_space", lambda p: feature_space),
+        _patch_dataset_features(_dataset_features(cameras=("wrist",))),
+        pytest.raises(ValueError, match="under different names"),
+    ):
+        _check_pretrained_feature_space("someone/random_act_checkpoint", "user/wrist_only_ds")
 
 
 def test_check_feature_space_exemption_is_all_or_nothing(tmp_path) -> None:

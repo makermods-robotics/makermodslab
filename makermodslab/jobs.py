@@ -1551,14 +1551,33 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
 
 _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
 
-# SmolVLA has no legitimate from-scratch mode: its vision-language backbone is
-# a full pretrained VLM, and lerobot only random-inits that backbone when no
-# pretrained_path is given (SmolVLAConfig.load_vlm_weights defaults to False —
-# see modeling_smolvla's own "unlikely to yield good results" warning). A
-# request that names neither a fine-tune source nor an explicit
-# policy_pretrained_path is defaulted onto this public foundation checkpoint
-# instead, in JobRegistry.start.
-_SMOLVLA_BASE_REPO_ID = "lerobot/smolvla_base"
+# None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
+# mode: each builds a pretrained backbone (a vision-language model for
+# smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
+# object with no unconditional download anywhere in modeling_<policy>.py —
+# real weights only ever arrive via --policy.pretrained_path, which
+# lerobot_train never receives unless we pass one. (Contrast ACT, Diffusion
+# and VQ-BeT, whose vision backbone is a real torchvision checkpoint
+# downloaded unconditionally via `pretrained_backbone_weights`, and TDMPC,
+# which has no pretrained-checkpoint concept at all — "from scratch" is
+# already correct for those four.) A request that names neither a fine-tune
+# source nor an explicit policy_pretrained_path is defaulted onto the
+# matching public foundation checkpoint instead, in JobRegistry.start.
+_POLICY_FOUNDATION_BASE_REPO_ID = {
+    "smolvla": "lerobot/smolvla_base",
+    "pi0": "lerobot/pi0_base",
+    "pi05": "lerobot/pi05_base",
+    "pi0_fast": "lerobot/pi0fast-base",
+}
+
+# The subset of _POLICY_FOUNDATION_BASE_REPO_ID's values whose OWN camera keys
+# are known ahead of time (we chose them, above) rather than placeholders like
+# smolvla_base's camera1/camera2/camera3 — pi0/pi05/pi0_fast's public
+# checkpoints name their pretraining rig's real cameras (e.g.
+# observation.images.base_0_rgb), so _is_placeholder_camera_set can't
+# recognize them as a generic base. Checked by repo id instead, in
+# _check_pretrained_feature_space.
+_KNOWN_FOUNDATION_BASE_REPO_IDS = frozenset(_POLICY_FOUNDATION_BASE_REPO_ID.values())
 
 
 _HUB_CKPT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
@@ -2169,16 +2188,28 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
       all dropped and the dataset's all start from scratch. Same selection
       mistake, so the same refusal.
 
-      ONE EXEMPTION — a GENERIC BASE. When every one of the CHECKPOINT's camera
-      keys is a placeholder (``camera1``/``camera2``/… — see
-      _is_placeholder_camera_set), the checkpoint was never tied to a rig at
-      all: ``lerobot/smolvla_base`` ships exactly that, and adapting it to a
-      named 3-camera rig is the CANONICAL SmolVLA fine-tune, not a mixup.
-      That case demotes to the warn path. The gate is checkpoint-side only —
-      a user's dataset always carries real mount names, so the dataset side
-      tells us nothing — and it is all-or-nothing, so a checkpoint mixing a
-      placeholder with a real mount stays refused. Phase 2 may replace this
-      exemption with an explicit confirm once there is a UI to confirm in.
+      TWO EXEMPTIONS — a GENERIC BASE, checkpoint-side, by two different
+      tells:
+
+      1. Every one of the CHECKPOINT's camera keys is a placeholder
+         (``camera1``/``camera2``/… — see _is_placeholder_camera_set): the
+         checkpoint was never tied to a rig at all. ``lerobot/smolvla_base``
+         ships exactly that, and adapting it to a named 3-camera rig is the
+         CANONICAL SmolVLA fine-tune, not a mixup. All-or-nothing: a
+         checkpoint mixing a placeholder with a real mount stays refused.
+      2. The pretrained_path IS one of _KNOWN_FOUNDATION_BASE_REPO_IDS. This
+         covers the pi0/pi05/pi0_fast public checkpoints, whose cameras name
+         their OWN pretraining rig (``observation.images.base_0_rgb``, …) —
+         real mount names, not placeholders, so tell 1 can't catch them. We
+         chose these exact repo ids ourselves (JobRegistry.start's
+         no-starting-point default), so knowing them ahead of time is exact,
+         not a heuristic.
+
+      Either tell demotes the pair to the warn path below instead of a
+      refusal. The gate is checkpoint-side only — a user's dataset always
+      carries real mount names, so the dataset side tells us nothing. Phase 2
+      may replace this exemption with an explicit confirm once there is a UI
+      to confirm in.
     * MISSING / EXTRA CAMERA, DIFFERENT RESOLUTION — legitimate choices
       (ACT's shared backbone handles a changed sensor count; resolution only
       moves the token count and VRAM). Phase 1 logs a warning; the
@@ -2235,11 +2266,15 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
     # to `renamed` first (its wording is accurate there), so this branch is in
     # practice the unequal-count case the rename rule alone would let through.
     disjoint = bool(ckpt_names) and bool(dataset_names) and ckpt_names.isdisjoint(dataset_names)
-    if (renamed or disjoint) and _is_placeholder_camera_set(ckpt_names):
+    is_generic_base = (
+        _is_placeholder_camera_set(ckpt_names) or pretrained_path in _KNOWN_FOUNDATION_BASE_REPO_IDS
+    )
+    if (renamed or disjoint) and is_generic_base:
         # A generic base being bound to a named rig for the first time — the
-        # canonical smolvla_base fine-tune. Recorded, not refused.
+        # canonical fine-tune for whichever foundation model this is.
+        # Recorded, not refused.
         logger.warning(
-            "Fine-tune feature space: checkpoint %s carries placeholder camera "
+            "Fine-tune feature space: checkpoint %s carries generic-base camera "
             "names (%s); binding them to dataset %s's cameras (%s).",
             pretrained_path,
             _describe_cameras(ckpt_names),
@@ -2980,14 +3015,18 @@ class JobRegistry:
             config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                 source, config.finetune_from_step
             )
-        elif config.policy_type == "smolvla" and not config.policy_pretrained_path and not config.resume:
-            # No starting point selected: default to the public SmolVLA
+        elif (
+            config.policy_type in _POLICY_FOUNDATION_BASE_REPO_ID
+            and not config.policy_pretrained_path
+            and not config.resume
+        ):
+            # No starting point selected: default to the matching public
             # foundation checkpoint rather than random weights (see
-            # _SMOLVLA_BASE_REPO_ID). Runs the same pretrained-path checks
-            # below as any other fine-tune — the placeholder-camera exemption
-            # in _check_pretrained_feature_space exists for exactly this
-            # checkpoint.
-            config.policy_pretrained_path = _SMOLVLA_BASE_REPO_ID
+            # _POLICY_FOUNDATION_BASE_REPO_ID). Runs the same pretrained-path
+            # checks below as any other fine-tune — the camera-name exemption
+            # in _check_pretrained_feature_space exists for exactly these
+            # checkpoints.
+            config.policy_pretrained_path = _POLICY_FOUNDATION_BASE_REPO_ID[config.policy_type]
 
         # Whatever put a pretrained_path on this request — the fine-tune
         # resolution above, or a caller setting the public field directly —
