@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -12,7 +13,10 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Loader2, CheckCircle2, XCircle, GitMerge } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
-import { validateDatasetRepoId } from "@/lib/datasetName";
+import {
+  datasetRepoIdIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import {
   DatasetItem,
   MergeStatus,
@@ -35,6 +39,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   datasets,
   onMerged,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [output, setOutput] = useState("");
@@ -110,7 +115,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     trimmedOutput && !trimmedOutput.includes("/") && commonNamespace
       ? `${commonNamespace}/${trimmedOutput}`
       : trimmedOutput;
-  const outputError = effectiveOutput ? validateDatasetRepoId(effectiveOutput) : null;
+  const outputIssue = effectiveOutput
+    ? datasetRepoIdIssue(effectiveOutput)
+    : null;
+  const outputError = outputIssue
+    ? formatDatasetNameIssue(t, outputIssue)
+    : null;
   const canMerge =
     selected.size >= 2 &&
     effectiveOutput.length > 0 &&
@@ -153,11 +163,10 @@ const MergeDatasetsDialog: React.FC<Props> = ({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <GitMerge className="w-5 h-5" /> Merge datasets
+            <GitMerge className="w-5 h-5" /> {t("landing.mergeDatasets.title")}
           </DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Combine episodes from two or more datasets into a new one. Sources
-            must share the same robot, fps, and cameras.
+            {t("landing.mergeDatasets.description")}
           </DialogDescription>
         </DialogHeader>
 
@@ -165,12 +174,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
           <div className="space-y-4">
             <div>
               <Label className="text-foreground">
-                Sources ({selected.size} selected)
+                {t("landing.mergeDatasets.sources", { n: selected.size })}
               </Label>
               <div className="mt-1 max-h-56 overflow-auto rounded-md border border-border divide-y divide-border">
                 {datasets.length === 0 ? (
                   <p className="p-3 text-sm text-muted-foreground">
-                    No datasets found.
+                    {t("landing.mergeDatasets.noDatasets")}
                   </p>
                 ) : (
                   datasets.map((d) => (
@@ -191,7 +200,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
             </div>
             <div>
               <Label htmlFor="merge-output" className="text-foreground">
-                Output dataset name
+                {t("landing.mergeDatasets.outputLabel")}
               </Label>
               <Input
                 id="merge-output"
@@ -206,8 +215,11 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               )}
               {!outputError && effectiveOutput !== trimmedOutput && (
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Will be created as{" "}
-                  <code className="text-info">{effectiveOutput}</code>
+                  <Trans
+                    i18nKey="landing.mergeDatasets.willBeCreatedAs"
+                    values={{ repoId: effectiveOutput }}
+                    components={[<code key="0" className="text-info" />]}
+                  />
                 </p>
               )}
             </div>
@@ -222,12 +234,15 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               >
                 {starting ? (
                   <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Starting…
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />{" "}
+                    {t("landing.mergeDatasets.starting")}
                   </>
                 ) : (
                   <>
-                    <GitMerge className="w-4 h-4 mr-2" /> Merge {selected.size}{" "}
-                    datasets
+                    <GitMerge className="w-4 h-4 mr-2" />{" "}
+                    {t("landing.mergeDatasets.submit", {
+                      count: selected.size,
+                    })}
                   </>
                 )}
               </Button>
@@ -239,21 +254,25 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               {state === "running" ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-info" />
-                  Merging into{" "}
-                  <code className="text-info">{status?.output_repo_id}</code>
-                  …
+                  <Trans
+                    i18nKey="landing.mergeDatasets.merging"
+                    values={{ repoId: status?.output_repo_id ?? "" }}
+                    components={[<code key="0" className="text-info" />]}
+                  />
                 </>
               ) : state === "done" ? (
                 <>
                   <CheckCircle2 className="w-4 h-4 text-ok" />
-                  Created{" "}
-                  <code className="text-ok">
-                    {status?.output_repo_id}
-                  </code>
+                  <Trans
+                    i18nKey="landing.mergeDatasets.created"
+                    values={{ repoId: status?.output_repo_id ?? "" }}
+                    components={[<code key="0" className="text-ok" />]}
+                  />
                 </>
               ) : (
                 <>
-                  <XCircle className="w-4 h-4 text-destructive" /> Merge failed
+                  <XCircle className="w-4 h-4 text-destructive" />{" "}
+                  {t("landing.mergeDatasets.failed")}
                 </>
               )}
             </div>
@@ -273,7 +292,9 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                 variant="outline"
                 onClick={() => onOpenChange(false)}
               >
-                {state === "done" ? "Done" : "Close"}
+                {state === "done"
+                  ? t("landing.mergeDatasets.done")
+                  : t("common.close")}
               </Button>
             </div>
           </div>

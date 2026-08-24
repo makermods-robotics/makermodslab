@@ -221,6 +221,7 @@ class _AutoCalArmRunner:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
                 wiggle as _wiggle,
@@ -239,6 +240,8 @@ class _AutoCalArmRunner:
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                 }
+            if _replay.replay_active:
+                return {"success": False, "message": "Replay is currently active. Stop it first."}
 
             if request.device_type not in ("teleop", "robot"):
                 return {"success": False, "message": "Invalid device type"}
@@ -581,6 +584,7 @@ class AutoCalibrationBatchManager:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
                 wiggle as _wiggle,
@@ -599,6 +603,8 @@ class AutoCalibrationBatchManager:
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                 }
+            if _replay.replay_active:
+                return {"success": False, "message": "Replay is currently active. Stop it first."}
 
             arms = request.arms
             # --- Fail-fast validation, before touching any hardware. ---

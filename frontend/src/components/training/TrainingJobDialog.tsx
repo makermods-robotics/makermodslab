@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 
@@ -22,6 +23,7 @@ import {
 } from "@/lib/jobsApi";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
+import { useEyebrowClass } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
 
 const POLL_INTERVAL_MS = 1000;
@@ -112,6 +114,9 @@ const TrainingJobDialog: React.FC<{
 }> = ({ jobId, onExit }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
+  // `.eyebrow`'s tracking over-spaces CJK; useEyebrowClass drops it there.
+  const eyebrow = useEyebrowClass();
 
   const { openStudio } = useStudio();
   const [job, setJob] = useState<JobRecord | null>(null);
@@ -251,14 +256,17 @@ const TrainingJobDialog: React.FC<{
 
   const handleStop = async () => {
     if (!job) return;
+    // Left in English deliberately: window.confirm is a native browser dialog
+    // whose own buttons cannot be translated, so a translated question above
+    // English OK/Cancel reads worse than leaving the pair consistent.
     if (!window.confirm("Stop this run?")) return;
     try {
       const next = await stopJob(baseUrl, fetchWithHeaders, job.id);
       setJob(next);
-      toast({ title: "Stopping…" });
+      toast({ title: t("training.jobDialog.toast.stoppingTitle") });
     } catch (e) {
       toast({
-        title: "Stop failed",
+        title: t("training.jobDialog.toast.stopFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -267,15 +275,16 @@ const TrainingJobDialog: React.FC<{
 
   const handleDelete = async () => {
     if (!job) return;
+    // English for the same reason as handleStop's confirm above.
     if (!window.confirm("Delete this run? This wipes the output directory."))
       return;
     try {
       await deleteJob(baseUrl, fetchWithHeaders, job.id);
-      toast({ title: "Job removed" });
+      toast({ title: t("training.jobDialog.toast.removedTitle") });
       onExit();
     } catch (e) {
       toast({
-        title: "Delete failed",
+        title: t("training.jobDialog.toast.deleteFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -303,7 +312,7 @@ const TrainingJobDialog: React.FC<{
       onClick={onExit}
       className="-ml-2 shrink-0 text-muted-foreground hover:text-foreground"
     >
-      <ArrowLeft className="mr-1.5 h-4 w-4" /> Skill studio
+      <ArrowLeft className="mr-1.5 h-4 w-4" /> {t("training.jobDialog.back")}
     </Button>
   );
 
@@ -319,20 +328,28 @@ const TrainingJobDialog: React.FC<{
         className="max-h-[92vh] w-[min(96vw,72rem)] max-w-none gap-0 overflow-y-auto p-6"
         aria-describedby={undefined}
       >
-        <DialogTitle className="sr-only">Training job status</DialogTitle>
+        <DialogTitle className="sr-only">
+          {t("training.jobDialog.srTitle")}
+        </DialogTitle>
 
         {error && !job ? (
           <div className="space-y-4">
             {backButton}
+            {/* {jobId} is data and {error} is the backend's own message —
+                only the framing sentence is translated. */}
             <p className="text-sm text-destructive">
-              Couldn't load job {jobId}: {error}
+              {t("training.jobDialog.loadFailed", {
+                jobId,
+                errorText: error,
+              })}
             </p>
           </div>
         ) : !job ? (
           <div className="space-y-4">
             {backButton}
             <div className="flex items-center justify-center py-20 text-muted-foreground">
-              <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Loading job…
+              <Loader2 className="mr-3 h-6 w-6 animate-spin" />{" "}
+              {t("training.jobDialog.loading")}
             </div>
           </div>
         ) : (
@@ -347,11 +364,11 @@ const TrainingJobDialog: React.FC<{
                     </h2>
                     {job.runner === "hf_cloud" ? (
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        HF · {job.hf_flavor ?? "cloud"}
+                        HF · {job.hf_flavor ?? t("training.jobDialog.cloudFallback")}
                       </span>
                     ) : (
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        Local
+                        {t("training.jobDialog.runnerLocal")}
                       </span>
                     )}
                     {job.runner === "hf_cloud" &&
@@ -363,7 +380,7 @@ const TrainingJobDialog: React.FC<{
                           rel="noreferrer"
                           className="text-xs text-primary hover:underline"
                         >
-                          View on Hub ↗
+                          {t("training.jobDialog.viewOnHub")}
                         </a>
                       )}
                     {job.wandb_run_url && (
@@ -373,7 +390,7 @@ const TrainingJobDialog: React.FC<{
                         rel="noreferrer"
                         className="text-xs text-primary hover:underline"
                       >
-                        View on W&B ↗
+                        {t("training.jobDialog.viewOnWandb")}
                       </a>
                     )}
                   </div>
@@ -394,7 +411,7 @@ const TrainingJobDialog: React.FC<{
               </div>
               {isRunning ? (
                 <Button onClick={handleStop} variant="destructive" size="sm">
-                  <Square className="mr-2 h-4 w-4" /> Stop
+                  <Square className="mr-2 h-4 w-4" /> {t("training.jobDialog.stop")}
                 </Button>
               ) : (
                 <Button
@@ -403,7 +420,7 @@ const TrainingJobDialog: React.FC<{
                   size="sm"
                   className="text-muted-foreground hover:text-foreground"
                 >
-                  <Trash2 className="mr-2 h-4 w-4" /> Delete
+                  <Trash2 className="mr-2 h-4 w-4" /> {t("training.jobDialog.delete")}
                 </Button>
               )}
             </div>
@@ -434,10 +451,10 @@ const TrainingJobDialog: React.FC<{
               formatTime={formatTime}
             />
             <div className="flex items-center gap-3 rounded-md border border-border bg-card p-4">
-              <span className="eyebrow">Run inference</span>
+              <span className={eyebrow}>{t("training.jobDialog.runInference")}</span>
               {checkpoints.length === 0 ? (
                 <span className="text-xs text-muted-foreground">
-                  No checkpoints yet — wait for the first save.
+                  {t("training.jobDialog.noCheckpoints")}
                 </span>
               ) : (
                 <>
@@ -472,7 +489,7 @@ const TrainingJobDialog: React.FC<{
                     size="sm"
                   >
                     <Play className="mr-2 h-4 w-4" />
-                    Run on robot
+                    {t("training.jobDialog.runOnRobot")}
                   </Button>
                 </>
               )}

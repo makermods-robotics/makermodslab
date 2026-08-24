@@ -1,4 +1,5 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -17,11 +18,14 @@ import {
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The backend's own pip command — data, shown verbatim. */
   installHint: string;
 }
 
 const WandbInstallDialog: React.FC<Props> = ({ open, onOpenChange, installHint }) => {
   const install = useInstallExtra("system/wandb-extra", open);
+  const { t } = useTranslation();
+  const idleTitle = t("training.wandbDialog.title");
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -29,10 +33,10 @@ const WandbInstallDialog: React.FC<Props> = ({ open, onOpenChange, installHint }
         <DialogHeader>
           <DialogTitle className="flex items-center gap-3 text-foreground">
             <InstallTitleIcon state={install.state} />
-            {installTitle(install.state, "Weights & Biases Not Installed")}
+            {installTitle(t, install.state, idleTitle)}
           </DialogTitle>
           <DialogDescription className="sr-only">
-            Install the wandb package to enable W&amp;B logging.
+            {t("training.wandbDialog.srDescription")}
           </DialogDescription>
         </DialogHeader>
 
@@ -46,18 +50,21 @@ const WandbInstallDialog: React.FC<Props> = ({ open, onOpenChange, installHint }
             onRetry={install.handleRetry}
             installHint={installHint}
             packageName="wandb"
-            idleTitle="Weights &amp; Biases Not Installed"
+            idleTitle={idleTitle}
             idleDescription={
-              <>
-                Enabling W&amp;B logging requires the{" "}
-                <code className="px-1 py-0.5 rounded bg-muted text-info">
-                  wandb
-                </code>{" "}
-                package, which isn't installed in this environment. Install it
-                to log this run to W&amp;B.
-              </>
+              <Trans
+                i18nKey="training.wandbDialog.description"
+                components={[
+                  <code
+                    key="0"
+                    className="px-1 py-0.5 rounded bg-muted text-info"
+                  />,
+                ]}
+              />
             }
-            doneDescription={<ReadyInstructions purpose="W&amp;B logging" />}
+            doneDescription={
+              <ReadyInstructions text={t("training.install.readyWandb")} />
+            }
           />
         </div>
       </DialogContent>

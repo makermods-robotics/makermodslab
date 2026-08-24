@@ -1,4 +1,5 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -8,7 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { ConfigComponentProps, RESUME_INHERITED_SHORT } from "../types";
+import { ConfigComponentProps, RESUME_INHERITED_SHORT_KEY } from "../types";
 import { RunnerFlavor } from "@/lib/jobsApi";
 
 interface TargetCardProps extends ConfigComponentProps {
@@ -17,6 +18,8 @@ interface TargetCardProps extends ConfigComponentProps {
   loading: boolean;
 }
 
+// Currency and number formatting are deliberately NOT locale-aware: HF Jobs
+// prices are quoted in USD, and the figure is the vendor's, not ours.
 const formatHourly = (unitCostUsd: number, unitLabel: string): string => {
   const hourly = unitLabel === "minute" ? unitCostUsd * 60 : unitCostUsd;
   return `$${hourly.toFixed(2)}/hr`;
@@ -55,6 +58,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
   loading,
   resumeLocked,
 }) => {
+  const { t } = useTranslation();
   const target = config.target;
 
   const setRunner = (runner: "local" | "hf_cloud") => {
@@ -70,7 +74,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
   return (
     <section className="space-y-4">
       <div className="space-y-2">
-        <Label>Compute</Label>
+        <Label>{t("training.target.computeLabel")}</Label>
         <div className="grid grid-cols-2 overflow-hidden rounded-md border border-border text-sm">
           {(["local", "hf_cloud"] as const).map((r) => (
             <button
@@ -84,21 +88,22 @@ const TargetCard: React.FC<TargetCardProps> = ({
                   : "bg-background text-muted-foreground hover:text-foreground",
               )}
             >
-              {r === "local" ? "Local — your machine" : "Hugging Face Cloud"}
+              {r === "local"
+                ? t("training.target.runnerLocal")
+                : t("training.target.runnerCloud")}
             </button>
           ))}
         </div>
         {resumeLocked ? (
           <p className="text-xs text-muted-foreground">
-            Defaults to the runner this run started on — switch it to continue
-            somewhere else.
+            {t("training.target.resumeRunnerHint")}
           </p>
         ) : null}
       </div>
 
       {target.runner === "local" ? (
         <div className="space-y-2">
-          <Label htmlFor="policy_device">Device</Label>
+          <Label htmlFor="policy_device">{t("training.target.deviceLabel")}</Label>
           <Select
             value={config.policy_device === "cpu" ? "cpu" : "auto"}
             onValueChange={(value) => updateConfig("policy_device", value)}
@@ -108,21 +113,22 @@ const TargetCard: React.FC<TargetCardProps> = ({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              {/* Values are wire settings; only the labels are copy. */}
               <SelectItem value="auto">
-                Automatic (use GPU if available)
+                {t("training.target.deviceAuto")}
               </SelectItem>
-              <SelectItem value="cpu">CPU</SelectItem>
+              <SelectItem value="cpu">{t("training.target.deviceCpu")}</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
             {resumeLocked
-              ? RESUME_INHERITED_SHORT
-              : "lerobot auto-detects your GPU (CUDA/MPS); only CPU is forced."}
+              ? t(RESUME_INHERITED_SHORT_KEY)
+              : t("training.target.deviceHint")}
           </p>
         </div>
       ) : (
         <div className="space-y-2">
-          <Label>Hardware</Label>
+          <Label>{t("training.target.hardwareLabel")}</Label>
           <Select
             value={target.flavor ?? ""}
             onValueChange={(flavor) =>
@@ -131,7 +137,11 @@ const TargetCard: React.FC<TargetCardProps> = ({
           >
             <SelectTrigger>
               <SelectValue
-                placeholder={loading ? "Loading…" : "Select hardware"}
+                placeholder={
+                  loading
+                    ? t("training.target.hardwareLoading")
+                    : t("training.target.hardwarePlaceholder")
+                }
               />
             </SelectTrigger>
             <SelectContent>
@@ -144,7 +154,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
                   {formatFlavorLine(f)}
                   {!authenticated && (
                     <span className="text-warn ml-2 text-xs">
-                      log in to HF
+                      {t("training.target.loginToHf")}
                     </span>
                   )}
                 </SelectItem>
@@ -152,8 +162,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Cost shown is per running hour. Final policy uploads to your HF
-            account when training completes.
+            {t("training.target.costHint")}
           </p>
         </div>
       )}

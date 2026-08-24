@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useModels } from "@/hooks/useModels";
 import { ModelItem } from "@/lib/modelsApi";
@@ -6,6 +7,7 @@ import SkillCard, {
   SkillBadge,
   WIP_SKILL_IDS,
   isWipSkillId,
+  skillDisplayTitle,
   skillNamespace,
   skillTitle,
 } from "@/components/launchpad/SkillCard";
@@ -78,6 +80,7 @@ const badgeFor = (m: ModelItem): SkillBadge =>
  */
 const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
   const { models, loading } = useModels();
+  const { t } = useTranslation();
   const trackRef = useRef<HTMLDivElement>(null);
   const [detail, setDetail] = useState<ModelItem | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -92,12 +95,17 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
     return curated.filter((m) => {
       const ns = skillNamespace(m) ?? "";
       return (
+        // The English title stays matchable in every language, so searching
+        // "sock" keeps finding the sorting-socks card while the UI is in
+        // Chinese. The translated title is an ADDITIONAL match, never a
+        // replacement — this filter is a strict superset of the old one.
         skillTitle(m).toLowerCase().includes(q) ||
+        skillDisplayTitle(t, m).toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q) ||
         ns.toLowerCase().includes(q)
       );
     });
-  }, [models, search]);
+  }, [models, search, t]);
 
   const scrollBy = (dir: 1 | -1) => {
     const el = trackRef.current;
@@ -111,12 +119,16 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
   };
 
   return (
-    <section className="w-full" aria-label="Skills">
+    <section
+      data-tour="launchpad-skills"
+      className="w-full"
+      aria-label={t("launchpad.skills.sectionLabel")}
+    >
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => scrollBy(-1)}
-          aria-label="Previous skills"
+          aria-label={t("launchpad.skills.previous")}
           className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-1 transition-colors hover:border-ring hover:text-foreground sm:flex"
         >
           <ChevronLeft className="h-4 w-4" />
@@ -130,7 +142,7 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
             <CardSkeleton />
           ) : filtered.length === 0 ? (
             <div className="flex min-h-[13rem] w-full items-center justify-center rounded-lg border border-dashed border-border bg-card/50 px-6 py-10 text-center text-sm text-muted-foreground">
-              No skills match your search.
+              {t("launchpad.skills.empty")}
             </div>
           ) : (
             filtered.map((model) => (
@@ -147,7 +159,7 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
         <button
           type="button"
           onClick={() => scrollBy(1)}
-          aria-label="Next skills"
+          aria-label={t("launchpad.skills.next")}
           className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-1 transition-colors hover:border-ring hover:text-foreground sm:flex"
         >
           <ChevronRight className="h-4 w-4" />

@@ -1,4 +1,5 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { AlertTriangle, Loader2, UploadCloud, WifiOff } from "lucide-react";
 
 interface LocalDatasetCloudNoticeProps {
@@ -16,6 +17,7 @@ interface LocalDatasetCloudNoticeProps {
   errorMessage?: string | null;
 }
 
+// Byte units are the conventional binary abbreviations, not copy — left as is.
 const formatSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -43,6 +45,7 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
   uploading,
   errorMessage,
 }) => {
+  const { t } = useTranslation();
   const sizeLabel = sizeBytes != null ? formatSize(sizeBytes) : null;
 
   if (offline) {
@@ -52,13 +55,17 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
           <WifiOff className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
           <div>
             <div className="font-semibold">
-              This dataset is only on this machine
+              {t("training.datasetNotice.title")}
             </div>
             <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-              Hugging Face Cloud trains from the Hub, but the server is in
-              offline mode (<code className="text-amber-700 dark:text-amber-100">HF_HUB_OFFLINE</code>
-              ), so <span className="font-medium">{repoId}</span> can't be
-              uploaded. Switch off offline mode, or run this training locally.
+              <Trans
+                i18nKey="training.datasetNotice.offline"
+                values={{ repoId }}
+                components={[
+                  <code key="0" className="text-amber-700 dark:text-amber-100" />,
+                  <span key="1" className="font-medium" />,
+                ]}
+              />
             </p>
           </div>
         </div>
@@ -72,27 +79,39 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
         <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
         <div className="w-full">
           <div className="font-semibold">
-            This dataset is only on this machine
+            {t("training.datasetNotice.title")}
           </div>
+          {/* Two complete sentences rather than an inline "(~120 MB)" fragment
+              spliced into one — the size sits in different places per language.
+              {{size}} arrives pre-formatted from formatSize. */}
           <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-            Hugging Face Cloud trains from the Hub, so{" "}
-            <span className="font-medium">{repoId}</span>
-            {sizeLabel ? ` (~${sizeLabel})` : ""} will be uploaded as a{" "}
-            <span className="font-medium">private</span> dataset before training
-            starts.
+            <Trans
+              i18nKey={
+                sizeLabel
+                  ? "training.datasetNotice.bodyWithSize"
+                  : "training.datasetNotice.body"
+              }
+              values={{ repoId, size: sizeLabel ?? "" }}
+              components={[
+                <span key="0" className="font-medium" />,
+                <span key="1" className="font-medium" />,
+              ]}
+            />
           </p>
           {uploading ? (
             <p className="mt-2 flex items-center gap-2 text-amber-700 dark:text-amber-100">
               <Loader2 className="w-4 h-4 animate-spin" />
-              Uploading to the Hub… this can take a few minutes for large
-              datasets.
+              {t("training.datasetNotice.uploading")}
             </p>
           ) : errorMessage ? (
+            // Backend text — shown exactly as it arrived.
             <p className="mt-2 text-red-300">{errorMessage}</p>
           ) : (
             <p className="mt-2 flex items-center gap-2 text-amber-700/70 dark:text-amber-200/70">
               <UploadCloud className="w-4 h-4" />
-              Use “Upload &amp; start training” below to upload, then launch.
+              {t("training.cloudNotice.uploadHint", {
+                action: t("training.configurator.button.uploadAndStart"),
+              })}
             </p>
           )}
         </div>

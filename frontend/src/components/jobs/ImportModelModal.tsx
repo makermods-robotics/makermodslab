@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,6 +25,7 @@ interface Props {
 const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const [source, setSource] = useState("");
   const [name, setName] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -45,8 +47,11 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
         // Duplicate source: the backend returned the existing entry (id and
         // display alias preserved) instead of registering a second one.
         toast({
-          title: "Already imported",
-          description: `"${jobDisplayName(record)}" is already in your models.`,
+          title: t("jobs.importModal.alreadyImportedTitle"),
+          // The name is the user's own — interpolated, never translated.
+          description: t("jobs.importModal.alreadyImportedDescription", {
+            name: jobDisplayName(record),
+          }),
         });
       }
       setSource("");
@@ -65,36 +70,35 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
       <DialogContent className="bg-background border-border sm:max-w-[520px] p-8">
         <DialogHeader>
           <DialogTitle className="text-foreground text-center text-2xl font-bold">
-            Import a skill
+            {t("jobs.importModal.title")}
           </DialogTitle>
           <DialogDescription className="text-muted-foreground text-center">
-            Point at a local directory or a Hugging Face repo. It appears in
-            your skills, ready to run inference on.
+            {t("jobs.importModal.description")}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
           <div className="space-y-2">
             <Label htmlFor="source" className="text-sm font-medium text-muted-foreground">
-              Local path or Hugging Face repo id
+              {t("jobs.importModal.sourceLabel")}
             </Label>
             <Input
               id="source"
               value={source}
               onChange={(e) => setSource(e.target.value)}
-              placeholder="/path/to/pretrained_model  or  user/my-policy"
+              placeholder={t("jobs.importModal.sourcePlaceholder")}
               className="bg-background border-input"
             />
           </div>
           <div className="space-y-2">
             <Label htmlFor="name" className="text-sm font-medium text-muted-foreground">
-              Display name (optional)
+              {t("jobs.importModal.nameLabel")}
             </Label>
             <Input
               id="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="My imported policy"
+              placeholder={t("jobs.importModal.namePlaceholder")}
               className="bg-background border-input"
             />
           </div>
@@ -117,14 +121,16 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
               ) : (
                 <Download className="w-4 h-4 mr-2" />
               )}
-              {submitting ? "Importing…" : "Import"}
+              {submitting
+                ? t("jobs.importModal.submitting")
+                : t("jobs.importModal.submit")}
             </Button>
             <Button
               onClick={() => onOpenChange(false)}
               variant="outline"
               className="border-border px-8 text-muted-foreground bg-background hover:bg-muted"
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
           </div>
         </div>

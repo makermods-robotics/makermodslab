@@ -30,13 +30,19 @@ Install and run: see [README.md](README.md) Quick Start (uv editable install; `m
 
 `lerobot` is pinned to the `v0.6.0` **release tag** on `huggingface/lerobot` (see [pyproject.toml](pyproject.toml)); that release exposes the `lerobot-rollout` script [makermodslab/rollout.py](makermodslab/rollout.py) shells out to. Track lerobot's releases, not its `main` branch — a moving pin makes every unrelated failure a bisect. lerobot is the one dependency the app cannot run without, so treat a bump as a real change: expect import-path drift, adjust call sites, and exercise a rollout end-to-end before landing it.
 
-When `frontend/**` (excluding `frontend/dist/**`) changes on `main`, [`.github/workflows/build_frontend.yml`](.github/workflows/build_frontend.yml) auto-rebuilds `frontend/dist/` and commits it back — don't rebuild it by hand for a PR. `makermodslab --dev` serves from Vite, no rebuild needed.
+When `frontend/**` (excluding `frontend/dist/**`) changes on `main` or `staging`, [`.github/workflows/build_frontend.yml`](.github/workflows/build_frontend.yml) auto-rebuilds `frontend/dist/` and commits it back — don't rebuild it by hand for a PR. `makermodslab --dev` serves from Vite, no rebuild needed.
 
-**`frontend/package-lock.json` is the most fragile file in the repo** — it has broken CI three times (`e345e61`, `944cb05`, `c18d42c`). npm records platform-specific optional dependencies (esbuild, rollup, the `@emnapi/*` wasm shims) in it, so a lockfile written by `npm install` on macOS can fail `npm ci` on the Linux runner. Never hand-edit it; regenerate it on Linux or in a container when it genuinely needs regenerating; and treat an unexplained `package-lock.json` diff in an otherwise-unrelated PR as stray local churn to drop, not a change to keep. [`.github/workflows/frontend.yml`](.github/workflows/frontend.yml) runs `npm ci` + `npx tsc --noEmit` + `npm run build` on every PR so this is caught before merge rather than after.
+**`frontend/package-lock.json` is the most fragile file in the repo** — it has broken CI three times (`e345e61`, `944cb05`, `c18d42c`). npm records platform-specific optional dependencies (esbuild, rollup, the `@emnapi/*` wasm shims) in it, so a lockfile written by `npm install` on macOS can fail `npm ci` on the Linux runner. Never hand-edit it; regenerate it on Linux or in a container when it genuinely needs regenerating; and treat an unexplained `package-lock.json` diff in an otherwise-unrelated PR as stray local churn to drop, not a change to keep. [`.github/workflows/frontend.yml`](.github/workflows/frontend.yml) runs `npm ci` + both typecheck projects + `npm run build` on every PR so this is caught before merge rather than after.
 
 Test with `pytest` (install `.[test]`), lint with `ruff check` / `ruff format` (config for both in [pyproject.toml](pyproject.toml)). Tests in [tests/](tests/) cover request schemas, pure helpers, and idle/mutex branches; subprocess/thread happy paths and HF Jobs integration are **deliberately** not unit-tested — don't add coverage there. There is no Python build step; for end-to-end validation, run `makermodslab` and exercise endpoints.
 
-Frontend checks (run from `frontend/`): `npm run lint`, `npx tsc --noEmit`, `npm run build`. Some type/lint errors pre-date any given change — record the baseline before you start and compare against it; don't fix pre-existing errors unrelated to your change.
+Frontend checks (run from `frontend/`): `npm run lint`, `npx tsc --noEmit -p tsconfig.app.json`, `npx tsc --noEmit -p tsconfig.node.json`, `npm run build`. **The `-p` is not optional, and there are two projects** — the root `tsconfig.json` is a solution file (`"files": []` plus project references), so a bare `npx tsc --noEmit` checks nothing and always exits 0; `tsconfig.app.json` covers `src`, `tsconfig.node.json` covers the build configs (`vite.config.ts`, `vitest.config.ts`, `tailwind.config.ts`). Some type/lint errors pre-date any given change — record the baseline before you start and compare against it; don't fix pre-existing errors unrelated to your change.
+
+### Branches and CI
+
+`main` is the release branch; `staging` is a permanent integration branch in front of it — feature branches PR into `staging`, and `staging` is promoted to `main` by PR. Both run the same workflows, so what passes on `staging` is what `main` will do.
+
+**Never commit `frontend/dist` by hand** — it is rebuilt and committed automatically on a push to either branch, and a hand-built bundle turns a clean merge into a binary conflict. [`sync_staging.yml`](.github/workflows/sync_staging.yml) merges `main` into `staging` on every push to `main` and resolves that for you, so the promotion PR stays clean.
 
 ## Architecture
 
@@ -75,7 +81,7 @@ Frontend checks (run from `frontend/`): `npm run lint`, `npx tsc --noEmit`, `npm
 
 ### State model & mutual exclusion
 
-Each feature module owns module-level globals (`recording_active`, `teleoperation_active`, `inference_active`, plus `calibrate.calibration_is_active()`, `auto_calibrate.auto_calibration_is_active()`, and `wiggle.wiggle_active`) protected by per-feature locks. Teleoperation, recording, inference, manual calibration, auto-calibration, and wiggle **are all mutually exclusive, enforced in code** — not by a shared lock, but by reciprocal active-flag checks at each feature's start (e.g. `handle_start_teleoperation` refuses while recording, inference, calibration, auto-calibration, or a wiggle is active). New features that drive the robot must add the same reciprocal checks against every existing one.
+Each feature module owns module-level globals (`recording_active`, `teleoperation_active`, `inference_active`, `replay.replay_active`, plus `calibrate.calibration_is_active()`, `auto_calibrate.auto_calibration_is_active()`, and `wiggle.wiggle_active`) protected by per-feature locks. Teleoperation, recording, inference, replay, manual calibration, auto-calibration, and wiggle **are all mutually exclusive, enforced in code** — not by a shared lock, but by reciprocal active-flag checks at each feature's start (e.g. `handle_start_teleoperation` refuses while recording, inference, replay, calibration, auto-calibration, or a wiggle is active). New features that drive the robot must add the same reciprocal checks against every existing one.
 
 ### WebSocket broadcast
 
@@ -100,6 +106,12 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makermod
 ## Frontend layout (`frontend/src/`)
 
 React + Vite + TypeScript with shadcn/radix primitives. Four pages (`Launchpad`, `Teleoperation`, `Training`, `NotFound`); ~100 components grouped by feature area (`calibration/`, `control/`, `dialogs/`, `studio/`, `library/`, `recording/`, `jobs/`, `launchpad/`, … plus shared `ui/`); state via React contexts (`ApiContext`, `StudioContext`, `InferenceSessionContext`, `UrdfContext`, …) and ~19 data/session hooks (`useRobots`, `useDatasets`, `useRealTimeJoints`, …). No Redux/Zustand.
+
+### Localization
+
+The UI ships English and Simplified Chinese via `react-i18next`; catalogs live in [`frontend/src/i18n/locales/`](frontend/src/i18n/locales/), one namespace file per feature area. **Read [frontend/docs/localization.md](frontend/docs/localization.md) before touching user-facing strings** — it is written to be the only thing you need.
+
+The governing rule is that localization is **cosmetic only**: no request/response, storage, form-value or on-disk change, and the Python backend is never localized (server prose renders in English in every language). A great many strings here are _data_ wearing a label — camera-name presets, codec ids, calibration file names, `formatDurationShort` output — and translating one corrupts a payload or a file on disk. Three tests enforce the invariants: catalog key parity, dynamic-key resolution, and frozen-English output for the helpers that had to be restructured.
 
 ## Hardware target
 

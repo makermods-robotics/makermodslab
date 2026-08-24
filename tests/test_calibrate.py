@@ -141,6 +141,18 @@ def test_start_calibration_blocked_when_wiggle_active(monkeypatch) -> None:
     assert "wiggle" in result["message"].lower()
 
 
+def test_start_calibration_blocked_when_replay_active(monkeypatch) -> None:
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
+
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    mgr = CalibrationManager()
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+    assert result["success"] is False
+    assert "replay" in result["message"].lower()
+
+
 def test_start_calibration_refuses_existing_config_without_overwrite(tmp_lerobot_home) -> None:
     """Completing calibration saves <config_file>.json; if that name already
     exists, start must refuse (code=name_taken) unless overwrite=True — so no

@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Trash2 } from "lucide-react";
 import {
   Popover,
@@ -54,6 +55,7 @@ const ModelPicker: React.FC<ModelPickerProps> = ({
   onDeleteItem,
   children,
 }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
 
   const { auth } = useHfAuth();
@@ -98,16 +100,20 @@ const ModelPicker: React.FC<ModelPickerProps> = ({
         </span>
       )}
       {m.source === "both" && (
-        <span className="shrink-0 text-xs text-muted-foreground">local + hub</span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {t("landing.picker.localAndHub")}
+        </span>
       )}
       {m.private && (
-        <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">private</span>
+        <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
+          {t("landing.picker.private")}
+        </span>
       )}
       {onDeleteItem && (
         <button
           type="button"
-          aria-label={`Delete ${m.name}`}
-          title="Delete…"
+          aria-label={t("landing.modelPicker.deleteAria", { name: m.name })}
+          title={t("landing.picker.deleteTitle")}
           // cmdk/Radix act on pointerdown AND the click would bubble to the
           // CommandItem's onSelect — guard both so the trash never also
           // selects the row or closes the popover on its own.
@@ -140,22 +146,24 @@ const ModelPicker: React.FC<ModelPickerProps> = ({
         align="end"
       >
         <Command>
-          <CommandInput placeholder="Search models…" />
+          <CommandInput
+            placeholder={t("landing.modelPicker.searchPlaceholder")}
+          />
           <CommandList>
             {models.length === 0 && (
               <CommandEmpty className="py-4 text-sm text-muted-foreground text-center">
                 {loading
-                  ? "Loading models…"
-                  : "No models yet. Use “Add model” to train, download, or import one."}
+                  ? t("landing.modelPicker.loading")
+                  : t("landing.modelPicker.empty")}
               </CommandEmpty>
             )}
             {hubModels.length > 0 && (
-              <CommandGroup heading="Hugging Face">
+              <CommandGroup heading={t("landing.picker.huggingFace")}>
                 {hubModels.map(renderItem)}
               </CommandGroup>
             )}
             {localModels.length > 0 && (
-              <CommandGroup heading="Local">
+              <CommandGroup heading={t("landing.picker.local")}>
                 {localModels.map(renderItem)}
               </CommandGroup>
             )}

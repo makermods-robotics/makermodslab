@@ -277,6 +277,7 @@ class CalibrationManager:
                 from . import (
                     auto_calibrate as _auto_calibrate,
                     record as _record,
+                    replay as _replay,
                     rollout as _rollout,
                     teleoperate as _teleoperate,
                     wiggle as _wiggle,
@@ -301,6 +302,8 @@ class CalibrationManager:
                         "success": False,
                         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                     }
+                if _replay.replay_active:
+                    return {"success": False, "message": "Replay is currently active. Stop it first."}
 
                 # Refuse to silently overwrite an existing config file. Completing a
                 # calibration saves "<config_file>.json"; if that name is taken, the

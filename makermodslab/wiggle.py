@@ -120,6 +120,7 @@ async def wiggle_gripper(port: str) -> dict:
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        replay as _replay,
         rollout as _rollout,
         teleoperate as _teleoperate,
     )
@@ -150,6 +151,11 @@ async def wiggle_gripper(port: str) -> dict:
         return {
             "success": False,
             "message": "Auto-calibration is currently active — wait for it to stop before wiggling.",
+        }
+    if _replay.replay_active:
+        return {
+            "success": False,
+            "message": "Replay is currently active — wait for it to stop before wiggling.",
         }
 
     wiggle_active = True

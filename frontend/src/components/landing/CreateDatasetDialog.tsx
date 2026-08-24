@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,7 +12,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { validateDatasetName } from "@/lib/datasetName";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 
 interface CreateDatasetDialogProps {
@@ -31,12 +35,17 @@ interface CreateDatasetDialogProps {
  * a name it would later reject. On confirm it hands the bare name to the parent
  * (handleCreateDataset), which opens the recording modal.
  */
+/** Placeholder AND live-preview stand-in for an untyped name. A literal repo
+ * segment the user could type verbatim — data, so it is not a catalog entry. */
+const SAMPLE_NAME = "my_dataset";
+
 const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
   open,
   onOpenChange,
   existingRepoIds,
   onCreateNew,
 }) => {
+  const { t } = useTranslation();
   const [name, setName] = useState("");
 
   // The namespace (`<hf_username>/`) is prepended downstream at record start,
@@ -60,7 +69,8 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
       bare.toLowerCase() === trimmed.toLowerCase()
     );
   });
-  const nameError = trimmed === "" ? null : validateDatasetName(trimmed);
+  const nameIssue = trimmed === "" ? null : datasetNameIssue(trimmed);
+  const nameError = nameIssue ? formatDatasetNameIssue(t, nameIssue) : null;
   const canCreate = trimmed !== "" && nameError === null && !matchesExisting;
 
   // Live preview of the resulting repo id. Only shown when we know the
@@ -68,7 +78,9 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
   // (a "/" means they're supplying the namespace themselves — don't double
   // it up). Falls back to the placeholder while the field is empty.
   const showNamespaceHint = username !== null && !trimmed.includes("/");
-  const previewName = trimmed === "" ? "my_dataset" : trimmed;
+  // Sample id, not prose: it is also the input's placeholder, and a dataset
+  // name has to stay a valid ASCII repo segment. Never translated.
+  const previewName = trimmed === "" ? SAMPLE_NAME : trimmed;
 
   const handleConfirm = () => {
     if (!canCreate) return;
@@ -80,10 +92,9 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Create a new dataset</DialogTitle>
+          <DialogTitle>{t("landing.createDataset.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Name the dataset you're about to record. You'll set the task and
-            episode count in the next step.
+            {t("landing.createDataset.description")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -95,7 +106,7 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
         >
           <div>
             <Label htmlFor="new-dataset-name" className="text-muted-foreground">
-              Name
+              {t("landing.createDataset.nameLabel")}
             </Label>
             <Input
               id="new-dataset-name"
@@ -104,23 +115,28 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
               onChange={(e) =>
                 setName(e.target.value.replace(/[^A-Za-z0-9._\-/]/g, "_"))
               }
-              placeholder="my_dataset"
+              placeholder={SAMPLE_NAME}
               aria-invalid={nameError !== null || matchesExisting}
               className="mt-1 aria-[invalid=true]:border-destructive/70"
             />
             {matchesExisting ? (
               <p className="mt-1 text-xs text-destructive">
-                A dataset with this name already exists.
+                {t("landing.createDataset.duplicate")}
               </p>
             ) : nameError ? (
               <p className="mt-1 text-xs text-destructive">{nameError}</p>
             ) : (
               showNamespaceHint && (
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Creates{" "}
-                  <span className="font-mono text-foreground">
-                    {username}/{previewName}
-                  </span>
+                  {/* The repo id is DATA — interpolated whole so no translation
+                      ever splits a namespace from its name. */}
+                  <Trans
+                    i18nKey="landing.createDataset.creates"
+                    values={{ repoId: `${username}/${previewName}` }}
+                    components={[
+                      <span key="0" className="font-mono text-foreground" />,
+                    ]}
+                  />
                 </p>
               )
             )}
@@ -132,14 +148,15 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
               onClick={() => onOpenChange(false)}
               className=""
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               type="submit"
               disabled={!canCreate}
               className=""
             >
-              <Plus className="w-4 h-4 mr-2" /> Create
+              <Plus className="w-4 h-4 mr-2" />{" "}
+              {t("landing.createDataset.submit")}
             </Button>
           </DialogFooter>
         </form>

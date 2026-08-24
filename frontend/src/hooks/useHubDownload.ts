@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useApi } from "@/contexts/ApiContext";
 import { ApiError } from "@/lib/apiClient";
 import { Fetcher } from "@/lib/apiClient";
@@ -65,6 +66,7 @@ export function useHubDownload({
   onDone,
   onError,
 }: UseHubDownloadArgs): UseHubDownloadResult {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [status, setStatus] = useState<HubDownloadStatus | null>(null);
   // Guards the one-shot callbacks so a lingering "done"/"error" status isn't
@@ -72,14 +74,18 @@ export function useHubDownload({
   const notified = useRef(false);
 
   // Latest callbacks/fns without retriggering the poll effect on every render.
+  // `t` rides along for the same reason: the poll effect must not restart (and
+  // re-arm its one-shot callbacks) just because the UI language changed.
   const onDoneRef = useRef(onDone);
   const onErrorRef = useRef(onError);
   const getStatusRef = useRef(getStatus);
   const startDownloadRef = useRef(startDownload);
+  const tRef = useRef(t);
   onDoneRef.current = onDone;
   onErrorRef.current = onError;
   getStatusRef.current = getStatus;
   startDownloadRef.current = startDownload;
+  tRef.current = t;
 
   const isMine = status?.repo_id === repoId;
   const downloading = isMine && status?.state === "running";
@@ -117,7 +123,11 @@ export function useHubDownload({
           onDoneRef.current?.();
         } else if (s.state === "error" && !notified.current) {
           notified.current = true;
-          onErrorRef.current?.(s.error ?? s.message ?? "Download failed.");
+          // `s.error` / `s.message` are the backend's own text; only this
+          // fallback is ours.
+          onErrorRef.current?.(
+            s.error ?? s.message ?? tRef.current("landing.hubDownload.failed"),
+          );
         }
       } catch {
         // transient — retry next tick
@@ -134,7 +144,7 @@ export function useHubDownload({
         repoId,
       );
       if (!res.started) {
-        return res.message ?? "Download could not be started.";
+        return res.message ?? t("landing.hubDownload.couldNotStart");
       }
       notified.current = false;
       setStatus({
@@ -148,9 +158,9 @@ export function useHubDownload({
       if (e instanceof ApiError && e.detail) return e.detail;
       return e instanceof Error
         ? e.message
-        : "Could not reach the backend to download.";
+        : t("landing.hubDownload.unreachable");
     }
-  }, [baseUrl, fetchWithHeaders, repoId]);
+  }, [t, baseUrl, fetchWithHeaders, repoId]);
 
   return { downloading, start };
 }

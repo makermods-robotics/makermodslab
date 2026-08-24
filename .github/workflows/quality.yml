@@ -45,9 +45,11 @@ on:
   push:
     branches:
       - main
+      - staging
   pull_request:
     branches:
       - main
+      - staging
 
 # Ensures that only the latest commit for a PR or branch is built, canceling older runs.
 concurrency:
@@ -82,6 +84,11 @@ jobs:
         if: always()
         env:
           OUTCOME: ${{ steps.pre-commit.outcome }}
+          # The PR's own base, not a hardcoded `main`. On a PR into `staging`,
+          # diffing against main lists the whole staging-vs-main delta rather
+          # than the author's change. Empty on a push event, where the branch
+          # itself is the right baseline.
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
         run: |
           if [ "$OUTCOME" = "failure" ]; then
             {
@@ -92,7 +99,7 @@ jobs:
               echo "The **Run pre-commit hooks** step above has the diff. To reproduce and fix locally:"
               echo
               echo '```bash'
-              echo 'pre-commit run --files $(git diff --name-only origin/main...HEAD)'
+              echo "pre-commit run --files \$(git diff --name-only origin/$BASE_REF...HEAD)"
               echo '```'
               echo
               echo "Most hooks fix the file in place — re-\`git add\` and commit. Run \`pre-commit install\` once and these stop reaching CI at all."

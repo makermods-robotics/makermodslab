@@ -97,6 +97,13 @@ from .record import (
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+from .replay import (
+    ReplayRequest,
+    handle_replay_status,
+    handle_start_replay,
+    handle_stop_replay,
+    stop_and_wait as stop_replay_and_wait,
+)
 from .rollout import (
     InferenceRequest,
     handle_inference_log,
@@ -600,6 +607,33 @@ def inference_log():
     most recent finished run of this server process) or null (nothing to show) —
     the caller must not present a "last_run" log as the live session's output."""
     return handle_inference_log()
+
+
+@app.post("/start-replay")
+def start_replay(request: ReplayRequest):
+    result = handle_start_replay(request, manager)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start replay"),
+        )
+    return result
+
+
+@app.post("/stop-replay")
+def stop_replay():
+    result = handle_stop_replay()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to stop replay"),
+        )
+    return result
+
+
+@app.get("/replay-status")
+def replay_status():
+    return handle_replay_status()
 
 
 @app.get("/health")
@@ -1410,6 +1444,47 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
+# Mirrors _RUN_LABEL in runners/hf_cloud.py — the label a submitted job carries.
+_HUB_RUN_LABEL = "makermodslab.run"
+
+
+def _hub_job_run_name(ji) -> str | None:
+    """The training run's name for a Hub job, or None when it can't be derived.
+
+    Every cloud run launches on the same image, so the frontend's
+    docker_image fallback titles ALL of them "huggingface/lerobot-gpu:latest".
+    A run launched from this machine is spared that because a local JobRecord
+    carries its name — one launched from a teammate's machine has no such
+    record, and the name has to come off the Hub instead.
+
+    Two sources, preferred first:
+    1. The `makermodslab.run` label hf_cloud stamps at submission.
+    2. `--policy.repo_id` in the job's own argv. Every cloud run publishes to
+       "<user>/<run slug>", so this recovers a name for jobs submitted before
+       labelling existed — the whole existing backlog.
+    """
+    labels = getattr(ji, "labels", None) or {}
+    labelled = labels.get(_HUB_RUN_LABEL)
+    if isinstance(labelled, str) and labelled.strip():
+        return labelled.strip()
+
+    # `arguments` is where the Hub splits argv for some submission paths; ours
+    # rides entirely in `command`. Scan both so neither shape is missed.
+    argv = [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
+    for i, tok in enumerate(argv):
+        if not isinstance(tok, str):
+            continue
+        repo_id = None
+        if tok == "--policy.repo_id" and i + 1 < len(argv):
+            repo_id = argv[i + 1]
+        elif tok.startswith("--policy.repo_id="):
+            repo_id = tok.split("=", 1)[1]
+        # The slug after the namespace is the run id the library titles by.
+        if isinstance(repo_id, str) and repo_id.strip():
+            return repo_id.strip().rsplit("/", 1)[-1]
+    return None
+
+
 # Errors a per-author Hub model listing may raise that must degrade to "empty for
 # this author" instead of 500ing /jobs/hub. httpx.HTTPError is the base of
 # ConnectError / TimeoutException / TransportError — what a GFW-killed TLS
@@ -1608,6 +1683,7 @@ def list_hub_jobs():
         "jobs": [
             {
                 "id": ji.id,
+                "name": _hub_job_run_name(ji),
                 "created_at": ji.created_at.isoformat() if ji.created_at else None,
                 "docker_image": ji.docker_image,
                 "space_id": ji.space_id,
@@ -2897,9 +2973,17 @@ async def shutdown_event():
         asyncio.to_thread(auto_calibration_manager.stop_and_wait),
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
+        asyncio.to_thread(stop_replay_and_wait),
         return_exceptions=True,
     )
-    labels = ("teleoperation", "recording", "auto-calibration", "auto-calibration batch", "inference")
+    labels = (
+        "teleoperation",
+        "recording",
+        "auto-calibration",
+        "auto-calibration batch",
+        "inference",
+        "replay",
+    )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):
             logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)

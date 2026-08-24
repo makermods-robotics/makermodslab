@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useToast } from "@/hooks/use-toast";
 
 const FLAG = "makermodslab:teleop-stopped";
@@ -13,6 +14,7 @@ const FLAG = "makermodslab:teleop-stopped";
  */
 const TeleopStopNotice = () => {
   const { toast } = useToast();
+  const { t } = useTranslation();
 
   useEffect(() => {
     let stopped = false;
@@ -24,12 +26,11 @@ const TeleopStopNotice = () => {
     }
     if (stopped) {
       toast({
-        title: "Teleoperation stopped",
-        description:
-          "Stopped when you left the page. The arm returns to its starting position, then goes limp.",
+        title: t("shared.teleopStopNotice.title"),
+        description: t("shared.teleopStopNotice.description"),
       });
     }
-  }, [toast]);
+  }, [toast, t]);
 
   return null;
 };

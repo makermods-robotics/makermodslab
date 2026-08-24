@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -69,31 +70,44 @@ function relativeTime(epochSec: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-const statePresentation: Record<
-  JobRecord["state"],
-  {
-    label: string;
-    color: string;
-    Icon: React.ComponentType<{ className?: string }>;
-  }
-> = {
-  running: { label: JOB_STATE_LABELS.running, color: "text-ok", Icon: Loader2 },
+/**
+ * State → badge presentation. `labelKey` is a translation KEY (JOB_STATE_LABELS
+ * holds key paths, not words) because this map is evaluated at import time —
+ * resolved copy here would freeze whichever language loaded first. The colour
+ * and icon are not copy and stay put.
+ */
+const statePresentation = {
+  running: {
+    labelKey: JOB_STATE_LABELS.running,
+    color: "text-ok",
+    Icon: Loader2,
+  },
   done: {
-    label: JOB_STATE_LABELS.done,
+    labelKey: JOB_STATE_LABELS.done,
     color: "text-muted-foreground",
     Icon: CheckCircle2,
   },
   failed: {
-    label: JOB_STATE_LABELS.failed,
+    labelKey: JOB_STATE_LABELS.failed,
     color: "text-destructive",
     Icon: XCircle,
   },
   interrupted: {
-    label: JOB_STATE_LABELS.interrupted,
+    labelKey: JOB_STATE_LABELS.interrupted,
     color: "text-warn",
     Icon: AlertTriangle,
   },
-};
+} as const;
+
+/** The subtitle's last branch says the state as running text. One key per
+ * state rather than .toLowerCase() on a translated word — case is a property of
+ * a script, not of a string. */
+const SUBTITLE_STATE_KEYS = {
+  running: "jobs.jobCard.subtitleState.running",
+  done: "jobs.jobCard.subtitleState.done",
+  failed: "jobs.jobCard.subtitleState.failed",
+  interrupted: "jobs.jobCard.subtitleState.interrupted",
+} as const;
 
 /**
  * Card for the jobs history: what a training is doing (state, progress, logs)
@@ -122,6 +136,7 @@ const JobCard: React.FC<Props> = ({
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const { openStudio, openJobMonitor } = useStudio();
   const present = statePresentation[job.state];
   const Icon = present.Icon;
@@ -141,7 +156,9 @@ const JobCard: React.FC<Props> = ({
   // title's hover reveals it too (DisplayName's `full`).
   const taskTitle = runTaskTitle(displayName);
   const importedSource = job.hf_repo_id || job.output_dir;
-  const stateLabel = isImported ? "Imported" : present.label;
+  const stateLabel = isImported
+    ? t("jobs.location.imported")
+    : t(present.labelKey);
   const isStarting = isRunning && job.metrics.total_steps === 0;
   const progressPct =
     job.metrics.total_steps > 0
@@ -151,15 +168,22 @@ const JobCard: React.FC<Props> = ({
         )
       : 0;
 
+  // One key per branch — the card picks a whole sentence, it never assembles
+  // one. `relativeTime` output is passed in pre-formatted: duration formatting
+  // is deliberately left exactly as it was.
   const subtitle = isImported
     ? importedSource
     : isStarting
-      ? "starting…"
+      ? t("jobs.progress.starting")
       : isRunning
-        ? `started ${relativeTime(job.started_at)}`
+        ? t("jobs.jobCard.subtitle.started", {
+            when: relativeTime(job.started_at),
+          })
         : job.ended_at != null
-          ? `ended ${relativeTime(job.ended_at)}`
-          : present.label.toLowerCase();
+          ? t("jobs.jobCard.subtitle.ended", {
+              when: relativeTime(job.ended_at),
+            })
+          : t(SUBTITLE_STATE_KEYS[job.state]);
 
   // Checkpoints across the resume lineage (this run + the runs it resumed
   // from), each tagged with its owning job so inference/continue route to the
@@ -198,7 +222,7 @@ const JobCard: React.FC<Props> = ({
   const doRename = async () => {
     const next = renameValue.trim();
     if (!next) {
-      setRenameError("Name cannot be empty.");
+      setRenameError(t("jobs.rename.empty"));
       return;
     }
     if (next === displayName) {
@@ -210,8 +234,12 @@ const JobCard: React.FC<Props> = ({
     try {
       await renameJob(baseUrl, fetchWithHeaders, job.id, next);
       toast({
-        title: "Model renamed",
-        description: `"${displayName}" → "${next}".`,
+        title: t("jobs.rename.toastTitle"),
+        // Both names are user data — interpolated, never translated.
+        description: t("jobs.rename.toastDescription", {
+          from: displayName,
+          to: next,
+        }),
       });
       setRenameOpen(false);
       onRenamed?.();
@@ -309,6 +337,10 @@ const JobCard: React.FC<Props> = ({
     job.config?.policy_type,
   ]);
 
+  // The four window.confirm() questions below stay in ENGLISH on purpose: a
+  // native confirm draws its OK/Cancel from the BROWSER's locale, so a
+  // translated question over English buttons reads worse than an English one.
+  // Replacing them with AlertDialogs is a separate UX change.
   const handleAction = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (isRunning) {
@@ -410,8 +442,10 @@ const JobCard: React.FC<Props> = ({
   const resumeStep = resumeSource?.ckpt.step ?? null;
   const resumeLabel =
     resumeStep == null || resumeStep === 0
-      ? "Resume from latest"
-      : `Resume from step ${resumeStep.toLocaleString()}`;
+      ? t("jobs.jobCard.resumeLatest")
+      // The step arrives ALREADY formatted (toLocaleString, untouched) — passed
+      // under its own name so i18next never tries to re-derive a plural from it.
+      : t("jobs.jobCard.resumeStep", { step: resumeStep.toLocaleString() });
 
   // No dialog and no route jump: continuing opens the Train panel's
   // "Start a new training" form in resume mode, seeded from this run and the
@@ -491,7 +525,10 @@ const JobCard: React.FC<Props> = ({
         `${baseUrl}/jobs/${selectedJob.id}/checkpoints/${selectedStep}/download`,
       );
       if (!res.ok) {
-        toast({ title: "Download failed", variant: "destructive" });
+        toast({
+          title: t("jobs.jobCard.downloadFailed"),
+          variant: "destructive",
+        });
         return;
       }
       const blob = await res.blob();
@@ -505,7 +542,7 @@ const JobCard: React.FC<Props> = ({
       URL.revokeObjectURL(url);
     } catch (err) {
       toast({
-        title: "Download failed",
+        title: t("jobs.jobCard.downloadFailed"),
         description: String(err),
         variant: "destructive",
       });
@@ -536,14 +573,17 @@ const JobCard: React.FC<Props> = ({
   // Unified metadata rows (same format as the dataset/model cards). Imported
   // models keep their source path in the subtitle; trainings surface what they
   // ran on. Rows are omitted when the fact is absent.
+  // Only the LABELS are translated; every value beside them is data (policy
+  // type, dataset repo id) or a pre-formatted number left exactly as it was.
   const metaRows: Array<[string, string]> = [];
-  if (job.config?.policy_type) metaRows.push(["Policy", job.config.policy_type]);
+  if (job.config?.policy_type)
+    metaRows.push([t("jobs.meta.policy"), job.config.policy_type]);
   // Imported pseudo-jobs carry the "(imported)" sentinel, not a real dataset.
   if (job.config?.dataset_repo_id && job.config.dataset_repo_id !== "(imported)")
-    metaRows.push(["Dataset", job.config.dataset_repo_id]);
+    metaRows.push([t("jobs.meta.dataset"), job.config.dataset_repo_id]);
   if (!isImported && (job.config?.steps ?? 0) > 0)
     metaRows.push([
-      "Steps",
+      t("jobs.meta.steps"),
       isRunning
         ? `${job.metrics.current_step.toLocaleString()} / ${job.config.steps.toLocaleString()}`
         : job.config.steps.toLocaleString(),
@@ -577,8 +617,8 @@ const JobCard: React.FC<Props> = ({
                 className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground"
                 title={
                   job.runner === "hf_cloud"
-                    ? "Runs on Hugging Face cloud"
-                    : "Runs on this machine"
+                    ? t("jobs.location.cloudTitle")
+                    : t("jobs.location.localTitle")
                 }
               >
                 {job.runner === "hf_cloud" ? (
@@ -586,16 +626,18 @@ const JobCard: React.FC<Props> = ({
                 ) : (
                   <HardDrive className="w-3 h-3" />
                 )}
-                {job.runner === "hf_cloud" ? "Cloud" : "Local"}
+                {job.runner === "hf_cloud"
+                  ? t("jobs.location.cloud")
+                  : t("jobs.location.local")}
               </div>
             ) : null}
             {isHubImport ? (
               <div
                 className="flex items-center gap-1 text-[11px] font-medium text-info"
-                title="Imported from a Hugging Face Hub repo"
+                title={t("jobs.location.fromHubTitle")}
               >
                 <Upload className="w-3 h-3" />
-                from Hub
+                {t("jobs.location.fromHub")}
               </div>
             ) : null}
           </div>
@@ -605,8 +647,8 @@ const JobCard: React.FC<Props> = ({
               size="icon"
               onClick={openRename}
               className="h-7 w-7 text-muted-foreground hover:text-foreground"
-              aria-label="Rename model"
-              title="Rename"
+              aria-label={t("jobs.actions.renameAria")}
+              title={t("jobs.actions.rename")}
             >
               <Pencil className="w-3.5 h-3.5" />
             </Button>
@@ -616,7 +658,7 @@ const JobCard: React.FC<Props> = ({
                 size="icon"
                 asChild
                 className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                aria-label="Open Hub job page"
+                aria-label={t("jobs.actions.openHubJob")}
               >
                 <a
                   href={job.hf_job_url}
@@ -640,7 +682,11 @@ const JobCard: React.FC<Props> = ({
                 className={`h-7 w-7 text-muted-foreground ${
                   isRunning ? "hover:text-foreground" : "hover:text-destructive"
                 }`}
-                aria-label={isRunning ? "Stop job" : "Delete job"}
+                aria-label={
+                  isRunning
+                    ? t("jobs.jobCard.stopAria")
+                    : t("jobs.jobCard.deleteAria")
+                }
               >
                 {isRunning ? (
                   <Square className="w-3.5 h-3.5" />
@@ -715,7 +761,9 @@ const JobCard: React.FC<Props> = ({
               style={{ width: `${progressPct}%` }}
             />
             <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-white tabular-nums drop-shadow">
-              {isStarting ? "Training starting…" : `${progressPct.toFixed(1)}%`}
+              {isStarting
+                ? t("jobs.jobCard.trainingStarting")
+                : `${progressPct.toFixed(1)}%`}
             </div>
           </div>
         ) : null}
@@ -750,9 +798,9 @@ const JobCard: React.FC<Props> = ({
               size="sm"
               onClick={handlePlay}
               className="h-8 shrink-0 gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
-              aria-label="Run inference with this checkpoint"
+              aria-label={t("jobs.actions.runInferenceCheckpoint")}
             >
-              <Play className="w-3.5 h-3.5" /> Run
+              <Play className="w-3.5 h-3.5" /> {t("jobs.actions.run")}
             </Button>
             {canResume ? (
               <Button
@@ -761,7 +809,7 @@ const JobCard: React.FC<Props> = ({
                 onClick={handleResume}
                 className="h-8 shrink-0 gap-1.5 px-2.5 border-info/50 text-info hover:bg-info/10"
                 aria-label={resumeLabel}
-                title="Opens the training form to continue from this checkpoint. Compute defaults to where this checkpoint's run executed, and can be retargeted before you start."
+                title={t("jobs.jobCard.resumeHint")}
               >
                 <FastForward className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">{resumeLabel}</span>
@@ -773,13 +821,17 @@ const JobCard: React.FC<Props> = ({
                 variant="outline"
                 onClick={handleFinetune}
                 className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
-                aria-label="Fine-tune a new run from this model's weights"
-                title="Fine-tune a new run from this model's weights"
+                // Same words on both, so one key rather than two that could
+                // drift apart.
+                aria-label={t("jobs.actions.fineTuneHint")}
+                title={t("jobs.actions.fineTuneHint")}
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 {/* Label only when the card is wide enough for the whole row
                     to stay on one line; the tooltip covers the narrow case. */}
-                <span className="hidden @[13rem]:inline">Fine-tune</span>
+                <span className="hidden @[13rem]:inline">
+                  {t("jobs.actions.fineTune")}
+                </span>
               </Button>
             ) : null}
             {canDownload ? (
@@ -788,8 +840,10 @@ const JobCard: React.FC<Props> = ({
                 variant="outline"
                 onClick={handleDownload}
                 className="h-8 w-8 shrink-0 p-0 border-border text-muted-foreground hover:bg-muted"
-                aria-label="Download this checkpoint"
-                title="Download this checkpoint"
+                // One key: the hover text and the accessible name are the same
+                // sentence on the same control.
+                aria-label={t("jobs.actions.download")}
+                title={t("jobs.actions.download")}
               >
                 <Download className="w-3.5 h-3.5" />
               </Button>
@@ -811,8 +865,9 @@ const JobCard: React.FC<Props> = ({
               }}
               className="h-8 gap-1.5 border-warn/50 text-warn hover:bg-warn/10"
             >
-              <Download className="w-3.5 h-3.5" /> Install{" "}
-              {missingExtra.installTarget}
+              <Download className="w-3.5 h-3.5" />{" "}
+              {/* The install target is the backend's own package spec — data. */}
+              {t("jobs.jobCard.install", { target: missingExtra.installTarget })}
             </Button>
           </div>
         ) : null}
@@ -823,14 +878,26 @@ const JobCard: React.FC<Props> = ({
           onClick={(e) => e.stopPropagation()}
         >
           <DialogHeader>
-            <DialogTitle>Rename model</DialogTitle>
+            <DialogTitle>{t("jobs.rename.title")}</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Sets a display name only — the underlying{" "}
-              {isImported && job.hf_repo_id ? "Hub repo" : "run"} (
-              <span className="font-mono text-muted-foreground">
-                {isImported ? importedSource : job.id}
-              </span>
-              ) is not moved or changed.
+              {/* One sentence with the identity embedded in it, not three
+                  concatenated fragments — <0/> is the mono span below and its
+                  contents (run id / repo id) are data. */}
+              <Trans
+                i18nKey="jobs.rename.description"
+                values={{
+                  target: t(
+                    isImported && job.hf_repo_id
+                      ? "jobs.rename.targetHubRepo"
+                      : "jobs.rename.targetRun",
+                  ),
+                }}
+                components={[
+                  <span key="0" className="font-mono text-muted-foreground">
+                    {isImported ? importedSource : job.id}
+                  </span>,
+                ]}
+              />
             </DialogDescription>
           </DialogHeader>
           <Input
@@ -846,7 +913,7 @@ const JobCard: React.FC<Props> = ({
               }
             }}
             autoFocus
-            placeholder="New name"
+            placeholder={t("jobs.rename.placeholder")}
             className="bg-background border-input"
           />
           {renameError && <p className="text-sm text-destructive">{renameError}</p>}
@@ -856,7 +923,7 @@ const JobCard: React.FC<Props> = ({
               className="border-border text-muted-foreground"
               onClick={() => setRenameOpen(false)}
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               className="bg-primary hover:bg-primary/90 text-primary-foreground"
@@ -867,7 +934,7 @@ const JobCard: React.FC<Props> = ({
               }
               onClick={doRename}
             >
-              {renaming ? "Renaming…" : "Rename"}
+              {renaming ? t("jobs.rename.submitting") : t("jobs.rename.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>

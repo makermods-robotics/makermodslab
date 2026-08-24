@@ -102,6 +102,41 @@ def test_shutdown_stops_active_teleoperation(monkeypatch: pytest.MonkeyPatch) ->
     worker.join(timeout=2.0)
 
 
+def test_shutdown_stops_active_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server restart mid-replay must wait for the worker to actually
+    finish releasing the arm — same class of bug I8 fixed for teleoperation
+    (a plain kill or --reload restart otherwise orphans the in-process
+    worker thread mid-motion, with no return-to-rest and no torque release)."""
+    import makermodslab.record as record
+    import makermodslab.replay as replay
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    released = threading.Event()
+
+    def _worker() -> None:
+        while replay.replay_active:
+            time.sleep(0.01)
+        released.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(replay, "replay_active", True)
+    monkeypatch.setattr(replay, "replay_thread", worker)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(server_mod, "manager", None)
+    worker.start()
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert released.is_set(), "shutdown returned without waiting for replay to finish releasing"
+    assert replay.replay_active is False
+    worker.join(timeout=2.0)
+
+
 def test_shutdown_stops_active_recording(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same requirement as teleoperation, for recording_thread.
 
@@ -1229,6 +1264,72 @@ def test_list_hub_jobs_keeps_dismissals_when_listing_fails(
     assert resp.status_code == 200
     assert resp.json()["jobs"] == []
     assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+
+# --- Hub job run names -----------------------------------------------------
+#
+# Every cloud run launches on the same image, so a job the local registry
+# doesn't know about (launched from another machine) would otherwise be titled
+# "huggingface/lerobot-gpu:latest" in the library, like every other one.
+# _hub_job_run_name recovers a real name from the job itself.
+
+
+def _job_with(**attrs):
+    """A _FakeHubJob carrying extra JobInfo attributes (labels, command, …)."""
+    job = _FakeHubJob("job-x", "COMPLETED")
+    for k, v in attrs.items():
+        setattr(job, k, v)
+    return job
+
+
+def test_hub_job_run_name_prefers_submission_label() -> None:
+    job = _job_with(
+        labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"},
+        command=["python", "-c", "…", "--", "--policy.repo_id", "makermods/other_name"],
+    )
+    assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
+
+
+def test_hub_job_run_name_falls_back_to_repo_id_in_argv() -> None:
+    # The backlog: jobs submitted before labelling existed still carry their
+    # publish target in argv, and its slug is the run id.
+    job = _job_with(
+        command=["python", "-c", "…", "--", "--policy.repo_id", "makermods/act_cube_2026-08-01_12-00-00"]
+    )
+    assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
+
+
+def test_hub_job_run_name_reads_equals_form_and_arguments_list() -> None:
+    job = _job_with(command=None, arguments=["--policy.repo_id=makermods/smolvla_fold_2026-08-02_09-00-00"])
+    assert server_mod._hub_job_run_name(job) == "smolvla_fold_2026-08-02_09-00-00"
+
+
+def test_hub_job_run_name_is_none_when_nothing_identifies_the_run() -> None:
+    # A foreign job on the same account: no label, no --policy.repo_id. The
+    # card keeps its image-name fallback rather than inventing a name.
+    assert server_mod._hub_job_run_name(_job_with(labels={}, command=["python", "train.py"])) is None
+    assert server_mod._hub_job_run_name(_FakeHubJob("bare", "COMPLETED")) is None  # no attrs at all
+
+
+def test_hub_job_run_name_ignores_blank_label_and_trailing_flag() -> None:
+    # A blank label must not win over the argv fallback, and a dangling
+    # --policy.repo_id with no value must not index past the end.
+    job = _job_with(
+        labels={"makermodslab.run": "   "},
+        command=["--policy.repo_id", "makermods/act_x_2026-08-01_12-00-00"],
+    )
+    assert server_mod._hub_job_run_name(job) == "act_x_2026-08-01_12-00-00"
+    assert server_mod._hub_job_run_name(_job_with(command=["--policy.repo_id"])) is None
+
+
+def test_list_hub_jobs_exposes_the_run_name(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    named = _job_with(labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"})
+    named.id = "job-named"
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([named]))
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"][0]["name"] == "act_cube_2026-08-01_12-00-00"
 
 
 def test_dismiss_hub_job_rejects_blank_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:

@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
@@ -36,11 +37,15 @@ const hubEntryKey = (h: HubJob) => `hub:${h.id}`;
 /** Where a job runs: everything, this machine, or Hugging Face cloud/Hub. */
 type JobsFilter = "all" | "local" | "online";
 
-const FILTERS: Array<{ key: JobsFilter; label: string }> = [
-  { key: "all", label: "All" },
-  { key: "local", label: "Local" },
-  { key: "online", label: "Online" },
-];
+/** `key` is LOGIC — it is what the list filters on and never changes. `label`
+ * is a translation KEY, not a word: this array is built at import time, so a
+ * resolved label would freeze whichever language loaded first. It is resolved
+ * where the toolbar is rendered. */
+const FILTERS = [
+  { key: "all", label: "jobs.jobsLibrary.filters.all" },
+  { key: "local", label: "jobs.jobsLibrary.filters.local" },
+  { key: "online", label: "jobs.jobsLibrary.filters.online" },
+] as const satisfies ReadonlyArray<{ key: JobsFilter; label: string }>;
 
 interface JobsLibraryProps {
   /** Controlled fold state so the Train panel can collapse the library while
@@ -81,6 +86,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     remove,
     dismissHub,
   } = useJobsData();
+
+  const { t } = useTranslation();
 
   // Run on a job card doesn't open a dialog: it prefills the Deploy panel's
   // skill/checkpoint picker and focuses that panel.
@@ -133,8 +140,10 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const filteredHub = useMemo(
     () =>
       showOnline
-        ? untrackedHubJobs.filter((h) =>
-            matchesQuery(h.docker_image ?? h.space_id ?? h.id),
+        ? untrackedHubJobs.filter(
+            (h) =>
+              matchesQuery(h.name) ||
+              matchesQuery(h.docker_image ?? h.space_id ?? h.id),
           )
         : [],
     [untrackedHubJobs, matchesQuery, showOnline],
@@ -265,25 +274,19 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           // belongs to a finished run. The delete-first wording that used to
           // live here is gone with the rule that made it necessary — an
           // empty-handed tip now simply resumes from what it inherited.
+          // The reason IDENTIFIERS are the shared rule's own vocabulary and
+          // are never translated — only the sentence each one maps to. Built
+          // here rather than at module level so it follows a language switch.
           const description: Record<NoResumeReason, string> = {
-            "not-resumable":
-              "This run isn't in a state that can be continued.",
-            "no-checkpoints":
-              "This run and the runs it continues from saved no checkpoint.",
-            "owner-done":
-              "Every checkpoint this run can continue from belongs to a run that already " +
-              "reached its target, so its learning-rate schedule is spent. Fine-tune from " +
-              "the final checkpoint instead.",
-            "at-target":
-              "Every checkpoint this run can continue from is already at its step target. " +
-              "Raise the target to continue, or fine-tune from the final checkpoint.",
-            "sibling-cap":
-              "Every checkpoint left in this run's lineage was saved past the step this run " +
-              "reached, so it belongs to another continuation sharing the same cloud output.",
-            other: "No checkpoint in this run's lineage can be resumed from.",
+            "not-resumable": t("jobs.jobsLibrary.noResume.notResumable"),
+            "no-checkpoints": t("jobs.jobsLibrary.noResume.noCheckpoints"),
+            "owner-done": t("jobs.jobsLibrary.noResume.ownerDone"),
+            "at-target": t("jobs.jobsLibrary.noResume.atTarget"),
+            "sibling-cap": t("jobs.jobsLibrary.noResume.siblingCap"),
+            other: t("jobs.jobsLibrary.noResume.other"),
           };
           toast({
-            title: "Nothing to resume from",
+            title: t("jobs.jobsLibrary.noResumeTitle"),
             description: description[reason],
             variant: reason === "no-checkpoints" ? "destructive" : "default",
           });
@@ -305,7 +308,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         });
       } catch (e) {
         toast({
-          title: "Couldn't load checkpoints",
+          title: t("jobs.jobsLibrary.checkpointsError"),
+          // Backend/network prose — shown as it was written.
           description: e instanceof Error ? e.message : String(e),
           variant: "destructive",
         });
@@ -313,16 +317,17 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         setResumingId(null);
       }
     },
-    [ancestorsOf, baseUrl, fetchWithHeaders, openStudio, toast],
+    [ancestorsOf, baseUrl, fetchWithHeaders, openStudio, toast, t],
   );
 
+  // One key per branch — never a sentence assembled from translated pieces.
   const emptyMessage = query
-    ? "No jobs match your search."
+    ? t("jobs.jobsLibrary.empty.search")
     : filter === "local"
-      ? "No local jobs."
+      ? t("jobs.jobsLibrary.empty.local")
       : filter === "online"
-        ? "No online jobs."
-        : "No training jobs yet.";
+        ? t("jobs.jobsLibrary.empty.online")
+        : t("jobs.jobsLibrary.empty.none");
 
   // First run: nothing anywhere, before any filter or search narrows anything
   // down (main, #79). Distinct from `emptyMessage`, which answers "your current
@@ -338,28 +343,33 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
   // The one thing worth saying on a first run that the instruction can't: why
   // the cloud half might be silent. Blank when there's nothing to explain.
+  // A whole second sentence, not a fragment: it is rendered after the
+  // instruction with a space between them, so neither half depends on the
+  // other's word order.
   const emptyHint = !showOnline
-    ? ""
+    ? null
     : hubError
-      ? ""
+      ? null
       : !hubAuthenticated
-        ? " Sign in with Hugging Face to see your cloud jobs."
+        ? t("jobs.jobsLibrary.signIn")
         : !hubJobsPermission
-          ? " Your Hugging Face token is missing the job.read permission, so cloud jobs can't be listed."
-          : "";
+          ? t("jobs.jobsLibrary.missingJobRead")
+          : null;
 
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="space-y-3">
       <LibraryHeader
-        title="Training jobs"
+        title={t("jobs.jobsLibrary.title")}
         count={activeCount}
         open={open}
         actions={
           <button
             type="button"
             onClick={refresh}
-            aria-label="Refresh job list"
-            title="Refresh job list"
+            // One key: the accessible name and the hover text are the same
+            // words on the same control.
+            aria-label={t("jobs.jobsLibrary.refresh")}
+            title={t("jobs.jobsLibrary.refresh")}
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -373,8 +383,13 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
             <LibraryToolbar
               query={search}
               onQueryChange={setSearch}
-              searchPlaceholder="Search jobs"
-              filters={FILTERS}
+              searchPlaceholder={t("jobs.jobsLibrary.searchPlaceholder")}
+              // Only the LABEL is translated — `key` is what the list filters
+              // on and is passed through untouched.
+              filters={FILTERS.map((f) => ({
+                key: f.key,
+                label: t(f.label),
+              }))}
               filter={filter}
               onFilterChange={setFilter}
             />
@@ -382,12 +397,14 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
           {error ? (
             <p className="text-sm text-destructive">
-              Couldn't load local jobs: {error}
+              {/* {{error}} is the backend's/network's own text — passed
+                  through as written. */}
+              {t("jobs.jobsLibrary.localError", { error })}
             </p>
           ) : null}
           {showOnline && hubError ? (
             <p className="text-sm text-destructive">
-              Couldn't load cloud jobs: {hubError}
+              {t("jobs.jobsLibrary.cloudError", { error: hubError })}
             </p>
           ) : null}
           {!isEmpty &&
@@ -396,14 +413,18 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           !hubAuthenticated &&
           trackedCloudJobs.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              Sign in with Hugging Face to see your cloud jobs.
+              {t("jobs.jobsLibrary.signIn")}
             </p>
           ) : null}
           {!isEmpty && showOnline && hubAuthenticated && !hubJobsPermission ? (
             <p className="text-sm text-warn">
-              Your Hugging Face token is missing the{" "}
-              <code className="text-warn">job.read</code> permission, so cloud
-              jobs can't be listed.
+              {/* One phrase with the scope name embedded — <0/> is the code
+                  element below, and "job.read" is an API scope name, never
+                  translated. */}
+              <Trans
+                i18nKey="jobs.jobsLibrary.missingJobReadRich"
+                components={[<code key="0" className="text-warn">job.read</code>]}
+              />
             </p>
           ) : null}
 
@@ -426,7 +447,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               // what keeps the three studio panels' action rows on one row, so
               // a first run has to hold it exactly like a populated one does.
               <div className="flex h-full items-center justify-center rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-                No training jobs yet. Start one above.{emptyHint}
+                {t("jobs.jobsLibrary.firstRun")}
+                {emptyHint ? <> {emptyHint}</> : null}
               </div>
             ) : (
               <>

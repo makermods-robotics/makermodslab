@@ -2154,6 +2154,21 @@ def test_start_recording_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPa
     }
 
 
+def test_start_recording_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recording must refuse to start while a hardware replay owns the same
+    serial bus."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+    assert result == {
+        "success": False,
+        "message": "Replay is currently active. Stop it first.",
+    }
+
+
 def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resume must append to the EXISTING directory: the repo_id is used
     verbatim (no '_<timestamp>' suffix), unlike a fresh session which stamps

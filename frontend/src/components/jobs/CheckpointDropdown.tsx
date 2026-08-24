@@ -1,4 +1,5 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import {
   Select,
   SelectContent,
@@ -46,15 +47,24 @@ export const CheckpointDropdown: React.FC<Props> = ({
   selectedRef,
   onChange,
   disabled,
-  placeholder = "Select checkpoint",
+  placeholder,
   className,
   id,
   owners,
 }) => {
+  const { t } = useTranslation();
+  // Resolved in the body rather than as a default parameter: a default is
+  // evaluated before `t` exists, and a module-level default would freeze the
+  // first language loaded.
+  const placeholderText = placeholder ?? t("jobs.checkpointDropdown.placeholder");
   // step 0 is the sentinel for an imported single-model checkpoint (lerobot
   // never saves at step 0), so it has no meaningful step number — show
-  // "latest" instead. Real training checkpoints keep their step label.
-  const labelFor = (step: number) => (step === 0 ? "latest" : `step ${step}`);
+  // "latest" instead. Real training checkpoints keep their step label. The
+  // step is stringified by hand, not run through a locale number formatter.
+  const labelFor = (step: number) =>
+    step === 0
+      ? t("jobs.checkpointDropdown.latest")
+      : t("jobs.checkpointDropdown.step", { step: String(step) });
   // Render newest-first regardless of the caller's order (the backend lists
   // ascending; JobCard pre-sorts descending — this is the one authoritative
   // display order). The step-0 "latest" sentinel sorts to the top, not the
@@ -109,11 +119,11 @@ export const CheckpointDropdown: React.FC<Props> = ({
             the one fact the collapsed control exists to show. The disambiguator
             belongs where the ambiguity is visible: the open list. */}
         {attributed && selected !== undefined ? (
-          <SelectValue placeholder={placeholder}>
+          <SelectValue placeholder={placeholderText}>
             {labelFor(selected.step)}
           </SelectValue>
         ) : (
-          <SelectValue placeholder={placeholder} />
+          <SelectValue placeholder={placeholderText} />
         )}
       </SelectTrigger>
       <SelectContent className="bg-popover border-border">
