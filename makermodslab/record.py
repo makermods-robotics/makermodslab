@@ -2128,7 +2128,14 @@ def record_with_web_events(
             releasing = False
 
     if cfg.dataset.push_to_hub:
-        dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+        # Same bare-id hazard as the UploadManager path, and the same single
+        # workaround: cfg.dataset.repo_id is the local (bare) id, and calling
+        # dataset.push_to_hub directly would let create_repo resolve it while
+        # the upload_folder right after it doesn't — stranding an empty repo.
+        # Unreachable from the browser today (the recording dialog sends
+        # push_to_hub: false and lets the user upload afterwards), but this is
+        # an HTTP API a non-UI caller can set.
+        push_dataset_to_hub(cfg.dataset.repo_id, tags=cfg.dataset.tags, private=cfg.dataset.private)
 
     log_say("Exiting", cfg.play_sounds)
     return dataset

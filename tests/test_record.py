@@ -1813,15 +1813,14 @@ def test_upload_manager_bare_repo_id_unauthenticated_errors(monkeypatch: pytest.
     _join_upload(mgr)
     status = mgr.get_status()
     assert status["state"] == "error"
-    assert "Not authenticated with the Hugging Face Hub" in status["message"]
+    assert "hf auth login" in status["message"]
     assert status["dataset_url"] is None
     # Bailing out before the push is the point: no repo is created, so there is
     # no empty-repo litter to clean up before the user retries after logging in.
     ds.push_to_hub.assert_not_called()
-    # This message doesn't match _upload_auth_error()'s 401 patterns, so it
-    # takes the generic branch and carries no docs_url — unlike a 401 raised
-    # from inside push_to_hub(), which does.
-    assert "docs_url" not in status
+    # The explicit pre-push auth refusal follows the same friendly path as a
+    # 401 raised from inside push_to_hub().
+    assert status["docs_url"].startswith("https://huggingface.co/docs")
 
 
 def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch) -> None:

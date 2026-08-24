@@ -20,6 +20,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -146,8 +147,36 @@ def _drop_resolved_keys(cache: dict[str, Any], repo_id: str) -> None:
             del cache[key]
 
 
-def resolve_hub_repo_id(repo_id: str) -> str:
-    """The id to address `repo_id` by on the Hub.
+@dataclass(frozen=True)
+class HubDatasetId:
+    """How one local dataset id maps onto the Hub.
+
+    Two facts, produced together because they are answers to the same lookup
+    and MUST NOT be derived separately:
+
+    * ``repo_id``   — the id to ADDRESS the repo by. Every literal-lookup Hub
+      call (``repo_exists``, ``dataset_info``, ``hf_hub_download``, …) wants
+      this and nothing else.
+    * ``writable``  — whether this token may write to that namespace. Only
+      callers about to MUTATE the repo (rename's ``move_repo``) care.
+    * ``namespace`` — the canonical namespace of ``repo_id``, so a caller
+      building a SIBLING id (rename's target name) doesn't re-split the
+      string and re-derive the casing.
+
+    The two answers genuinely diverge for a third-party dataset: ``lerobot/pusht``
+    is already the right id to READ, and can never be written to. Returning
+    them from one place is what keeps a read path and a write path from
+    disagreeing about the same dataset in the same process.
+    """
+
+    repo_id: str
+    namespace: str | None
+    writable: bool
+
+
+def resolve_hub_dataset_id(repo_id: str, who: dict[str, Any] | None) -> HubDatasetId:
+    """THE mapping from a local dataset id to its Hub identity. One
+    implementation, no exceptions — see HubDatasetId for what it returns.
 
     A locally-recorded dataset's repo_id is bare (no "namespace/" prefix) —
     the only form the app naturally has for it, since local dataset
@@ -161,26 +190,44 @@ def resolve_hub_repo_id(repo_id: str) -> str:
     write to: a locally-recorded "MyOrg/foo" must reach the Hub as the
     canonical "myorg/foo" the account actually owns. An id in someone else's
     namespace (a downloaded third-party dataset like ``lerobot/pusht``) is
-    returned untouched — it is already the right id, and ownership is
-    irrelevant to *reading* it.
+    returned untouched and marked unwritable — it is already the right id, and
+    ownership is irrelevant to *reading* it.
 
-    Returns the id unchanged when there's no token to resolve against;
-    callers degrade rather than raise on the unauthenticated case.
+    `who` is a ``cached_whoami()`` payload, or None for "no Hub identity" —
+    passed IN rather than fetched here on purpose. A caller that must fail
+    closed on a transient whoami failure (rename, via ``fail_on_error=True``)
+    would otherwise have a second, silently-degrading lookup happen underneath
+    it and reach a different conclusion than the check it just made.
 
-    NOT an ownership check. Callers that need "may I WRITE here?" — rename's
-    move_repo, which must skip the Hub step rather than target a namespace it
-    can't touch — want ``canonical_writable_namespace`` directly, whose None
-    carries exactly that answer. Don't collapse the two: this function's job
-    is to name a repo, not to grant permission to change it.
+    Unauthenticated returns the id unchanged and unwritable: read callers
+    degrade rather than raise, write callers skip the Hub.
     """
-    who = cached_whoami()
     if who is None:
-        return repo_id
+        return HubDatasetId(repo_id=repo_id, namespace=None, writable=False)
     if "/" not in repo_id:
-        return f"{who['name']}/{repo_id}"
+        # A bare id lives under the user's own account. `writable_namespaces`
+        # always contains whoami's own name, so this is a lookup, not a
+        # special case — going through the same helper keeps one rule.
+        namespace = canonical_writable_namespace(who, who["name"]) or who["name"]
+        return HubDatasetId(repo_id=f"{namespace}/{repo_id}", namespace=namespace, writable=True)
     namespace, name = repo_id.split("/", 1)
     canonical = canonical_writable_namespace(who, namespace)
-    return f"{canonical}/{name}" if canonical else repo_id
+    if canonical is None:
+        return HubDatasetId(repo_id=repo_id, namespace=namespace, writable=False)
+    return HubDatasetId(repo_id=f"{canonical}/{name}", namespace=canonical, writable=True)
+
+
+def resolve_hub_repo_id(repo_id: str) -> str:
+    """The id to address `repo_id` by on the Hub, resolved against whoever is
+    logged in now. The read path's projection of ``resolve_hub_dataset_id`` —
+    keep it a projection, so addressing can never drift from permission.
+
+    NOT an ownership check: it answers "what is this repo called", not "may I
+    change it". A caller that needs the second question — rename's move_repo,
+    which must skip the Hub step rather than target a namespace it can't touch
+    — calls ``resolve_hub_dataset_id`` and reads ``.writable``.
+    """
+    return resolve_hub_dataset_id(repo_id, cached_whoami()).repo_id
 
 
 def push_dataset_to_hub(local_repo_id: str, *, tags: list[str] | None, private: bool) -> str:
@@ -210,7 +257,9 @@ def push_dataset_to_hub(local_repo_id: str, *, tags: list[str] | None, private: 
 
     hub_repo_id = resolve_hub_repo_id(local_repo_id)
     if "/" not in hub_repo_id:
-        raise RuntimeError("Not authenticated with the Hugging Face Hub")
+        # Keep this wording aligned with record._upload_auth_error so the
+        # upload worker returns the friendly login instruction + docs link.
+        raise RuntimeError("You must be authenticated with the Hugging Face Hub")
 
     dataset = LeRobotDataset(local_repo_id)
     logger.info(
@@ -1146,7 +1195,11 @@ def get_episode_action_series(repo_id: str, episode_index: int) -> dict[str, Any
     rel_data_path = Path("data") / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
     if is_hub:
         try:
-            data_path = Path(hf_hub_download(repo_id, filename=str(rel_data_path), repo_type="dataset"))
+            data_path = Path(
+                hf_hub_download(
+                    resolve_hub_repo_id(repo_id), filename=str(rel_data_path), repo_type="dataset"
+                )
+            )
         except Exception as exc:
             logger.info("hub data chunk fetch for %s failed: %s", repo_id, exc)
             return None
@@ -1435,9 +1488,10 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     if not _is_dataset_dir(src):
         raise DatasetRenameError(404, f"Dataset '{repo_id}' not found in the local cache")
 
-    # The namespace prefix is fixed — swap only the final path segment.
+    # The namespace prefix is fixed — swap only the final path segment. This is
+    # the LOCAL id: it keeps the caller's own casing, because the directory is
+    # the user's own. The Hub-side ids are resolved separately below.
     namespace = repo_id.rsplit("/", 1)[0] if "/" in repo_id else None
-    local_name = repo_id.rsplit("/", 1)[1] if namespace else repo_id
     new_repo_id = f"{namespace}/{new_name}" if namespace else new_name
     if new_repo_id == repo_id:
         # No-op: nothing moved anywhere, so no Hub copy went stale.
@@ -1489,38 +1543,46 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     hub_state = "skipped"
     hub_repo_id: str | None = None
     hub_new_repo_id: str | None = None
-    if whoami_info is not None:
-        requested_namespace = namespace or whoami_info["name"]
-        # Resolve to whoami's own spelling, not the local directory's — a
-        # locally-recorded "MyOrg/foo" would otherwise hit the Hub as
-        # "MyOrg" instead of the canonical "myorg" the account actually owns.
-        hub_namespace = canonical_writable_namespace(whoami_info, requested_namespace)
-        if hub_namespace is None:
-            # Someone else's namespace (a downloaded third-party dataset, or
-            # an org this token doesn't have write access to). move_repo there
-            # can never succeed, so the Hub step is skipped — hub_state stays
-            # "skipped" — but the local rename below still goes ahead.
-            logger.info(
-                "rename: '%s' belongs to '%s' on the Hub, which this account can't write to "
-                "— renaming the local copy only",
-                repo_id,
-                requested_namespace,
-            )
-        else:
-            hub_repo_id = f"{hub_namespace}/{local_name}"
-            hub_new_repo_id = f"{hub_namespace}/{new_name}"
+    # The SAME resolution every read path uses — rename just reads the other
+    # half of the answer. `.repo_id` canonicalises casing (a locally-recorded
+    # "MyOrg/foo" must hit the Hub as the "myorg" the account actually owns)
+    # and qualifies a bare id under the user's account; `.writable` gates the
+    # Hub step. Deriving either of those here again is how the rename path and
+    # the read paths end up disagreeing about the same dataset.
+    #
+    # `whoami_info` is passed in rather than re-fetched so the fail-closed
+    # check just above governs this resolution too.
+    hub_id = resolve_hub_dataset_id(repo_id, whoami_info)
+    if hub_id.writable:
+        hub_repo_id = hub_id.repo_id
+        # The target keeps the SOURCE's canonical namespace — building it from
+        # the local directory's casing would land the repo somewhere else.
+        hub_new_repo_id = f"{hub_id.namespace}/{new_name}"
+    else:
+        # Either unauthenticated (no credential to move a repo with), or
+        # someone else's namespace: a downloaded third-party dataset, or an
+        # org this token has no write access to. move_repo can never succeed
+        # in any of those, so the Hub step is skipped — hub_state stays
+        # "skipped" — but the local rename below still goes ahead, since the
+        # DIRECTORY is the user's own and moving it needs no Hub permission.
+        # Failing the whole operation shut would break renaming a
+        # never-uploaded dataset while logged out, the case least deserving of
+        # a Hub error.
+        logger.info(
+            "rename: the Hub step for '%s' is skipped (namespace '%s' is not writable by this "
+            "account, or there is no token) — renaming the local copy only",
+            repo_id,
+            hub_id.namespace or "<unauthenticated>",
+        )
 
-    # Unauthenticated (no token): there's no Hub identity to resolve ownership
-    # against and no credential to move a repo with, so skip the Hub entirely
-    # and do the local-only rename this function has always done. Failing shut
-    # would break renaming a never-uploaded dataset while logged out, which is
-    # the case least deserving of a Hub error.
-    hub_repo_exists = False
+    # NB: a plain `hub_repo_exists` local here would shadow the module-level
+    # function of that name for this whole scope.
+    hub_copy_exists = False
     if hub_repo_id is not None and hf_hub_offline():
         logger.info("rename: HF_HUB_OFFLINE is set — renaming %s locally only", repo_id)
     elif hub_repo_id is not None:
         try:
-            hub_repo_exists = api.repo_exists(hub_repo_id, repo_type="dataset")
+            hub_copy_exists = api.repo_exists(hub_repo_id, repo_type="dataset")
         except Exception as exc:
             logger.warning("rename: repo_exists(%s) failed: %s", hub_repo_id, exc)
             raise DatasetRenameError(
@@ -1529,10 +1591,10 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
                 "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
                 "renames the local copy only and leaves any Hub copy under the old name.",
             ) from exc
-        if not hub_repo_exists:
+        if not hub_copy_exists:
             hub_state = "none"
 
-    if hub_repo_exists:
+    if hub_copy_exists:
         try:
             new_taken = api.repo_exists(hub_new_repo_id, repo_type="dataset")
         except Exception as exc:
@@ -1558,7 +1620,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     try:
         os.rename(src, dst)
     except OSError as exc:
-        if hub_repo_exists:
+        if hub_copy_exists:
             # The Hub already moved, so the two copies have diverged. Try to put
             # the Hub back rather than leaving the user with a dataset renamed
             # in one place only — a best-effort undo of the one step that did
