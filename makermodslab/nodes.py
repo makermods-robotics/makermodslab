@@ -239,6 +239,55 @@ class NodeRegistry:
                     return
         raise NodeNotFoundError(f"no registered peer with instance_id {instance_id!r}")
 
+    def resolve(self, instance_id: str) -> PeerNode:
+        """The live peer carrying `instance_id`, for a caller about to TALK to
+        it (job offload). A verification within the TTL is trusted as-is;
+        anything staler — or a peer currently marked unreachable — is probed
+        now, so the answer is at most TTL seconds old.
+
+        Raises NodeNotFoundError when no registered peer carries the id.
+        Entries with no identity yet (fresh loads from disk) are probed first,
+        since the id being resolved may belong to one of them. Raises
+        NodeUnreachableError when the peer is registered but did not answer —
+        or answered as a DIFFERENT install (the machine at that URL was
+        reinstalled), which for this identity is the same thing.
+        """
+        with self._lock:
+            self._ensure_loaded()
+            for candidate in self._peers:
+                if candidate.instance_id is not None:
+                    continue
+                now = self._clock()
+                try:
+                    doc = self._probe(candidate.url)
+                except NodeUnreachableError:
+                    candidate.status = "unreachable"
+                    candidate.last_probe_at = now
+                else:
+                    self._apply_handshake(candidate, doc)
+            peer = next((p for p in self._peers if p.instance_id == instance_id), None)
+            if peer is None:
+                raise NodeNotFoundError(f"no registered peer with instance_id {instance_id!r}")
+            now = self._clock()
+            stale = peer.last_probe_at is None or now - peer.last_probe_at >= self._ttl
+            if stale or peer.status != "ok":
+                try:
+                    doc = self._probe(peer.url)
+                except NodeUnreachableError:
+                    peer.status = "unreachable"
+                    peer.last_probe_at = now
+                    raise
+                if doc["instance_id"] != instance_id:
+                    peer.status = "unreachable"
+                    peer.last_probe_at = now
+                    raise NodeUnreachableError(
+                        f"{peer.url} now answers as a different node "
+                        f"({doc['instance_id']!r}, expected {instance_id!r}) — "
+                        "re-add the peer to adopt its new identity"
+                    )
+                self._apply_handshake(peer, doc)
+            return replace(peer)
+
     def list_nodes(self) -> list[PeerNode]:
         """Current peer table, re-probing entries whose last probe is older
         than the TTL (never-probed entries — fresh loads — probe now). A

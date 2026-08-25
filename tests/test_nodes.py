@@ -274,6 +274,53 @@ def test_remove_unknown_raises(registry):
 
 
 # ---------------------------------------------------------------------------
+# resolve(): the pre-flight lookup for talking to a peer (job offload)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_trusts_a_fresh_verification_without_reprobing(registry, network, clock):
+    registry.add(PEER_A_URL)
+    clock.advance(1.0)  # inside the TTL
+    node = registry.resolve(PEER_A_ID)
+    assert node.url == PEER_A_URL
+    assert node.status == "ok"
+    assert network.probes[PEER_A_URL] == 1  # add's handshake only
+
+
+def test_resolve_reprobes_when_stale_and_raises_on_a_dead_peer(registry, network, clock):
+    from makermodslab.nodes import NODE_TTL_S, NodeUnreachableError
+
+    registry.add(PEER_A_URL)
+    network.down.add(PEER_A_URL)
+    clock.advance(NODE_TTL_S + 1)
+    with pytest.raises(NodeUnreachableError):
+        registry.resolve(PEER_A_ID)
+    # The entry is kept (marked unreachable), never evicted.
+    [node] = registry.list_nodes()
+    assert node.status == "unreachable"
+
+
+def test_resolve_unknown_instance_raises_not_found(registry, network):
+    from makermodslab.nodes import NodeNotFoundError
+
+    registry.add(PEER_A_URL)
+    with pytest.raises(NodeNotFoundError):
+        registry.resolve("ee" * 16)
+
+
+def test_resolve_probes_loaded_unverified_entries_first(local_identity, nodes_file, network, clock):
+    """A peer loaded from disk has no identity until its first handshake, so
+    resolving by instance_id must probe it rather than report not-found."""
+    from makermodslab.nodes import NodeRegistry
+
+    NodeRegistry(clock=clock, transport=network.transport()).add(PEER_A_URL)
+    reloaded = NodeRegistry(clock=clock, transport=network.transport())
+    node = reloaded.resolve(PEER_A_ID)
+    assert node.instance_id == PEER_A_ID
+    assert node.status == "ok"
+
+
+# ---------------------------------------------------------------------------
 # Persistence: url + name only; identity re-verified on load
 # ---------------------------------------------------------------------------
 

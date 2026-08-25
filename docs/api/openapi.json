@@ -1872,6 +1872,28 @@
             "title": "Name",
             "type": "string"
           },
+          "node_instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Instance Id"
+          },
+          "node_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Url"
+          },
           "output_dir": {
             "title": "Output Dir",
             "type": "string"
@@ -1887,12 +1909,24 @@
             ],
             "title": "Process Pid"
           },
+          "remote_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Job Id"
+          },
           "runner": {
             "default": "local",
             "enum": [
               "local",
               "hf_cloud",
-              "imported"
+              "imported",
+              "lan_node"
             ],
             "title": "Runner",
             "type": "string"

@@ -57,7 +57,7 @@ from . import (
 
 # Import our custom calibration functionality
 from .__version__ import __version__
-from .api_errors import ApiError, install_error_handlers
+from .api_errors import ApiError, ErrorCode, install_error_handlers
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
     AutoCalibrationRequest,
@@ -81,7 +81,13 @@ from .jobs import (
 )
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
-from .nodes import handle_add_node, handle_list_nodes, handle_remove_node
+from .nodes import (
+    NodeNotFoundError,
+    NodeUnreachableError,
+    handle_add_node,
+    handle_list_nodes,
+    handle_remove_node,
+)
 
 # Import our custom recording functionality
 from .record import (
@@ -1453,6 +1459,16 @@ async def create_training_job(req: Request):
     raw = await req.json()
     body = StartTrainingBody.from_legacy(raw)
     cfg = body.config
+    # A lan_node target without a node is unroutable — refuse with the same
+    # 422 + code a malformed body would get, before any slower preflight.
+    # (JobRegistry.start re-checks as belt-and-braces, mirroring the flavor
+    # guard; that copy surfaces as a plain 400 for non-HTTP callers.)
+    if body.target is not None and body.target.runner == "lan_node" and not body.target.node_instance_id:
+        raise ApiError(
+            status_code=422,
+            detail="target.node_instance_id is required when target.runner is 'lan_node'",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
     # Soft warning (not a block): lerobot saves/logs on `step % freq == 0`, so a
     # frequency larger than the total step count means the action never fires —
     # no checkpoint gets saved / no metrics logged. Almost always a config
@@ -1575,6 +1591,16 @@ async def create_training_job(req: Request):
             status_code=409,
             detail=f"{source} was already continued by {continued_by}. {remedy}",
         ) from exc
+    except NodeNotFoundError as exc:
+        # The request named a node this install has never registered — a bad
+        # reference in the request, so 400 (not the DELETE route's 404: there
+        # is no /nodes/{id} resource being addressed here).
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        # Same status the node routes use for a peer that didn't answer.
+        # Raised by the pre-record resolve (no record) or by the runner's
+        # submission (record already finalised `failed` by the registry).
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
