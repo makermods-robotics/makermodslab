@@ -40,6 +40,7 @@ from lerobot.teleoperators import (
 from lerobot.utils.utils import init_logging
 
 from .api_errors import ErrorCode
+from .session_events import notify_session_changed
 from .utils.config import calibration_dir_for_device, save_robot_record
 
 logger = logging.getLogger(__name__)
@@ -373,6 +374,10 @@ class CalibrationManager:
                 self._step_complete.clear()
                 self.calibration_thread.start()
 
+            # The claim above (calibration_active=True under the lock) is the
+            # real state transition — broadcast the hint so every WS client
+            # refetches /calibration-status.
+            notify_session_changed("calibration", True, phase="connecting")
             return {"success": True, "message": "Calibration started"}
 
         except Exception as e:
@@ -380,6 +385,10 @@ class CalibrationManager:
             self._update_status(
                 calibration_active=False, status="error", error=str(e), message="Failed to start calibration"
             )
+            # Undo any claim hint: a start that failed after claiming must not
+            # leave clients believing a session is live. (Harmless when the
+            # failure predates the claim — clients refetch and see idle.)
+            notify_session_changed("calibration", False, phase="error")
             return {"success": False, "message": str(e)}
 
     def complete_step(self) -> dict[str, Any]:
@@ -790,6 +799,9 @@ class CalibrationManager:
         self._cleanup_device()
         self._recording_active = False
         self._update_status(calibration_active=False, status=status, message=message)
+        # Final release: every terminal path (completed / cancelled / error /
+        # forced stop) funnels through here, after the device cleanup ran.
+        notify_session_changed("calibration", False, phase=status)
 
     def _cleanup_device(self):
         """Clean up device connection"""

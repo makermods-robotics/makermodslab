@@ -20,6 +20,7 @@ import MockHubBanner from "@/components/MockHubBanner";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
 import { HfAuthProvider } from "./contexts/HfAuthContext";
+import { SessionProvider } from "./contexts/SessionContext";
 
 const queryClient = new QueryClient();
 
@@ -30,6 +31,7 @@ function App() {
         <ThemeProvider>
           <LanguageProvider>
           <ApiProvider>
+           <SessionProvider>
             <HfAuthProvider>
               <UrdfProvider>
                 <DragAndDropProvider>
@@ -74,6 +76,7 @@ function App() {
                 </DragAndDropProvider>
               </UrdfProvider>
             </HfAuthProvider>
+           </SessionProvider>
           </ApiProvider>
           </LanguageProvider>
         </ThemeProvider>

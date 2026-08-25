@@ -25,6 +25,7 @@ from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
 from .api_errors import ErrorCode
+from .session_events import notify_session_changed
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,10 @@ async def wiggle_gripper(port: str) -> dict:
         }
 
     wiggle_active = True
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client learns the robot is busy (wiggle has no status
+    # endpoint of its own; consumers see the busy state via start refusals).
+    notify_session_changed("wiggle", True)
     try:
         await asyncio.wait_for(
             asyncio.to_thread(_run_wiggle_and_clear_flag, port.strip()),
@@ -204,3 +209,6 @@ def _run_wiggle_and_clear_flag(port: str) -> None:
         _wiggle_gripper_sync(port)
     finally:
         wiggle_active = False
+        # Final release, tied to the thread's REAL exit (like the flag) so
+        # the hint can never claim idle while the port is still held.
+        notify_session_changed("wiggle", False)

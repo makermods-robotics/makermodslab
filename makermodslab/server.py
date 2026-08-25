@@ -53,6 +53,7 @@ from . import (
     models as model_browser,
     record as record_state,
     rollout as rollout_state,
+    session_events,
 )
 
 # Import our custom calibration functionality
@@ -481,6 +482,20 @@ class ConnectionManager:
             with contextlib.suppress(queue.Full):
                 self.broadcast_queue.put_nowait({"type": "jobs_changed", "timestamp": time.time()})
 
+    def notify_session_changed(self, event: dict) -> None:
+        """Push a feature module's 'session_changed' hint to all WS clients.
+
+        Wired into makermodslab/session_events.py below so the feature modules
+        never import the manager. The event dict is built by the seam
+        (type/session/timestamp); like notify_jobs_changed this is a droppable
+        hint — skipped silently with no clients connected, and consumers
+        refetch the relevant status endpoint rather than trusting the payload,
+        so a missed broadcast is self-healing (every page already polls).
+        """
+        if self.is_running and self.active_connections:
+            with contextlib.suppress(queue.Full):
+                self.broadcast_queue.put_nowait(event)
+
     def notify_job_progress(self, snapshots: list[dict]) -> None:
         """Push a 'job_progress' event with per-running-job snapshots.
 
@@ -498,6 +513,7 @@ class ConnectionManager:
 manager = ConnectionManager()
 job_registry.set_on_change(manager.notify_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
+session_events.set_notifier(manager.notify_session_changed)
 
 
 # Frontend policy_type -> lerobot registry name. In this lerobot pin the names

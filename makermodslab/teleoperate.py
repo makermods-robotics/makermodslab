@@ -31,6 +31,7 @@ from .api_errors import ErrorCode
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
+from .session_events import notify_session_changed
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
@@ -867,6 +868,10 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         releasing = False
         _release_now.clear()
 
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client (any page, any remote UI) refetches the status endpoint.
+    notify_session_changed("teleoperation", True)
+
     robot = None
     teleop_device = None
     try:
@@ -1041,6 +1046,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     # stop (release-now) skips/aborts the return; error exits
                     # skip this — the bus may be gone, release ASAP.
                     releasing = True
+                    # Still energized and holding the ports — a phase of this
+                    # session, not idle yet (mirrors the status payload).
+                    notify_session_changed("teleoperation", True, phase="releasing")
                     _return_followers_to_rest(follower_rest_poses, _release_now)
                 # Belt and braces: disable torque explicitly before disconnect.
                 # disconnect() disables torque too, but if it fails partway the
@@ -1065,6 +1073,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 releasing = False
                 current_robot = None
                 current_teleop = None
+                # Final release: cleanup (including error paths) is done and
+                # the ports are free.
+                notify_session_changed("teleoperation", False)
 
         teleoperation_thread = threading.Thread(
             target=teleoperation_worker, name="teleoperation-worker", daemon=True
@@ -1103,6 +1114,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         teleoperation_active = False
         current_robot = None
         current_teleop = None
+        # The claim above already broadcast active=True; undo the hint now
+        # that the setup failure released everything.
+        notify_session_changed("teleoperation", False)
         logger.error(f"Failed to start teleoperation: {e}")
         # str(e) is already a user-facing message for the connection failures
         # raised above; the toast title supplies the "error starting" context.
