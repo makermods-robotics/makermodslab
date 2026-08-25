@@ -283,6 +283,83 @@
         "title": "CameraInfo",
         "type": "object"
       },
+      "CheckpointImageFeature": {
+        "description": "One camera's expected input size in a checkpoint's policy config\n(jobs.py JobRegistry.get_policy_config_summary).",
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "height",
+          "width"
+        ],
+        "title": "CheckpointImageFeature",
+        "type": "object"
+      },
+      "CheckpointPolicyConfigResponse": {
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature.",
+        "properties": {
+          "action_dim": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Dim"
+          },
+          "image_features": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CheckpointImageFeature"
+            },
+            "title": "Image Features",
+            "type": "object"
+          },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
+          "requires_task": {
+            "title": "Requires Task",
+            "type": "boolean"
+          },
+          "state_dim": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State Dim"
+          }
+        },
+        "required": [
+          "policy_type",
+          "image_features",
+          "requires_task",
+          "state_dim",
+          "action_dim"
+        ],
+        "title": "CheckpointPolicyConfigResponse",
+        "type": "object"
+      },
       "CustomDatasetRequest": {
         "properties": {
           "repo_id": {
@@ -1063,6 +1140,246 @@
         "title": "HfLoginResponse",
         "type": "object"
       },
+      "HubJobDismissResponse": {
+        "description": "server.py dismiss_hub_job — job_id is the stripped id that was persisted\nto the dismissal file, not necessarily the caller's raw input.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "job_id"
+        ],
+        "title": "HubJobDismissResponse",
+        "type": "object"
+      },
+      "HubJobItem": {
+        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "docker_image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Image"
+          },
+          "flavor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flavor"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "space_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Space Id"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HubJobStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "docker_image",
+          "space_id",
+          "flavor",
+          "status",
+          "owner",
+          "url"
+        ],
+        "title": "HubJobItem",
+        "type": "object"
+      },
+      "HubJobStatus": {
+        "description": "The {stage, message} pair of one Hub job (server.py list_hub_jobs, from\nhuggingface_hub's JobStatus).",
+        "properties": {
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage",
+          "message"
+        ],
+        "title": "HubJobStatus",
+        "type": "object"
+      },
+      "HubJobsResponse": {
+        "description": "server.py list_hub_jobs. Heterogeneous by branch: the unauthenticated\nbody is exactly {authenticated, jobs, models} — jobs_permission is absent\nthere (never null), and present (true/false) when authenticated. The route\nserializes with exclude_unset so each branch keeps its exact keys while the\nrows' legitimate nulls (name, created_at, status, …) still go out.",
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/HubJobItem"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "jobs_permission": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Jobs Permission"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/HubModelItem"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "authenticated",
+          "jobs",
+          "models"
+        ],
+        "title": "HubJobsResponse",
+        "type": "object"
+      },
+      "HubModelDeleteResponse": {
+        "description": "server.py delete_hub_model (success path only; refusals raise) —\nidempotent, so an already-gone repo reports success too.",
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "repo_id"
+        ],
+        "title": "HubModelDeleteResponse",
+        "type": "object"
+      },
+      "HubModelItem": {
+        "description": "One row of GET /jobs/hub `models` (server.py list_hub_jobs `_add`).",
+        "properties": {
+          "last_modified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Modified"
+          },
+          "private": {
+            "title": "Private",
+            "type": "boolean"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "last_modified",
+          "private"
+        ],
+        "title": "HubModelItem",
+        "type": "object"
+      },
       "IdentifyArmRequest": {
         "properties": {
           "ports": {
@@ -1282,6 +1599,335 @@
         "title": "InstallStatusResponse",
         "type": "object"
       },
+      "JobCheckpoint": {
+        "description": "One checkpoint produced by a training job.\n\n`ref` is opaque to the frontend; the inference handler resolves it back\nto a usable `--policy.path` value (a local dir for both sources, after\nsnapshot_download for hub refs).",
+        "properties": {
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "hub"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "source",
+          "ref"
+        ],
+        "title": "JobCheckpoint",
+        "type": "object"
+      },
+      "JobCheckpointsResponse": {
+        "description": "server.py get_job_checkpoints — JobRegistry.list_checkpoints, ascending\nby step.",
+        "properties": {
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/JobCheckpoint"
+            },
+            "title": "Checkpoints",
+            "type": "array"
+          }
+        },
+        "required": [
+          "checkpoints"
+        ],
+        "title": "JobCheckpointsResponse",
+        "type": "object"
+      },
+      "JobListResponse": {
+        "description": "server.py list_jobs — JobRegistry.list() records (checkpoint_count and\nthe resume lineage annotated at read time), newest first.",
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobRecord"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs"
+        ],
+        "title": "JobListResponse",
+        "type": "object"
+      },
+      "JobLogsResponse": {
+        "description": "server.py get_job_logs / get_job_log_file — both return {\"logs\": [...]}\nof the same LogLine model: the live drained tail for /logs, the whole\npersisted log.jsonl for /log-file (JSON, not a file download).",
+        "properties": {
+          "logs": {
+            "items": {
+              "$ref": "#/components/schemas/LogLine"
+            },
+            "title": "Logs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "logs"
+        ],
+        "title": "JobLogsResponse",
+        "type": "object"
+      },
+      "JobMetricsHistoryResponse": {
+        "description": "server.py get_job_metrics_history — the per-step series JobRegistry.\nread_metrics_history reconstructs from log.jsonl across the resume chain.",
+        "properties": {
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/MetricsHistoryPoint"
+            },
+            "title": "Points",
+            "type": "array"
+          }
+        },
+        "required": [
+          "points"
+        ],
+        "title": "JobMetricsHistoryResponse",
+        "type": "object"
+      },
+      "JobRecord": {
+        "properties": {
+          "ancestor_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Ancestor Ids",
+            "type": "array"
+          },
+          "checkpoint_count": {
+            "default": 0,
+            "title": "Checkpoint Count",
+            "type": "integer"
+          },
+          "checkpoints_hub_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoints Hub Repo Id"
+          },
+          "checkpoints_hub_steps": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Checkpoints Hub Steps",
+            "type": "array"
+          },
+          "child_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Child Ids",
+            "type": "array"
+          },
+          "config": {
+            "$ref": "#/components/schemas/TrainingRequest"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "hf_flavor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Flavor"
+          },
+          "hf_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Job Id"
+          },
+          "hf_job_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Job Url"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_number": {
+            "default": 0,
+            "title": "Job Number",
+            "type": "integer"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/TrainingMetrics",
+            "default": {
+              "current_step": 0,
+              "total_steps": 0
+            }
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "output_dir": {
+            "title": "Output Dir",
+            "type": "string"
+          },
+          "process_pid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Process Pid"
+          },
+          "runner": {
+            "default": "local",
+            "enum": [
+              "local",
+              "hf_cloud",
+              "imported"
+            ],
+            "title": "Runner",
+            "type": "string"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "done",
+              "failed",
+              "interrupted"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "wandb_run_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wandb Run Url"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "state",
+          "config",
+          "output_dir",
+          "started_at"
+        ],
+        "title": "JobRecord",
+        "type": "object"
+      },
+      "LogLine": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "timestamp",
+          "message"
+        ],
+        "title": "LogLine",
+        "type": "object"
+      },
       "MergeLogEntry": {
         "description": "One drained line of the merge subprocess log (merge.py _enqueue).",
         "properties": {
@@ -1403,6 +2049,53 @@
           "logs"
         ],
         "title": "MergeStatusResponse",
+        "type": "object"
+      },
+      "MetricsHistoryPoint": {
+        "description": "One (step, metrics) sample reconstructed from a job's log.jsonl.\n\nUsed by GET /jobs/{id}/metrics-history to seed the monitoring charts.\nA point is emitted for each log line that carried a `step: ... loss: ...`\npayload (the log-freq lines from lerobot). Tqdm progress lines are\nskipped — they carry step + ETA but no loss/lr/grdn.",
+        "properties": {
+          "grad_norm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grad Norm"
+          },
+          "loss": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loss"
+          },
+          "lr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lr"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step"
+        ],
+        "title": "MetricsHistoryPoint",
         "type": "object"
       },
       "ModelDeleteBody": {
@@ -2170,6 +2863,115 @@
         "title": "RobotPortResponse",
         "type": "object"
       },
+      "RunnerFlavor": {
+        "description": "One HF Jobs hardware flavor (server.py get_runners_hardware, flattened\nfrom huggingface_hub's JobHardwareInfo). accelerator is the label\n_format_accelerator renders (\"2× Nvidia A100\"), null on cpu-* flavors, as\nis vram (the Hub words it as a string, \"16 GB\"). unit_cost_usd is\n`int | float` so it passes through exactly as the Hub sent it.",
+        "properties": {
+          "accelerator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accelerator"
+          },
+          "cpu": {
+            "title": "Cpu",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pretty_name": {
+            "title": "Pretty Name",
+            "type": "string"
+          },
+          "ram": {
+            "title": "Ram",
+            "type": "string"
+          },
+          "unit_cost_usd": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Unit Cost Usd"
+          },
+          "unit_label": {
+            "title": "Unit Label",
+            "type": "string"
+          },
+          "vram": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vram"
+          }
+        },
+        "required": [
+          "name",
+          "pretty_name",
+          "cpu",
+          "ram",
+          "accelerator",
+          "vram",
+          "unit_cost_usd",
+          "unit_label"
+        ],
+        "title": "RunnerFlavor",
+        "type": "object"
+      },
+      "RunnersHardwareResponse": {
+        "description": "server.py get_runners_hardware — every branch (unauthenticated, flavor\nfetch failed, cached catalog) carries all four keys; username is null (not\nabsent) when unauthenticated.",
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "flavors": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerFlavor"
+            },
+            "title": "Flavors",
+            "type": "array"
+          },
+          "offline": {
+            "title": "Offline",
+            "type": "boolean"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "required": [
+          "authenticated",
+          "username",
+          "flavors",
+          "offline"
+        ],
+        "title": "RunnersHardwareResponse",
+        "type": "object"
+      },
       "SuccessRepoIdResponse": {
         "description": "The pin/hide mutations' shared shape (server.py datasets_save_custom /\ndatasets_remove_custom / datasets_hide / datasets_unhide and their models\nmirrors) — success is False when a remove/unhide had nothing to remove.",
         "properties": {
@@ -2286,6 +3088,499 @@
           "follower_config"
         ],
         "title": "TeleoperateRequest",
+        "type": "object"
+      },
+      "TrainingMetrics": {
+        "properties": {
+          "current_loss": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Loss"
+          },
+          "current_lr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Lr"
+          },
+          "current_step": {
+            "default": 0,
+            "title": "Current Step",
+            "type": "integer"
+          },
+          "eta_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eta Seconds"
+          },
+          "grad_norm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grad Norm"
+          },
+          "total_steps": {
+            "default": 0,
+            "title": "Total Steps",
+            "type": "integer"
+          }
+        },
+        "title": "TrainingMetrics",
+        "type": "object"
+      },
+      "TrainingRequest": {
+        "properties": {
+          "batch_size": {
+            "default": 8,
+            "title": "Batch Size",
+            "type": "integer"
+          },
+          "config_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Path"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
+          },
+          "dataset_repo_id": {
+            "title": "Dataset Repo Id",
+            "type": "string"
+          },
+          "dataset_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Revision"
+          },
+          "dataset_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Root"
+          },
+          "env_eval_freq": {
+            "default": 0,
+            "title": "Env Eval Freq",
+            "type": "integer"
+          },
+          "env_task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env Task"
+          },
+          "env_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env Type"
+          },
+          "eval_batch_size": {
+            "default": 50,
+            "title": "Eval Batch Size",
+            "type": "integer"
+          },
+          "eval_n_episodes": {
+            "default": 10,
+            "title": "Eval N Episodes",
+            "type": "integer"
+          },
+          "eval_use_async_envs": {
+            "default": false,
+            "title": "Eval Use Async Envs",
+            "type": "boolean"
+          },
+          "finetune_from_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finetune From Job Id"
+          },
+          "finetune_from_step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finetune From Step"
+          },
+          "hf_job_timeout": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Job Timeout"
+          },
+          "job_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Name"
+          },
+          "log_freq": {
+            "default": 50,
+            "title": "Log Freq",
+            "type": "integer"
+          },
+          "num_workers": {
+            "default": 4,
+            "title": "Num Workers",
+            "type": "integer"
+          },
+          "optimizer_grad_clip_norm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Optimizer Grad Clip Norm"
+          },
+          "optimizer_lr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Optimizer Lr"
+          },
+          "optimizer_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "adam",
+            "title": "Optimizer Type"
+          },
+          "optimizer_weight_decay": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Optimizer Weight Decay"
+          },
+          "output_dir": {
+            "default": "outputs/train",
+            "title": "Output Dir",
+            "type": "string"
+          },
+          "policy_device": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "auto",
+            "title": "Policy Device"
+          },
+          "policy_pretrained_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Pretrained Path"
+          },
+          "policy_push_to_hub": {
+            "default": false,
+            "title": "Policy Push To Hub",
+            "type": "boolean"
+          },
+          "policy_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Repo Id"
+          },
+          "policy_type": {
+            "default": "act",
+            "title": "Policy Type",
+            "type": "string"
+          },
+          "policy_use_amp": {
+            "default": false,
+            "title": "Policy Use Amp",
+            "type": "boolean"
+          },
+          "resume": {
+            "default": false,
+            "title": "Resume",
+            "type": "boolean"
+          },
+          "resume_from_checkpoint_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume From Checkpoint Job Id"
+          },
+          "resume_from_hub_repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume From Hub Repo"
+          },
+          "resume_from_hub_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume From Hub Step"
+          },
+          "resume_from_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume From Job Id"
+          },
+          "resume_from_step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume From Step"
+          },
+          "resume_from_uploaded_checkpoint": {
+            "default": false,
+            "title": "Resume From Uploaded Checkpoint",
+            "type": "boolean"
+          },
+          "save_checkpoint": {
+            "default": true,
+            "title": "Save Checkpoint",
+            "type": "boolean"
+          },
+          "save_freq": {
+            "default": 1000,
+            "title": "Save Freq",
+            "type": "integer"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 1000,
+            "title": "Seed"
+          },
+          "steps": {
+            "default": 10000,
+            "title": "Steps",
+            "type": "integer"
+          },
+          "upload_finetune_checkpoint": {
+            "default": false,
+            "title": "Upload Finetune Checkpoint",
+            "type": "boolean"
+          },
+          "upload_resume_checkpoint": {
+            "default": false,
+            "title": "Upload Resume Checkpoint",
+            "type": "boolean"
+          },
+          "use_policy_training_preset": {
+            "default": true,
+            "title": "Use Policy Training Preset",
+            "type": "boolean"
+          },
+          "wandb_disable_artifact": {
+            "default": false,
+            "title": "Wandb Disable Artifact",
+            "type": "boolean"
+          },
+          "wandb_enable": {
+            "default": false,
+            "title": "Wandb Enable",
+            "type": "boolean"
+          },
+          "wandb_entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wandb Entity"
+          },
+          "wandb_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "online",
+            "title": "Wandb Mode"
+          },
+          "wandb_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wandb Notes"
+          },
+          "wandb_project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wandb Project"
+          },
+          "wandb_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wandb Run Id"
+          }
+        },
+        "required": [
+          "dataset_repo_id"
+        ],
+        "title": "TrainingRequest",
         "type": "object"
       },
       "UpdateResult": {
@@ -3990,7 +5285,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobListResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4006,7 +5303,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Jobs"
+        "summary": "List Jobs",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/hub": {
@@ -4017,13 +5317,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HubJobsResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "List Hub Jobs"
+        "summary": "List Hub Jobs",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/hub/jobs/{job_id}/dismiss": {
@@ -4045,7 +5350,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HubJobDismissResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4061,7 +5368,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Dismiss Hub Job"
+        "summary": "Dismiss Hub Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/hub/models/{repo_id}": {
@@ -4083,7 +5393,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HubModelDeleteResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4099,12 +5411,15 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Delete Hub Model"
+        "summary": "Delete Hub Model",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/import": {
       "post": {
-        "description": "Register an external model (local dir or HF repo) as a pseudo-job.\n\nImporting an already-registered source is idempotent: the registry\nreturns the EXISTING record (id and display alias preserved), and the\nresponse carries `already_imported: true` with a 200 (not 201) so the\nfrontend can say \"already imported\" instead of pretending a new entry\nwas created.",
+        "description": "Register an external model (local dir or HF repo) as a pseudo-job.\n\nImporting an already-registered source is idempotent: the registry\nreturns the EXISTING record (id and display alias preserved), and the\nresponse carries `already_imported: true` with a 200 (not 201) so the\nfrontend can say \"already imported\" instead of pretending a new entry\nwas created. That branch is a JSONResponse and passes through the\ndeclared response_model untouched — the model documents the 201.",
         "operationId": "import_model",
         "requestBody": {
           "content": {
@@ -4120,7 +5435,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -4136,7 +5453,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Import Model"
+        "summary": "Import Model",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/runners/hardware": {
@@ -4147,13 +5467,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RunnersHardwareResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Runners Hardware"
+        "summary": "Get Runners Hardware",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/training": {
@@ -4163,13 +5488,18 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Create Training Job"
+        "summary": "Create Training Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}": {
@@ -4201,7 +5531,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Delete Job"
+        "summary": "Delete Job",
+        "tags": [
+          "jobs"
+        ]
       },
       "get": {
         "operationId": "get_job",
@@ -4220,7 +5553,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -4236,7 +5571,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job"
+        "summary": "Get Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/checkpoints": {
@@ -4258,7 +5596,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobCheckpointsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4274,7 +5614,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Checkpoints"
+        "summary": "Get Job Checkpoints",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/checkpoints/{step}/download": {
@@ -4352,7 +5695,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CheckpointPolicyConfigResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4368,7 +5713,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Checkpoint Policy Config"
+        "summary": "Get Checkpoint Policy Config",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/log-file": {
@@ -4390,7 +5738,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4406,7 +5756,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Log File"
+        "summary": "Get Job Log File",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/logs": {
@@ -4427,7 +5780,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4443,7 +5798,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Logs"
+        "summary": "Get Job Logs",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/metrics-history": {
@@ -4465,7 +5823,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobMetricsHistoryResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4481,7 +5841,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Metrics History"
+        "summary": "Get Job Metrics History",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/rename": {
@@ -4513,7 +5876,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -4529,7 +5894,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Rename Job"
+        "summary": "Rename Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/jobs/{job_id}/stop": {
@@ -4550,7 +5918,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -4566,7 +5936,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Stop Job"
+        "summary": "Stop Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/api/v1/models": {
@@ -7707,7 +9080,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobListResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7723,7 +9098,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Jobs"
+        "summary": "List Jobs",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/hub": {
@@ -7734,13 +9112,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HubJobsResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "List Hub Jobs"
+        "summary": "List Hub Jobs",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/hub/jobs/{job_id}/dismiss": {
@@ -7762,7 +9145,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HubJobDismissResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7778,7 +9163,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Dismiss Hub Job"
+        "summary": "Dismiss Hub Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/hub/models/{repo_id}": {
@@ -7800,7 +9188,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HubModelDeleteResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7816,12 +9206,15 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Delete Hub Model"
+        "summary": "Delete Hub Model",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/import": {
       "post": {
-        "description": "Register an external model (local dir or HF repo) as a pseudo-job.\n\nImporting an already-registered source is idempotent: the registry\nreturns the EXISTING record (id and display alias preserved), and the\nresponse carries `already_imported: true` with a 200 (not 201) so the\nfrontend can say \"already imported\" instead of pretending a new entry\nwas created.",
+        "description": "Register an external model (local dir or HF repo) as a pseudo-job.\n\nImporting an already-registered source is idempotent: the registry\nreturns the EXISTING record (id and display alias preserved), and the\nresponse carries `already_imported: true` with a 200 (not 201) so the\nfrontend can say \"already imported\" instead of pretending a new entry\nwas created. That branch is a JSONResponse and passes through the\ndeclared response_model untouched — the model documents the 201.",
         "operationId": "import_model_jobs_import_post",
         "requestBody": {
           "content": {
@@ -7837,7 +9230,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -7853,7 +9248,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Import Model"
+        "summary": "Import Model",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/runners/hardware": {
@@ -7864,13 +9262,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RunnersHardwareResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Runners Hardware"
+        "summary": "Get Runners Hardware",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/training": {
@@ -7880,13 +9283,18 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Create Training Job"
+        "summary": "Create Training Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}": {
@@ -7918,7 +9326,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Delete Job"
+        "summary": "Delete Job",
+        "tags": [
+          "jobs"
+        ]
       },
       "get": {
         "operationId": "get_job_jobs__job_id__get",
@@ -7937,7 +9348,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -7953,7 +9366,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job"
+        "summary": "Get Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}/checkpoints": {
@@ -7975,7 +9391,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobCheckpointsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7991,7 +9409,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Checkpoints"
+        "summary": "Get Job Checkpoints",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}/checkpoints/{step}/download": {
@@ -8069,7 +9490,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CheckpointPolicyConfigResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8085,7 +9508,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Checkpoint Policy Config"
+        "summary": "Get Checkpoint Policy Config",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}/log-file": {
@@ -8107,7 +9533,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8123,7 +9551,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Log File"
+        "summary": "Get Job Log File",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}/logs": {
@@ -8144,7 +9575,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8160,7 +9593,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Logs"
+        "summary": "Get Job Logs",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}/metrics-history": {
@@ -8182,7 +9618,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobMetricsHistoryResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8198,7 +9636,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Job Metrics History"
+        "summary": "Get Job Metrics History",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}/rename": {
@@ -8230,7 +9671,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -8246,7 +9689,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Rename Job"
+        "summary": "Rename Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/jobs/{job_id}/stop": {
@@ -8267,7 +9713,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
               }
             },
             "description": "Successful Response"
@@ -8283,7 +9731,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Stop Job"
+        "summary": "Stop Job",
+        "tags": [
+          "jobs"
+        ]
       }
     },
     "/models": {

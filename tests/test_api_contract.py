@@ -234,11 +234,14 @@ def test_v1_mirrors_legacy_surface():
     )
 
 
-# Routes whose v1 response is a file or stream, not a JSON document — a
-# Pydantic response_model does not apply to them. Kept out of the shrinking
-# list so "fully typed" can be reached without lying about these.
+# Routes whose v1 response is a file, a stream, or no body at all — never a
+# JSON document, so a Pydantic response_model does not apply to them. Kept out
+# of the shrinking list so "fully typed" can be reached without lying about
+# these.
 RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
     [
+        # 204 No Content: a successful job delete has no body to model.
+        "DELETE /api/v1/jobs/{job_id}",
         # Raw Response: calibration JSON served as an attachment download.
         "GET /api/v1/calibration-configs/{device_type}/{config_name}/download",
         # StreamingResponse: MJPEG camera preview stream.
@@ -258,8 +261,6 @@ RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
 UNTYPED_V1_ROUTES: frozenset[str] = frozenset(
     [
         "DELETE /api/v1/calibration-configs/{device_type}/{config_name}",
-        "DELETE /api/v1/jobs/hub/models/{repo_id:path}",
-        "DELETE /api/v1/jobs/{job_id}",
         "DELETE /api/v1/robots/{name}",
         "GET /api/v1/auto-calibration-batch-status",
         "GET /api/v1/auto-calibration-status",
@@ -267,15 +268,6 @@ UNTYPED_V1_ROUTES: frozenset[str] = frozenset(
         "GET /api/v1/calibration-status",
         "GET /api/v1/inference-log",
         "GET /api/v1/inference-status",
-        "GET /api/v1/jobs",
-        "GET /api/v1/jobs/hub",
-        "GET /api/v1/jobs/runners/hardware",
-        "GET /api/v1/jobs/{job_id}",
-        "GET /api/v1/jobs/{job_id}/checkpoints",
-        "GET /api/v1/jobs/{job_id}/checkpoints/{step}/policy-config",
-        "GET /api/v1/jobs/{job_id}/log-file",
-        "GET /api/v1/jobs/{job_id}/logs",
-        "GET /api/v1/jobs/{job_id}/metrics-history",
         "GET /api/v1/recording-log",
         "GET /api/v1/recording-status",
         "GET /api/v1/replay-status",
@@ -288,11 +280,6 @@ UNTYPED_V1_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/identify-arm",
         "POST /api/v1/inference-episode-stop",
         "POST /api/v1/inference-next-episode",
-        "POST /api/v1/jobs/hub/jobs/{job_id}/dismiss",
-        "POST /api/v1/jobs/import",
-        "POST /api/v1/jobs/training",
-        "POST /api/v1/jobs/{job_id}/rename",
-        "POST /api/v1/jobs/{job_id}/stop",
         "POST /api/v1/move-arm",
         "POST /api/v1/open-calibration-folder",
         "POST /api/v1/recording-exit-early",

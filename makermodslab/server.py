@@ -138,6 +138,18 @@ from .schemas.datasets import (
     UploadStartResponse,
     UploadStatusResponse,
 )
+from .schemas.jobs import (
+    CheckpointPolicyConfigResponse,
+    HubJobDismissResponse,
+    HubJobsResponse,
+    HubModelDeleteResponse,
+    JobCheckpointsResponse,
+    JobListResponse,
+    JobLogsResponse,
+    JobMetricsHistoryResponse,
+    JobRecord,
+    RunnersHardwareResponse,
+)
 from .schemas.models import (
     ModelDeleteResponse,
     ModelInfoResponse,
@@ -1377,7 +1389,7 @@ def _is_finished_run(job_id: str) -> bool:
         return False
 
 
-@router.post("/jobs/training", status_code=201)
+@router.post("/jobs/training", status_code=201, response_model=JobRecord, tags=["jobs"])
 async def create_training_job(req: Request):
     raw = await req.json()
     body = StartTrainingBody.from_legacy(raw)
@@ -1515,7 +1527,7 @@ class ImportModelRequest(BaseModel):
     name: str | None = None
 
 
-@router.post("/jobs/import", status_code=201)
+@router.post("/jobs/import", status_code=201, response_model=JobRecord, tags=["jobs"])
 def import_model(body: ImportModelRequest):
     """Register an external model (local dir or HF repo) as a pseudo-job.
 
@@ -1523,7 +1535,8 @@ def import_model(body: ImportModelRequest):
     returns the EXISTING record (id and display alias preserved), and the
     response carries `already_imported: true` with a 200 (not 201) so the
     frontend can say "already imported" instead of pretending a new entry
-    was created."""
+    was created. That branch is a JSONResponse and passes through the
+    declared response_model untouched — the model documents the 201."""
     try:
         existing = job_registry.find_imported(body.source)
         record = job_registry.register_imported(body.source, body.name)
@@ -1536,7 +1549,7 @@ def import_model(body: ImportModelRequest):
     return record
 
 
-@router.get("/jobs")
+@router.get("/jobs", response_model=JobListResponse, tags=["jobs"])
 def list_jobs(limit: int = 10):
     return {"jobs": job_registry.list(limit=limit)}
 
@@ -1703,7 +1716,12 @@ def _fan_out_model_authors(authors: list[str], call) -> list:
     return [r for r in results if r is not None]
 
 
-@router.get("/jobs/hub")
+@router.get(
+    "/jobs/hub",
+    response_model=HubJobsResponse,
+    response_model_exclude_unset=True,
+    tags=["jobs"],
+)
 def list_hub_jobs():
     """List the user's HF Cloud compute Jobs and their uploaded LeRobot model
     repos on huggingface.co.
@@ -1818,7 +1836,7 @@ def list_hub_jobs():
     return response
 
 
-@router.delete("/jobs/hub/models/{repo_id:path}")
+@router.delete("/jobs/hub/models/{repo_id:path}", response_model=HubModelDeleteResponse, tags=["jobs"])
 def delete_hub_model(repo_id: str):
     """Permanently delete a model repo from the Hugging Face Hub.
 
@@ -1883,7 +1901,7 @@ def delete_hub_model(repo_id: str):
     return {"status": "success", "repo_id": repo_id}
 
 
-@router.post("/jobs/hub/jobs/{job_id}/dismiss")
+@router.post("/jobs/hub/jobs/{job_id}/dismiss", response_model=HubJobDismissResponse, tags=["jobs"])
 def dismiss_hub_job(job_id: str):
     """Hide a Hub job from the /jobs/hub listing.
 
@@ -1899,7 +1917,7 @@ def dismiss_hub_job(job_id: str):
     return {"status": "success", "job_id": job_id.strip()}
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", response_model=JobRecord, tags=["jobs"])
 def get_job(job_id: str):
     try:
         return job_registry.get(job_id)
@@ -1907,7 +1925,7 @@ def get_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
 
 
-@router.get("/jobs/{job_id}/logs")
+@router.get("/jobs/{job_id}/logs", response_model=JobLogsResponse, tags=["jobs"])
 def get_job_logs(job_id: str):
     try:
         logs = job_registry.drain_logs(job_id)
@@ -1916,7 +1934,7 @@ def get_job_logs(job_id: str):
     return {"logs": logs}
 
 
-@router.get("/jobs/{job_id}/log-file")
+@router.get("/jobs/{job_id}/log-file", response_model=JobLogsResponse, tags=["jobs"])
 def get_job_log_file(job_id: str):
     """Return the entire on-disk log file for a job. Drains the live queue too
     so the next /logs poll returns only lines that arrived after this call."""
@@ -1930,7 +1948,7 @@ def get_job_log_file(job_id: str):
     return {"logs": logs}
 
 
-@router.get("/jobs/{job_id}/metrics-history")
+@router.get("/jobs/{job_id}/metrics-history", response_model=JobMetricsHistoryResponse, tags=["jobs"])
 def get_job_metrics_history(job_id: str):
     """Return the per-step loss/lr/grad-norm series reconstructed from the
     job's log.jsonl. Used to seed the monitoring charts so curves persist
@@ -1942,7 +1960,7 @@ def get_job_metrics_history(job_id: str):
     return {"points": points}
 
 
-@router.get("/jobs/{job_id}/checkpoints")
+@router.get("/jobs/{job_id}/checkpoints", response_model=JobCheckpointsResponse, tags=["jobs"])
 def get_job_checkpoints(job_id: str):
     """List the checkpoints saved for this job, ascending by step."""
     try:
@@ -1951,7 +1969,11 @@ def get_job_checkpoints(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
 
 
-@router.get("/jobs/{job_id}/checkpoints/{step}/policy-config")
+@router.get(
+    "/jobs/{job_id}/checkpoints/{step}/policy-config",
+    response_model=CheckpointPolicyConfigResponse,
+    tags=["jobs"],
+)
 def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
     policy_type, image_features (per-camera height/width), requires_task, and
@@ -2026,7 +2048,7 @@ class RenameJobBody(BaseModel):
     new_name: str
 
 
-@router.post("/jobs/{job_id}/rename")
+@router.post("/jobs/{job_id}/rename", response_model=JobRecord, tags=["jobs"])
 def rename_job(job_id: str, body: RenameJobBody):
     """Set a job's display alias (shown in place of the auto-generated name).
 
@@ -2045,7 +2067,7 @@ def rename_job(job_id: str, body: RenameJobBody):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/jobs/{job_id}/stop")
+@router.post("/jobs/{job_id}/stop", response_model=JobRecord, tags=["jobs"])
 def stop_job(job_id: str):
     try:
         return job_registry.stop(job_id)
@@ -2055,7 +2077,9 @@ def stop_job(job_id: str):
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is not running") from exc
 
 
-@router.delete("/jobs/{job_id}", status_code=204)
+# 204 No Content — there is no body for a response_model to describe, so the
+# route sits in RESPONSE_MODEL_EXEMPT (tests/test_api_contract.py) instead.
+@router.delete("/jobs/{job_id}", status_code=204, tags=["jobs"])
 def delete_job(job_id: str):
     try:
         record = job_registry.get(job_id)
@@ -2107,7 +2131,7 @@ def _format_accelerator(accelerator) -> str | None:
     return f"{quantity}× {name}" if quantity and quantity != "1" else name
 
 
-@router.get("/jobs/runners/hardware")
+@router.get("/jobs/runners/hardware", response_model=RunnersHardwareResponse, tags=["jobs"])
 def get_runners_hardware():
     """Return HF Jobs flavor catalog + auth state for the TargetCard.
 
