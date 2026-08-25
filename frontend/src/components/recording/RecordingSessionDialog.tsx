@@ -687,7 +687,7 @@ const RecordingSessionDialog: React.FC<{
       backendStatus?.dataset_repo_id || recordingConfig?.dataset_repo_id;
     if (repoId) {
       try {
-        await fetchWithHeaders(`${baseUrl}/delete-dataset`, {
+        await fetchWithHeaders(`${baseUrl}/api/v1/delete-dataset`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dataset_repo_id: repoId }),

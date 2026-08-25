@@ -118,6 +118,32 @@ from .rollout import (
 )
 
 # Response models for the typed /api/v1 surface (see makermodslab/schemas/).
+from .schemas.datasets import (
+    DatasetHubSettingsResponse,
+    DatasetHubStatusResponse,
+    DatasetInfoResponse,
+    DatasetListItem,
+    DatasetRenameResponse,
+    DatasetTagsResponse,
+    DatasetVisibilityResponse,
+    DeleteDatasetResponse,
+    DownloadStartResponse,
+    DownloadStatusResponse,
+    EpisodeJointSeriesResponse,
+    EpisodeSummary,
+    ImportResponse,
+    MergeStartResponse,
+    MergeStatusResponse,
+    SuccessRepoIdResponse,
+    UploadStartResponse,
+    UploadStatusResponse,
+)
+from .schemas.models import (
+    ModelDeleteResponse,
+    ModelInfoResponse,
+    ModelListItem,
+    ModelUploadResponse,
+)
 from .schemas.system import (
     AvailableCamerasResponse,
     AvailablePortsResponse,
@@ -714,7 +740,16 @@ def hf_auth_login(body: HfLoginBody):
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
-@router.get("/datasets")
+# exclude_unset: `saved_custom` exists only on pin-fold rows (absent, never
+# null, elsewhere) while `last_modified` is legitimately null on pinned rows —
+# unset-exclusion reproduces each producer's exact keys where None-exclusion
+# would eat the legitimate nulls.
+@router.get(
+    "/datasets",
+    response_model=list[DatasetListItem],
+    response_model_exclude_unset=True,
+    tags=["datasets"],
+)
 def datasets_list():
     """List datasets available to the user — Hub-owned + local cache.
 
@@ -723,7 +758,7 @@ def datasets_list():
     return dataset_browser.list_all_datasets()
 
 
-@router.get("/datasets/info")
+@router.get("/datasets/info", response_model=DatasetInfoResponse, tags=["datasets"])
 def datasets_info(repo_id: str):
     """Detail card for one dataset. Local cache first (full detail: episodes,
     cameras, tasks, size on disk — ``source: "local"``); a dataset with no
@@ -739,7 +774,7 @@ def datasets_info(repo_id: str):
     return info
 
 
-@router.get("/datasets/episodes")
+@router.get("/datasets/episodes", response_model=list[EpisodeSummary], tags=["datasets"])
 def datasets_episodes(repo_id: str):
     """Per-episode index/length/duration/tasks for the dataset viewer window.
     404 when the dataset isn't local or predates the v3.0 parquet episode
@@ -750,7 +785,7 @@ def datasets_episodes(repo_id: str):
     return episodes
 
 
-@router.get("/datasets/episode-joints")
+@router.get("/datasets/episode-joints", response_model=EpisodeJointSeriesResponse, tags=["datasets"])
 def datasets_episode_joints(repo_id: str, episode_index: int):
     """Per-frame timestamp + joint (observation.state) values for one episode,
     for the dataset viewer's joint-position chart."""
@@ -776,7 +811,7 @@ def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
     return FileResponse(video_path, media_type="video/mp4")
 
 
-@router.get("/datasets/hub-status")
+@router.get("/datasets/hub-status", response_model=DatasetHubStatusResponse, tags=["datasets"])
 def datasets_hub_status(repo_id: str):
     """Whether a dataset repo with this id exists on the Hub.
 
@@ -787,7 +822,7 @@ def datasets_hub_status(repo_id: str):
     return dataset_browser.get_hub_status(repo_id)
 
 
-@router.get("/datasets/hub-settings")
+@router.get("/datasets/hub-settings", response_model=DatasetHubSettingsResponse, tags=["datasets"])
 def datasets_hub_settings(repo_id: str):
     """Current Hub-side visibility + tags for a dataset, for pre-filling the
     post-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;
@@ -803,7 +838,7 @@ class DatasetVisibilityBody(BaseModel):
     private: bool
 
 
-@router.post("/datasets/visibility")
+@router.post("/datasets/visibility", response_model=DatasetVisibilityResponse, tags=["datasets"])
 def datasets_visibility(body: DatasetVisibilityBody):
     """Flip a Hub dataset's visibility (public <-> private). MUTATES the live
     repo. 400 offline; 403 when the token can't write the namespace; 502 on any
@@ -819,7 +854,7 @@ class DatasetTagsBody(BaseModel):
     tags: list[str]
 
 
-@router.post("/datasets/tags")
+@router.post("/datasets/tags", response_model=DatasetTagsResponse, tags=["datasets"])
 def datasets_tags(body: DatasetTagsBody):
     """Replace a Hub dataset card's ``tags:`` metadata. User tags run through
     with_makermodslab_tag first, so the required org tags are never dropped. MUTATES
@@ -836,7 +871,7 @@ class DatasetRenameBody(BaseModel):
     new_name: str
 
 
-@router.post("/datasets/rename")
+@router.post("/datasets/rename", response_model=DatasetRenameResponse, tags=["datasets"])
 def datasets_rename(body: DatasetRenameBody):
     """Rename a locally-cached dataset by moving its directory, and its Hub
     copy (if any) to match.
@@ -867,7 +902,7 @@ class CustomDatasetRequest(BaseModel):
 _CUSTOM_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
-@router.post("/datasets/custom")
+@router.post("/datasets/custom", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_save_custom(request: CustomDatasetRequest):
     """Pin a typed Hub dataset repo id so it persists in the picker listing.
 
@@ -887,7 +922,7 @@ def datasets_save_custom(request: CustomDatasetRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@router.delete("/datasets/custom")
+@router.delete("/datasets/custom", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_remove_custom(request: CustomDatasetRequest):
     """Unpin a saved custom dataset (does NOT touch the Hub or any local copy)."""
     repo_id = request.repo_id.strip()
@@ -896,7 +931,7 @@ def datasets_remove_custom(request: CustomDatasetRequest):
     return {"success": removed, "repo_id": repo_id}
 
 
-@router.post("/datasets/hide")
+@router.post("/datasets/hide", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_hide(request: CustomDatasetRequest):
     """Hide a Hub dataset from the picker listing ("remove from list").
 
@@ -914,7 +949,7 @@ def datasets_hide(request: CustomDatasetRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@router.delete("/datasets/hide")
+@router.delete("/datasets/hide", response_model=SuccessRepoIdResponse, tags=["datasets"])
 def datasets_unhide(request: CustomDatasetRequest):
     """Unhide a dataset so it reappears in the listing (does NOT touch the Hub)."""
     repo_id = request.repo_id.strip()
@@ -927,7 +962,7 @@ class DatasetDownloadRequest(BaseModel):
     repo_id: str
 
 
-@router.post("/datasets/download")
+@router.post("/datasets/download", response_model=DownloadStartResponse, tags=["datasets"])
 def datasets_download(request: DatasetDownloadRequest):
     """Download a Hub dataset into the local cache in the background.
 
@@ -944,7 +979,7 @@ def datasets_download(request: DatasetDownloadRequest):
     return result
 
 
-@router.get("/datasets/download-status")
+@router.get("/datasets/download-status", response_model=DownloadStatusResponse, tags=["datasets"])
 def datasets_download_status():
     """Current download state (idle | running | done | error) + repo_id, message,
     and error once failed. Polled by the info card so a download survives
@@ -957,7 +992,7 @@ class DatasetImportRequest(BaseModel):
     name: str | None = None
 
 
-@router.post("/datasets/import")
+@router.post("/datasets/import", response_model=ImportResponse, tags=["datasets"])
 def datasets_import(request: DatasetImportRequest):
     """Import a LeRobot dataset folder already on the server machine by COPYING
     it into the local cache (the user's source folder is left intact).
@@ -971,13 +1006,13 @@ def datasets_import(request: DatasetImportRequest):
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
-@router.post("/datasets/merge")
+@router.post("/datasets/merge", response_model=MergeStartResponse, tags=["datasets"])
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""
     return handle_start_merge(request)
 
 
-@router.get("/datasets/merge/status")
+@router.get("/datasets/merge/status", response_model=MergeStatusResponse, tags=["datasets"])
 def datasets_merge_status():
     """Current merge state + drained log lines (idle | running | done | error)."""
     return handle_merge_status()
@@ -1084,7 +1119,10 @@ def recording_resume():
     return handle_resume_recording()
 
 
-@router.post("/upload-dataset")
+# Tagged "datasets": handled in record.py for historical reasons, but this is a
+# dataset-library operation (push a recorded dataset to the Hub), not part of
+# the recording session flow.
+@router.post("/upload-dataset", response_model=UploadStartResponse, tags=["datasets"])
 def upload_dataset(request: UploadRequest):
     """Start a background upload of a local dataset to the Hub.
 
@@ -1097,13 +1135,21 @@ def upload_dataset(request: UploadRequest):
     return result
 
 
-@router.get("/upload-status")
+# exclude_unset: `docs_url` is set only alongside an auth-failure message
+# (absent otherwise, never null), while repo_id/message/dataset_url ARE null in
+# the idle state — unset-exclusion keeps both behaviors byte-identical.
+@router.get(
+    "/upload-status",
+    response_model=UploadStatusResponse,
+    response_model_exclude_unset=True,
+    tags=["datasets"],
+)
 def upload_status():
     """Current upload state + repo_id, message, and dataset_url once done."""
     return handle_upload_status()
 
 
-@router.post("/delete-dataset")
+@router.post("/delete-dataset", response_model=DeleteDatasetResponse, tags=["datasets"])
 def delete_dataset(request: DatasetInfoRequest):
     """Remove a recorded dataset directory from local disk."""
     return handle_delete_dataset(request)
@@ -1117,7 +1163,16 @@ def delete_dataset(request: DatasetInfoRequest):
 # Hub models are the user's LeRobot policy repos. See makermodslab/models.py.
 
 
-@router.get("/models")
+# exclude_unset: the listing merges four producers whose rows carry different
+# key sets (repo_id/private/target_steps/state/saved_custom are absent — never
+# null — outside their producer) while other keys are legitimately null; see
+# ModelListItem. Unset-exclusion reproduces each producer's exact keys.
+@router.get(
+    "/models",
+    response_model=list[ModelListItem],
+    response_model_exclude_unset=True,
+    tags=["models"],
+)
 def models_list():
     """List trained models available to the user — local runs + Hub repos.
 
@@ -1126,7 +1181,14 @@ def models_list():
     return model_browser.list_all_models()
 
 
-@router.get("/models/info")
+# exclude_unset for the same reason as GET /models: the local/hub/probe
+# branches carry different key sets (see ModelInfoResponse).
+@router.get(
+    "/models/info",
+    response_model=ModelInfoResponse,
+    response_model_exclude_unset=True,
+    tags=["models"],
+)
 def models_info(id: str):
     """Detail card for one model: policy type, base dataset, steps, size, and the
     local path (local) or Hub repo (hub). `id` is a local run id or a Hub repo id
@@ -1142,7 +1204,7 @@ class ModelUploadBody(BaseModel):
     repo_id: str | None = None
 
 
-@router.post("/models/upload")
+@router.post("/models/upload", response_model=ModelUploadResponse, tags=["models"])
 def models_upload(body: ModelUploadBody):
     """Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged
     model repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when
@@ -1158,7 +1220,7 @@ class ModelDeleteBody(BaseModel):
     id: str
 
 
-@router.post("/models/delete")
+@router.post("/models/delete", response_model=ModelDeleteResponse, tags=["models"])
 def models_delete(body: ModelDeleteBody):
     """Delete a local model — its training run's output dir (strictly sandboxed
     under outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404
@@ -1173,7 +1235,7 @@ class CustomModelRequest(BaseModel):
     repo_id: str
 
 
-@router.post("/models/custom")
+@router.post("/models/custom", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_save_custom(request: CustomModelRequest):
     """Pin a Hub model repo id so it persists in the /models listing.
 
@@ -1191,7 +1253,7 @@ def models_save_custom(request: CustomModelRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@router.delete("/models/custom")
+@router.delete("/models/custom", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_remove_custom(request: CustomModelRequest):
     """Unpin a saved custom model (does NOT touch the Hub or any local copy)."""
     repo_id = request.repo_id.strip()
@@ -1200,7 +1262,7 @@ def models_remove_custom(request: CustomModelRequest):
     return {"success": removed, "repo_id": repo_id}
 
 
-@router.post("/models/hide")
+@router.post("/models/hide", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_hide(request: CustomModelRequest):
     """Hide a Hub model from the picker listing ("remove from list").
 
@@ -1216,7 +1278,7 @@ def models_hide(request: CustomModelRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@router.delete("/models/hide")
+@router.delete("/models/hide", response_model=SuccessRepoIdResponse, tags=["models"])
 def models_unhide(request: CustomModelRequest):
     """Unhide a model so it reappears in the listing (does NOT touch the Hub)."""
     repo_id = request.repo_id.strip()
@@ -1229,7 +1291,7 @@ class ModelDownloadRequest(BaseModel):
     repo_id: str
 
 
-@router.post("/models/download")
+@router.post("/models/download", response_model=DownloadStartResponse, tags=["models"])
 def models_download(request: ModelDownloadRequest):
     """Download a Hub model checkpoint into the local models dir in the
     background. Returns immediately with {started, repo_id, message}; poll
@@ -1246,7 +1308,7 @@ def models_download(request: ModelDownloadRequest):
     return result
 
 
-@router.get("/models/download-status")
+@router.get("/models/download-status", response_model=DownloadStatusResponse, tags=["models"])
 def models_download_status():
     """Current model-download state (idle | running | done | error) + repo_id,
     message, and error once failed. Polled by the model info card so a download
@@ -1259,7 +1321,7 @@ class ModelImportRequest(BaseModel):
     name: str | None = None
 
 
-@router.post("/models/import")
+@router.post("/models/import", response_model=ImportResponse, tags=["models"])
 def models_import(request: ModelImportRequest):
     """Import a policy checkpoint folder already on the server machine by
     COPYING it into the local models dir (the source folder is left intact).

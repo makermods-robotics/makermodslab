@@ -463,7 +463,7 @@ export function mockHubResponse(
     return json(undefined, 204);
   }
 
-  if (method === "GET" && path === "/models") {
+  if (method === "GET" && path === "/api/v1/models") {
     return json(modelItems());
   }
 

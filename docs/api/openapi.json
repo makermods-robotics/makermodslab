@@ -322,6 +322,70 @@
         "title": "DatasetDownloadRequest",
         "type": "object"
       },
+      "DatasetHubSettingsResponse": {
+        "description": "datasets.py get_hub_settings (success path only; failures raise).",
+        "properties": {
+          "private": {
+            "title": "Private",
+            "type": "boolean"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repo_id",
+          "private",
+          "tags"
+        ],
+        "title": "DatasetHubSettingsResponse",
+        "type": "object"
+      },
+      "DatasetHubStatusResponse": {
+        "description": "datasets.py get_hub_status — url is null (not absent) for every status\nexcept on_hub, so None must NOT be excluded on this route.",
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "on_hub",
+              "local_only",
+              "absent",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "repo_id",
+          "status",
+          "url"
+        ],
+        "title": "DatasetHubStatusResponse",
+        "type": "object"
+      },
       "DatasetImportRequest": {
         "properties": {
           "name": {
@@ -359,6 +423,146 @@
         "title": "DatasetInfoRequest",
         "type": "object"
       },
+      "DatasetInfoResponse": {
+        "description": "datasets.py get_local_dataset_info / get_hub_dataset_info — both\nbranches carry every key. The hub summary degrades tasks to [] and\nsize_bytes to null (the repo isn't on disk). fps is `int | float` because\nit passes through from meta/info.json — a whole-number fps must stay the\ninteger the file holds, not become 30.0 on the wire.",
+        "properties": {
+          "cameras": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "robot_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot Type"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "hub"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/DatasetTaskCount"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "total_episodes": {
+            "title": "Total Episodes",
+            "type": "integer"
+          },
+          "total_frames": {
+            "title": "Total Frames",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repo_id",
+          "total_episodes",
+          "total_frames",
+          "fps",
+          "robot_type",
+          "cameras",
+          "tasks",
+          "size_bytes",
+          "source"
+        ],
+        "title": "DatasetInfoResponse",
+        "type": "object"
+      },
+      "DatasetListItem": {
+        "description": "One row of GET /datasets (datasets.py list_all_datasets).\n\nHeterogeneous on purpose: ``saved_custom`` exists only on rows the pin\nfold touched (a pinned hub row, or a local row a pin flipped to \"both\") —\nabsent everywhere else, never null. ``last_modified`` is null (present)\nfor a pinned row with no Hub timestamp, so the route serializes with\nexclude_unset, not exclude_none.",
+        "properties": {
+          "last_modified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Modified"
+          },
+          "private": {
+            "title": "Private",
+            "type": "boolean"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "saved_custom": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saved Custom"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "hub",
+              "both"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "last_modified",
+          "private",
+          "source"
+        ],
+        "title": "DatasetListItem",
+        "type": "object"
+      },
       "DatasetRenameBody": {
         "properties": {
           "new_name": {
@@ -375,6 +579,35 @@
           "new_name"
         ],
         "title": "DatasetRenameBody",
+        "type": "object"
+      },
+      "DatasetRenameResponse": {
+        "description": "server.py datasets_rename: {\"success\": True, **rename_local_dataset()}.\n`hub` reports what happened to the Hub copy — \"skipped\" means a Hub copy,\nif any, kept its old name (see rename_local_dataset).",
+        "properties": {
+          "hub": {
+            "enum": [
+              "renamed",
+              "none",
+              "skipped"
+            ],
+            "title": "Hub",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "repo_id",
+          "hub"
+        ],
+        "title": "DatasetRenameResponse",
         "type": "object"
       },
       "DatasetTagsBody": {
@@ -398,6 +631,47 @@
         "title": "DatasetTagsBody",
         "type": "object"
       },
+      "DatasetTagsResponse": {
+        "description": "datasets.py set_dataset_tags — tags is the final list actually written\n(org tags re-added), not the caller's input.",
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repo_id",
+          "tags"
+        ],
+        "title": "DatasetTagsResponse",
+        "type": "object"
+      },
+      "DatasetTaskCount": {
+        "description": "One entry of /datasets/info `tasks` (datasets.py get_local_dataset_info);\nnum_episodes is 0 when the per-episode count is unavailable.",
+        "properties": {
+          "num_episodes": {
+            "title": "Num Episodes",
+            "type": "integer"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task",
+          "num_episodes"
+        ],
+        "title": "DatasetTaskCount",
+        "type": "object"
+      },
       "DatasetVisibilityBody": {
         "properties": {
           "private": {
@@ -414,6 +688,203 @@
           "private"
         ],
         "title": "DatasetVisibilityBody",
+        "type": "object"
+      },
+      "DatasetVisibilityResponse": {
+        "description": "datasets.py set_dataset_visibility (success path only).",
+        "properties": {
+          "private": {
+            "title": "Private",
+            "type": "boolean"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "private"
+        ],
+        "title": "DatasetVisibilityResponse",
+        "type": "object"
+      },
+      "DeleteDatasetResponse": {
+        "description": "record.py handle_delete_dataset — success False carries the refusal\nreason in `message` (still HTTP 200).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "DeleteDatasetResponse",
+        "type": "object"
+      },
+      "DownloadStartResponse": {
+        "description": "datasets.py DownloadManager.start success branch, shared by the dataset\nand model download routes (both raise on the started=False branch, so only\nthis shape reaches the wire).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "repo_id",
+          "message"
+        ],
+        "title": "DownloadStartResponse",
+        "type": "object"
+      },
+      "DownloadStatusResponse": {
+        "description": "datasets.py DownloadManager.get_status, shared by both download-status\nroutes. Every field but state is null (not absent) until a download has\nrun/failed, so None must NOT be excluded on these routes.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "repo_id",
+          "message",
+          "error"
+        ],
+        "title": "DownloadStatusResponse",
+        "type": "object"
+      },
+      "EpisodeJointSeriesResponse": {
+        "description": "datasets.py get_episode_joint_series — per-frame timestamps + one\nobservation.state vector per frame.",
+        "properties": {
+          "joint_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Joint Names",
+            "type": "array"
+          },
+          "timestamps": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Timestamps",
+            "type": "array"
+          },
+          "values": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "title": "Values",
+            "type": "array"
+          }
+        },
+        "required": [
+          "joint_names",
+          "timestamps",
+          "values"
+        ],
+        "title": "EpisodeJointSeriesResponse",
+        "type": "object"
+      },
+      "EpisodeSummary": {
+        "description": "One row of GET /datasets/episodes (datasets.py list_episode_summaries).\nvideo_offsets maps camera name -> {\"from\": s, \"to\": s} slice bounds within\nthe (possibly shared) mp4; kept a plain mapping because \"from\" is a Python\nkeyword and the inner keys are exactly those two.",
+        "properties": {
+          "duration": {
+            "title": "Duration",
+            "type": "number"
+          },
+          "episode_index": {
+            "title": "Episode Index",
+            "type": "integer"
+          },
+          "length": {
+            "title": "Length",
+            "type": "integer"
+          },
+          "tasks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "video_offsets": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            "title": "Video Offsets",
+            "type": "object"
+          }
+        },
+        "required": [
+          "episode_index",
+          "length",
+          "duration",
+          "tasks",
+          "video_offsets"
+        ],
+        "title": "EpisodeSummary",
         "type": "object"
       },
       "ExtraStatus": {
@@ -636,6 +1107,20 @@
         "title": "ImportModelRequest",
         "type": "object"
       },
+      "ImportResponse": {
+        "description": "datasets.py import_local_dataset / models.py import_local_model\n(success path only) — the repo id the copy landed under.",
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id"
+        ],
+        "title": "ImportResponse",
+        "type": "object"
+      },
       "InferenceRequest": {
         "properties": {
           "camera_bindings": {
@@ -797,6 +1282,25 @@
         "title": "InstallStatusResponse",
         "type": "object"
       },
+      "MergeLogEntry": {
+        "description": "One drained line of the merge subprocess log (merge.py _enqueue).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "number"
+          }
+        },
+        "required": [
+          "timestamp",
+          "message"
+        ],
+        "title": "MergeLogEntry",
+        "type": "object"
+      },
       "MergeRequest": {
         "properties": {
           "output_repo_id": {
@@ -818,6 +1322,89 @@
         "title": "MergeRequest",
         "type": "object"
       },
+      "MergeStartResponse": {
+        "description": "merge.py MergeManager.start — unlike the download routes, the\nstarted=False refusals return 200 with the reason in `message`.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "message"
+        ],
+        "title": "MergeStartResponse",
+        "type": "object"
+      },
+      "MergeStatusResponse": {
+        "description": "merge.py MergeManager.get_status — error/output_repo_id/log_path are\nnull (not absent) outside their states, so None must NOT be excluded.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "log_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Path"
+          },
+          "logs": {
+            "items": {
+              "$ref": "#/components/schemas/MergeLogEntry"
+            },
+            "title": "Logs",
+            "type": "array"
+          },
+          "output_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Repo Id"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "error",
+          "output_repo_id",
+          "log_path",
+          "logs"
+        ],
+        "title": "MergeStatusResponse",
+        "type": "object"
+      },
       "ModelDeleteBody": {
         "properties": {
           "id": {
@@ -829,6 +1416,25 @@
           "id"
         ],
         "title": "ModelDeleteBody",
+        "type": "object"
+      },
+      "ModelDeleteResponse": {
+        "description": "models.py delete_local_model (success path only; failures raise).",
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deleted",
+          "id"
+        ],
+        "title": "ModelDeleteResponse",
         "type": "object"
       },
       "ModelDownloadRequest": {
@@ -868,6 +1474,306 @@
         "title": "ModelImportRequest",
         "type": "object"
       },
+      "ModelInfoResponse": {
+        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.",
+        "properties": {
+          "dataset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_modified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Modified"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
+          "private": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "hub"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          },
+          "target_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Steps"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "policy_type",
+          "dataset",
+          "steps",
+          "path",
+          "hf_repo_id",
+          "size_bytes",
+          "source"
+        ],
+        "title": "ModelInfoResponse",
+        "type": "object"
+      },
+      "ModelListItem": {
+        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
+        "properties": {
+          "dataset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_modified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Modified"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
+          "private": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "saved_custom": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saved Custom"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "hub",
+              "both"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          },
+          "target_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Steps"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "policy_type",
+          "dataset",
+          "steps",
+          "path",
+          "last_modified",
+          "hf_repo_id",
+          "source"
+        ],
+        "title": "ModelListItem",
+        "type": "object"
+      },
       "ModelUploadBody": {
         "properties": {
           "id": {
@@ -890,6 +1796,33 @@
           "id"
         ],
         "title": "ModelUploadBody",
+        "type": "object"
+      },
+      "ModelUploadResponse": {
+        "description": "models.py upload_local_model (success path only; failures raise) —\nthe Hub repo the checkpoint landed in, and the final tag list written.",
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "url",
+          "tags"
+        ],
+        "title": "ModelUploadResponse",
         "type": "object"
       },
       "OpenCalibrationFolderRequest": {
@@ -1237,6 +2170,25 @@
         "title": "RobotPortResponse",
         "type": "object"
       },
+      "SuccessRepoIdResponse": {
+        "description": "The pin/hide mutations' shared shape (server.py datasets_save_custom /\ndatasets_remove_custom / datasets_hide / datasets_unhide and their models\nmirrors) — success is False when a remove/unhide had nothing to remove.",
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "repo_id"
+        ],
+        "title": "SuccessRepoIdResponse",
+        "type": "object"
+      },
       "SupplyVoltageResponse": {
         "description": "motor_power.py read_supply_voltage. Success carries voltage, failure\ncarries message — never both, never null; the route excludes None.",
         "properties": {
@@ -1456,6 +2408,97 @@
           "dataset_repo_id"
         ],
         "title": "UploadRequest",
+        "type": "object"
+      },
+      "UploadStartResponse": {
+        "description": "record.py UploadManager.start success branch (the route 409s on\nstarted=False, so only this shape reaches the wire).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "repo_id",
+          "message"
+        ],
+        "title": "UploadStartResponse",
+        "type": "object"
+      },
+      "UploadStatusResponse": {
+        "description": "record.py UploadManager.get_status. docs_url is set only when an auth\nfailure produced one (absent otherwise, never null), while the other\nnullable fields ARE null in the idle state — so the route serializes with\nexclude_unset, not exclude_none.",
+        "properties": {
+          "dataset_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Url"
+          },
+          "docs_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docs Url"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "repo_id",
+          "message",
+          "dataset_url"
+        ],
+        "title": "UploadStatusResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -1934,13 +2977,22 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DatasetListItem"
+                  },
+                  "title": "Response Datasets List",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Datasets List"
+        "summary": "Datasets List",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/custom": {
@@ -1961,7 +3013,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -1977,7 +3031,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Remove Custom"
+        "summary": "Datasets Remove Custom",
+        "tags": [
+          "datasets"
+        ]
       },
       "post": {
         "description": "Pin a typed Hub dataset repo id so it persists in the picker listing.\n\nCalled when the user selects \"Use org/name\" for a dataset that isn't in\ntheir own namespace and has no local copy. Idempotent. Invalidates the\nlisting cache so the pinned dataset appears immediately.",
@@ -1996,7 +3053,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2012,7 +3071,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Save Custom"
+        "summary": "Datasets Save Custom",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/download": {
@@ -2033,7 +3095,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2049,7 +3113,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Download"
+        "summary": "Datasets Download",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/download-status": {
@@ -2060,13 +3127,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Datasets Download Status"
+        "summary": "Datasets Download Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/episode-joints": {
@@ -2097,7 +3169,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodeJointSeriesResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2113,7 +3187,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Episode Joints"
+        "summary": "Datasets Episode Joints",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/episode-video": {
@@ -2191,7 +3268,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/EpisodeSummary"
+                  },
+                  "title": "Response Datasets Episodes",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -2207,7 +3290,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Episodes"
+        "summary": "Datasets Episodes",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/hide": {
@@ -2228,7 +3314,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2244,7 +3332,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Unhide"
+        "summary": "Datasets Unhide",
+        "tags": [
+          "datasets"
+        ]
       },
       "post": {
         "description": "Hide a Hub dataset from the picker listing (\"remove from list\").\n\nNEVER deletes or mutates the Hub repo — it's a persistent local filter for\nhub rows the user's own namespace listing keeps returning (a pinned row is\nunpinned instead; a local copy is deleted instead). Re-pinning via\nPOST /datasets/custom auto-unhides. Invalidates the listing cache only (the\nhub-status cache is untouched — the repo's Hub state didn't change).",
@@ -2263,7 +3354,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2279,7 +3372,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Hide"
+        "summary": "Datasets Hide",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/hub-settings": {
@@ -2301,7 +3397,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetHubSettingsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2317,7 +3415,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Hub Settings"
+        "summary": "Datasets Hub Settings",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/hub-status": {
@@ -2339,7 +3440,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetHubStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2355,7 +3458,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Hub Status"
+        "summary": "Datasets Hub Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/import": {
@@ -2376,7 +3482,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2392,7 +3500,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Import"
+        "summary": "Datasets Import",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/info": {
@@ -2414,7 +3525,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetInfoResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2430,7 +3543,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Info"
+        "summary": "Datasets Info",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/merge": {
@@ -2451,7 +3567,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MergeStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2467,7 +3585,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Merge"
+        "summary": "Datasets Merge",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/merge/status": {
@@ -2478,13 +3599,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MergeStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Datasets Merge Status"
+        "summary": "Datasets Merge Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/rename": {
@@ -2505,7 +3631,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetRenameResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2521,7 +3649,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Rename"
+        "summary": "Datasets Rename",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/tags": {
@@ -2542,7 +3673,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetTagsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2558,7 +3691,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Tags"
+        "summary": "Datasets Tags",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/datasets/visibility": {
@@ -2579,7 +3715,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetVisibilityResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2595,7 +3733,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Visibility"
+        "summary": "Datasets Visibility",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/delete-dataset": {
@@ -2616,7 +3757,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteDatasetResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2632,7 +3775,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Delete Dataset"
+        "summary": "Delete Dataset",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/health": {
@@ -3431,13 +4577,22 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ModelListItem"
+                  },
+                  "title": "Response Models List",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Models List"
+        "summary": "Models List",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/custom": {
@@ -3458,7 +4613,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3474,7 +4631,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Remove Custom"
+        "summary": "Models Remove Custom",
+        "tags": [
+          "models"
+        ]
       },
       "post": {
         "description": "Pin a Hub model repo id so it persists in the /models listing.\n\nThe models mirror of POST /datasets/custom (same repo-id shape, same\nidempotence). Invalidates the model listing cache so the pin appears\nimmediately.",
@@ -3493,7 +4653,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3509,7 +4671,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Save Custom"
+        "summary": "Models Save Custom",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/delete": {
@@ -3530,7 +4695,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDeleteResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3546,7 +4713,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Delete"
+        "summary": "Models Delete",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/download": {
@@ -3567,7 +4737,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3583,7 +4755,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Download"
+        "summary": "Models Download",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/download-status": {
@@ -3594,13 +4769,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Models Download Status"
+        "summary": "Models Download Status",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/hide": {
@@ -3621,7 +4801,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3637,7 +4819,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Unhide"
+        "summary": "Models Unhide",
+        "tags": [
+          "models"
+        ]
       },
       "post": {
         "description": "Hide a Hub model from the picker listing (\"remove from list\").\n\nNEVER deletes or mutates the Hub repo — a persistent local filter, the\nmodels mirror of POST /datasets/hide. Re-pinning via POST /models/custom\nauto-unhides. Invalidates the listing cache only.",
@@ -3656,7 +4841,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3672,7 +4859,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Hide"
+        "summary": "Models Hide",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/import": {
@@ -3693,7 +4883,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3709,7 +4901,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Import"
+        "summary": "Models Import",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/info": {
@@ -3731,7 +4926,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfoResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3747,7 +4944,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Info"
+        "summary": "Models Info",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/models/upload": {
@@ -3768,7 +4968,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModelUploadResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3784,7 +4986,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Upload"
+        "summary": "Models Upload",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/api/v1/move-arm": {
@@ -4991,7 +6196,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UploadStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5007,7 +6214,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Upload Dataset"
+        "summary": "Upload Dataset",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/upload-status": {
@@ -5018,13 +6228,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UploadStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Upload Status"
+        "summary": "Upload Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/api/v1/wiggle": {
@@ -5479,13 +6694,22 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DatasetListItem"
+                  },
+                  "title": "Response Datasets List Datasets Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Datasets List"
+        "summary": "Datasets List",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/custom": {
@@ -5506,7 +6730,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5522,7 +6748,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Remove Custom"
+        "summary": "Datasets Remove Custom",
+        "tags": [
+          "datasets"
+        ]
       },
       "post": {
         "description": "Pin a typed Hub dataset repo id so it persists in the picker listing.\n\nCalled when the user selects \"Use org/name\" for a dataset that isn't in\ntheir own namespace and has no local copy. Idempotent. Invalidates the\nlisting cache so the pinned dataset appears immediately.",
@@ -5541,7 +6770,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5557,7 +6788,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Save Custom"
+        "summary": "Datasets Save Custom",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/download": {
@@ -5578,7 +6812,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5594,7 +6830,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Download"
+        "summary": "Datasets Download",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/download-status": {
@@ -5605,13 +6844,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Datasets Download Status"
+        "summary": "Datasets Download Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/episode-joints": {
@@ -5642,7 +6886,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/EpisodeJointSeriesResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5658,7 +6904,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Episode Joints"
+        "summary": "Datasets Episode Joints",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/episode-video": {
@@ -5736,7 +6985,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/EpisodeSummary"
+                  },
+                  "title": "Response Datasets Episodes Datasets Episodes Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -5752,7 +7007,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Episodes"
+        "summary": "Datasets Episodes",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/hide": {
@@ -5773,7 +7031,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5789,7 +7049,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Unhide"
+        "summary": "Datasets Unhide",
+        "tags": [
+          "datasets"
+        ]
       },
       "post": {
         "description": "Hide a Hub dataset from the picker listing (\"remove from list\").\n\nNEVER deletes or mutates the Hub repo — it's a persistent local filter for\nhub rows the user's own namespace listing keeps returning (a pinned row is\nunpinned instead; a local copy is deleted instead). Re-pinning via\nPOST /datasets/custom auto-unhides. Invalidates the listing cache only (the\nhub-status cache is untouched — the repo's Hub state didn't change).",
@@ -5808,7 +7071,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5824,7 +7089,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Hide"
+        "summary": "Datasets Hide",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/hub-settings": {
@@ -5846,7 +7114,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetHubSettingsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5862,7 +7132,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Hub Settings"
+        "summary": "Datasets Hub Settings",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/hub-status": {
@@ -5884,7 +7157,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetHubStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5900,7 +7175,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Hub Status"
+        "summary": "Datasets Hub Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/import": {
@@ -5921,7 +7199,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5937,7 +7217,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Import"
+        "summary": "Datasets Import",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/info": {
@@ -5959,7 +7242,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetInfoResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5975,7 +7260,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Info"
+        "summary": "Datasets Info",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/merge": {
@@ -5996,7 +7284,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MergeStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -6012,7 +7302,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Merge"
+        "summary": "Datasets Merge",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/merge/status": {
@@ -6023,13 +7316,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MergeStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Datasets Merge Status"
+        "summary": "Datasets Merge Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/rename": {
@@ -6050,7 +7348,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetRenameResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -6066,7 +7366,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Rename"
+        "summary": "Datasets Rename",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/tags": {
@@ -6087,7 +7390,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetTagsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -6103,7 +7408,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Tags"
+        "summary": "Datasets Tags",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/datasets/visibility": {
@@ -6124,7 +7432,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetVisibilityResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -6140,7 +7450,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Datasets Visibility"
+        "summary": "Datasets Visibility",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/delete-dataset": {
@@ -6161,7 +7474,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteDatasetResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -6177,7 +7492,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Delete Dataset"
+        "summary": "Delete Dataset",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/health": {
@@ -6976,13 +8294,22 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ModelListItem"
+                  },
+                  "title": "Response Models List Models Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Models List"
+        "summary": "Models List",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/custom": {
@@ -7003,7 +8330,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7019,7 +8348,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Remove Custom"
+        "summary": "Models Remove Custom",
+        "tags": [
+          "models"
+        ]
       },
       "post": {
         "description": "Pin a Hub model repo id so it persists in the /models listing.\n\nThe models mirror of POST /datasets/custom (same repo-id shape, same\nidempotence). Invalidates the model listing cache so the pin appears\nimmediately.",
@@ -7038,7 +8370,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7054,7 +8388,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Save Custom"
+        "summary": "Models Save Custom",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/delete": {
@@ -7075,7 +8412,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDeleteResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7091,7 +8430,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Delete"
+        "summary": "Models Delete",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/download": {
@@ -7112,7 +8454,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7128,7 +8472,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Download"
+        "summary": "Models Download",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/download-status": {
@@ -7139,13 +8486,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Models Download Status"
+        "summary": "Models Download Status",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/hide": {
@@ -7166,7 +8518,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7182,7 +8536,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Unhide"
+        "summary": "Models Unhide",
+        "tags": [
+          "models"
+        ]
       },
       "post": {
         "description": "Hide a Hub model from the picker listing (\"remove from list\").\n\nNEVER deletes or mutates the Hub repo — a persistent local filter, the\nmodels mirror of POST /datasets/hide. Re-pinning via POST /models/custom\nauto-unhides. Invalidates the listing cache only.",
@@ -7201,7 +8558,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessRepoIdResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7217,7 +8576,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Hide"
+        "summary": "Models Hide",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/import": {
@@ -7238,7 +8600,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7254,7 +8618,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Import"
+        "summary": "Models Import",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/info": {
@@ -7276,7 +8643,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfoResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7292,7 +8661,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Info"
+        "summary": "Models Info",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/models/upload": {
@@ -7313,7 +8685,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ModelUploadResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7329,7 +8703,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Models Upload"
+        "summary": "Models Upload",
+        "tags": [
+          "models"
+        ]
       }
     },
     "/move-arm": {
@@ -8536,7 +9913,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UploadStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8552,7 +9931,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Upload Dataset"
+        "summary": "Upload Dataset",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/upload-status": {
@@ -8563,13 +9945,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UploadStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Upload Status"
+        "summary": "Upload Status",
+        "tags": [
+          "datasets"
+        ]
       }
     },
     "/wiggle": {
