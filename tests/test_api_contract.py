@@ -32,21 +32,35 @@ from starlette.routing import WebSocketRoute
 from makermodslab.scripts.export_openapi import SNAPSHOT_PATH, generate_spec
 
 
-def api_surface() -> set[str]:
-    """Every routable operation as '<METHOD> <path>' ('WS <path>' for websockets).
+def _walk_routes(routes, prefix: str = ""):
+    """Yield (prefixed_path, route) over a route table, traversing includes.
 
-    Plain starlette Routes (the /docs and /openapi.json machinery) and Mounts
-    (the SPA static files) are deliberately excluded — they aren't API surface.
+    FastAPI >= 0.138 registers include_router() calls lazily as _IncludedRouter
+    entries that carry the prefix in their include_context instead of
+    flattening prefixed APIRoute copies into app.routes; older versions
+    flatten. Handle both so a lerobot-driven fastapi bump can't blind the
+    contract tests. Plain starlette Routes (the /docs machinery) and Mounts
+    (the SPA static files) fall through — they aren't API surface.
     """
+    for r in routes:
+        if isinstance(r, APIRoute | WebSocketRoute):
+            yield prefix + r.path, r
+        elif type(r).__name__ == "_IncludedRouter":
+            sub_prefix = prefix + (r.include_context.prefix or "")
+            yield from _walk_routes(r.original_router.routes, sub_prefix)
+
+
+def api_surface() -> set[str]:
+    """Every routable operation as '<METHOD> <path>' ('WS <path>' for websockets)."""
     from makermodslab.server import app
 
     pairs: set[str] = set()
-    for r in app.routes:
+    for path, r in _walk_routes(app.routes):
         if isinstance(r, APIRoute):
             for m in sorted(r.methods - {"HEAD", "OPTIONS"}):
-                pairs.add(f"{m} {r.path}")
-        elif isinstance(r, WebSocketRoute):
-            pairs.add(f"WS {r.path}")
+                pairs.add(f"{m} {path}")
+        else:
+            pairs.add(f"WS {path}")
     return pairs
 
 
@@ -197,4 +211,46 @@ def test_no_new_routes_outside_api_v1():
         f"Flat (non-/api/v1) route surface changed.\n"
         f"  Added (new endpoints belong under /api/v1): {sorted(added)}\n"
         f"  Removed (delete retired routes from LEGACY_ROUTES): {sorted(removed)}"
+    )
+
+
+def test_v1_mirrors_legacy_surface():
+    """Every flat operation must also be mounted under /api/v1, and vice versa.
+
+    The dual mount serves the shipped frontend (flat) and the versioned surface
+    (v1) from the same router; this asserts the two never drift while both exist.
+    """
+    surface = api_surface()
+    legacy = {p for p in surface if not p.split(" ", 1)[1].startswith("/api/v1")}
+    v1 = set()
+    for op in surface:
+        method, path = op.split(" ", 1)
+        if path.startswith("/api/v1/"):
+            v1.add(f"{method} {path[len('/api/v1') :]}")
+    assert v1 == legacy, (
+        f"flat and /api/v1 surfaces drifted.\n"
+        f"  only flat: {sorted(legacy - v1)}\n"
+        f"  only v1:   {sorted(v1 - legacy)}"
+    )
+
+
+def test_v1_operation_ids_are_clean_and_unique():
+    """v1 operation ids are the handler function names — the names an SDK
+    generator will emit as client methods — and must therefore be unique."""
+    from makermodslab.server import app
+
+    spec = app.openapi()
+    v1_ids: list[str] = []
+    for path, ops in spec["paths"].items():
+        if not path.startswith("/api/v1"):
+            continue
+        v1_ids.extend(
+            op["operationId"] for op in ops.values() if isinstance(op, dict) and "operationId" in op
+        )
+    assert v1_ids, "no /api/v1 operations in the spec yet"
+    dupes = {i for i in v1_ids if v1_ids.count(i) > 1}
+    assert not dupes, f"duplicate v1 operation ids (rename the handler functions): {sorted(dupes)}"
+    assert all("_api_v1_" not in i for i in v1_ids), (
+        "v1 operation ids must come from the clean generator (function names), "
+        "not FastAPI's default name_path_method mangling"
     )

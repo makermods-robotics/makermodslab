@@ -31,9 +31,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
@@ -258,6 +259,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Every endpoint registers on this router, which is mounted twice at the bottom
+# of the module: once flat (the surface the shipped frontend was built against)
+# and once under /api/v1 (the versioned surface SDK clients target). The two
+# stay identical by construction; tests/test_api_contract.py asserts it.
+router = APIRouter()
+
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
 # Get the path to the lerobot root directory (3 levels up from this script)
@@ -471,7 +478,7 @@ def _optimizer_name_from_preset(preset) -> str:
     return _OPTIMIZER_CLASS_TO_NAME.get(name, name)
 
 
-@app.get("/policy-optimizer-defaults")
+@router.get("/policy-optimizer-defaults")
 def get_policy_optimizer_defaults():
     """Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm
     + optimizer type) so the training UI can show the real "policy default"
@@ -520,25 +527,25 @@ def get_policy_optimizer_defaults():
     return {"defaults": defaults, "available": available}
 
 
-@app.post("/move-arm")
+@router.post("/move-arm")
 def teleoperate_arm(request: TeleoperateRequest):
     """Start teleoperation of the robot arm"""
     return handle_start_teleoperation(request, manager)
 
 
-@app.post("/stop-teleoperation")
+@router.post("/stop-teleoperation")
 def stop_teleoperation():
     """Stop the current teleoperation session"""
     return handle_stop_teleoperation()
 
 
-@app.get("/teleoperation-status")
+@router.get("/teleoperation-status")
 def teleoperation_status():
     """Get the current teleoperation status"""
     return handle_teleoperation_status()
 
 
-@app.post("/start-inference")
+@router.post("/start-inference")
 def start_inference(request: InferenceRequest):
     result = handle_start_inference(request)
     if not result.get("success"):
@@ -549,7 +556,7 @@ def start_inference(request: InferenceRequest):
     return result
 
 
-@app.post("/stop-inference")
+@router.post("/stop-inference")
 def stop_inference():
     """Abort the whole session. In evaluation mode (eval_episodes > 1) this ends
     the run wherever it is and reports the partial tally with NO accuracy — the
@@ -563,7 +570,7 @@ def stop_inference():
     return result
 
 
-@app.post("/inference-episode-stop")
+@router.post("/inference-episode-stop")
 def inference_episode_stop():
     """Evaluation mode only: end the CURRENT episode early and score it a
     SUCCESS ("the robot did the task"). The session stays up and moves into its
@@ -577,7 +584,7 @@ def inference_episode_stop():
     return result
 
 
-@app.post("/inference-next-episode")
+@router.post("/inference-next-episode")
 def inference_next_episode():
     """Evaluation mode only: leave the reset phase and start the next episode.
     The reset is user-ended (no auto-timer). 409 unless an evaluation is parked
@@ -591,12 +598,12 @@ def inference_next_episode():
     return result
 
 
-@app.get("/inference-status")
+@router.get("/inference-status")
 def inference_status():
     return handle_inference_status()
 
 
-@app.get("/inference-log")
+@router.get("/inference-log")
 def inference_log():
     """Tail of the active/most-recent rollout's log file (read-only, bounded).
 
@@ -609,7 +616,7 @@ def inference_log():
     return handle_inference_log()
 
 
-@app.post("/start-replay")
+@router.post("/start-replay")
 def start_replay(request: ReplayRequest):
     result = handle_start_replay(request, manager)
     if not result.get("success"):
@@ -620,7 +627,7 @@ def start_replay(request: ReplayRequest):
     return result
 
 
-@app.post("/stop-replay")
+@router.post("/stop-replay")
 def stop_replay():
     result = handle_stop_replay()
     if not result.get("success"):
@@ -631,18 +638,18 @@ def stop_replay():
     return result
 
 
-@app.get("/replay-status")
+@router.get("/replay-status")
 def replay_status():
     return handle_replay_status()
 
 
-@app.get("/health")
+@router.get("/health")
 def health_check():
     """Simple health check endpoint to verify server is running"""
     return {"status": "ok", "message": "FastAPI server is running"}
 
 
-@app.get("/hf-auth-status")
+@router.get("/hf-auth-status")
 def hf_auth_status():
     """Check whether the local HF CLI is authenticated and return user info."""
     return handle_hf_auth_status()
@@ -652,7 +659,7 @@ class HfLoginBody(BaseModel):
     token: str
 
 
-@app.post("/hf-auth/login")
+@router.post("/hf-auth/login")
 def hf_auth_login(body: HfLoginBody):
     """Persist a pasted HF token (validated against whoami) for this user."""
     try:
@@ -661,7 +668,7 @@ def hf_auth_login(body: HfLoginBody):
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
-@app.get("/datasets")
+@router.get("/datasets")
 def datasets_list():
     """List datasets available to the user — Hub-owned + local cache.
 
@@ -670,7 +677,7 @@ def datasets_list():
     return dataset_browser.list_all_datasets()
 
 
-@app.get("/datasets/info")
+@router.get("/datasets/info")
 def datasets_info(repo_id: str):
     """Detail card for one dataset. Local cache first (full detail: episodes,
     cameras, tasks, size on disk — ``source: "local"``); a dataset with no
@@ -686,7 +693,7 @@ def datasets_info(repo_id: str):
     return info
 
 
-@app.get("/datasets/episodes")
+@router.get("/datasets/episodes")
 def datasets_episodes(repo_id: str):
     """Per-episode index/length/duration/tasks for the dataset viewer window.
     404 when the dataset isn't local or predates the v3.0 parquet episode
@@ -697,7 +704,7 @@ def datasets_episodes(repo_id: str):
     return episodes
 
 
-@app.get("/datasets/episode-joints")
+@router.get("/datasets/episode-joints")
 def datasets_episode_joints(repo_id: str, episode_index: int):
     """Per-frame timestamp + joint (observation.state) values for one episode,
     for the dataset viewer's joint-position chart."""
@@ -709,7 +716,7 @@ def datasets_episode_joints(repo_id: str, episode_index: int):
     return series
 
 
-@app.get("/datasets/episode-video")
+@router.get("/datasets/episode-video")
 def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
     """The mp4 backing one camera's footage for one episode, served straight
     off disk. FileResponse handles Range requests, so the <video> element can
@@ -723,7 +730,7 @@ def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
     return FileResponse(video_path, media_type="video/mp4")
 
 
-@app.get("/datasets/hub-status")
+@router.get("/datasets/hub-status")
 def datasets_hub_status(repo_id: str):
     """Whether a dataset repo with this id exists on the Hub.
 
@@ -734,7 +741,7 @@ def datasets_hub_status(repo_id: str):
     return dataset_browser.get_hub_status(repo_id)
 
 
-@app.get("/datasets/hub-settings")
+@router.get("/datasets/hub-settings")
 def datasets_hub_settings(repo_id: str):
     """Current Hub-side visibility + tags for a dataset, for pre-filling the
     post-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;
@@ -750,7 +757,7 @@ class DatasetVisibilityBody(BaseModel):
     private: bool
 
 
-@app.post("/datasets/visibility")
+@router.post("/datasets/visibility")
 def datasets_visibility(body: DatasetVisibilityBody):
     """Flip a Hub dataset's visibility (public <-> private). MUTATES the live
     repo. 400 offline; 403 when the token can't write the namespace; 502 on any
@@ -766,7 +773,7 @@ class DatasetTagsBody(BaseModel):
     tags: list[str]
 
 
-@app.post("/datasets/tags")
+@router.post("/datasets/tags")
 def datasets_tags(body: DatasetTagsBody):
     """Replace a Hub dataset card's ``tags:`` metadata. User tags run through
     with_makermodslab_tag first, so the required org tags are never dropped. MUTATES
@@ -783,7 +790,7 @@ class DatasetRenameBody(BaseModel):
     new_name: str
 
 
-@app.post("/datasets/rename")
+@router.post("/datasets/rename")
 def datasets_rename(body: DatasetRenameBody):
     """Rename a locally-cached dataset by moving its directory, and its Hub
     copy (if any) to match.
@@ -814,7 +821,7 @@ class CustomDatasetRequest(BaseModel):
 _CUSTOM_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
-@app.post("/datasets/custom")
+@router.post("/datasets/custom")
 def datasets_save_custom(request: CustomDatasetRequest):
     """Pin a typed Hub dataset repo id so it persists in the picker listing.
 
@@ -834,7 +841,7 @@ def datasets_save_custom(request: CustomDatasetRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/datasets/custom")
+@router.delete("/datasets/custom")
 def datasets_remove_custom(request: CustomDatasetRequest):
     """Unpin a saved custom dataset (does NOT touch the Hub or any local copy)."""
     repo_id = request.repo_id.strip()
@@ -843,7 +850,7 @@ def datasets_remove_custom(request: CustomDatasetRequest):
     return {"success": removed, "repo_id": repo_id}
 
 
-@app.post("/datasets/hide")
+@router.post("/datasets/hide")
 def datasets_hide(request: CustomDatasetRequest):
     """Hide a Hub dataset from the picker listing ("remove from list").
 
@@ -861,7 +868,7 @@ def datasets_hide(request: CustomDatasetRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/datasets/hide")
+@router.delete("/datasets/hide")
 def datasets_unhide(request: CustomDatasetRequest):
     """Unhide a dataset so it reappears in the listing (does NOT touch the Hub)."""
     repo_id = request.repo_id.strip()
@@ -874,7 +881,7 @@ class DatasetDownloadRequest(BaseModel):
     repo_id: str
 
 
-@app.post("/datasets/download")
+@router.post("/datasets/download")
 def datasets_download(request: DatasetDownloadRequest):
     """Download a Hub dataset into the local cache in the background.
 
@@ -891,7 +898,7 @@ def datasets_download(request: DatasetDownloadRequest):
     return result
 
 
-@app.get("/datasets/download-status")
+@router.get("/datasets/download-status")
 def datasets_download_status():
     """Current download state (idle | running | done | error) + repo_id, message,
     and error once failed. Polled by the info card so a download survives
@@ -904,7 +911,7 @@ class DatasetImportRequest(BaseModel):
     name: str | None = None
 
 
-@app.post("/datasets/import")
+@router.post("/datasets/import")
 def datasets_import(request: DatasetImportRequest):
     """Import a LeRobot dataset folder already on the server machine by COPYING
     it into the local cache (the user's source folder is left intact).
@@ -918,19 +925,19 @@ def datasets_import(request: DatasetImportRequest):
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
-@app.post("/datasets/merge")
+@router.post("/datasets/merge")
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""
     return handle_start_merge(request)
 
 
-@app.get("/datasets/merge/status")
+@router.get("/datasets/merge/status")
 def datasets_merge_status():
     """Current merge state + drained log lines (idle | running | done | error)."""
     return handle_merge_status()
 
 
-@app.websocket("/ws/joint-data")
+@router.websocket("/ws/joint-data")
 async def websocket_endpoint(websocket: WebSocket):
     logger.info("🔗 New WebSocket connection attempt")
     try:
@@ -962,7 +969,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("🧹 WebSocket connection cleaned up")
 
 
-@app.post("/start-recording")
+@router.post("/start-recording")
 def start_recording(request: RecordingRequest):
     """Start a dataset recording session.
 
@@ -978,7 +985,7 @@ def start_recording(request: RecordingRequest):
     return result
 
 
-@app.post("/stop-recording")
+@router.post("/stop-recording")
 def stop_recording(discard: bool = False):
     """End the current recording session.
 
@@ -990,13 +997,13 @@ def stop_recording(discard: bool = False):
     return handle_stop_recording(discard=discard)
 
 
-@app.get("/recording-status")
+@router.get("/recording-status")
 def recording_status():
     """Get the current recording status"""
     return handle_recording_status()
 
 
-@app.get("/recording-log")
+@router.get("/recording-log")
 def recording_log():
     """Tail of the current/most-recent recording session's log (read-only,
     bounded ring buffer). Returns {logs}; empty (not an error) before a session
@@ -1004,33 +1011,33 @@ def recording_log():
     return handle_recording_log()
 
 
-@app.post("/recording-exit-early")
+@router.post("/recording-exit-early")
 def recording_exit_early():
     """Skip to next episode (replaces right arrow key)"""
     return handle_exit_early()
 
 
-@app.post("/recording-rerecord-episode")
+@router.post("/recording-rerecord-episode")
 def recording_rerecord_episode():
     """Re-record current episode (replaces left arrow key)"""
     return handle_rerecord_episode()
 
 
-@app.post("/recording-pause")
+@router.post("/recording-pause")
 def recording_pause():
     """Pause the reset-phase gap between episodes (mouse-only, no keyboard
     shortcut). No-ops outside the reset phase — see handle_pause_recording."""
     return handle_pause_recording()
 
 
-@app.post("/recording-resume")
+@router.post("/recording-resume")
 def recording_resume():
     """Resume a paused reset-phase gap. No-ops if not currently paused —
     see handle_resume_recording."""
     return handle_resume_recording()
 
 
-@app.post("/upload-dataset")
+@router.post("/upload-dataset")
 def upload_dataset(request: UploadRequest):
     """Start a background upload of a local dataset to the Hub.
 
@@ -1043,13 +1050,13 @@ def upload_dataset(request: UploadRequest):
     return result
 
 
-@app.get("/upload-status")
+@router.get("/upload-status")
 def upload_status():
     """Current upload state + repo_id, message, and dataset_url once done."""
     return handle_upload_status()
 
 
-@app.post("/delete-dataset")
+@router.post("/delete-dataset")
 def delete_dataset(request: DatasetInfoRequest):
     """Remove a recorded dataset directory from local disk."""
     return handle_delete_dataset(request)
@@ -1063,7 +1070,7 @@ def delete_dataset(request: DatasetInfoRequest):
 # Hub models are the user's LeRobot policy repos. See makermodslab/models.py.
 
 
-@app.get("/models")
+@router.get("/models")
 def models_list():
     """List trained models available to the user — local runs + Hub repos.
 
@@ -1072,7 +1079,7 @@ def models_list():
     return model_browser.list_all_models()
 
 
-@app.get("/models/info")
+@router.get("/models/info")
 def models_info(id: str):
     """Detail card for one model: policy type, base dataset, steps, size, and the
     local path (local) or Hub repo (hub). `id` is a local run id or a Hub repo id
@@ -1088,7 +1095,7 @@ class ModelUploadBody(BaseModel):
     repo_id: str | None = None
 
 
-@app.post("/models/upload")
+@router.post("/models/upload")
 def models_upload(body: ModelUploadBody):
     """Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged
     model repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when
@@ -1104,7 +1111,7 @@ class ModelDeleteBody(BaseModel):
     id: str
 
 
-@app.post("/models/delete")
+@router.post("/models/delete")
 def models_delete(body: ModelDeleteBody):
     """Delete a local model — its training run's output dir (strictly sandboxed
     under outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404
@@ -1119,7 +1126,7 @@ class CustomModelRequest(BaseModel):
     repo_id: str
 
 
-@app.post("/models/custom")
+@router.post("/models/custom")
 def models_save_custom(request: CustomModelRequest):
     """Pin a Hub model repo id so it persists in the /models listing.
 
@@ -1137,7 +1144,7 @@ def models_save_custom(request: CustomModelRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/models/custom")
+@router.delete("/models/custom")
 def models_remove_custom(request: CustomModelRequest):
     """Unpin a saved custom model (does NOT touch the Hub or any local copy)."""
     repo_id = request.repo_id.strip()
@@ -1146,7 +1153,7 @@ def models_remove_custom(request: CustomModelRequest):
     return {"success": removed, "repo_id": repo_id}
 
 
-@app.post("/models/hide")
+@router.post("/models/hide")
 def models_hide(request: CustomModelRequest):
     """Hide a Hub model from the picker listing ("remove from list").
 
@@ -1162,7 +1169,7 @@ def models_hide(request: CustomModelRequest):
     return {"success": True, "repo_id": repo_id}
 
 
-@app.delete("/models/hide")
+@router.delete("/models/hide")
 def models_unhide(request: CustomModelRequest):
     """Unhide a model so it reappears in the listing (does NOT touch the Hub)."""
     repo_id = request.repo_id.strip()
@@ -1175,7 +1182,7 @@ class ModelDownloadRequest(BaseModel):
     repo_id: str
 
 
-@app.post("/models/download")
+@router.post("/models/download")
 def models_download(request: ModelDownloadRequest):
     """Download a Hub model checkpoint into the local models dir in the
     background. Returns immediately with {started, repo_id, message}; poll
@@ -1192,7 +1199,7 @@ def models_download(request: ModelDownloadRequest):
     return result
 
 
-@app.get("/models/download-status")
+@router.get("/models/download-status")
 def models_download_status():
     """Current model-download state (idle | running | done | error) + repo_id,
     message, and error once failed. Polled by the model info card so a download
@@ -1205,7 +1212,7 @@ class ModelImportRequest(BaseModel):
     name: str | None = None
 
 
-@app.post("/models/import")
+@router.post("/models/import")
 def models_import(request: ModelImportRequest):
     """Import a policy checkpoint folder already on the server machine by
     COPYING it into the local models dir (the source folder is left intact).
@@ -1261,7 +1268,7 @@ def _is_finished_run(job_id: str) -> bool:
         return False
 
 
-@app.post("/jobs/training", status_code=201)
+@router.post("/jobs/training", status_code=201)
 async def create_training_job(req: Request):
     raw = await req.json()
     body = StartTrainingBody.from_legacy(raw)
@@ -1399,7 +1406,7 @@ class ImportModelRequest(BaseModel):
     name: str | None = None
 
 
-@app.post("/jobs/import", status_code=201)
+@router.post("/jobs/import", status_code=201)
 def import_model(body: ImportModelRequest):
     """Register an external model (local dir or HF repo) as a pseudo-job.
 
@@ -1420,7 +1427,7 @@ def import_model(body: ImportModelRequest):
     return record
 
 
-@app.get("/jobs")
+@router.get("/jobs")
 def list_jobs(limit: int = 10):
     return {"jobs": job_registry.list(limit=limit)}
 
@@ -1587,7 +1594,7 @@ def _fan_out_model_authors(authors: list[str], call) -> list:
     return [r for r in results if r is not None]
 
 
-@app.get("/jobs/hub")
+@router.get("/jobs/hub")
 def list_hub_jobs():
     """List the user's HF Cloud compute Jobs and their uploaded LeRobot model
     repos on huggingface.co.
@@ -1702,7 +1709,7 @@ def list_hub_jobs():
     return response
 
 
-@app.delete("/jobs/hub/models/{repo_id:path}")
+@router.delete("/jobs/hub/models/{repo_id:path}")
 def delete_hub_model(repo_id: str):
     """Permanently delete a model repo from the Hugging Face Hub.
 
@@ -1767,7 +1774,7 @@ def delete_hub_model(repo_id: str):
     return {"status": "success", "repo_id": repo_id}
 
 
-@app.post("/jobs/hub/jobs/{job_id}/dismiss")
+@router.post("/jobs/hub/jobs/{job_id}/dismiss")
 def dismiss_hub_job(job_id: str):
     """Hide a Hub job from the /jobs/hub listing.
 
@@ -1783,7 +1790,7 @@ def dismiss_hub_job(job_id: str):
     return {"status": "success", "job_id": job_id.strip()}
 
 
-@app.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}")
 def get_job(job_id: str):
     try:
         return job_registry.get(job_id)
@@ -1791,7 +1798,7 @@ def get_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
 
 
-@app.get("/jobs/{job_id}/logs")
+@router.get("/jobs/{job_id}/logs")
 def get_job_logs(job_id: str):
     try:
         logs = job_registry.drain_logs(job_id)
@@ -1800,7 +1807,7 @@ def get_job_logs(job_id: str):
     return {"logs": logs}
 
 
-@app.get("/jobs/{job_id}/log-file")
+@router.get("/jobs/{job_id}/log-file")
 def get_job_log_file(job_id: str):
     """Return the entire on-disk log file for a job. Drains the live queue too
     so the next /logs poll returns only lines that arrived after this call."""
@@ -1814,7 +1821,7 @@ def get_job_log_file(job_id: str):
     return {"logs": logs}
 
 
-@app.get("/jobs/{job_id}/metrics-history")
+@router.get("/jobs/{job_id}/metrics-history")
 def get_job_metrics_history(job_id: str):
     """Return the per-step loss/lr/grad-norm series reconstructed from the
     job's log.jsonl. Used to seed the monitoring charts so curves persist
@@ -1826,7 +1833,7 @@ def get_job_metrics_history(job_id: str):
     return {"points": points}
 
 
-@app.get("/jobs/{job_id}/checkpoints")
+@router.get("/jobs/{job_id}/checkpoints")
 def get_job_checkpoints(job_id: str):
     """List the checkpoints saved for this job, ascending by step."""
     try:
@@ -1835,7 +1842,7 @@ def get_job_checkpoints(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
 
 
-@app.get("/jobs/{job_id}/checkpoints/{step}/policy-config")
+@router.get("/jobs/{job_id}/checkpoints/{step}/policy-config")
 def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
     policy_type, image_features (per-camera height/width), requires_task, and
@@ -1851,7 +1858,7 @@ def get_checkpoint_policy_config(job_id: str, step: int):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/jobs/{job_id}/checkpoints/{step}/download")
+@router.get("/jobs/{job_id}/checkpoints/{step}/download")
 def download_checkpoint(job_id: str, step: int):
     """Stream a zip of a local checkpoint's `pretrained_model/` directory.
 
@@ -1910,7 +1917,7 @@ class RenameJobBody(BaseModel):
     new_name: str
 
 
-@app.post("/jobs/{job_id}/rename")
+@router.post("/jobs/{job_id}/rename")
 def rename_job(job_id: str, body: RenameJobBody):
     """Set a job's display alias (shown in place of the auto-generated name).
 
@@ -1929,7 +1936,7 @@ def rename_job(job_id: str, body: RenameJobBody):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/jobs/{job_id}/stop")
+@router.post("/jobs/{job_id}/stop")
 def stop_job(job_id: str):
     try:
         return job_registry.stop(job_id)
@@ -1939,7 +1946,7 @@ def stop_job(job_id: str):
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is not running") from exc
 
 
-@app.delete("/jobs/{job_id}", status_code=204)
+@router.delete("/jobs/{job_id}", status_code=204)
 def delete_job(job_id: str):
     try:
         record = job_registry.get(job_id)
@@ -1991,7 +1998,7 @@ def _format_accelerator(accelerator) -> str | None:
     return f"{quantity}× {name}" if quantity and quantity != "1" else name
 
 
-@app.get("/jobs/runners/hardware")
+@router.get("/jobs/runners/hardware")
 def get_runners_hardware():
     """Return HF Jobs flavor catalog + auth state for the TargetCard.
 
@@ -2044,68 +2051,68 @@ def get_runners_hardware():
 # ============================================================================
 
 
-@app.get("/system/training-extra")
+@router.get("/system/training-extra")
 def get_training_extra():
     """Return whether the LeRobot training extra (accelerate) is importable."""
     return handle_get_training_extra()
 
 
-@app.post("/system/training-extra/install")
+@router.post("/system/training-extra/install")
 def install_training_extra():
     """Spawn `pip install accelerate` as a background subprocess. No-op if already running."""
     return handle_install_training_extra()
 
 
-@app.get("/system/training-extra/install-status")
+@router.get("/system/training-extra/install-status")
 def install_training_extra_status():
     """Return current install state plus any pending log lines (drained on read)."""
     return handle_install_training_extra_status()
 
 
-@app.get("/system/wandb-extra")
+@router.get("/system/wandb-extra")
 def get_wandb_extra():
     """Return whether the `wandb` package is importable in this MakerMods Lab process."""
     return handle_get_wandb_extra()
 
 
-@app.post("/system/wandb-extra/install")
+@router.post("/system/wandb-extra/install")
 def install_wandb_extra():
     """Spawn `pip install wandb` as a background subprocess. No-op if already running."""
     return handle_install_wandb_extra()
 
 
-@app.get("/system/wandb-extra/install-status")
+@router.get("/system/wandb-extra/install-status")
 def install_wandb_extra_status():
     """Return current wandb install state plus any pending log lines (drained on read)."""
     return handle_install_wandb_extra_status()
 
 
-@app.get("/system/policy-extra/{policy_type}")
+@router.get("/system/policy-extra/{policy_type}")
 def get_policy_extra(policy_type: str):
     """Whether the optional LeRobot extra a policy needs (e.g. transformers for
     smolvla/pi0, diffusers for diffusion) is importable. Core policies report available."""
     return handle_get_policy_extra(policy_type)
 
 
-@app.post("/system/policy-extra/{policy_type}/install")
+@router.post("/system/policy-extra/{policy_type}/install")
 def install_policy_extra(policy_type: str):
     """Spawn `pip install lerobot[<extra>]` for the policy's extra in the background."""
     return handle_install_policy_extra(policy_type)
 
 
-@app.get("/system/policy-extra/{policy_type}/install-status")
+@router.get("/system/policy-extra/{policy_type}/install-status")
 def install_policy_extra_status(policy_type: str):
     """Return the policy extra's install state plus any pending log lines (drained on read)."""
     return handle_install_policy_extra_status(policy_type)
 
 
-@app.get("/system/update-check")
+@router.get("/system/update-check")
 def update_check():
     """Report whether a newer MakerMods Lab commit exists on GitHub (cached, silent on failure)."""
     return handle_update_check()
 
 
-@app.post("/system/update")
+@router.post("/system/update")
 def run_update():
     """Run the pip upgrade in-process; the user must restart MakerMods Lab afterwards."""
     return handle_run_update()
@@ -2116,19 +2123,19 @@ def run_update():
 
 # ============================================================================
 # Calibration endpoints
-@app.post("/start-calibration")
+@router.post("/start-calibration")
 def start_calibration(request: CalibrationRequest):
     """Start calibration process"""
     return calibration_manager.start_calibration(request)
 
 
-@app.post("/stop-calibration")
+@router.post("/stop-calibration")
 def stop_calibration():
     """Stop calibration process"""
     return calibration_manager.stop_calibration_process()
 
 
-@app.get("/calibration-status")
+@router.get("/calibration-status")
 def calibration_status():
     """Get current calibration status"""
     from dataclasses import asdict
@@ -2137,7 +2144,7 @@ def calibration_status():
     return asdict(status)
 
 
-@app.post("/complete-calibration-step")
+@router.post("/complete-calibration-step")
 def complete_calibration_step():
     """Complete the current calibration step"""
     return calibration_manager.complete_step()
@@ -2146,25 +2153,25 @@ def complete_calibration_step():
 # --- Auto-calibration (drives the arm under torque; runs the vendored script) ---
 
 
-@app.post("/start-auto-calibration")
+@router.post("/start-auto-calibration")
 def start_auto_calibration(request: AutoCalibrationRequest):
     """Start auto-calibration as a subprocess. The arm moves on its own."""
     return auto_calibration_manager.start(request)
 
 
-@app.post("/stop-auto-calibration")
+@router.post("/stop-auto-calibration")
 def stop_auto_calibration():
     """Stop a running auto-calibration."""
     return auto_calibration_manager.stop()
 
 
-@app.get("/auto-calibration-status")
+@router.get("/auto-calibration-status")
 def auto_calibration_status():
     """Current auto-calibration state + streamed log lines."""
     return auto_calibration_manager.get_status()
 
 
-@app.post("/start-auto-calibration-batch")
+@router.post("/start-auto-calibration-batch")
 def start_auto_calibration_batch(request: AutoCalibrationBatchRequest):
     """Auto-calibrate a user-selected subset of arms CONCURRENTLY. Each arm runs
     its own subprocess on its own serial port with an independent outcome
@@ -2173,20 +2180,20 @@ def start_auto_calibration_batch(request: AutoCalibrationBatchRequest):
     return auto_calibration_batch_manager.start(request)
 
 
-@app.post("/stop-auto-calibration-batch")
+@router.post("/stop-auto-calibration-batch")
 def stop_auto_calibration_batch():
     """Stop ALL running arms of a batch auto-calibration, releasing each arm's
     torque independently."""
     return auto_calibration_batch_manager.stop()
 
 
-@app.get("/auto-calibration-batch-status")
+@router.get("/auto-calibration-batch-status")
 def auto_calibration_batch_status():
     """Per-arm status + logs and overall counts for a batch auto-calibration."""
     return auto_calibration_batch_manager.get_status()
 
 
-@app.get("/calibration-configs/{device_type}")
+@router.get("/calibration-configs/{device_type}")
 def get_calibration_configs(device_type: str):
     """Get all calibration config files for a specific device type"""
     try:
@@ -2223,7 +2230,7 @@ def get_calibration_configs(device_type: str):
         return {"success": False, "message": str(e)}
 
 
-@app.delete("/calibration-configs/{device_type}/{config_name}")
+@router.delete("/calibration-configs/{device_type}/{config_name}")
 def delete_calibration_config(device_type: str, config_name: str):
     """Delete a calibration config file"""
     try:
@@ -2279,7 +2286,7 @@ def delete_calibration_config(device_type: str, config_name: str):
         return {"success": False, "message": str(e)}
 
 
-@app.get("/calibration-configs/{device_type}/{config_name}/download")
+@router.get("/calibration-configs/{device_type}/{config_name}/download")
 def download_calibration_config(device_type: str, config_name: str):
     """
     Download one arm's calibration as a raw lerobot calibration JSON file.
@@ -2328,7 +2335,7 @@ def download_calibration_config(device_type: str, config_name: str):
     )
 
 
-@app.post("/calibration-configs/{device_type}/upload")
+@router.post("/calibration-configs/{device_type}/upload")
 def upload_calibration_config(device_type: str, body: dict):
     """
     Import a calibration into a side's config dir. Body: {"name": "...",
@@ -2363,7 +2370,7 @@ def upload_calibration_config(device_type: str, body: dict):
     return JSONResponse(status_code=500, content={"success": False, "message": "Import failed"})
 
 
-@app.post("/calibration-configs/{device_type}/{config_name}/rename")
+@router.post("/calibration-configs/{device_type}/{config_name}/rename")
 def rename_calibration_config_endpoint(device_type: str, config_name: str, body: dict):
     """
     Rename a calibration config file. Body: {"new_name": "..."}. Never
@@ -2392,7 +2399,7 @@ class OpenCalibrationFolderRequest(BaseModel):
     device_type: str  # "teleop" (leader) or "robot" (follower)
 
 
-@app.post("/open-calibration-folder")
+@router.post("/open-calibration-folder")
 def open_calibration_folder(request: OpenCalibrationFolderRequest):
     """Open a side's calibration folder in the OS file browser (Finder/Explorer/
     xdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.
@@ -2421,7 +2428,7 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
 # ============================================================================
 
 
-@app.get("/available-ports")
+@router.get("/available-ports")
 def get_available_ports():
     """Get all available serial ports"""
     try:
@@ -2436,7 +2443,7 @@ class WiggleRequest(BaseModel):
     port: str
 
 
-@app.post("/wiggle")
+@router.post("/wiggle")
 async def wiggle(request: WiggleRequest):
     """Wiggle the gripper on a port so the user can see which arm it is."""
     return await wiggle_gripper(request.port)
@@ -2447,14 +2454,14 @@ class IdentifyArmRequest(BaseModel):
     ports: list[str] | None = None
 
 
-@app.post("/identify-arm")
+@router.post("/identify-arm")
 async def identify_arm(request: IdentifyArmRequest):
     """The inverse of /wiggle: the user swings an arm's base (shoulder pan) by
     hand and we report which port saw the motion. Read-only — no motor writes."""
     return await identify_arm_by_motion(request.ports)
 
 
-@app.get("/supply-voltage")
+@router.get("/supply-voltage")
 async def supply_voltage(port: str = ""):
     """One-shot, read-only supply-voltage reading (Present_Voltage) from the arm
     on `port`. Connects, reads, and releases the port immediately — never holds
@@ -2625,7 +2632,7 @@ def _linux_cameras() -> list[dict[str, Any]]:
     return cameras
 
 
-@app.get("/available-cameras")
+@router.get("/available-cameras")
 def get_available_cameras():
     """List cameras with the same index ordering cv2 will use to record.
 
@@ -2665,7 +2672,7 @@ def get_available_cameras():
         return {"status": "error", "message": str(e), "cameras": []}
 
 
-@app.get("/camera-preview/{index}")
+@router.get("/camera-preview/{index}")
 def camera_preview_stream(index: int, unique_id: str | None = None):
     """MJPEG preview stream of a camera attached to the *server* machine.
 
@@ -2729,7 +2736,7 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
 RobotSideLiteral = Literal["leader", "follower"]
 
 
-@app.get("/robot-port/{robot_type}")
+@router.get("/robot-port/{robot_type}")
 def get_robot_port(robot_type: RobotSideLiteral):
     """Get the saved port for a robot type"""
     saved_port = get_saved_robot_port(robot_type)
@@ -2755,7 +2762,7 @@ def _record_with_clean(record: dict) -> dict:
     }
 
 
-@app.get("/robots")
+@router.get("/robots")
 def get_robots():
     """List all saved robot records."""
     try:
@@ -2766,7 +2773,7 @@ def get_robots():
         return {"status": "error", "message": str(e), "robots": []}
 
 
-@app.get("/robots/{name}")
+@router.get("/robots/{name}")
 def get_robot(name: str):
     """Get a single robot record by name."""
     if not is_valid_robot_name(name):
@@ -2777,7 +2784,7 @@ def get_robot(name: str):
     return {"status": "success", "robot": _record_with_clean(record)}
 
 
-@app.post("/robots/{name}")
+@router.post("/robots/{name}")
 def upsert_robot(name: str, data: dict, create: bool = False):
     """
     Upsert a robot record.
@@ -2880,7 +2887,7 @@ def upsert_robot(name: str, data: dict, create: bool = False):
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
-@app.post("/robots/{name}/rename")
+@router.post("/robots/{name}/rename")
 def rename_robot(name: str, data: dict):
     """
     Rename a robot record. Body: {"new_name": "..."}. Calibration files are not
@@ -2906,7 +2913,7 @@ def rename_robot(name: str, data: dict):
     return JSONResponse(status_code=status_code, content={"status": "error", "message": message})
 
 
-@app.delete("/robots/{name}")
+@router.delete("/robots/{name}")
 def delete_robot(name: str):
     """Delete a robot record."""
     if not is_valid_robot_name(name):
@@ -3038,6 +3045,18 @@ class SPAStaticFiles(StaticFiles):
                 return await super().get_response("index.html", scope)
             raise
 
+
+def _v1_operation_id(route: APIRoute) -> str:
+    """v1 operation ids are the bare handler names — the method names an SDK
+    generator emits — so handlers must be uniquely named (contract-tested)."""
+    return route.name
+
+
+# Flat mount first (default operation ids), then /api/v1 with clean ids.
+# Both precede the SPA mount below: starlette matches in registration order,
+# so anything registered after the "/" mount would be unreachable.
+app.include_router(router)
+app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
 
 # Serve the built frontend at /. Must be mounted last so API routes win.
 if FRONTEND_DIST.exists():
