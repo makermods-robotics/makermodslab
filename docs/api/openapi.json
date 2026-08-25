@@ -123,6 +123,78 @@
         "title": "AutoCalibrationRequest",
         "type": "object"
       },
+      "AvailableCamerasResponse": {
+        "description": "server.py get_available_cameras. cameras is always present (empty list\non failure); message only on the error branch — the route excludes None.",
+        "properties": {
+          "cameras": {
+            "items": {
+              "$ref": "#/components/schemas/CameraInfo"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "cameras"
+        ],
+        "title": "AvailableCamerasResponse",
+        "type": "object"
+      },
+      "AvailablePortsResponse": {
+        "description": "server.py get_available_ports. Success carries ports, failure carries\nmessage — never both, never null; the route excludes None to keep each\nbranch's exact keys.",
+        "properties": {
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "AvailablePortsResponse",
+        "type": "object"
+      },
       "CalibrationRequest": {
         "description": "Request parameters for starting calibration",
         "properties": {
@@ -174,6 +246,41 @@
           "config_file"
         ],
         "title": "CalibrationRequest",
+        "type": "object"
+      },
+      "CameraInfo": {
+        "description": "One camera from the platform enumerators in server.py — unique_id is\nthe AVFoundation uniqueID, present on macOS only (absent elsewhere, never\nnull; the route excludes None).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "unique_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unique Id"
+          }
+        },
+        "required": [
+          "index",
+          "name",
+          "available"
+        ],
+        "title": "CameraInfo",
         "type": "object"
       },
       "CustomDatasetRequest": {
@@ -309,6 +416,24 @@
         "title": "DatasetVisibilityBody",
         "type": "object"
       },
+      "ExtraStatus": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "install_hint": {
+            "title": "Install Hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "install_hint"
+        ],
+        "title": "ExtraStatus",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -322,6 +447,106 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthCapabilities": {
+        "additionalProperties": true,
+        "description": "Capabilities block of /health (server.py health_check).\n\nThe health doc grows additively as the node registry needs more\n(gpu, hardware inventory, …) — extra=\"allow\" keeps keys the handler adds\nbefore this model learns about them, instead of silently filtering them\nout of the handshake.",
+        "properties": {
+          "accepts_jobs": {
+            "title": "Accepts Jobs",
+            "type": "boolean"
+          },
+          "serves_ui": {
+            "title": "Serves Ui",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "serves_ui",
+          "accepts_jobs"
+        ],
+        "title": "HealthCapabilities",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "Node identity + capability document (server.py health_check).",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/HealthCapabilities"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "message",
+          "version",
+          "instance_id",
+          "capabilities"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "HfAuthStatusResponse": {
+        "description": "utils/hf_auth.py handle_hf_auth_status — username is null (not absent)\nwhen unauthenticated.",
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "login_command": {
+            "title": "Login Command",
+            "type": "string"
+          },
+          "orgs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Orgs",
+            "type": "array"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "writable_namespaces": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Writable Namespaces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "authenticated",
+          "username",
+          "orgs",
+          "writable_namespaces",
+          "login_command"
+        ],
+        "title": "HfAuthStatusResponse",
+        "type": "object"
+      },
       "HfLoginBody": {
         "properties": {
           "token": {
@@ -333,6 +558,38 @@
           "token"
         ],
         "title": "HfLoginBody",
+        "type": "object"
+      },
+      "HfLoginResponse": {
+        "description": "utils/hf_auth.py handle_hf_login (success path only; failures raise).",
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "login_command": {
+            "title": "Login Command",
+            "type": "string"
+          },
+          "orgs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Orgs",
+            "type": "array"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authenticated",
+          "username",
+          "orgs",
+          "login_command"
+        ],
+        "title": "HfLoginResponse",
         "type": "object"
       },
       "IdentifyArmRequest": {
@@ -489,6 +746,57 @@
         "title": "InferenceRequest",
         "type": "object"
       },
+      "InstallStartResponse": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "message"
+        ],
+        "title": "InstallStartResponse",
+        "type": "object"
+      },
+      "InstallStatusResponse": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "logs": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Logs",
+            "type": "array"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "InstallStatusResponse",
+        "type": "object"
+      },
       "MergeRequest": {
         "properties": {
           "output_repo_id": {
@@ -614,6 +922,106 @@
           "height"
         ],
         "title": "PolicyCameraDims",
+        "type": "object"
+      },
+      "PolicyExtraStatus": {
+        "description": "utils/system.py handle_get_policy_extra — every key is always set\n(core policies report needs_extra=False with empty-string fields).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "install_hint": {
+            "title": "Install Hint",
+            "type": "string"
+          },
+          "install_target": {
+            "title": "Install Target",
+            "type": "string"
+          },
+          "needs_extra": {
+            "title": "Needs Extra",
+            "type": "boolean"
+          },
+          "package": {
+            "title": "Package",
+            "type": "string"
+          },
+          "policy_type": {
+            "title": "Policy Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_type",
+          "needs_extra",
+          "available",
+          "package",
+          "install_target",
+          "install_hint"
+        ],
+        "title": "PolicyExtraStatus",
+        "type": "object"
+      },
+      "PolicyOptimizerDefaultsResponse": {
+        "description": "server.py get_policy_optimizer_defaults — `defaults` values are null\n(legitimately) for unavailable policies or unreadable presets, so None\nmust NOT be excluded on this route.",
+        "properties": {
+          "available": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Available",
+            "type": "object"
+          },
+          "defaults": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PolicyOptimizerPreset"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Defaults",
+            "type": "object"
+          }
+        },
+        "required": [
+          "defaults",
+          "available"
+        ],
+        "title": "PolicyOptimizerDefaultsResponse",
+        "type": "object"
+      },
+      "PolicyOptimizerPreset": {
+        "description": "One entry of /policy-optimizer-defaults `defaults` (server.py\nget_policy_optimizer_defaults); lerobot OptimizerConfig presets type all\nthree numbers as float.",
+        "properties": {
+          "grad_clip_norm": {
+            "title": "Grad Clip Norm",
+            "type": "number"
+          },
+          "lr": {
+            "title": "Lr",
+            "type": "number"
+          },
+          "optimizer": {
+            "title": "Optimizer",
+            "type": "string"
+          },
+          "weight_decay": {
+            "title": "Weight Decay",
+            "type": "number"
+          }
+        },
+        "required": [
+          "optimizer",
+          "lr",
+          "weight_decay",
+          "grad_clip_norm"
+        ],
+        "title": "PolicyOptimizerPreset",
         "type": "object"
       },
       "RecordingRequest": {
@@ -798,6 +1206,73 @@
         "title": "ReplayRequest",
         "type": "object"
       },
+      "RobotPortResponse": {
+        "description": "server.py get_robot_port — saved_port is null (not absent) when no\nport file exists, so None must NOT be excluded on this route.",
+        "properties": {
+          "default_port": {
+            "title": "Default Port",
+            "type": "string"
+          },
+          "saved_port": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saved Port"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "saved_port",
+          "default_port"
+        ],
+        "title": "RobotPortResponse",
+        "type": "object"
+      },
+      "SupplyVoltageResponse": {
+        "description": "motor_power.py read_supply_voltage. Success carries voltage, failure\ncarries message — never both, never null; the route excludes None.",
+        "properties": {
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "voltage": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Voltage"
+          }
+        },
+        "required": [
+          "success"
+        ],
+        "title": "SupplyVoltageResponse",
+        "type": "object"
+      },
       "TeleoperateRequest": {
         "properties": {
           "follower_config": {
@@ -859,6 +1334,102 @@
           "follower_config"
         ],
         "title": "TeleoperateRequest",
+        "type": "object"
+      },
+      "UpdateResult": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "output": {
+            "default": "",
+            "title": "Output",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "UpdateResult",
+        "type": "object"
+      },
+      "UpdateStatus": {
+        "properties": {
+          "can_auto_update": {
+            "default": false,
+            "title": "Can Auto Update",
+            "type": "boolean"
+          },
+          "commits_behind": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commits Behind"
+          },
+          "compare_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compare Url"
+          },
+          "current_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Commit"
+          },
+          "latest_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Commit"
+          },
+          "update_available": {
+            "title": "Update Available",
+            "type": "boolean"
+          },
+          "update_command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Update Command"
+          }
+        },
+        "required": [
+          "update_available"
+        ],
+        "title": "UpdateStatus",
         "type": "object"
       },
       "UploadRequest": {
@@ -990,13 +1561,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AvailableCamerasResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Available Cameras"
+        "summary": "Get Available Cameras",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/available-ports": {
@@ -1007,13 +1583,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AvailablePortsResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Available Ports"
+        "summary": "Get Available Ports",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/calibration-configs/{device_type}": {
@@ -2062,13 +2643,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Health Check"
+        "summary": "Health Check",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/hf-auth-status": {
@@ -2079,13 +2665,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HfAuthStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Hf Auth Status"
+        "summary": "Hf Auth Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/hf-auth/login": {
@@ -2106,7 +2697,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HfLoginResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -2122,7 +2715,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Hf Auth Login"
+        "summary": "Hf Auth Login",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/identify-arm": {
@@ -3273,13 +3869,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyOptimizerDefaultsResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Policy Optimizer Defaults"
+        "summary": "Get Policy Optimizer Defaults",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/recording-exit-early": {
@@ -3423,7 +4024,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RobotPortResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -3439,7 +4042,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Robot Port"
+        "summary": "Get Robot Port",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/robots": {
@@ -4021,7 +4627,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SupplyVoltageResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4037,7 +4645,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Supply Voltage"
+        "summary": "Supply Voltage",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/policy-extra/{policy_type}": {
@@ -4059,7 +4670,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyExtraStatus"
+                }
               }
             },
             "description": "Successful Response"
@@ -4075,7 +4688,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Policy Extra"
+        "summary": "Get Policy Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/policy-extra/{policy_type}/install": {
@@ -4097,7 +4713,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4113,7 +4731,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Install Policy Extra"
+        "summary": "Install Policy Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/policy-extra/{policy_type}/install-status": {
@@ -4135,7 +4756,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -4151,7 +4774,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Install Policy Extra Status"
+        "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/training-extra": {
@@ -4162,13 +4788,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ExtraStatus"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Training Extra"
+        "summary": "Get Training Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/training-extra/install": {
@@ -4179,13 +4810,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Training Extra"
+        "summary": "Install Training Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/training-extra/install-status": {
@@ -4196,13 +4832,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Training Extra Status"
+        "summary": "Install Training Extra Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/update": {
@@ -4213,13 +4854,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateResult"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Run Update"
+        "summary": "Run Update",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/update-check": {
@@ -4230,13 +4876,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateStatus"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Update Check"
+        "summary": "Update Check",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/wandb-extra": {
@@ -4247,13 +4898,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ExtraStatus"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Wandb Extra"
+        "summary": "Get Wandb Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/wandb-extra/install": {
@@ -4264,13 +4920,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Wandb Extra"
+        "summary": "Install Wandb Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/system/wandb-extra/install-status": {
@@ -4281,13 +4942,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Wandb Extra Status"
+        "summary": "Install Wandb Extra Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/api/v1/teleoperation-status": {
@@ -4440,13 +5106,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AvailableCamerasResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Available Cameras"
+        "summary": "Get Available Cameras",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/available-ports": {
@@ -4457,13 +5128,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AvailablePortsResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Available Ports"
+        "summary": "Get Available Ports",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/calibration-configs/{device_type}": {
@@ -5512,13 +6188,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Health Check"
+        "summary": "Health Check",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/hf-auth-status": {
@@ -5529,13 +6210,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HfAuthStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Hf Auth Status"
+        "summary": "Hf Auth Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/hf-auth/login": {
@@ -5556,7 +6242,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HfLoginResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -5572,7 +6260,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Hf Auth Login"
+        "summary": "Hf Auth Login",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/identify-arm": {
@@ -6723,13 +7414,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyOptimizerDefaultsResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Policy Optimizer Defaults"
+        "summary": "Get Policy Optimizer Defaults",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/recording-exit-early": {
@@ -6873,7 +7569,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RobotPortResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -6889,7 +7587,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Robot Port"
+        "summary": "Get Robot Port",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/robots": {
@@ -7471,7 +8172,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SupplyVoltageResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7487,7 +8190,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Supply Voltage"
+        "summary": "Supply Voltage",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/policy-extra/{policy_type}": {
@@ -7509,7 +8215,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyExtraStatus"
+                }
               }
             },
             "description": "Successful Response"
@@ -7525,7 +8233,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Policy Extra"
+        "summary": "Get Policy Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/policy-extra/{policy_type}/install": {
@@ -7547,7 +8258,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7563,7 +8276,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Install Policy Extra"
+        "summary": "Install Policy Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/policy-extra/{policy_type}/install-status": {
@@ -7585,7 +8301,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7601,7 +8319,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Install Policy Extra Status"
+        "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/training-extra": {
@@ -7612,13 +8333,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ExtraStatus"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Training Extra"
+        "summary": "Get Training Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/training-extra/install": {
@@ -7629,13 +8355,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Training Extra"
+        "summary": "Install Training Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/training-extra/install-status": {
@@ -7646,13 +8377,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Training Extra Status"
+        "summary": "Install Training Extra Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/update": {
@@ -7663,13 +8399,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateResult"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Run Update"
+        "summary": "Run Update",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/update-check": {
@@ -7680,13 +8421,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateStatus"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Update Check"
+        "summary": "Update Check",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/wandb-extra": {
@@ -7697,13 +8443,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ExtraStatus"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Get Wandb Extra"
+        "summary": "Get Wandb Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/wandb-extra/install": {
@@ -7714,13 +8465,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Wandb Extra"
+        "summary": "Install Wandb Extra",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/system/wandb-extra/install-status": {
@@ -7731,13 +8487,18 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
               }
             },
             "description": "Successful Response"
           }
         },
-        "summary": "Install Wandb Extra Status"
+        "summary": "Install Wandb Extra Status",
+        "tags": [
+          "system"
+        ]
       }
     },
     "/teleoperation-status": {

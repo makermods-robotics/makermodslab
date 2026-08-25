@@ -631,7 +631,7 @@ const DeployPanel: React.FC = () => {
       setCheckingExtra(true);
       try {
         const r = await fetchWithHeaders(
-          `${baseUrl}/system/policy-extra/${policyConfig.policy_type}`,
+          `${baseUrl}/api/v1/system/policy-extra/${policyConfig.policy_type}`,
         );
         if (r.ok) {
           const extra = await r.json();

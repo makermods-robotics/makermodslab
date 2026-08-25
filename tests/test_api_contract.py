@@ -234,6 +234,151 @@ def test_v1_mirrors_legacy_surface():
     )
 
 
+# Routes whose v1 response is a file or stream, not a JSON document — a
+# Pydantic response_model does not apply to them. Kept out of the shrinking
+# list so "fully typed" can be reached without lying about these.
+RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
+    [
+        # Raw Response: calibration JSON served as an attachment download.
+        "GET /api/v1/calibration-configs/{device_type}/{config_name}/download",
+        # StreamingResponse: MJPEG camera preview stream.
+        "GET /api/v1/camera-preview/{index}",
+        # FileResponse: episode MP4 (Range-request video playback).
+        "GET /api/v1/datasets/episode-video",
+        # Raw Response: checkpoint zip served as an attachment download.
+        "GET /api/v1/jobs/{job_id}/checkpoints/{step}/download",
+    ]
+)
+
+# Every v1 operation still served without a declared response_model. This list
+# only ever SHRINKS: typing a route group deletes its entries in the same
+# commit that adds the models (see the ratchet note at the top of the file).
+# Only the /api/v1 mount is counted so entries stay stable while the flat
+# mount is retired.
+UNTYPED_V1_ROUTES: frozenset[str] = frozenset(
+    [
+        "DELETE /api/v1/calibration-configs/{device_type}/{config_name}",
+        "DELETE /api/v1/datasets/custom",
+        "DELETE /api/v1/datasets/hide",
+        "DELETE /api/v1/jobs/hub/models/{repo_id:path}",
+        "DELETE /api/v1/jobs/{job_id}",
+        "DELETE /api/v1/models/custom",
+        "DELETE /api/v1/models/hide",
+        "DELETE /api/v1/robots/{name}",
+        "GET /api/v1/auto-calibration-batch-status",
+        "GET /api/v1/auto-calibration-status",
+        "GET /api/v1/calibration-configs/{device_type}",
+        "GET /api/v1/calibration-status",
+        "GET /api/v1/datasets",
+        "GET /api/v1/datasets/download-status",
+        "GET /api/v1/datasets/episode-joints",
+        "GET /api/v1/datasets/episodes",
+        "GET /api/v1/datasets/hub-settings",
+        "GET /api/v1/datasets/hub-status",
+        "GET /api/v1/datasets/info",
+        "GET /api/v1/datasets/merge/status",
+        "GET /api/v1/inference-log",
+        "GET /api/v1/inference-status",
+        "GET /api/v1/jobs",
+        "GET /api/v1/jobs/hub",
+        "GET /api/v1/jobs/runners/hardware",
+        "GET /api/v1/jobs/{job_id}",
+        "GET /api/v1/jobs/{job_id}/checkpoints",
+        "GET /api/v1/jobs/{job_id}/checkpoints/{step}/policy-config",
+        "GET /api/v1/jobs/{job_id}/log-file",
+        "GET /api/v1/jobs/{job_id}/logs",
+        "GET /api/v1/jobs/{job_id}/metrics-history",
+        "GET /api/v1/models",
+        "GET /api/v1/models/download-status",
+        "GET /api/v1/models/info",
+        "GET /api/v1/recording-log",
+        "GET /api/v1/recording-status",
+        "GET /api/v1/replay-status",
+        "GET /api/v1/robots",
+        "GET /api/v1/robots/{name}",
+        "GET /api/v1/teleoperation-status",
+        "GET /api/v1/upload-status",
+        "POST /api/v1/calibration-configs/{device_type}/upload",
+        "POST /api/v1/calibration-configs/{device_type}/{config_name}/rename",
+        "POST /api/v1/complete-calibration-step",
+        "POST /api/v1/datasets/custom",
+        "POST /api/v1/datasets/download",
+        "POST /api/v1/datasets/hide",
+        "POST /api/v1/datasets/import",
+        "POST /api/v1/datasets/merge",
+        "POST /api/v1/datasets/rename",
+        "POST /api/v1/datasets/tags",
+        "POST /api/v1/datasets/visibility",
+        "POST /api/v1/delete-dataset",
+        "POST /api/v1/identify-arm",
+        "POST /api/v1/inference-episode-stop",
+        "POST /api/v1/inference-next-episode",
+        "POST /api/v1/jobs/hub/jobs/{job_id}/dismiss",
+        "POST /api/v1/jobs/import",
+        "POST /api/v1/jobs/training",
+        "POST /api/v1/jobs/{job_id}/rename",
+        "POST /api/v1/jobs/{job_id}/stop",
+        "POST /api/v1/models/custom",
+        "POST /api/v1/models/delete",
+        "POST /api/v1/models/download",
+        "POST /api/v1/models/hide",
+        "POST /api/v1/models/import",
+        "POST /api/v1/models/upload",
+        "POST /api/v1/move-arm",
+        "POST /api/v1/open-calibration-folder",
+        "POST /api/v1/recording-exit-early",
+        "POST /api/v1/recording-pause",
+        "POST /api/v1/recording-rerecord-episode",
+        "POST /api/v1/recording-resume",
+        "POST /api/v1/robots/{name}",
+        "POST /api/v1/robots/{name}/rename",
+        "POST /api/v1/start-auto-calibration",
+        "POST /api/v1/start-auto-calibration-batch",
+        "POST /api/v1/start-calibration",
+        "POST /api/v1/start-inference",
+        "POST /api/v1/start-recording",
+        "POST /api/v1/start-replay",
+        "POST /api/v1/stop-auto-calibration",
+        "POST /api/v1/stop-auto-calibration-batch",
+        "POST /api/v1/stop-calibration",
+        "POST /api/v1/stop-inference",
+        "POST /api/v1/stop-recording",
+        "POST /api/v1/stop-replay",
+        "POST /api/v1/stop-teleoperation",
+        "POST /api/v1/upload-dataset",
+        "POST /api/v1/wiggle",
+    ]
+)
+
+
+def _v1_json_operations():
+    """(op, route) for every v1 APIRoute operation, '<METHOD> /api/v1/...'."""
+    from makermodslab.server import app
+
+    for path, r in _walk_routes(app.routes):
+        if not isinstance(r, APIRoute) or not path.startswith("/api/v1/"):
+            continue
+        for m in sorted(r.methods - {"HEAD", "OPTIONS"}):
+            yield f"{m} {path}", r
+
+
+def test_untyped_v1_routes_ratchet():
+    """Every v1 JSON operation must either declare a response_model or appear
+    in UNTYPED_V1_ROUTES; file/stream routes live in RESPONSE_MODEL_EXEMPT."""
+    ops = dict(_v1_json_operations())
+    unknown_exempt = RESPONSE_MODEL_EXEMPT - ops.keys()
+    assert not unknown_exempt, f"RESPONSE_MODEL_EXEMPT lists retired routes: {sorted(unknown_exempt)}"
+
+    untyped = {op for op, r in ops.items() if op not in RESPONSE_MODEL_EXEMPT and r.response_model is None}
+    added = untyped - UNTYPED_V1_ROUTES
+    removed = UNTYPED_V1_ROUTES - untyped
+    assert untyped == UNTYPED_V1_ROUTES, (
+        f"Untyped v1 route surface changed.\n"
+        f"  Added (new routes must declare a response_model): {sorted(added)}\n"
+        f"  Removed (delete newly-typed routes from UNTYPED_V1_ROUTES): {sorted(removed)}"
+    )
+
+
 def test_v1_operation_ids_are_clean_and_unique():
     """v1 operation ids are the handler function names — the names an SDK
     generator will emit as client methods — and must therefore be unique."""

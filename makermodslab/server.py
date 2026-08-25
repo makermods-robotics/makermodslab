@@ -117,6 +117,24 @@ from .rollout import (
     handle_stop_inference,
 )
 
+# Response models for the typed /api/v1 surface (see makermodslab/schemas/).
+from .schemas.system import (
+    AvailableCamerasResponse,
+    AvailablePortsResponse,
+    ExtraStatus,
+    HealthResponse,
+    HfAuthStatusResponse,
+    HfLoginResponse,
+    InstallStartResponse,
+    InstallStatusResponse,
+    PolicyExtraStatus,
+    PolicyOptimizerDefaultsResponse,
+    RobotPortResponse,
+    SupplyVoltageResponse,
+    UpdateResult,
+    UpdateStatus,
+)
+
 # Import our custom teleoperation functionality
 from .teleoperate import (
     TeleoperateRequest,
@@ -485,7 +503,7 @@ def _optimizer_name_from_preset(preset) -> str:
     return _OPTIMIZER_CLASS_TO_NAME.get(name, name)
 
 
-@router.get("/policy-optimizer-defaults")
+@router.get("/policy-optimizer-defaults", response_model=PolicyOptimizerDefaultsResponse, tags=["system"])
 def get_policy_optimizer_defaults():
     """Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm
     + optimizer type) so the training UI can show the real "policy default"
@@ -656,7 +674,7 @@ def replay_status():
     return handle_replay_status()
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthResponse, tags=["system"])
 def health_check():
     """Node identity + capability document.
 
@@ -677,7 +695,7 @@ def health_check():
     }
 
 
-@router.get("/hf-auth-status")
+@router.get("/hf-auth-status", response_model=HfAuthStatusResponse, tags=["system"])
 def hf_auth_status():
     """Check whether the local HF CLI is authenticated and return user info."""
     return handle_hf_auth_status()
@@ -687,7 +705,7 @@ class HfLoginBody(BaseModel):
     token: str
 
 
-@router.post("/hf-auth/login")
+@router.post("/hf-auth/login", response_model=HfLoginResponse, tags=["system"])
 def hf_auth_login(body: HfLoginBody):
     """Persist a pasted HF token (validated against whoami) for this user."""
     try:
@@ -2080,68 +2098,74 @@ def get_runners_hardware():
 # ============================================================================
 
 
-@router.get("/system/training-extra")
+@router.get("/system/training-extra", response_model=ExtraStatus, tags=["system"])
 def get_training_extra():
     """Return whether the LeRobot training extra (accelerate) is importable."""
     return handle_get_training_extra()
 
 
-@router.post("/system/training-extra/install")
+@router.post("/system/training-extra/install", response_model=InstallStartResponse, tags=["system"])
 def install_training_extra():
     """Spawn `pip install accelerate` as a background subprocess. No-op if already running."""
     return handle_install_training_extra()
 
 
-@router.get("/system/training-extra/install-status")
+@router.get("/system/training-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
 def install_training_extra_status():
     """Return current install state plus any pending log lines (drained on read)."""
     return handle_install_training_extra_status()
 
 
-@router.get("/system/wandb-extra")
+@router.get("/system/wandb-extra", response_model=ExtraStatus, tags=["system"])
 def get_wandb_extra():
     """Return whether the `wandb` package is importable in this MakerMods Lab process."""
     return handle_get_wandb_extra()
 
 
-@router.post("/system/wandb-extra/install")
+@router.post("/system/wandb-extra/install", response_model=InstallStartResponse, tags=["system"])
 def install_wandb_extra():
     """Spawn `pip install wandb` as a background subprocess. No-op if already running."""
     return handle_install_wandb_extra()
 
 
-@router.get("/system/wandb-extra/install-status")
+@router.get("/system/wandb-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
 def install_wandb_extra_status():
     """Return current wandb install state plus any pending log lines (drained on read)."""
     return handle_install_wandb_extra_status()
 
 
-@router.get("/system/policy-extra/{policy_type}")
+@router.get("/system/policy-extra/{policy_type}", response_model=PolicyExtraStatus, tags=["system"])
 def get_policy_extra(policy_type: str):
     """Whether the optional LeRobot extra a policy needs (e.g. transformers for
     smolvla/pi0, diffusers for diffusion) is importable. Core policies report available."""
     return handle_get_policy_extra(policy_type)
 
 
-@router.post("/system/policy-extra/{policy_type}/install")
+@router.post(
+    "/system/policy-extra/{policy_type}/install", response_model=InstallStartResponse, tags=["system"]
+)
 def install_policy_extra(policy_type: str):
     """Spawn `pip install lerobot[<extra>]` for the policy's extra in the background."""
     return handle_install_policy_extra(policy_type)
 
 
-@router.get("/system/policy-extra/{policy_type}/install-status")
+@router.get(
+    "/system/policy-extra/{policy_type}/install-status",
+    response_model=InstallStatusResponse,
+    tags=["system"],
+)
 def install_policy_extra_status(policy_type: str):
     """Return the policy extra's install state plus any pending log lines (drained on read)."""
     return handle_install_policy_extra_status(policy_type)
 
 
-@router.get("/system/update-check")
+@router.get("/system/update-check", response_model=UpdateStatus, tags=["system"])
 def update_check():
     """Report whether a newer MakerMods Lab commit exists on GitHub (cached, silent on failure)."""
     return handle_update_check()
 
 
-@router.post("/system/update")
+@router.post("/system/update", response_model=UpdateResult, tags=["system"])
 def run_update():
     """Run the pip upgrade in-process; the user must restart MakerMods Lab afterwards."""
     return handle_run_update()
@@ -2457,7 +2481,14 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
 # ============================================================================
 
 
-@router.get("/available-ports")
+# exclude_none: success carries `ports`, failure carries `message` — the other
+# key is absent, never null, so None-exclusion reproduces each branch exactly.
+@router.get(
+    "/available-ports",
+    response_model=AvailablePortsResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
 def get_available_ports():
     """Get all available serial ports"""
     try:
@@ -2490,7 +2521,14 @@ async def identify_arm(request: IdentifyArmRequest):
     return await identify_arm_by_motion(request.ports)
 
 
-@router.get("/supply-voltage")
+# exclude_none: success carries `voltage`, failure carries `message` — never
+# both, never null (see read_supply_voltage), so None-exclusion is faithful.
+@router.get(
+    "/supply-voltage",
+    response_model=SupplyVoltageResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
 async def supply_voltage(port: str = ""):
     """One-shot, read-only supply-voltage reading (Present_Voltage) from the arm
     on `port`. Connects, reads, and releases the port immediately — never holds
@@ -2661,7 +2699,15 @@ def _linux_cameras() -> list[dict[str, Any]]:
     return cameras
 
 
-@router.get("/available-cameras")
+# exclude_none: `message` exists only on the error branch and `unique_id` only
+# on macOS entries — both absent (never null) otherwise, so None-exclusion
+# reproduces the platform-specific bodies exactly.
+@router.get(
+    "/available-cameras",
+    response_model=AvailableCamerasResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
 def get_available_cameras():
     """List cameras with the same index ordering cv2 will use to record.
 
@@ -2765,7 +2811,7 @@ def camera_preview_stream(index: int, unique_id: str | None = None):
 RobotSideLiteral = Literal["leader", "follower"]
 
 
-@router.get("/robot-port/{robot_type}")
+@router.get("/robot-port/{robot_type}", response_model=RobotPortResponse, tags=["system"])
 def get_robot_port(robot_type: RobotSideLiteral):
     """Get the saved port for a robot type"""
     saved_port = get_saved_robot_port(robot_type)
@@ -3086,6 +3132,7 @@ def _v1_operation_id(route: APIRoute) -> str:
 # so anything registered after the "/" mount would be unreachable.
 app.include_router(router)
 app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
+
 
 def ui_enabled() -> bool:
     """Whether this process serves the built frontend.

@@ -612,7 +612,7 @@ const RobotConfigWindow = ({
   const fetchPorts = useCallback(async () => {
     setPortsLoading(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/available-ports`);
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/available-ports`);
       const data = await res.json();
       setAvailablePorts(Array.isArray(data.ports) ? data.ports : []);
     } catch (e) {

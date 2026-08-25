@@ -428,7 +428,7 @@ export function mockHubResponse(
     return null;
   }
 
-  if (method === "GET" && path === "/hf-auth-status") {
+  if (method === "GET" && path === "/api/v1/hf-auth-status") {
     return json({
       authenticated: true,
       username: USER,
