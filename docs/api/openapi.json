@@ -1,6 +1,30 @@
 {
   "components": {
     "schemas": {
+      "AddNodeBody": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "AddNodeBody",
+        "type": "object"
+      },
       "AutoCalibrationBatchArm": {
         "description": "One arm in a concurrent auto-calibration batch. Same fields as the\nsingle-arm request minus robot_name (batch-level, shared by every arm).",
         "properties": {
@@ -2516,6 +2540,139 @@
           "tags"
         ],
         "title": "ModelUploadResponse",
+        "type": "object"
+      },
+      "NodeEntry": {
+        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started. capabilities is\na plain dict, not HealthCapabilities — it's the PEER's self-reported\nblock, and a version-skewed peer must not fail our response validation.\nlast_verified_at is the server's monotonic registry clock (ordering and\nfreshness relative to other entries, not wall-clock time).",
+        "properties": {
+          "capabilities": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capabilities"
+          },
+          "instance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance Id"
+          },
+          "is_self": {
+            "title": "Is Self",
+            "type": "boolean"
+          },
+          "last_verified_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Verified At"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "unreachable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "url",
+          "instance_id",
+          "name",
+          "version",
+          "capabilities",
+          "status",
+          "last_verified_at",
+          "is_self"
+        ],
+        "title": "NodeEntry",
+        "type": "object"
+      },
+      "NodeListResponse": {
+        "description": "server.py list_nodes — the self entry first, then registered peers.",
+        "properties": {
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/NodeEntry"
+            },
+            "title": "Nodes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "nodes"
+        ],
+        "title": "NodeListResponse",
+        "type": "object"
+      },
+      "NodeRemoveResponse": {
+        "description": "nodes.py handle_remove_node.",
+        "properties": {
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "removed",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "instance_id"
+        ],
+        "title": "NodeRemoveResponse",
         "type": "object"
       },
       "OpenCalibrationFolderRequest": {
@@ -6400,6 +6557,111 @@
           }
         },
         "summary": "Teleoperate Arm"
+      }
+    },
+    "/api/v1/nodes": {
+      "get": {
+        "description": "All known nodes: this server first (is_self=true, built from the same\nhealth fields the handshake reads, so clients render one uniform list),\nthen every registered peer. Peers whose last probe is older than the TTL\nare re-verified inline; a peer that fails re-verification is reported\n`unreachable` but kept until explicitly removed.",
+        "operationId": "list_nodes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Nodes",
+        "tags": [
+          "nodes"
+        ]
+      },
+      "post": {
+        "description": "Verify-on-add: GET {url}/api/v1/health and register the peer's\nidentity. 200 returns the entry (also when a known peer's URL is updated\nin place); 422 request.validation for a non-http(s) url; 409 node.self /\nnode.duplicate; 502 node.unreachable when the handshake fails (dead host\nor a non-node answer) — an unreachable peer is an error, never a pending\nstate.",
+        "operationId": "add_node",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddNodeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Node",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}": {
+      "delete": {
+        "description": "Remove a registered peer. 404 node.not_found for an unknown\ninstance_id (including a saved peer that has never completed a handshake\nthis run — those carry a null instance_id until verified).",
+        "operationId": "remove_node",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeRemoveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Node",
+        "tags": [
+          "nodes"
+        ]
       }
     },
     "/api/v1/open-calibration-folder": {

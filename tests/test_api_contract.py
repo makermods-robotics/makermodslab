@@ -214,21 +214,42 @@ def test_no_new_routes_outside_api_v1():
     )
 
 
+# Operations that exist ONLY under /api/v1. The flat mount is frozen
+# (LEGACY_ROUTES above), so all new surface lands versioned from day one and
+# registers here. NOT a ratchet: unlike the shrink-only lists, this set GROWS —
+# each entry documents a deliberate v1-only addition, and the parity test
+# checks every entry actually exists so retired surface can't linger.
+V1_ONLY_ROUTES: frozenset[str] = frozenset(
+    [
+        # Node registry (multi-node): static/manual peer source.
+        "DELETE /api/v1/nodes/{instance_id}",
+        "GET /api/v1/nodes",
+        "POST /api/v1/nodes",
+    ]
+)
+
+
 def test_v1_mirrors_legacy_surface():
-    """Every flat operation must also be mounted under /api/v1, and vice versa.
+    """Every flat operation must also be mounted under /api/v1, and every v1
+    operation is either the mirror of a flat one or registered in
+    V1_ONLY_ROUTES.
 
     The dual mount serves the shipped frontend (flat) and the versioned surface
-    (v1) from the same router; this asserts the two never drift while both exist.
+    (v1) from the same router; new surface skips the flat mount entirely.
     """
     surface = api_surface()
     legacy = {p for p in surface if not p.split(" ", 1)[1].startswith("/api/v1")}
+    v1_full = {p for p in surface if p.split(" ", 1)[1].startswith("/api/v1/")}
+
+    missing = V1_ONLY_ROUTES - v1_full
+    assert not missing, f"V1_ONLY_ROUTES lists operations that don't exist: {sorted(missing)}"
+
     v1 = set()
-    for op in surface:
+    for op in v1_full - V1_ONLY_ROUTES:
         method, path = op.split(" ", 1)
-        if path.startswith("/api/v1/"):
-            v1.add(f"{method} {path[len('/api/v1') :]}")
+        v1.add(f"{method} {path[len('/api/v1') :]}")
     assert v1 == legacy, (
-        f"flat and /api/v1 surfaces drifted.\n"
+        f"flat and /api/v1 surfaces drifted (new v1-only surface belongs in V1_ONLY_ROUTES).\n"
         f"  only flat: {sorted(legacy - v1)}\n"
         f"  only v1:   {sorted(v1 - legacy)}"
     )

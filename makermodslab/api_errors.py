@@ -83,6 +83,14 @@ class ErrorCode(StrEnum):
     CHECKPOINT_NOT_FOUND = "checkpoint.not_found"
     CHECKPOINT_INCOMPLETE = "checkpoint.incomplete"
 
+    # node.* — the peer-node registry (other MakerMods Lab servers on the
+    # LAN/tailnet). `unreachable` covers both a dead host and one that answers
+    # /api/v1/health with something that isn't a node identity document.
+    NODE_NOT_FOUND = "node.not_found"
+    NODE_UNREACHABLE = "node.unreachable"
+    NODE_DUPLICATE = "node.duplicate"
+    NODE_SELF = "node.self"
+
     # session.* — RESERVED for the Phase-2 /api/v1/sessions lease. Wired by a
     # strict-xfail test until that surface exists; do not use elsewhere.
     SESSION_HELD = "session.held"

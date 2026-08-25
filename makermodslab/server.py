@@ -81,6 +81,7 @@ from .jobs import (
 )
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
+from .nodes import handle_add_node, handle_list_nodes, handle_remove_node
 
 # Import our custom recording functionality
 from .record import (
@@ -155,6 +156,11 @@ from .schemas.models import (
     ModelInfoResponse,
     ModelListItem,
     ModelUploadResponse,
+)
+from .schemas.nodes import (
+    NodeEntry,
+    NodeListResponse,
+    NodeRemoveResponse,
 )
 from .schemas.system import (
     AvailableCamerasResponse,
@@ -323,6 +329,11 @@ app.add_middleware(
 # and once under /api/v1 (the versioned surface SDK clients target). The two
 # stay identical by construction; tests/test_api_contract.py asserts it.
 router = APIRouter()
+
+# NEW surface registers here instead: this router is mounted ONLY under
+# /api/v1 (the flat mount is frozen — LEGACY_ROUTES is a shrink-only ratchet).
+# Each addition is documented in tests/test_api_contract.py V1_ONLY_ROUTES.
+v1_router = APIRouter()
 
 # ApiError responses carry a machine-readable `code` beside the legacy string
 # `detail` (see api_errors.py); plain HTTPException raises are untouched.
@@ -731,6 +742,54 @@ def health_check():
             "accepts_jobs": True,
         },
     }
+
+
+# --- Node registry (v1-only surface; see v1_router note above) ---
+
+
+class AddNodeBody(BaseModel):
+    url: str
+    name: str | None = None
+
+
+@v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
+def list_nodes():
+    """All known nodes: this server first (is_self=true, built from the same
+    health fields the handshake reads, so clients render one uniform list),
+    then every registered peer. Peers whose last probe is older than the TTL
+    are re-verified inline; a peer that fails re-verification is reported
+    `unreachable` but kept until explicitly removed."""
+    health = health_check()
+    self_entry = {
+        "url": None,  # a server doesn't know its own external address
+        "instance_id": health["instance_id"],
+        "name": None,
+        "version": health["version"],
+        "capabilities": health["capabilities"],
+        "status": "ok",
+        "last_verified_at": None,  # no handshake needed with ourselves
+        "is_self": True,
+    }
+    return {"nodes": [self_entry, *handle_list_nodes()]}
+
+
+@v1_router.post("/nodes", response_model=NodeEntry, tags=["nodes"])
+def add_node(body: AddNodeBody):
+    """Verify-on-add: GET {url}/api/v1/health and register the peer's
+    identity. 200 returns the entry (also when a known peer's URL is updated
+    in place); 422 request.validation for a non-http(s) url; 409 node.self /
+    node.duplicate; 502 node.unreachable when the handshake fails (dead host
+    or a non-node answer) — an unreachable peer is an error, never a pending
+    state."""
+    return handle_add_node(body.url, name=body.name)
+
+
+@v1_router.delete("/nodes/{instance_id}", response_model=NodeRemoveResponse, tags=["nodes"])
+def remove_node(instance_id: str):
+    """Remove a registered peer. 404 node.not_found for an unknown
+    instance_id (including a saved peer that has never completed a handshake
+    this run — those carry a null instance_id until verified)."""
+    return handle_remove_node(instance_id)
 
 
 @router.get("/hf-auth-status", response_model=HfAuthStatusResponse, tags=["system"])
@@ -3218,6 +3277,8 @@ def _v1_operation_id(route: APIRoute) -> str:
 # so anything registered after the "/" mount would be unreachable.
 app.include_router(router)
 app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
+# v1-only surface: included ONCE, versioned — never on the flat mount.
+app.include_router(v1_router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
 
 
 def ui_enabled() -> bool:

@@ -85,6 +85,12 @@ SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidd
 # MagicDNS name can change; its instance id doesn't).
 INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.txt")
 
+# The node registry's saved peer list: [{"url": ..., "name": ...}, ...]. Only
+# url + name are persisted — identity (instance_id/version/capabilities) is
+# deliberately NOT: a peer is re-verified against its live /api/v1/health on
+# load/probe, so stale identity can never be served from disk.
+NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
+
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
 MAKERMODSLAB_TAG = "MakerModsLab"
@@ -121,6 +127,32 @@ def _atomic_write_text(path: str, content: str) -> None:
     with open(tmp, "w") as f:
         f.write(content)
     os.replace(tmp, path)
+
+
+def load_saved_nodes() -> list[dict[str, str | None]]:
+    """The saved peer rows from NODES_FILE, each ``{"url": str, "name": str|None}``.
+
+    Missing, corrupt, or wrong-shaped content yields [] (an empty registry is
+    always a safe starting point); rows without a string url are dropped.
+    """
+    try:
+        with open(NODES_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    rows: list[dict[str, str | None]] = []
+    for row in data:
+        if isinstance(row, dict) and isinstance(row.get("url"), str):
+            name = row.get("name")
+            rows.append({"url": row["url"], "name": name if isinstance(name, str) else None})
+    return rows
+
+
+def save_saved_nodes(rows: list[dict[str, str | None]]) -> None:
+    """Persist the peer rows (url + name only) to NODES_FILE atomically."""
+    _atomic_write_text(NODES_FILE, json.dumps(rows, indent=2))
 
 
 _instance_id_cache: str | None = None
