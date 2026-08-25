@@ -56,6 +56,7 @@ from . import (
 )
 
 # Import our custom calibration functionality
+from .__version__ import __version__
 from .api_errors import ApiError, install_error_handlers
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
@@ -143,6 +144,7 @@ from .utils.config import (
     find_available_ports,
     get_default_robot_port,
     get_dismissed_hub_jobs,
+    get_instance_id,
     get_robot_record,
     get_saved_robot_port,
     is_robot_record_clean,
@@ -656,8 +658,23 @@ def replay_status():
 
 @router.get("/health")
 def health_check():
-    """Simple health check endpoint to verify server is running"""
-    return {"status": "ok", "message": "FastAPI server is running"}
+    """Node identity + capability document.
+
+    Doubles as the node-registry verify handshake: a discovered peer is
+    confirmed by fetching this and reading version/instance_id/capabilities.
+    `status`/`message` are the legacy reachability-probe fields — keep them.
+    Capabilities grow additively (gpu, hardware inventory) as the registry
+    needs them; absent key means "unknown/unsupported", never guess."""
+    return {
+        "status": "ok",
+        "message": "FastAPI server is running",
+        "version": __version__,
+        "instance_id": get_instance_id(),
+        "capabilities": {
+            "serves_ui": ui_enabled(),
+            "accepts_jobs": True,
+        },
+    }
 
 
 @router.get("/hf-auth-status")
@@ -3070,8 +3087,16 @@ def _v1_operation_id(route: APIRoute) -> str:
 app.include_router(router)
 app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
 
+def ui_enabled() -> bool:
+    """Whether this process serves the built frontend.
+
+    MAKERMODSLAB_NO_UI=1 (the --no-ui flag) turns a node into a pure API
+    server — same binary, headless role."""
+    return FRONTEND_DIST.exists() and os.environ.get("MAKERMODSLAB_NO_UI") != "1"
+
+
 # Serve the built frontend at /. Must be mounted last so API routes win.
-if FRONTEND_DIST.exists():
+if ui_enabled():
     app.mount("/", SPAStaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 else:
     logger.warning(

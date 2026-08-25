@@ -2056,7 +2056,7 @@
     },
     "/api/v1/health": {
       "get": {
-        "description": "Simple health check endpoint to verify server is running",
+        "description": "Node identity + capability document.\n\nDoubles as the node-registry verify handshake: a discovered peer is\nconfirmed by fetching this and reading version/instance_id/capabilities.\n`status`/`message` are the legacy reachability-probe fields — keep them.\nCapabilities grow additively (gpu, hardware inventory) as the registry\nneeds them; absent key means \"unknown/unsupported\", never guess.",
         "operationId": "health_check",
         "responses": {
           "200": {
@@ -5506,7 +5506,7 @@
     },
     "/health": {
       "get": {
-        "description": "Simple health check endpoint to verify server is running",
+        "description": "Node identity + capability document.\n\nDoubles as the node-registry verify handshake: a discovered peer is\nconfirmed by fetching this and reading version/instance_id/capabilities.\n`status`/`message` are the legacy reachability-probe fields — keep them.\nCapabilities grow additively (gpu, hardware inventory) as the registry\nneeds them; absent key means \"unknown/unsupported\", never guess.",
         "operationId": "health_check_health_get",
         "responses": {
           "200": {

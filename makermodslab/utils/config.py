@@ -18,6 +18,7 @@ import os
 import platform
 import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import Literal
 
@@ -79,6 +80,11 @@ SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/save
 SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
 SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
 
+# Stable per-install identity, minted on first read. The node registry uses it
+# to recognize a peer across restarts and address changes (a machine's IP or
+# MagicDNS name can change; its instance id doesn't).
+INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.txt")
+
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
 MAKERMODSLAB_TAG = "MakerModsLab"
@@ -115,6 +121,30 @@ def _atomic_write_text(path: str, content: str) -> None:
     with open(tmp, "w") as f:
         f.write(content)
     os.replace(tmp, path)
+
+
+_instance_id_cache: str | None = None
+
+
+def get_instance_id() -> str:
+    """This install's stable identity: a 32-hex-char id, persisted on first use.
+
+    Cached after the first read; a wiped cache dir simply mints a new identity
+    (a fresh install IS a new node as far as peers are concerned).
+    """
+    global _instance_id_cache
+    if _instance_id_cache is not None:
+        return _instance_id_cache
+    try:
+        with open(INSTANCE_ID_FILE) as f:
+            stored = f.read().strip()
+    except OSError:
+        stored = ""
+    if not re.fullmatch(r"[0-9a-f]{32}", stored):
+        stored = uuid.uuid4().hex
+        _atomic_write_text(INSTANCE_ID_FILE, stored + "\n")
+    _instance_id_cache = stored
+    return stored
 
 
 def _port_file_for(robot_type: RobotSide) -> str:

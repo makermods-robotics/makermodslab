@@ -297,14 +297,15 @@ def _open_browser_when_ready():
         return
 
 
-def _run_prod(lan: bool = False):
+def _run_prod(lan: bool = False, no_ui: bool = False):
     """Serve built frontend from backend on a single port.
 
     `lan` binds 0.0.0.0 for headless stations serving other machines on the
     network; it also skips the open-a-local-browser step (there is no local
-    browser worth opening in that deployment).
+    browser worth opening in that deployment). `no_ui` skips serving (and
+    requiring) the built frontend entirely — a pure API node.
     """
-    if not FRONTEND_DIST.exists():
+    if not no_ui and not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
         logger.error("   Run `npm run build` in frontend/ first, or use `makermodslab --dev`.")
         sys.exit(1)
@@ -315,7 +316,8 @@ def _run_prod(lan: bool = False):
         logger.info("🚀 Starting MakerMods Lab on http://0.0.0.0:%d (LAN) ...", BACKEND_PORT)
     else:
         logger.info("🚀 Starting MakerMods Lab on http://localhost:%d ...", BACKEND_PORT)
-        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+        if not no_ui:
+            threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
@@ -466,6 +468,11 @@ def main():
         help="Set HF_HUB_OFFLINE=1: every Hub call fails fast (all hardware flows work offline)",
     )
     parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="Don't serve the built frontend: pure API node (same binary, headless role)",
+    )
+    parser.add_argument(
         "--stop",
         action="store_true",
         help="Stop a running MakerMods Lab and free its ports (:8000/:8080), then exit.",
@@ -488,12 +495,17 @@ def main():
             "dataset push will fail fast), hardware flows unaffected."
         )
 
+    if args.no_ui:
+        # Like HF_HUB_OFFLINE above: must be in the environment before uvicorn
+        # imports makermodslab.server, where ui_enabled() gates the SPA mount.
+        os.environ["MAKERMODSLAB_NO_UI"] = "1"
+
     if args.dev:
         if args.lan:
             logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
         _run_dev()
     else:
-        _run_prod(lan=args.lan)
+        _run_prod(lan=args.lan, no_ui=args.no_ui)
 
 
 def station():
