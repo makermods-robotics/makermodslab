@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .api_errors import ErrorCode
 from .motor_power import torque_limit_from_percent
 from .torque import force_disable_bus_torque
 from .utils.config import (
@@ -212,7 +213,11 @@ class _AutoCalArmRunner:
     def start(self, request: AutoCalibrationRequest) -> dict:
         with self._lock:
             if self.status.active:
-                return {"success": False, "message": "Auto-calibration is already running"}
+                return {
+                    "success": False,
+                    "message": "Auto-calibration is already running",
+                    "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+                }
 
             # Mutex with every other feature that drives the same serial bus
             # (see CLAUDE.md's "State model & mutual exclusion"). Lazy
@@ -228,20 +233,41 @@ class _AutoCalArmRunner:
             )
 
             if _teleoperate.teleoperation_active:
-                return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+                }
             if _record.recording_active:
-                return {"success": False, "message": "Recording is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Recording is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_RECORDING,
+                }
             if _rollout.inference_active:
-                return {"success": False, "message": "Inference is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                }
             if _calibrate.calibration_is_active():
-                return {"success": False, "message": "Calibration is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Calibration is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+                }
             if _wiggle.wiggle_active:
                 return {
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                    "code": ErrorCode.ROBOT_BUSY_WIGGLE,
                 }
             if _replay.replay_active:
-                return {"success": False, "message": "Replay is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Replay is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REPLAY,
+                }
 
             if request.device_type not in ("teleop", "robot"):
                 return {"success": False, "message": "Invalid device type"}
@@ -572,7 +598,11 @@ class AutoCalibrationBatchManager:
     def start(self, request: AutoCalibrationBatchRequest) -> dict:
         with self._lock:
             if self._active():
-                return {"success": False, "message": "A batch auto-calibration is already running"}
+                return {
+                    "success": False,
+                    "message": "A batch auto-calibration is already running",
+                    "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+                }
 
             # Mutex with every other feature that drives the same serial bus
             # (see CLAUDE.md's "State model & mutual exclusion"). Checked
@@ -591,20 +621,41 @@ class AutoCalibrationBatchManager:
             )
 
             if _teleoperate.teleoperation_active:
-                return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Teleoperation is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+                }
             if _record.recording_active:
-                return {"success": False, "message": "Recording is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Recording is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_RECORDING,
+                }
             if _rollout.inference_active:
-                return {"success": False, "message": "Inference is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                }
             if _calibrate.calibration_is_active():
-                return {"success": False, "message": "Calibration is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Calibration is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+                }
             if _wiggle.wiggle_active:
                 return {
                     "success": False,
                     "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                    "code": ErrorCode.ROBOT_BUSY_WIGGLE,
                 }
             if _replay.replay_active:
-                return {"success": False, "message": "Replay is currently active. Stop it first."}
+                return {
+                    "success": False,
+                    "message": "Replay is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REPLAY,
+                }
 
             arms = request.arms
             # --- Fail-fast validation, before touching any hardware. ---

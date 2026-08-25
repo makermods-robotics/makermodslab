@@ -56,6 +56,7 @@ from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from .api_errors import ErrorCode
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
 from .eval_protocol import (
@@ -1661,18 +1662,21 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _record.recording_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Recording is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is already active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
         if _inference_startup_thread is not None and _inference_startup_thread.is_alive():
             # A previous session was stopped while its startup worker was
@@ -1685,30 +1689,35 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "The previous session is still shutting down. Try again in a few seconds.",
+                "code": ErrorCode.ROBOT_BUSY_RELEASING,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if _replay.replay_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first

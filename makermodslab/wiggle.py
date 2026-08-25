@@ -24,6 +24,8 @@ import time
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .api_errors import ErrorCode
+
 logger = logging.getLogger(__name__)
 
 # ~200 encoder steps (of 4096) is a small but clearly visible movement.
@@ -126,36 +128,46 @@ async def wiggle_gripper(port: str) -> dict:
     )
 
     if wiggle_active:
-        return {"success": False, "message": "A gripper wiggle is already in progress."}
+        return {
+            "success": False,
+            "message": "A gripper wiggle is already in progress.",
+            "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+        }
     if _teleoperate.teleoperation_active:
         return {
             "success": False,
             "message": "Teleoperation is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
         }
     if _record.recording_active:
         return {
             "success": False,
             "message": "Recording is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_RECORDING,
         }
     if _rollout.inference_active:
         return {
             "success": False,
             "message": "Inference is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_INFERENCE,
         }
     if _calibrate.calibration_is_active():
         return {
             "success": False,
             "message": "Calibration is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
         }
     if _auto_calibrate.auto_calibration_is_active():
         return {
             "success": False,
             "message": "Auto-calibration is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
         }
     if _replay.replay_active:
         return {
             "success": False,
             "message": "Replay is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_REPLAY,
         }
 
     wiggle_active = True

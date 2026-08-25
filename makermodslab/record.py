@@ -31,6 +31,7 @@ from lerobot.motors.motors_bus import MotorsBus
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
 
+from .api_errors import ErrorCode
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
 from .datasets import (
@@ -650,39 +651,50 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     if releasing
                     else "Recording is already active"
                 ),
+                "code": ErrorCode.ROBOT_BUSY_RELEASING if releasing else ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if _teleoperate.teleoperation_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _rollout.inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if _replay.replay_active:
-            return {"success": False, "message": "Replay is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
+            }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".
@@ -693,7 +705,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 request.dataset_repo_id,
                 name_reason,
             )
-            return {"success": False, "status_code": 400, "message": name_reason}
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": name_reason,
+                "code": ErrorCode.REQUEST_INVALID_NAME,
+            }
         # Resolve the session's cameras from the robot record NAMED BY THE
         # REQUEST — the request itself carries no camera payload. Done here,
         # before the flag is claimed, so a wrong robot name or an ambiguous

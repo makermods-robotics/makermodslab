@@ -27,6 +27,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
 from lerobot.utils.errors import DeviceNotConnectedError
 
+from .api_errors import ErrorCode
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
@@ -805,7 +806,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
     with _state_lock:
         if teleoperation_active:
-            return {"success": False, "message": "Teleoperation is already active"}
+            return {
+                "success": False,
+                "message": "Teleoperation is already active",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+            }
         if teleoperation_thread is not None and teleoperation_thread.is_alive():
             # A stopped session's worker is still releasing the arms (grace was
             # cut short above but the cleanup hasn't finished yet).
@@ -813,24 +818,43 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 "success": False,
                 "message": "The arms from the previous session are still being released. "
                 "Try again in a few seconds.",
+                "code": ErrorCode.ROBOT_BUSY_RELEASING,
             }
         if _record.recording_active:
-            return {"success": False, "message": "Recording is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Recording is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_RECORDING,
+            }
         if _rollout.inference_active:
-            return {"success": False, "message": "Inference is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+            }
         if _calibrate.calibration_is_active():
-            return {"success": False, "message": "Calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+            }
         if _auto_calibrate.auto_calibration_is_active():
-            return {"success": False, "message": "Auto-calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+            }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if _replay.replay_active:
             return {
                 "success": False,
                 "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop

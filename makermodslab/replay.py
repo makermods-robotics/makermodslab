@@ -38,6 +38,7 @@ from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from .api_errors import ErrorCode
 from .arm_identity import verify_devices
 from .datasets import get_episode_action_series
 from .motor_power import clear_goal_velocity, reset_torque_limit
@@ -154,48 +155,56 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _record.recording_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Recording is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if _rollout.inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if replay_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Replay is already active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
         if replay_thread is not None and replay_thread.is_alive():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "The previous replay session is still shutting down. Try again in a few seconds.",
+                "code": ErrorCode.ROBOT_BUSY_RELEASING,
             }
 
         record = _load_robot_record(request.robot_name)

@@ -56,6 +56,7 @@ from . import (
 )
 
 # Import our custom calibration functionality
+from .api_errors import ApiError, install_error_handlers
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
     AutoCalibrationRequest,
@@ -264,6 +265,10 @@ app.add_middleware(
 # and once under /api/v1 (the versioned surface SDK clients target). The two
 # stay identical by construction; tests/test_api_contract.py asserts it.
 router = APIRouter()
+
+# ApiError responses carry a machine-readable `code` beside the legacy string
+# `detail` (see api_errors.py); plain HTTPException raises are untouched.
+install_error_handlers(app)
 
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
@@ -549,9 +554,10 @@ def teleoperation_status():
 def start_inference(request: InferenceRequest):
     result = handle_start_inference(request)
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to start inference"),
+            code=result.get("code"),
         )
     return result
 
@@ -563,9 +569,10 @@ def stop_inference():
     per-episode control is /inference-episode-stop."""
     result = handle_stop_inference()
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to stop inference"),
+            code=result.get("code"),
         )
     return result
 
@@ -577,9 +584,10 @@ def inference_episode_stop():
     reset phase. 409 when no evaluation episode is running."""
     result = handle_stop_episode()
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to stop the episode"),
+            code=result.get("code"),
         )
     return result
 
@@ -591,9 +599,10 @@ def inference_next_episode():
     waiting for a reset."""
     result = handle_next_episode()
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to start the next episode"),
+            code=result.get("code"),
         )
     return result
 
@@ -620,9 +629,10 @@ def inference_log():
 def start_replay(request: ReplayRequest):
     result = handle_start_replay(request, manager)
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to start replay"),
+            code=result.get("code"),
         )
     return result
 
@@ -631,9 +641,10 @@ def start_replay(request: ReplayRequest):
 def stop_replay():
     result = handle_stop_replay()
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to stop replay"),
+            code=result.get("code"),
         )
     return result
 
@@ -978,9 +989,10 @@ def start_recording(request: RecordingRequest):
     400 for a malformed dataset name."""
     result = handle_start_recording(request)
     if not result.get("success"):
-        raise HTTPException(
+        raise ApiError(
             status_code=result.get("status_code", 500),
             detail=result.get("message", "Failed to start recording"),
+            code=result.get("code"),
         )
     return result
 

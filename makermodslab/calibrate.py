@@ -39,6 +39,7 @@ from lerobot.teleoperators import (
 )
 from lerobot.utils.utils import init_logging
 
+from .api_errors import ErrorCode
 from .utils.config import calibration_dir_for_device, save_robot_record
 
 logger = logging.getLogger(__name__)
@@ -268,7 +269,11 @@ class CalibrationManager:
             # both spawn a worker thread against the same arm.
             with self._status_lock:
                 if self.status.calibration_active:
-                    return {"success": False, "message": "Calibration already active"}
+                    return {
+                        "success": False,
+                        "message": "Calibration already active",
+                        "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+                    }
 
                 # Mutex with every other feature that drives the same serial bus
                 # (see CLAUDE.md's "State model & mutual exclusion"). Lazy
@@ -287,23 +292,38 @@ class CalibrationManager:
                     return {
                         "success": False,
                         "message": "Teleoperation is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
                     }
                 if _record.recording_active:
-                    return {"success": False, "message": "Recording is currently active. Stop it first."}
+                    return {
+                        "success": False,
+                        "message": "Recording is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_RECORDING,
+                    }
                 if _rollout.inference_active:
-                    return {"success": False, "message": "Inference is currently active. Stop it first."}
+                    return {
+                        "success": False,
+                        "message": "Inference is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                    }
                 if _auto_calibrate.auto_calibration_is_active():
                     return {
                         "success": False,
                         "message": "Auto-calibration is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
                     }
                 if _wiggle.wiggle_active:
                     return {
                         "success": False,
                         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                        "code": ErrorCode.ROBOT_BUSY_WIGGLE,
                     }
                 if _replay.replay_active:
-                    return {"success": False, "message": "Replay is currently active. Stop it first."}
+                    return {
+                        "success": False,
+                        "message": "Replay is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_REPLAY,
+                    }
 
                 # Refuse to silently overwrite an existing config file. Completing a
                 # calibration saves "<config_file>.json"; if that name is taken, the
