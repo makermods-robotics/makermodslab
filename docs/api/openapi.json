@@ -1,0 +1,4402 @@
+{
+  "components": {
+    "schemas": {
+      "AutoCalibrationBatchArm": {
+        "description": "One arm in a concurrent auto-calibration batch. Same fields as the\nsingle-arm request minus robot_name (batch-level, shared by every arm).",
+        "properties": {
+          "arm": {
+            "default": "left",
+            "title": "Arm",
+            "type": "string"
+          },
+          "config_file": {
+            "title": "Config File",
+            "type": "string"
+          },
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_type",
+          "port",
+          "config_file"
+        ],
+        "title": "AutoCalibrationBatchArm",
+        "type": "object"
+      },
+      "AutoCalibrationBatchRequest": {
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/AutoCalibrationBatchArm"
+            },
+            "title": "Arms",
+            "type": "array"
+          },
+          "motor_power": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Motor Power"
+          },
+          "overwrite": {
+            "default": false,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "robot_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot Name"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "AutoCalibrationBatchRequest",
+        "type": "object"
+      },
+      "AutoCalibrationRequest": {
+        "properties": {
+          "arm": {
+            "default": "left",
+            "title": "Arm",
+            "type": "string"
+          },
+          "config_file": {
+            "title": "Config File",
+            "type": "string"
+          },
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "motor_power": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Motor Power"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          },
+          "robot_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot Name"
+          }
+        },
+        "required": [
+          "device_type",
+          "port",
+          "config_file"
+        ],
+        "title": "AutoCalibrationRequest",
+        "type": "object"
+      },
+      "CalibrationRequest": {
+        "description": "Request parameters for starting calibration",
+        "properties": {
+          "arm": {
+            "default": "left",
+            "enum": [
+              "left",
+              "right"
+            ],
+            "title": "Arm",
+            "type": "string"
+          },
+          "config_file": {
+            "title": "Config File",
+            "type": "string"
+          },
+          "device_type": {
+            "enum": [
+              "robot",
+              "teleop"
+            ],
+            "title": "Device Type",
+            "type": "string"
+          },
+          "overwrite": {
+            "default": false,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          },
+          "robot_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot Name"
+          }
+        },
+        "required": [
+          "device_type",
+          "port",
+          "config_file"
+        ],
+        "title": "CalibrationRequest",
+        "type": "object"
+      },
+      "CustomDatasetRequest": {
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id"
+        ],
+        "title": "CustomDatasetRequest",
+        "type": "object"
+      },
+      "CustomModelRequest": {
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id"
+        ],
+        "title": "CustomModelRequest",
+        "type": "object"
+      },
+      "DatasetDownloadRequest": {
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id"
+        ],
+        "title": "DatasetDownloadRequest",
+        "type": "object"
+      },
+      "DatasetImportRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "DatasetImportRequest",
+        "type": "object"
+      },
+      "DatasetInfoRequest": {
+        "properties": {
+          "dataset_repo_id": {
+            "title": "Dataset Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dataset_repo_id"
+        ],
+        "title": "DatasetInfoRequest",
+        "type": "object"
+      },
+      "DatasetRenameBody": {
+        "properties": {
+          "new_name": {
+            "title": "New Name",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "new_name"
+        ],
+        "title": "DatasetRenameBody",
+        "type": "object"
+      },
+      "DatasetTagsBody": {
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "repo_id",
+          "tags"
+        ],
+        "title": "DatasetTagsBody",
+        "type": "object"
+      },
+      "DatasetVisibilityBody": {
+        "properties": {
+          "private": {
+            "title": "Private",
+            "type": "boolean"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "private"
+        ],
+        "title": "DatasetVisibilityBody",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HfLoginBody": {
+        "properties": {
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "HfLoginBody",
+        "type": "object"
+      },
+      "IdentifyArmRequest": {
+        "properties": {
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "title": "IdentifyArmRequest",
+        "type": "object"
+      },
+      "ImportModelRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "ImportModelRequest",
+        "type": "object"
+      },
+      "InferenceRequest": {
+        "properties": {
+          "camera_bindings": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Camera Bindings",
+            "type": "object"
+          },
+          "camera_dims": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PolicyCameraDims"
+            },
+            "default": {},
+            "title": "Camera Dims",
+            "type": "object"
+          },
+          "checkpoint_state_dim": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint State Dim"
+          },
+          "duration_s": {
+            "default": 60,
+            "title": "Duration S",
+            "type": "integer"
+          },
+          "eval_episodes": {
+            "default": 1,
+            "title": "Eval Episodes",
+            "type": "integer"
+          },
+          "follower_config": {
+            "title": "Follower Config",
+            "type": "string"
+          },
+          "follower_port": {
+            "title": "Follower Port",
+            "type": "string"
+          },
+          "inference_engine": {
+            "default": "sync",
+            "enum": [
+              "sync",
+              "rtc"
+            ],
+            "title": "Inference Engine",
+            "type": "string"
+          },
+          "mode": {
+            "default": "single",
+            "title": "Mode",
+            "type": "string"
+          },
+          "policy_ref": {
+            "title": "Policy Ref",
+            "type": "string"
+          },
+          "right_follower_config": {
+            "default": "",
+            "title": "Right Follower Config",
+            "type": "string"
+          },
+          "right_follower_port": {
+            "default": "",
+            "title": "Right Follower Port",
+            "type": "string"
+          },
+          "robot_name": {
+            "default": "",
+            "title": "Robot Name",
+            "type": "string"
+          },
+          "skip_identity_check": {
+            "default": false,
+            "title": "Skip Identity Check",
+            "type": "boolean"
+          },
+          "task": {
+            "default": "",
+            "title": "Task",
+            "type": "string"
+          },
+          "temporal_ensemble_coeff": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temporal Ensemble Coeff"
+          }
+        },
+        "required": [
+          "follower_port",
+          "follower_config",
+          "policy_ref"
+        ],
+        "title": "InferenceRequest",
+        "type": "object"
+      },
+      "MergeRequest": {
+        "properties": {
+          "output_repo_id": {
+            "title": "Output Repo Id",
+            "type": "string"
+          },
+          "source_repo_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Repo Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "source_repo_ids",
+          "output_repo_id"
+        ],
+        "title": "MergeRequest",
+        "type": "object"
+      },
+      "ModelDeleteBody": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ModelDeleteBody",
+        "type": "object"
+      },
+      "ModelDownloadRequest": {
+        "properties": {
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id"
+        ],
+        "title": "ModelDownloadRequest",
+        "type": "object"
+      },
+      "ModelImportRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "ModelImportRequest",
+        "type": "object"
+      },
+      "ModelUploadBody": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ModelUploadBody",
+        "type": "object"
+      },
+      "OpenCalibrationFolderRequest": {
+        "properties": {
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "device_type"
+        ],
+        "title": "OpenCalibrationFolderRequest",
+        "type": "object"
+      },
+      "PolicyCameraDims": {
+        "description": "The frame size one of the checkpoint's cameras was trained on.\n\nForwarded from /policy-config's `image_features` by the launch UI, in the\nsame spirit as `checkpoint_state_dim` below: the client already has the\ncheckpoint's metadata, and echoing it lets the server apply it\nauthoritatively instead of guessing. See bind_robot_cameras for why capture\nresolution must come from the checkpoint rather than the robot record.",
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "width",
+          "height"
+        ],
+        "title": "PolicyCameraDims",
+        "type": "object"
+      },
+      "RecordingRequest": {
+        "properties": {
+          "dataset_repo_id": {
+            "title": "Dataset Repo Id",
+            "type": "string"
+          },
+          "episode_time_s": {
+            "default": 30,
+            "title": "Episode Time S",
+            "type": "integer"
+          },
+          "follower_config": {
+            "title": "Follower Config",
+            "type": "string"
+          },
+          "follower_port": {
+            "title": "Follower Port",
+            "type": "string"
+          },
+          "fps": {
+            "default": 30,
+            "title": "Fps",
+            "type": "integer"
+          },
+          "leader_config": {
+            "title": "Leader Config",
+            "type": "string"
+          },
+          "leader_port": {
+            "title": "Leader Port",
+            "type": "string"
+          },
+          "mode": {
+            "default": "single",
+            "title": "Mode",
+            "type": "string"
+          },
+          "num_episodes": {
+            "default": 5,
+            "title": "Num Episodes",
+            "type": "integer"
+          },
+          "private": {
+            "default": false,
+            "title": "Private",
+            "type": "boolean"
+          },
+          "push_to_hub": {
+            "default": false,
+            "title": "Push To Hub",
+            "type": "boolean"
+          },
+          "reset_time_s": {
+            "default": 10,
+            "title": "Reset Time S",
+            "type": "integer"
+          },
+          "resume": {
+            "default": false,
+            "title": "Resume",
+            "type": "boolean"
+          },
+          "right_follower_config": {
+            "default": "",
+            "title": "Right Follower Config",
+            "type": "string"
+          },
+          "right_follower_port": {
+            "default": "",
+            "title": "Right Follower Port",
+            "type": "string"
+          },
+          "right_leader_config": {
+            "default": "",
+            "title": "Right Leader Config",
+            "type": "string"
+          },
+          "right_leader_port": {
+            "default": "",
+            "title": "Right Leader Port",
+            "type": "string"
+          },
+          "robot_name": {
+            "default": "",
+            "title": "Robot Name",
+            "type": "string"
+          },
+          "single_task": {
+            "title": "Single Task",
+            "type": "string"
+          },
+          "skip_identity_check": {
+            "default": false,
+            "title": "Skip Identity Check",
+            "type": "boolean"
+          },
+          "streaming_encoding": {
+            "default": true,
+            "title": "Streaming Encoding",
+            "type": "boolean"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "test_mode": {
+            "default": false,
+            "title": "Test Mode",
+            "type": "boolean"
+          },
+          "video": {
+            "default": true,
+            "title": "Video",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "leader_port",
+          "follower_port",
+          "leader_config",
+          "follower_config",
+          "dataset_repo_id",
+          "single_task"
+        ],
+        "title": "RecordingRequest",
+        "type": "object"
+      },
+      "RenameJobBody": {
+        "properties": {
+          "new_name": {
+            "title": "New Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_name"
+        ],
+        "title": "RenameJobBody",
+        "type": "object"
+      },
+      "ReplayRequest": {
+        "properties": {
+          "episode_index": {
+            "title": "Episode Index",
+            "type": "integer"
+          },
+          "follower_config": {
+            "title": "Follower Config",
+            "type": "string"
+          },
+          "follower_port": {
+            "title": "Follower Port",
+            "type": "string"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "robot_name": {
+            "default": "",
+            "title": "Robot Name",
+            "type": "string"
+          },
+          "skip_identity_check": {
+            "default": false,
+            "title": "Skip Identity Check",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_index",
+          "follower_port",
+          "follower_config"
+        ],
+        "title": "ReplayRequest",
+        "type": "object"
+      },
+      "TeleoperateRequest": {
+        "properties": {
+          "follower_config": {
+            "title": "Follower Config",
+            "type": "string"
+          },
+          "follower_port": {
+            "title": "Follower Port",
+            "type": "string"
+          },
+          "leader_config": {
+            "title": "Leader Config",
+            "type": "string"
+          },
+          "leader_port": {
+            "title": "Leader Port",
+            "type": "string"
+          },
+          "mode": {
+            "default": "single",
+            "title": "Mode",
+            "type": "string"
+          },
+          "right_follower_config": {
+            "default": "",
+            "title": "Right Follower Config",
+            "type": "string"
+          },
+          "right_follower_port": {
+            "default": "",
+            "title": "Right Follower Port",
+            "type": "string"
+          },
+          "right_leader_config": {
+            "default": "",
+            "title": "Right Leader Config",
+            "type": "string"
+          },
+          "right_leader_port": {
+            "default": "",
+            "title": "Right Leader Port",
+            "type": "string"
+          },
+          "robot_name": {
+            "default": "",
+            "title": "Robot Name",
+            "type": "string"
+          },
+          "skip_identity_check": {
+            "default": false,
+            "title": "Skip Identity Check",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "leader_port",
+          "follower_port",
+          "leader_config",
+          "follower_config"
+        ],
+        "title": "TeleoperateRequest",
+        "type": "object"
+      },
+      "UploadRequest": {
+        "properties": {
+          "dataset_repo_id": {
+            "title": "Dataset Repo Id",
+            "type": "string"
+          },
+          "private": {
+            "default": false,
+            "title": "Private",
+            "type": "boolean"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "dataset_repo_id"
+        ],
+        "title": "UploadRequest",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WiggleRequest": {
+        "properties": {
+          "port": {
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "port"
+        ],
+        "title": "WiggleRequest",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "FastAPI",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/auto-calibration-batch-status": {
+      "get": {
+        "description": "Per-arm status + logs and overall counts for a batch auto-calibration.",
+        "operationId": "auto_calibration_batch_status_auto_calibration_batch_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Auto Calibration Batch Status"
+      }
+    },
+    "/auto-calibration-status": {
+      "get": {
+        "description": "Current auto-calibration state + streamed log lines.",
+        "operationId": "auto_calibration_status_auto_calibration_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Auto Calibration Status"
+      }
+    },
+    "/available-cameras": {
+      "get": {
+        "description": "List cameras with the same index ordering cv2 will use to record.\n\nEach platform enumerates in the order its cv2 backend indexes devices, and\npairs each index with the device's real name so the frontend can match it to\nthe browser's ``MediaDeviceInfo.label`` for the live preview:\n  - macOS: AVFoundation ``localizedName`` (via a PyObjC subprocess);\n  - Windows: DirectShow FriendlyName (via pygrabber; recording pinned DSHOW);\n  - Linux: the VIDIOC_QUERYCAP card name (sysfs fallback); QUERYCAP works\n    on busy devices, so live previews never hide cameras from the list.\nWithout real names the frontend can't match a camera and shows \"No browser\nmatch\" with an empty device_id (issues #12, #16).",
+        "operationId": "get_available_cameras_available_cameras_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Available Cameras"
+      }
+    },
+    "/available-ports": {
+      "get": {
+        "description": "Get all available serial ports",
+        "operationId": "get_available_ports_available_ports_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Available Ports"
+      }
+    },
+    "/calibration-configs/{device_type}": {
+      "get": {
+        "description": "Get all calibration config files for a specific device type",
+        "operationId": "get_calibration_configs_calibration_configs__device_type__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_type",
+            "required": true,
+            "schema": {
+              "title": "Device Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Calibration Configs"
+      }
+    },
+    "/calibration-configs/{device_type}/upload": {
+      "post": {
+        "description": "Import a calibration into a side's config dir. Body: {\"name\": \"...\",\n\"data\": {<raw lerobot calibration>}}. The data is shape-validated; an\nexisting name is never overwritten (409 → caller renames).",
+        "operationId": "upload_calibration_config_calibration_configs__device_type__upload_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_type",
+            "required": true,
+            "schema": {
+              "title": "Device Type",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Calibration Config"
+      }
+    },
+    "/calibration-configs/{device_type}/{config_name}": {
+      "delete": {
+        "description": "Delete a calibration config file",
+        "operationId": "delete_calibration_config_calibration_configs__device_type___config_name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_type",
+            "required": true,
+            "schema": {
+              "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "config_name",
+            "required": true,
+            "schema": {
+              "title": "Config Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Calibration Config"
+      }
+    },
+    "/calibration-configs/{device_type}/{config_name}/download": {
+      "get": {
+        "description": "Download one arm's calibration as a raw lerobot calibration JSON file.\n\nThe file IS lerobot's own calibration file (no MakerMods Lab wrapper), so it's\ndrop-in: shareable, hand-copyable, and re-importable anywhere. The arm's\nside/name are supplied by the caller on re-import, not stored in the file.",
+        "operationId": "download_calibration_config_calibration_configs__device_type___config_name__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_type",
+            "required": true,
+            "schema": {
+              "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "config_name",
+            "required": true,
+            "schema": {
+              "title": "Config Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Calibration Config"
+      }
+    },
+    "/calibration-configs/{device_type}/{config_name}/rename": {
+      "post": {
+        "description": "Rename a calibration config file. Body: {\"new_name\": \"...\"}. Never\noverwrites; robot records referencing the old name are repointed.",
+        "operationId": "rename_calibration_config_endpoint_calibration_configs__device_type___config_name__rename_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_type",
+            "required": true,
+            "schema": {
+              "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "config_name",
+            "required": true,
+            "schema": {
+              "title": "Config Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Calibration Config Endpoint"
+      }
+    },
+    "/calibration-status": {
+      "get": {
+        "description": "Get current calibration status",
+        "operationId": "calibration_status_calibration_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Calibration Status"
+      }
+    },
+    "/camera-preview/{index}": {
+      "get": {
+        "description": "MJPEG preview stream of a camera attached to the *server* machine.\n\nThe browser's getUserMedia only sees the *viewing* machine's cameras, and\nit identifies them by ``deviceId`` — which the frontend can only match to a\ncv2 index by localizedName. Two cameras of the same model share that name,\nso the match is a coin flip and the preview can show the wrong device (and\nswap between refreshes). Streaming from the backend by cv2 index removes\nthe browser from the loop: the tile shows exactly what the recorder will\nopen. It is also the only preview that works at all on a headless host.\n\n``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors\nthe index to the physical device before opening: cv2 resolves indices\nagainst this process's device snapshot, which diverges from the\nfresh-subprocess enumeration after a replug — without the re-anchor the\nstream can silently show a different camera (see makermodslab/camera_identity.py).\nThe identity is also what the preview registry shares captures by, so the\nresolver hands back both: the index to open and the key to file it under.\nKeying by the bare index aliased two different cameras onto one handle\nwhenever the device set renumbered mid-session.\n\nReturns 409 while recording or inference is active (they own the cv2\ndevices) and 503 when the camera can't be opened. Teleoperation drives the\nserial bus and opens no cv2 cameras, so a preview during teleop does not\ncontend — it is allowed.",
+        "operationId": "camera_preview_stream_camera_preview__index__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "unique_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Unique Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Camera Preview Stream"
+      }
+    },
+    "/complete-calibration-step": {
+      "post": {
+        "description": "Complete the current calibration step",
+        "operationId": "complete_calibration_step_complete_calibration_step_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Complete Calibration Step"
+      }
+    },
+    "/datasets": {
+      "get": {
+        "description": "List datasets available to the user — Hub-owned + local cache.\n\nEach entry carries a `source` field: \"local\", \"hub\", or \"both\".",
+        "operationId": "datasets_list_datasets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Datasets List"
+      }
+    },
+    "/datasets/custom": {
+      "delete": {
+        "description": "Unpin a saved custom dataset (does NOT touch the Hub or any local copy).",
+        "operationId": "datasets_remove_custom_datasets_custom_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomDatasetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Remove Custom"
+      },
+      "post": {
+        "description": "Pin a typed Hub dataset repo id so it persists in the picker listing.\n\nCalled when the user selects \"Use org/name\" for a dataset that isn't in\ntheir own namespace and has no local copy. Idempotent. Invalidates the\nlisting cache so the pinned dataset appears immediately.",
+        "operationId": "datasets_save_custom_datasets_custom_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomDatasetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Save Custom"
+      }
+    },
+    "/datasets/download": {
+      "post": {
+        "description": "Download a Hub dataset into the local cache in the background.\n\nReturns immediately with {started, repo_id, message}; poll\n/datasets/download-status for progress. The dataset lands in the flat cache\nlayout so the listing source flips to \"both\" on completion. 400 for a\nmalformed repo id; 409 when a download is already running.",
+        "operationId": "datasets_download_datasets_download_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Download"
+      }
+    },
+    "/datasets/download-status": {
+      "get": {
+        "description": "Current download state (idle | running | done | error) + repo_id, message,\nand error once failed. Polled by the info card so a download survives\nnavigation.",
+        "operationId": "datasets_download_status_datasets_download_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Datasets Download Status"
+      }
+    },
+    "/datasets/episode-joints": {
+      "get": {
+        "description": "Per-frame timestamp + joint (observation.state) values for one episode,\nfor the dataset viewer's joint-position chart.",
+        "operationId": "datasets_episode_joints_datasets_episode_joints_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "episode_index",
+            "required": true,
+            "schema": {
+              "title": "Episode Index",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Episode Joints"
+      }
+    },
+    "/datasets/episode-video": {
+      "get": {
+        "description": "The mp4 backing one camera's footage for one episode, served straight\noff disk. FileResponse handles Range requests, so the <video> element can\nseek without downloading the whole file first.",
+        "operationId": "datasets_episode_video_datasets_episode_video_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "episode_index",
+            "required": true,
+            "schema": {
+              "title": "Episode Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "camera",
+            "required": true,
+            "schema": {
+              "title": "Camera",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Episode Video"
+      }
+    },
+    "/datasets/episodes": {
+      "get": {
+        "description": "Per-episode index/length/duration/tasks for the dataset viewer window.\n404 when the dataset isn't local or predates the v3.0 parquet episode\nlayout (meta/episodes/chunk-*/file-*.parquet) the viewer reads.",
+        "operationId": "datasets_episodes_datasets_episodes_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Episodes"
+      }
+    },
+    "/datasets/hide": {
+      "delete": {
+        "description": "Unhide a dataset so it reappears in the listing (does NOT touch the Hub).",
+        "operationId": "datasets_unhide_datasets_hide_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomDatasetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Unhide"
+      },
+      "post": {
+        "description": "Hide a Hub dataset from the picker listing (\"remove from list\").\n\nNEVER deletes or mutates the Hub repo — it's a persistent local filter for\nhub rows the user's own namespace listing keeps returning (a pinned row is\nunpinned instead; a local copy is deleted instead). Re-pinning via\nPOST /datasets/custom auto-unhides. Invalidates the listing cache only (the\nhub-status cache is untouched — the repo's Hub state didn't change).",
+        "operationId": "datasets_hide_datasets_hide_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomDatasetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Hide"
+      }
+    },
+    "/datasets/hub-settings": {
+      "get": {
+        "description": "Current Hub-side visibility + tags for a dataset, for pre-filling the\npost-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;\n403/502 on a Hub failure. repo_id is a query param (repo ids contain '/').",
+        "operationId": "datasets_hub_settings_datasets_hub_settings_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Hub Settings"
+      }
+    },
+    "/datasets/hub-status": {
+      "get": {
+        "description": "Whether a dataset repo with this id exists on the Hub.\n\nFetched lazily by the info card (separate from /datasets/info) so it never\nblocks the card render. Degrades to status \"unknown\" offline/unauthenticated\n— see get_hub_status. repo_id is a query param because repo ids contain '/'.",
+        "operationId": "datasets_hub_status_datasets_hub_status_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Hub Status"
+      }
+    },
+    "/datasets/import": {
+      "post": {
+        "description": "Import a LeRobot dataset folder already on the server machine by COPYING\nit into the local cache (the user's source folder is left intact).\n\nValidates the folder is a LeRobot dataset with episodes and the target name.\n400 invalid source/name; 404 no such folder; 409 target already exists.\nCopy is synchronous — the request blocks until it completes.",
+        "operationId": "datasets_import_datasets_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Import"
+      }
+    },
+    "/datasets/info": {
+      "get": {
+        "description": "Detail card for one dataset. Local cache first (full detail: episodes,\ncameras, tasks, size on disk — ``source: \"local\"``); a dataset with no\nlocal copy falls back to a Hub summary read from its meta/info.json\n(episodes/frames/fps/robot/cameras, no tasks/size — ``source: \"hub\"``).\n404 only when NEITHER resolves (offline / unknown repo). repo_id is a query\nparam because repo ids contain '/'.",
+        "operationId": "datasets_info_datasets_info_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Info"
+      }
+    },
+    "/datasets/merge": {
+      "post": {
+        "description": "Aggregate 2+ datasets into a new local dataset in the background.",
+        "operationId": "datasets_merge_datasets_merge_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Merge"
+      }
+    },
+    "/datasets/merge/status": {
+      "get": {
+        "description": "Current merge state + drained log lines (idle | running | done | error).",
+        "operationId": "datasets_merge_status_datasets_merge_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Datasets Merge Status"
+      }
+    },
+    "/datasets/rename": {
+      "post": {
+        "description": "Rename a locally-cached dataset by moving its directory, and its Hub\ncopy (if any) to match.\n\n`new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so\n`ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is\nbeing recorded, merged, or trained on locally, or if the new name is\nalready taken (locally or on the Hub).\n\nReturns `{success, repo_id, hub}`, where `hub` is `\"renamed\"` (the Hub copy\nmoved too), `\"none\"` (the Hub has no copy of this dataset), or `\"skipped\"`\n(the Hub step didn't run — offline, logged out, or someone else's\nnamespace — so a Hub copy, if any, kept its old name). The caller needs\nthat distinction to avoid claiming a Hub rename that didn't happen.",
+        "operationId": "datasets_rename_datasets_rename_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetRenameBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Rename"
+      }
+    },
+    "/datasets/tags": {
+      "post": {
+        "description": "Replace a Hub dataset card's ``tags:`` metadata. User tags run through\nwith_makermodslab_tag first, so the required org tags are never dropped. MUTATES\nthe live card. 400 offline; 403 no write permission; 502 other Hub failure.\nReturns the final tag list actually written.",
+        "operationId": "datasets_tags_datasets_tags_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetTagsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Tags"
+      }
+    },
+    "/datasets/visibility": {
+      "post": {
+        "description": "Flip a Hub dataset's visibility (public <-> private). MUTATES the live\nrepo. 400 offline; 403 when the token can't write the namespace; 502 on any\nother Hub failure. Invalidates the cached hub-status so the card re-reads.",
+        "operationId": "datasets_visibility_datasets_visibility_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetVisibilityBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Visibility"
+      }
+    },
+    "/delete-dataset": {
+      "post": {
+        "description": "Remove a recorded dataset directory from local disk.",
+        "operationId": "delete_dataset_delete_dataset_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetInfoRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Dataset"
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Simple health check endpoint to verify server is running",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health Check"
+      }
+    },
+    "/hf-auth-status": {
+      "get": {
+        "description": "Check whether the local HF CLI is authenticated and return user info.",
+        "operationId": "hf_auth_status_hf_auth_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Hf Auth Status"
+      }
+    },
+    "/hf-auth/login": {
+      "post": {
+        "description": "Persist a pasted HF token (validated against whoami) for this user.",
+        "operationId": "hf_auth_login_hf_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HfLoginBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Hf Auth Login"
+      }
+    },
+    "/identify-arm": {
+      "post": {
+        "description": "The inverse of /wiggle: the user swings an arm's base (shoulder pan) by\nhand and we report which port saw the motion. Read-only — no motor writes.",
+        "operationId": "identify_arm_identify_arm_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifyArmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Identify Arm"
+      }
+    },
+    "/inference-episode-stop": {
+      "post": {
+        "description": "Evaluation mode only: end the CURRENT episode early and score it a\nSUCCESS (\"the robot did the task\"). The session stays up and moves into its\nreset phase. 409 when no evaluation episode is running.",
+        "operationId": "inference_episode_stop_inference_episode_stop_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Inference Episode Stop"
+      }
+    },
+    "/inference-log": {
+      "get": {
+        "description": "Tail of the active/most-recent rollout's log file (read-only, bounded).\n\nReturns {logs, log_path, belongs_to}; empty logs (not an error) when no run\nhas produced output yet, so the frontend can poll unconditionally.\n\n`belongs_to` is \"active\" (the running session's own log), \"last_run\" (the\nmost recent finished run of this server process) or null (nothing to show) —\nthe caller must not present a \"last_run\" log as the live session's output.",
+        "operationId": "inference_log_inference_log_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Inference Log"
+      }
+    },
+    "/inference-next-episode": {
+      "post": {
+        "description": "Evaluation mode only: leave the reset phase and start the next episode.\nThe reset is user-ended (no auto-timer). 409 unless an evaluation is parked\nwaiting for a reset.",
+        "operationId": "inference_next_episode_inference_next_episode_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Inference Next Episode"
+      }
+    },
+    "/inference-status": {
+      "get": {
+        "operationId": "inference_status_inference_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Inference Status"
+      }
+    },
+    "/jobs": {
+      "get": {
+        "operationId": "list_jobs_jobs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Jobs"
+      }
+    },
+    "/jobs/hub": {
+      "get": {
+        "description": "List the user's HF Cloud compute Jobs and their uploaded LeRobot model\nrepos on huggingface.co.\n\nReturns 200 with empty lists when no token is configured so the frontend\ncan render an unauthenticated empty state without surfacing an error.\n\nDeclared before `/jobs/{job_id}` so FastAPI's first-match routing doesn't\ntreat \"hub\" as a job id.",
+        "operationId": "list_hub_jobs_jobs_hub_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Hub Jobs"
+      }
+    },
+    "/jobs/hub/jobs/{job_id}/dismiss": {
+      "post": {
+        "description": "Hide a Hub job from the /jobs/hub listing.\n\nThe HF Jobs API has no delete — a finished job stays in list_jobs()\nindefinitely — so \"removing\" a dead untracked job from the UI is a local,\npersisted hide (utils/config.DISMISSED_HUB_JOBS_FILE), not a Hub mutation.\nThe listing keeps showing a dismissed id while its stage is still active\n(RUNNING/QUEUED/SCHEDULING); it disappears once the job reaches a terminal\nstage. Ids that later drop out of the Hub listing are pruned automatically.",
+        "operationId": "dismiss_hub_job_jobs_hub_jobs__job_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss Hub Job"
+      }
+    },
+    "/jobs/hub/models/{repo_id}": {
+      "delete": {
+        "description": "Permanently delete a model repo from the Hugging Face Hub.\n\nScoped to model repos under the authenticated user's own namespace — used\nto clean up orphaned repos (e.g. an empty repo left behind by a crashed\ncloud run). This destroys weights on the Hub; it is not a local-record\ndeletion.\n\nSemantics:\n- A missing repo (404 from the Hub) is treated as already-gone success,\n  mirroring the idempotent robot-delete convention.\n- Repos NOT under the caller's own username are refused up front with a\n  clear message (the Hub would 403 anyway; fail fast).\n- Auth/permission failures (401/403) surface the friendly \"token needs\n  write access\" message.\n\nThe `/jobs/hub` listing is cached backend-side for a short TTL; this delete\ninvalidates that cache (see invalidate_hub_jobs_cache) so the removed repo\ndisappears immediately when the frontend re-fetches.",
+        "operationId": "delete_hub_model_jobs_hub_models__repo_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Hub Model"
+      }
+    },
+    "/jobs/import": {
+      "post": {
+        "description": "Register an external model (local dir or HF repo) as a pseudo-job.\n\nImporting an already-registered source is idempotent: the registry\nreturns the EXISTING record (id and display alias preserved), and the\nresponse carries `already_imported: true` with a 200 (not 201) so the\nfrontend can say \"already imported\" instead of pretending a new entry\nwas created.",
+        "operationId": "import_model_jobs_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Model"
+      }
+    },
+    "/jobs/runners/hardware": {
+      "get": {
+        "description": "Return HF Jobs flavor catalog + auth state for the TargetCard.\n\nBoth the flavors list and the whoami result are cached in-process to\nkeep this endpoint cheap (it can be re-fetched whenever auth state\nchanges). The whoami cache is invalidated on login.",
+        "operationId": "get_runners_hardware_jobs_runners_hardware_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Runners Hardware"
+      }
+    },
+    "/jobs/training": {
+      "post": {
+        "operationId": "create_training_job_jobs_training_post",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Training Job"
+      }
+    },
+    "/jobs/{job_id}": {
+      "delete": {
+        "operationId": "delete_job_jobs__job_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Job"
+      },
+      "get": {
+        "operationId": "get_job_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job"
+      }
+    },
+    "/jobs/{job_id}/checkpoints": {
+      "get": {
+        "description": "List the checkpoints saved for this job, ascending by step.",
+        "operationId": "get_job_checkpoints_jobs__job_id__checkpoints_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Checkpoints"
+      }
+    },
+    "/jobs/{job_id}/checkpoints/{step}/download": {
+      "get": {
+        "description": "Stream a zip of a local checkpoint's `pretrained_model/` directory.\n\nThis bundles the portable, importable model (config.json + weights +\npre/post-processors) — NOT the large `training_state/` optimizer dir.\nHub-hosted models are downloadable from their HF page, so only local runs\nare supported here.",
+        "operationId": "download_checkpoint_jobs__job_id__checkpoints__step__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step",
+            "required": true,
+            "schema": {
+              "title": "Step",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Checkpoint"
+      }
+    },
+    "/jobs/{job_id}/checkpoints/{step}/policy-config": {
+      "get": {
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, and\nthe flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch.",
+        "operationId": "get_checkpoint_policy_config_jobs__job_id__checkpoints__step__policy_config_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step",
+            "required": true,
+            "schema": {
+              "title": "Step",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Checkpoint Policy Config"
+      }
+    },
+    "/jobs/{job_id}/log-file": {
+      "get": {
+        "description": "Return the entire on-disk log file for a job. Drains the live queue too\nso the next /logs poll returns only lines that arrived after this call.",
+        "operationId": "get_job_log_file_jobs__job_id__log_file_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Log File"
+      }
+    },
+    "/jobs/{job_id}/logs": {
+      "get": {
+        "operationId": "get_job_logs_jobs__job_id__logs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Logs"
+      }
+    },
+    "/jobs/{job_id}/metrics-history": {
+      "get": {
+        "description": "Return the per-step loss/lr/grad-norm series reconstructed from the\njob's log.jsonl. Used to seed the monitoring charts so curves persist\nacross page reloads, navigation, and MakerMods Lab restarts.",
+        "operationId": "get_job_metrics_history_jobs__job_id__metrics_history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Metrics History"
+      }
+    },
+    "/jobs/{job_id}/rename": {
+      "post": {
+        "description": "Set a job's display alias (shown in place of the auto-generated name).\n\nMetadata-only: never moves the output directory or rewrites the run id /\nhub repo id — those are the job's immutable identity (resume lineage,\nimported-model dedup, and remote HF/W&B names key off them). Validation\n(trim, reject empty, is_valid-style character guard) lives in\nJobRegistry.rename; unlike calibration/robot renames, aliases are\ndisplay-only and need not be unique.",
+        "operationId": "rename_job_jobs__job_id__rename_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameJobBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Job"
+      }
+    },
+    "/jobs/{job_id}/stop": {
+      "post": {
+        "operationId": "stop_job_jobs__job_id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Job"
+      }
+    },
+    "/models": {
+      "get": {
+        "description": "List trained models available to the user — local runs + Hub repos.\n\nEach entry carries a `source` field: \"local\", \"hub\", or \"both\" (a local run\nthat was also pushed to the Hub). Mirrors GET /datasets.",
+        "operationId": "models_list_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Models List"
+      }
+    },
+    "/models/custom": {
+      "delete": {
+        "description": "Unpin a saved custom model (does NOT touch the Hub or any local copy).",
+        "operationId": "models_remove_custom_models_custom_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Remove Custom"
+      },
+      "post": {
+        "description": "Pin a Hub model repo id so it persists in the /models listing.\n\nThe models mirror of POST /datasets/custom (same repo-id shape, same\nidempotence). Invalidates the model listing cache so the pin appears\nimmediately.",
+        "operationId": "models_save_custom_models_custom_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Save Custom"
+      }
+    },
+    "/models/delete": {
+      "post": {
+        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training; 502 on a delete failure.",
+        "operationId": "models_delete_models_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelDeleteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Delete"
+      }
+    },
+    "/models/download": {
+      "post": {
+        "description": "Download a Hub model checkpoint into the local models dir in the\nbackground. Returns immediately with {started, repo_id, message}; poll\n/models/download-status for progress. On completion the listing source flips\nto \"both\" and inference can run on it offline. 400 for a malformed repo id;\n409 when a download is already running (shared one-at-a-time budget with the\ndataset downloader — each manager runs its own single download).",
+        "operationId": "models_download_models_download_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Download"
+      }
+    },
+    "/models/download-status": {
+      "get": {
+        "description": "Current model-download state (idle | running | done | error) + repo_id,\nmessage, and error once failed. Polled by the model info card so a download\nsurvives navigation. Mirrors /datasets/download-status.",
+        "operationId": "models_download_status_models_download_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Models Download Status"
+      }
+    },
+    "/models/hide": {
+      "delete": {
+        "description": "Unhide a model so it reappears in the listing (does NOT touch the Hub).",
+        "operationId": "models_unhide_models_hide_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Unhide"
+      },
+      "post": {
+        "description": "Hide a Hub model from the picker listing (\"remove from list\").\n\nNEVER deletes or mutates the Hub repo — a persistent local filter, the\nmodels mirror of POST /datasets/hide. Re-pinning via POST /models/custom\nauto-unhides. Invalidates the listing cache only.",
+        "operationId": "models_hide_models_hide_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Hide"
+      }
+    },
+    "/models/import": {
+      "post": {
+        "description": "Import a policy checkpoint folder already on the server machine by\nCOPYING it into the local models dir (the source folder is left intact).\n\nValidates the folder is a checkpoint (config.json or checkpoints tree) and\nthe target name. 400 invalid source/name; 404 no such folder; 409 target\nalready exists. Copy is synchronous — the request blocks until it completes.\nMirrors POST /datasets/import.",
+        "operationId": "models_import_models_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Import"
+      }
+    },
+    "/models/info": {
+      "get": {
+        "description": "Detail card for one model: policy type, base dataset, steps, size, and the\nlocal path (local) or Hub repo (hub). `id` is a local run id or a Hub repo id\n(a query param because repo ids contain '/'). 404 when neither resolves.",
+        "operationId": "models_info_models_info_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Info"
+      }
+    },
+    "/models/upload": {
+      "post": {
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "operationId": "models_upload_models_upload_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelUploadBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Upload"
+      }
+    },
+    "/move-arm": {
+      "post": {
+        "description": "Start teleoperation of the robot arm",
+        "operationId": "teleoperate_arm_move_arm_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeleoperateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Teleoperate Arm"
+      }
+    },
+    "/open-calibration-folder": {
+      "post": {
+        "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
+        "operationId": "open_calibration_folder_open_calibration_folder_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenCalibrationFolderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Open Calibration Folder"
+      }
+    },
+    "/policy-optimizer-defaults": {
+      "get": {
+        "description": "Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm\n+ optimizer type) so the training UI can show the real \"policy default\"\ninstead of a generic placeholder.\n\nEvery frontend policy_type is included. `available` says whether this\nlerobot pin can construct the policy config at all — false means a training\nrun with that type is doomed at policy construction, so the UI disables the\nbutton (e.g. reward_classifier, which isn't a policy in this pin). Policies\nwhose config exists but whose optimizer preset can't be read stay available\nwith a null entry in `defaults`.",
+        "operationId": "get_policy_optimizer_defaults_policy_optimizer_defaults_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Policy Optimizer Defaults"
+      }
+    },
+    "/recording-exit-early": {
+      "post": {
+        "description": "Skip to next episode (replaces right arrow key)",
+        "operationId": "recording_exit_early_recording_exit_early_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recording Exit Early"
+      }
+    },
+    "/recording-log": {
+      "get": {
+        "description": "Tail of the current/most-recent recording session's log (read-only,\nbounded ring buffer). Returns {logs}; empty (not an error) before a session\nhas captured anything, so the frontend can poll unconditionally.",
+        "operationId": "recording_log_recording_log_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recording Log"
+      }
+    },
+    "/recording-pause": {
+      "post": {
+        "description": "Pause the reset-phase gap between episodes (mouse-only, no keyboard\nshortcut). No-ops outside the reset phase — see handle_pause_recording.",
+        "operationId": "recording_pause_recording_pause_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recording Pause"
+      }
+    },
+    "/recording-rerecord-episode": {
+      "post": {
+        "description": "Re-record current episode (replaces left arrow key)",
+        "operationId": "recording_rerecord_episode_recording_rerecord_episode_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recording Rerecord Episode"
+      }
+    },
+    "/recording-resume": {
+      "post": {
+        "description": "Resume a paused reset-phase gap. No-ops if not currently paused —\nsee handle_resume_recording.",
+        "operationId": "recording_resume_recording_resume_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recording Resume"
+      }
+    },
+    "/recording-status": {
+      "get": {
+        "description": "Get the current recording status",
+        "operationId": "recording_status_recording_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recording Status"
+      }
+    },
+    "/replay-status": {
+      "get": {
+        "operationId": "replay_status_replay_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Replay Status"
+      }
+    },
+    "/robot-port/{robot_type}": {
+      "get": {
+        "description": "Get the saved port for a robot type",
+        "operationId": "get_robot_port_robot_port__robot_type__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "robot_type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "leader",
+                "follower"
+              ],
+              "title": "Robot Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Robot Port"
+      }
+    },
+    "/robots": {
+      "get": {
+        "description": "List all saved robot records.",
+        "operationId": "get_robots_robots_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Robots"
+      }
+    },
+    "/robots/{name}": {
+      "delete": {
+        "description": "Delete a robot record.",
+        "operationId": "delete_robot_robots__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Robot"
+      },
+      "get": {
+        "description": "Get a single robot record by name.",
+        "operationId": "get_robot_robots__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Robot"
+      },
+      "post": {
+        "description": "Upsert a robot record.\n\n- `?create=true` is the \"Add Robot\" path: returns 409 if a record with that\n  name already exists; otherwise creates with empty fields then merges body.\n- Without `?create=true` is the \"patch\" path (e.g., calibration write-back):\n  merges body into existing record. If no record exists, no-ops and returns\n  success — see deletion-during-calibration edge case in the spec.",
+        "operationId": "upsert_robot_robots__name__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "create",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Create",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Data",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upsert Robot"
+      }
+    },
+    "/robots/{name}/rename": {
+      "post": {
+        "description": "Rename a robot record. Body: {\"new_name\": \"...\"}. Calibration files are not\naffected (they're keyed by config name, not robot name).",
+        "operationId": "rename_robot_robots__name__rename_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Data",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Robot"
+      }
+    },
+    "/start-auto-calibration": {
+      "post": {
+        "description": "Start auto-calibration as a subprocess. The arm moves on its own.",
+        "operationId": "start_auto_calibration_start_auto_calibration_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoCalibrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Auto Calibration"
+      }
+    },
+    "/start-auto-calibration-batch": {
+      "post": {
+        "description": "Auto-calibrate a user-selected subset of arms CONCURRENTLY. Each arm runs\nits own subprocess on its own serial port with an independent outcome\n(partial success). Validated up front (1-4 arms, distinct ports, distinct\nsame-side names, name-taken pre-check) before any hardware is touched.",
+        "operationId": "start_auto_calibration_batch_start_auto_calibration_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoCalibrationBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Auto Calibration Batch"
+      }
+    },
+    "/start-calibration": {
+      "post": {
+        "description": "Start calibration process",
+        "operationId": "start_calibration_start_calibration_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalibrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Calibration"
+      }
+    },
+    "/start-inference": {
+      "post": {
+        "operationId": "start_inference_start_inference_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InferenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Inference"
+      }
+    },
+    "/start-recording": {
+      "post": {
+        "description": "Start a dataset recording session.\n\nRefuses (409) if recording, teleoperation, inference, calibration,\nauto-calibration, or a gripper wiggle is already active on this robot;\n400 for a malformed dataset name.",
+        "operationId": "start_recording_start_recording_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Recording"
+      }
+    },
+    "/start-replay": {
+      "post": {
+        "operationId": "start_replay_start_replay_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Replay"
+      }
+    },
+    "/stop-auto-calibration": {
+      "post": {
+        "description": "Stop a running auto-calibration.",
+        "operationId": "stop_auto_calibration_stop_auto_calibration_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Auto Calibration"
+      }
+    },
+    "/stop-auto-calibration-batch": {
+      "post": {
+        "description": "Stop ALL running arms of a batch auto-calibration, releasing each arm's\ntorque independently.",
+        "operationId": "stop_auto_calibration_batch_stop_auto_calibration_batch_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Auto Calibration Batch"
+      }
+    },
+    "/stop-calibration": {
+      "post": {
+        "description": "Stop calibration process",
+        "operationId": "stop_calibration_stop_calibration_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Calibration"
+      }
+    },
+    "/stop-inference": {
+      "post": {
+        "description": "Abort the whole session. In evaluation mode (eval_episodes > 1) this ends\nthe run wherever it is and reports the partial tally with NO accuracy — the\nper-episode control is /inference-episode-stop.",
+        "operationId": "stop_inference_stop_inference_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Inference"
+      }
+    },
+    "/stop-recording": {
+      "post": {
+        "description": "End the current recording session.\n\n``discard`` is a query parameter (not a body) so the browser's page-leave\nsafety net can POST it via a keepalive/beacon \"simple request\" during unload\nwithout tripping a CORS preflight. ``discard=false`` keeps every saved\nepisode (Done); ``discard=true`` throws the recording away (Quit / an\nunintentional page exit) — see handle_stop_recording.",
+        "operationId": "stop_recording_stop_recording_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "discard",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Discard",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Recording"
+      }
+    },
+    "/stop-replay": {
+      "post": {
+        "operationId": "stop_replay_stop_replay_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Replay"
+      }
+    },
+    "/stop-teleoperation": {
+      "post": {
+        "description": "Stop the current teleoperation session",
+        "operationId": "stop_teleoperation_stop_teleoperation_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Teleoperation"
+      }
+    },
+    "/supply-voltage": {
+      "get": {
+        "description": "One-shot, read-only supply-voltage reading (Present_Voltage) from the arm\non `port`. Connects, reads, and releases the port immediately — never holds\nit — so calibration/teleoperation can grab the port right after.",
+        "operationId": "supply_voltage_supply_voltage_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "port",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Port",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Supply Voltage"
+      }
+    },
+    "/system/policy-extra/{policy_type}": {
+      "get": {
+        "description": "Whether the optional LeRobot extra a policy needs (e.g. transformers for\nsmolvla/pi0, diffusers for diffusion) is importable. Core policies report available.",
+        "operationId": "get_policy_extra_system_policy_extra__policy_type__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Policy Extra"
+      }
+    },
+    "/system/policy-extra/{policy_type}/install": {
+      "post": {
+        "description": "Spawn `pip install lerobot[<extra>]` for the policy's extra in the background.",
+        "operationId": "install_policy_extra_system_policy_extra__policy_type__install_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Policy Extra"
+      }
+    },
+    "/system/policy-extra/{policy_type}/install-status": {
+      "get": {
+        "description": "Return the policy extra's install state plus any pending log lines (drained on read).",
+        "operationId": "install_policy_extra_status_system_policy_extra__policy_type__install_status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Policy Extra Status"
+      }
+    },
+    "/system/training-extra": {
+      "get": {
+        "description": "Return whether the LeRobot training extra (accelerate) is importable.",
+        "operationId": "get_training_extra_system_training_extra_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Training Extra"
+      }
+    },
+    "/system/training-extra/install": {
+      "post": {
+        "description": "Spawn `pip install accelerate` as a background subprocess. No-op if already running.",
+        "operationId": "install_training_extra_system_training_extra_install_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Training Extra"
+      }
+    },
+    "/system/training-extra/install-status": {
+      "get": {
+        "description": "Return current install state plus any pending log lines (drained on read).",
+        "operationId": "install_training_extra_status_system_training_extra_install_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Training Extra Status"
+      }
+    },
+    "/system/update": {
+      "post": {
+        "description": "Run the pip upgrade in-process; the user must restart MakerMods Lab afterwards.",
+        "operationId": "run_update_system_update_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Run Update"
+      }
+    },
+    "/system/update-check": {
+      "get": {
+        "description": "Report whether a newer MakerMods Lab commit exists on GitHub (cached, silent on failure).",
+        "operationId": "update_check_system_update_check_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Update Check"
+      }
+    },
+    "/system/wandb-extra": {
+      "get": {
+        "description": "Return whether the `wandb` package is importable in this MakerMods Lab process.",
+        "operationId": "get_wandb_extra_system_wandb_extra_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Wandb Extra"
+      }
+    },
+    "/system/wandb-extra/install": {
+      "post": {
+        "description": "Spawn `pip install wandb` as a background subprocess. No-op if already running.",
+        "operationId": "install_wandb_extra_system_wandb_extra_install_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Wandb Extra"
+      }
+    },
+    "/system/wandb-extra/install-status": {
+      "get": {
+        "description": "Return current wandb install state plus any pending log lines (drained on read).",
+        "operationId": "install_wandb_extra_status_system_wandb_extra_install_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Wandb Extra Status"
+      }
+    },
+    "/teleoperation-status": {
+      "get": {
+        "description": "Get the current teleoperation status",
+        "operationId": "teleoperation_status_teleoperation_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Teleoperation Status"
+      }
+    },
+    "/upload-dataset": {
+      "post": {
+        "description": "Start a background upload of a local dataset to the Hub.\n\nReturns immediately with {started, repo_id, message}; poll /upload-status\nfor progress. 409 when an upload is already running (frontend maps it to a\n\"an upload is already running\" toast).",
+        "operationId": "upload_dataset_upload_dataset_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Dataset"
+      }
+    },
+    "/upload-status": {
+      "get": {
+        "description": "Current upload state + repo_id, message, and dataset_url once done.",
+        "operationId": "upload_status_upload_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Upload Status"
+      }
+    },
+    "/wiggle": {
+      "post": {
+        "description": "Wiggle the gripper on a port so the user can see which arm it is.",
+        "operationId": "wiggle_wiggle_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WiggleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Wiggle"
+      }
+    }
+  }
+}
