@@ -114,6 +114,12 @@ class InferenceOptions(BaseModel):
     checkpoint_state_dim: int | None = None
     eval_episodes: int = 1
     skip_identity_check: bool = False
+    # The two remaining policy-shaped knobs of InferenceRequest — without them
+    # a UI-selected RTC engine / ACT temporal ensembling would be silently
+    # dropped by this surface (extra="forbid" refuses them; omitting them runs
+    # the arm under a different engine than the user chose).
+    inference_engine: Literal["sync", "rtc"] = "sync"
+    temporal_ensemble_coeff: float | None = None
 
 
 class ReplayOptions(BaseModel):

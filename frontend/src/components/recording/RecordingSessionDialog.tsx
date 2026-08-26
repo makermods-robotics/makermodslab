@@ -18,13 +18,12 @@ import {
   playAutoAdvanceWarning,
 } from "@/lib/recordingAudio";
 import { useApi } from "@/contexts/ApiContext";
-import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
-import {
-  doneConfirmCopy,
-  quitConfirmCopy,
-  formatLeaveDiscardMessage,
-  leaveDiscardMessage,
-} from "@/lib/recordingExit";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useUnloadWarning } from "@/hooks/useUnloadWarning";
+import { ApiError } from "@/lib/apiClient";
+import { startSession, stopSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
+import { doneConfirmCopy, quitConfirmCopy } from "@/lib/recordingExit";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
@@ -42,10 +41,10 @@ import {
 } from "@/components/ui/alert-dialog";
 
 export interface RecordingConfig {
-  leader_port: string;
-  follower_port: string;
-  leader_config: string;
-  follower_config: string;
+  /** Robot RECORD name — POST /api/v1/sessions resolves ports, configs, mode,
+   * right-arm fields and cameras from it server-side; the request carries
+   * nothing hardware-shaped. */
+  robot: string;
   dataset_repo_id: string;
   single_task: string;
   num_episodes: number;
@@ -117,7 +116,8 @@ interface BackendStatus {
  * replaces the old /recording page (the session logic is ported verbatim;
  * every navigate-home became `onExit`). The dialog can't be dismissed by
  * ESC / outside click / X: leaving a live session is only ever an explicit
- * Done or Quit (or the shared exit guard's confirmed leave).
+ * Done or Quit. An abandoned page (tab close, crash) is the server's problem
+ * now — the session's lease expires and the safety stop keeps what was saved.
  */
 const RecordingSessionDialog: React.FC<{
   config: RecordingConfig;
@@ -184,58 +184,31 @@ const RecordingSessionDialog: React.FC<{
     backendStatus.session_ended === true;
   const resume = recordingConfig?.resume ?? false;
 
-  // Unintentional leave (back button, tab close, incidental route change) is
-  // treated as QUIT: end WITHOUT saving. Fresh → the backend deletes the whole
-  // dataset; resume → already-saved episodes stay, only the in-flight take is
-  // dropped. Best-effort discard POST; the guard's own latch runs it once.
-  const stopRecordingForLeave = useCallback(async () => {
-    try {
-      const res = await fetchWithHeaders(
-        `${baseUrl}/stop-recording?discard=true`,
-        { method: "POST" }
-      );
-      const data = await res.json().catch(() => null);
-      if (data?.success) {
-        toast({
-          title: t("recording.session.toast.discardedTitle"),
-          // Backend prose wins when present; only the fallback is localized.
-          description: data.message ?? formatLeaveDiscardMessage(t, resume),
-        });
-      }
-    } catch {
-      /* best-effort — the session UI is going away regardless */
-    }
-  }, [baseUrl, fetchWithHeaders, toast, resume, t]);
+  // Identity of the session this dialog started (POST /api/v1/sessions).
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
-  // One shared page-leave safety net (also used by Inference & Calibration):
-  //  - browser unload → native confirm + keepalive discard beacon;
-  //  - in-app back → blocking confirm;
-  //  - other in-app nav (this dialog unmounting) → discard on unmount.
-  // Armed only while the session is live; disarmed the moment it ends. The
-  // deliberate exits (Done/Quit buttons, natural end, start failure) call
-  // markHandled() so the guard doesn't fire a spurious second discard.
-  const guardActive = recordingSessionStarted && !sessionEnded;
-  const { markHandled } = useSessionExitGuard({
-    active: guardActive,
-    // Deliberately the ENGLISH copy: this is the body of a native
-    // window.confirm(), whose buttons and frame the browser renders in its own
-    // language. See leaveDiscardMessage's note in lib/recordingExit.ts.
-    confirmMessage: leaveDiscardMessage(resume),
-    beaconUrl: `${baseUrl}/stop-recording?discard=true`,
-    onLeave: stopRecordingForLeave,
-    beaconFlagKey: "makermodslab:recording-stopped",
-  });
+  // While the session is live, renew its lease; if this tab goes away the
+  // missed heartbeats make the SERVER stop the session — episodes saved so
+  // far are KEPT (a lease-expiry stop never discards). The retired exit guard
+  // used to treat every unintentional leave as quit-WITHOUT-saving via a
+  // discard beacon; quit-without-saving is now strictly the explicit Quit
+  // button's semantics. The courtesy beforeunload below only keeps an
+  // accidental tab-close from walking away silently — no beacon, no
+  // unmount-stop.
+  const sessionLive = recordingSessionStarted && !sessionEnded;
+  useSessionHeartbeat(sessionId, tabOwnerId(), sessionLive);
+  useUnloadWarning(sessionLive);
 
   // Start recording session when the dialog mounts. The ref guard prevents
-  // React StrictMode (and any future re-renders) from firing /start-recording
-  // twice — the second call returns 409 and bounces the user out.
+  // React StrictMode (and any future re-renders) from POSTing the session
+  // start twice — the second call returns 409 and bounces the user out.
   useEffect(() => {
     if (!startInitiatedRef.current) {
       startInitiatedRef.current = true;
       startRecordingSession();
     }
     // startRecordingSession is intentionally omitted: re-running this effect
-    // on its identity change would re-fire /start-recording.
+    // on its identity change would re-fire the session start.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -258,7 +231,7 @@ const RecordingSessionDialog: React.FC<{
       if (doneRef.current) return;
       try {
         const response = await fetchWithHeaders(
-          `${baseUrl}/recording-status`
+          `${baseUrl}/api/v1/recording-status`
         );
         if (!response.ok) return;
         const status = await response.json();
@@ -267,7 +240,9 @@ const RecordingSessionDialog: React.FC<{
         // Pull the recording log tail on the same tick so the panel stays live.
         // Best-effort: a log fetch failure must not disturb status handling.
         try {
-          const logRes = await fetchWithHeaders(`${baseUrl}/recording-log`);
+          const logRes = await fetchWithHeaders(
+            `${baseUrl}/api/v1/recording-log`
+          );
           if (logRes.ok) {
             const logData = await logRes.json();
             setLogs(logData.logs ?? "");
@@ -337,10 +312,7 @@ const RecordingSessionDialog: React.FC<{
 
         if (!status.recording_active && status.session_ended) {
           // The session finished on its own (or a stop we issued completed and
-          // the backend returned to rest). This is a normal exit — mark the
-          // safety net as handled so the imminent unmount doesn't POST a
-          // spurious discard against a session that's already gone.
-          markHandled();
+          // the backend returned to rest).
           // A real failure or a cleanup-only warning: keep the user here so
           // the hint + error banner (near the log panel) is readable instead
           // of bouncing straight to upload. Freeze polling on this payload;
@@ -368,7 +340,7 @@ const RecordingSessionDialog: React.FC<{
     pollStatus();
     const statusInterval = setInterval(pollStatus, 1000);
     return () => clearInterval(statusInterval);
-  }, [recordingSessionStarted, recordingConfig, baseUrl, fetchWithHeaders, toast, markHandled, t]);
+  }, [recordingSessionStarted, recordingConfig, baseUrl, fetchWithHeaders, toast, t]);
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -380,60 +352,47 @@ const RecordingSessionDialog: React.FC<{
 
   const startRecordingSession = async () => {
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/start-recording`, {
-        method: "POST",
-        body: JSON.stringify(recordingConfig),
+      // The request is the robot NAME plus the dataset-shaped options — the
+      // server resolves ports/configs/cameras from the saved record. The
+      // owner attaches the lease the heartbeat above renews.
+      const { robot, ...options } = recordingConfig;
+      const session = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "recording",
+        robot,
+        owner: tabOwnerId(),
+        options,
       });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        setRecordingSessionStarted(true);
-        toast({
-          title: t("recording.session.toast.startedTitle"),
-          description: t("recording.session.toast.startedBody", {
-            count: recordingConfig.num_episodes,
-          }),
-        });
-      } else {
-        // The backend rejected the start (e.g. 409 already-active, or a config
-        // error) — no session is ours to stop, so keep the safety net from
-        // firing a stop that would kill an unrelated in-flight session.
-        // A rejection now raises HTTPException, whose body carries the reason
-        // under "detail" (FastAPI's convention), not "message" — read both so
-        // the specific reason (already active / invalid name / etc.) still
-        // reaches the toast instead of falling back to the generic text.
-        // A 422 (request validation failure) puts an array of {loc,msg,type}
-        // in `detail` instead of a string — toast() renders description as a
-        // React node, so an unguarded array would crash the render.
-        markHandled();
-        const detail =
-          typeof data.detail === "string"
-            ? data.detail
-            : Array.isArray(data.detail)
-              ? data.detail
-                  .map((d: { msg?: string }) => d?.msg ?? JSON.stringify(d))
-                  .join("; ")
-              : null;
+      setSessionId(session.id);
+      setRecordingSessionStarted(true);
+      toast({
+        title: t("recording.session.toast.startedTitle"),
+        description: t("recording.session.toast.startedBody", {
+          count: recordingConfig.num_episodes,
+        }),
+      });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        // The backend refused the start. 409 session.held renders as the
+        // shared localized "robot is busy" line (details name the holder);
+        // every other coded refusal (robot.not_ready, request.validation —
+        // apiRequest already flattened a 422's array shape) shows the
+        // server's own prose, with a localized last-resort fallback.
         toast({
           title: t("recording.session.toast.startFailedTitle"),
-          // Backend prose first; only the last-resort fallback is localized.
           description:
-            detail ||
-            data.message ||
+            formatSessionHeld(t, error) ??
+            error.detail ??
             t("recording.session.toast.startFailedBody"),
           variant: "destructive",
         });
-        onExitRef.current();
+      } else {
+        // Never reached the backend — nothing started.
+        toast({
+          title: t("recording.session.toast.connectionErrorTitle"),
+          description: t("recording.session.toast.connectionErrorBody"),
+          variant: "destructive",
+        });
       }
-    } catch (error) {
-      // Never reached the backend — nothing started, nothing to stop.
-      markHandled();
-      toast({
-        title: t("recording.session.toast.connectionErrorTitle"),
-        description: t("recording.session.toast.connectionErrorBody"),
-        variant: "destructive",
-      });
       onExitRef.current();
     }
   };
@@ -453,7 +412,7 @@ const RecordingSessionDialog: React.FC<{
 
     try {
       const response = await fetchWithHeaders(
-        `${baseUrl}/recording-exit-early`,
+        `${baseUrl}/api/v1/recording-exit-early`,
         { method: "POST" }
       );
       const data = await response.json();
@@ -487,7 +446,7 @@ const RecordingSessionDialog: React.FC<{
 
     try {
       const response = await fetchWithHeaders(
-        `${baseUrl}/recording-pause`,
+        `${baseUrl}/api/v1/recording-pause`,
         { method: "POST" }
       );
       const data = await response.json();
@@ -532,7 +491,7 @@ const RecordingSessionDialog: React.FC<{
 
     try {
       const response = await fetchWithHeaders(
-        `${baseUrl}/recording-resume`,
+        `${baseUrl}/api/v1/recording-resume`,
         { method: "POST" }
       );
       const data = await response.json();
@@ -574,7 +533,7 @@ const RecordingSessionDialog: React.FC<{
 
     try {
       const response = await fetchWithHeaders(
-        `${baseUrl}/recording-rerecord-episode`,
+        `${baseUrl}/api/v1/recording-rerecord-episode`,
         {
           method: "POST",
         }
@@ -608,18 +567,29 @@ const RecordingSessionDialog: React.FC<{
     }
   }, [backendStatus, baseUrl, fetchWithHeaders, toast, t]);
 
-  // POST the session-end request. discard=false is DONE (keep saved episodes,
-  // the poll then exits with the handoff); discard=true is QUIT (end without
-  // saving). markHandled() first so the page-leave guard doesn't also fire.
+  // POST the session-end request. DONE (keep saved episodes; the poll then
+  // exits with the handoff) stops the session by its id — the same stop the
+  // lease watchdog uses. QUIT (end WITHOUT saving) keeps the kind-specific
+  // legacy endpoint: `discard` is recording-only semantics the generic
+  // sessions stop deliberately doesn't carry.
   const doStopRecording = useCallback(
     async (discard: boolean) => {
       if (!backendStatus?.available_controls.stop_recording) return;
-      markHandled();
-      const url = discard
-        ? `${baseUrl}/stop-recording?discard=true`
-        : `${baseUrl}/stop-recording`;
       try {
-        await fetchWithHeaders(url, { method: "POST" });
+        if (discard || !sessionId) {
+          await fetchWithHeaders(
+            `${baseUrl}/api/v1/stop-recording${discard ? "?discard=true" : ""}`,
+            { method: "POST" }
+          );
+        } else {
+          try {
+            await stopSession(baseUrl, fetchWithHeaders, sessionId);
+          } catch (e) {
+            // 404: the session ended on its own a beat before the click —
+            // the poll exits with the handoff; nothing left to stop.
+            if (!(e instanceof ApiError && e.status === 404)) throw e;
+          }
+        }
         toast(
           discard
             ? {
@@ -639,7 +609,7 @@ const RecordingSessionDialog: React.FC<{
         });
       }
     },
-    [backendStatus, baseUrl, fetchWithHeaders, toast, markHandled, t]
+    [backendStatus, sessionId, baseUrl, fetchWithHeaders, toast, t]
   );
 
   const requestDone = useCallback(() => {

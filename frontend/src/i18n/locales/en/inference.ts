@@ -32,7 +32,6 @@ export default {
     running: "Running",
     finished: "Finished",
   },
-  leaveConfirm: "Leaving stops the running inference. Continue?",
   toast: {
     startedWarningTitle: "Started with a warning",
     failedTitle: "Inference failed",

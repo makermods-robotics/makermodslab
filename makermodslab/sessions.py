@@ -507,6 +507,8 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
         checkpoint_state_dim=opts.checkpoint_state_dim,
         eval_episodes=opts.eval_episodes,
         skip_identity_check=opts.skip_identity_check,
+        inference_engine=opts.inference_engine,
+        temporal_ensemble_coeff=opts.temporal_ensemble_coeff,
     )
 
 

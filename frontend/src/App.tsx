@@ -13,8 +13,6 @@ import Launchpad from "@/pages/Launchpad";
 import Teleoperation from "@/pages/Teleoperation";
 import Training from "@/pages/Training";
 import NotFound from "@/pages/NotFound";
-import SingleTabGuard from "@/components/SingleTabGuard";
-import TeleopStopNotice from "@/components/TeleopStopNotice";
 import UpdateNotice from "@/components/UpdateNotice";
 import MockHubBanner from "@/components/MockHubBanner";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
@@ -39,8 +37,13 @@ function App() {
                     <StudioProvider>
                      <InferenceSessionProvider>
                       <OnboardingProvider>
-                       <SingleTabGuard>
-                        <TeleopStopNotice />
+                        {/* SingleTabGuard used to live here. Hardware
+                            exclusivity is now server-authoritative (409
+                            session.held names the holder), and the unload
+                            beacons whose crossfire the guard prevented — one
+                            tab's unload stopping another tab's session — are
+                            gone with it: sessions carry a server-side lease
+                            instead. Multiple tabs are simply allowed now. */}
                         <UpdateNotice />
                         <MockHubBanner />
                         <Routes>
@@ -66,7 +69,6 @@ function App() {
 
                           <Route path="*" element={<NotFound />} />
                         </Routes>
-                       </SingleTabGuard>
                        <Spotlight />
                       </OnboardingProvider>
                      </InferenceSessionProvider>

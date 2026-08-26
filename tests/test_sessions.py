@@ -555,6 +555,8 @@ def test_inference_request_is_follower_only(client, tmp_lerobot_home, monkeypatc
                 "duration_s": 120,
                 "checkpoint_state_dim": 12,
                 "eval_episodes": 3,
+                "inference_engine": "rtc",
+                "temporal_ensemble_coeff": 0.01,
             },
         },
     )
@@ -568,6 +570,7 @@ def test_inference_request_is_follower_only(client, tmp_lerobot_home, monkeypatc
     assert req.camera_bindings == {"top": "workbench"}
     assert req.camera_dims["top"].width == 320 and req.camera_dims["top"].height == 240
     assert (req.duration_s, req.checkpoint_state_dim, req.eval_episodes) == (120, 12, 3)
+    assert (req.inference_engine, req.temporal_ensemble_coeff) == ("rtc", 0.01)
 
 
 def test_replay_request_built_from_record_and_options(client, tmp_lerobot_home, monkeypatch) -> None:

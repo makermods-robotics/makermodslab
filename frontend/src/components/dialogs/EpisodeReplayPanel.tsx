@@ -6,12 +6,15 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots } from "@/hooks/useRobots";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
-import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useUnloadWarning } from "@/hooks/useUnloadWarning";
 import { useLiveJointReadout } from "@/hooks/useLiveJointReadout";
+import { ApiError } from "@/lib/apiClient";
+import { startSession, stopSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import {
   ReplayStatus,
   ReplayPhase,
-  startReplay,
   getReplayStatus,
   stopReplay,
 } from "@/lib/replayHardwareApi";
@@ -48,20 +51,20 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   const [status, setStatus] = useState<ReplayStatus | null>(null);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  // Identity of the session THIS panel started (POST /api/v1/sessions).
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const doneRef = useRef(false);
   const localT0Ref = useRef<number | null>(null);
 
   const { joints: liveJoints } = useLiveJointReadout(status?.replay_active === true);
 
-  const { markHandled } = useSessionExitGuard({
-    active: status?.replay_active === true,
-    confirmMessage: t("dialogs.replay.leaveConfirm"),
-    beaconUrl: `${baseUrl}/stop-replay`,
-    onLeave: () => {
-      stopReplay(baseUrl, fetchWithHeaders).catch(() => {});
-    },
-    beaconFlagKey: "makermodslab:replay-stopped",
-  });
+  // While the replay is live, renew its lease; an abandoned page makes the
+  // SERVER stop the arm via the missed heartbeats — the replacement for the
+  // retired exit guard's stop beacon. The courtesy beforeunload only keeps an
+  // accidental tab-close from being silent.
+  const replayLive = status?.replay_active === true;
+  useSessionHeartbeat(sessionId, tabOwnerId(), replayLive);
+  useUnloadWarning(replayLive);
 
   useEffect(() => {
     doneRef.current = false;
@@ -99,7 +102,6 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
               duration: 10000,
             });
           }
-          markHandled();
           doneRef.current = true;
         }
       } catch (e) {
@@ -118,31 +120,34 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
       cancelled = true;
       clearInterval(id);
     };
-  }, [baseUrl, fetchWithHeaders, toast, markHandled, onElapsedChange, t]);
+  }, [baseUrl, fetchWithHeaders, toast, onElapsedChange, t]);
 
   const handleStart = async () => {
     if (!selectedRecord) return;
     setStarting(true);
     doneRef.current = false;
     try {
-      const result = await startReplay(baseUrl, fetchWithHeaders, {
-        repo_id: repoId,
-        episode_index: episodeIndex,
-        follower_port: selectedRecord.follower_port,
-        follower_config: selectedRecord.follower_config,
-        robot_name: selectedRecord.name,
+      // Robot NAME + episode selection only — the follower port/config
+      // resolve server-side from the saved record. The owner attaches the
+      // lease the heartbeat above renews while the replay plays.
+      const session = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "replay",
+        robot: selectedRecord.name,
+        owner: tabOwnerId(),
+        options: {
+          repo_id: repoId,
+          episode_index: episodeIndex,
+        },
       });
-      if (result.warning) {
-        toast({
-          title: t("dialogs.replay.toast.startedWarningTitle"),
-          description: result.warning,
-          duration: 8000,
-        });
-      }
+      setSessionId(session.id);
     } catch (e) {
       toast({
         title: t("dialogs.replay.toast.startFailedTitle"),
-        description: e instanceof Error ? e.message : String(e),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; everything else is the server's raw error text.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof Error ? e.message : String(e)),
         variant: "destructive",
       });
     } finally {
@@ -153,7 +158,17 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   const handleStop = async () => {
     setStopping(true);
     try {
-      await stopReplay(baseUrl, fetchWithHeaders);
+      // Stop by session id (a 404 means the replay already ended — fine);
+      // fall back to the kind-level stop when this panel never started one.
+      if (sessionId) {
+        try {
+          await stopSession(baseUrl, fetchWithHeaders, sessionId);
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 404)) throw e;
+        }
+      } else {
+        await stopReplay(baseUrl, fetchWithHeaders);
+      }
     } catch (e) {
       toast({
         title: t("dialogs.replay.toast.stopFailedTitle"),

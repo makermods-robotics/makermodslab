@@ -1,55 +1,10 @@
 import { Fetcher, apiRequest } from "./apiClient";
 
-export interface StartInferenceRequest {
-  follower_port: string;
-  follower_config: string;
-  policy_ref: string;
-  task: string;
-  // Which of the ROBOT RECORD's cameras plays each camera role the checkpoint
-  // was trained with: { policy-expected camera name: robot-record camera name }.
-  // Only the name pairing is sent — which device, and how it's opened (index,
-  // unique_id, fps, fourcc, backend), is read out of the record named by
-  // `robot_name`, so a run can never open a camera set the saved robot doesn't
-  // have. (Capture resolution is the exception — see `camera_dims`.) A binding
-  // naming a camera the record lacks is a 400.
-  camera_bindings: Record<string, string>;
-  // Capture resolution per policy-expected camera name, read off the
-  // checkpoint's `image_features` (same forward-the-checkpoint's-own-metadata
-  // pattern as `checkpoint_state_dim`). The ONE camera setting not taken from
-  // the robot record: lerobot's rollout does not resize frames to the policy's
-  // input shape, so a camera must capture at the resolution the policy was
-  // trained on. Omitted entries fall back to the record's own width/height.
-  camera_dims?: Record<string, { width: number; height: number }>;
-  duration_s: number;
-  // Bimanual: "single" (default) drives one follower; "bimanual" drives two.
-  // In bimanual mode follower_port/follower_config above is the LEFT arm and
-  // the right_* fields carry the RIGHT arm. Inference has no leader arms.
-  mode?: "single" | "bimanual";
-  right_follower_port?: string;
-  right_follower_config?: string;
-  // Robot record name. Names the record `camera_bindings` resolve against
-  // (required whenever any binding is set), and — bimanual only — the BiSO
-  // calibration-staging base id.
-  robot_name?: string;
-  // Checkpoint's flat state width (6 = single arm, 12 = bimanual). Lets the
-  // server reject an arm-count mismatch before spawning the rollout subprocess.
-  checkpoint_state_dim?: number;
-  // Multi-episode EVALUATION mode. Omitted/1 = the historical single rollout.
-  // >1 runs N sequential episodes in one session (one model download, one arm
-  // preflight, one camera handover), each scored success/failure, ending in an
-  // accuracy. Clamped server-side to [1, 200].
-  eval_episodes?: number;
-  // Which lerobot inference engine runs the rollout. "sync" (the server-side
-  // default) does one policy forward per control tick, so the arm pauses
-  // between action chunks; "rtc" (Real-Time Chunking) overlaps that forward
-  // with action playback on a background thread. Experimental: RTC changes the
-  // policy's action-generation path, not just its scheduling.
-  inference_engine?: "sync" | "rtc";
-  // ACT temporal ensembling. Omit (or undefined) to leave it off, matching
-  // lerobot's default. Any positive coefficient enables it — the server also
-  // pins n_action_steps=1, which ACT requires alongside it. ACT-only.
-  temporal_ensemble_coeff?: number;
-}
+// Starting a run no longer lives here: launch goes through POST
+// /api/v1/sessions (lib/sessionApi.ts startSession, kind "inference") — the
+// request carries the robot NAME plus InferenceSessionOptions, and the server
+// resolves ports/configs/cameras from the saved record. This module keeps the
+// run's rich status/log polling and the kind-specific controls.
 
 // Structured startup sub-phase, mirrored from rollout.py's phase constants.
 // Names which substep a slow startup is in so the UI can say "Downloading
@@ -132,32 +87,23 @@ export interface InferenceStatus {
   accuracy?: number | null;
 }
 
-// The POST now returns immediately: it only validates the request cheaply, then
-// hands the model download + arm preflight + subprocess spawn to a background
-// worker. So there's no log_path or warning here yet — the inference page polls
-// /inference-status for the download progress, the warn-but-allow finding, and
-// any failure. A 4xx still surfaces here (mutex/arm-count/policy-ref shape).
-export async function startInference(
-  baseUrl: string,
-  fetcher: Fetcher,
-  request: StartInferenceRequest,
-): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(
-    baseUrl,
-    fetcher,
-    "/start-inference",
-    { method: "POST", body: request, action: "Start inference" },
-  );
-}
-
+// Kind-agnostic fallback stop. The session dialog stops by session id
+// (lib/sessionApi.ts stopSession); this endpoint remains for surfaces that
+// know only "an inference run is active" (DeployPanel's Stop button) — stops
+// are never owner-gated, so it may target a run another tab started.
 export async function stopInference(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/stop-inference", {
-    method: "POST",
-    action: "Stop inference",
-  });
+  return apiRequest<{ message: string }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/stop-inference",
+    {
+      method: "POST",
+      action: "Stop inference",
+    },
+  );
 }
 
 // Evaluation mode only: end the CURRENT episode early and score it a SUCCESS
@@ -170,7 +116,7 @@ export async function stopInferenceEpisode(
   return apiRequest<{ message: string }>(
     baseUrl,
     fetcher,
-    "/inference-episode-stop",
+    "/api/v1/inference-episode-stop",
     { method: "POST", action: "Stop inference episode" },
   );
 }
@@ -185,7 +131,7 @@ export async function startNextInferenceEpisode(
   return apiRequest<{ message: string }>(
     baseUrl,
     fetcher,
-    "/inference-next-episode",
+    "/api/v1/inference-next-episode",
     { method: "POST", action: "Start next episode" },
   );
 }
@@ -195,7 +141,7 @@ export async function getInferenceStatus(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<InferenceStatus> {
-  return apiRequest<InferenceStatus>(baseUrl, fetcher, "/inference-status", {
+  return apiRequest<InferenceStatus>(baseUrl, fetcher, "/api/v1/inference-status", {
     signal,
     action: "Get inference status",
   });
@@ -226,7 +172,7 @@ export async function getInferenceLog(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<InferenceLog> {
-  return apiRequest<InferenceLog>(baseUrl, fetcher, "/inference-log", {
+  return apiRequest<InferenceLog>(baseUrl, fetcher, "/api/v1/inference-log", {
     signal,
     action: "Get inference log",
   });

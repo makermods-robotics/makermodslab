@@ -696,13 +696,20 @@ const RobotConfigWindow = ({
     }
   }, [calibrationStatus.calibration_active, calibrationStatus.status]);
 
-  // Shared leave safety net (same hook as Recording & Inference). Manual
-  // calibration holds the serial port in a singleton that would otherwise block
-  // the next start ("Calibration already active"); an unintentional exit aborts
-  // it. In the window this covers tab close/reload (beacon) and the window's
-  // own unmount-on-close cleanup. The arm is LIMP during manual range recording
-  // (torque is disabled), so this is a clean teardown, not a mid-motion stop.
-  // The abort reuses the module's existing /stop-calibration teardown.
+  // Leave safety net — KEPT here on purpose while it retired everywhere else:
+  // calibration is not yet on the /api/v1/sessions surface, so it has no
+  // lease and no server-side expiry stop, and the unload beacon below is
+  // still the only thing that frees the singleton when the page goes away.
+  // This guard (and useSessionExitGuard itself) retires when calibration
+  // migrates to the sessions surface.
+  //
+  // Manual calibration holds the serial port in a singleton that would
+  // otherwise block the next start ("Calibration already active"); an
+  // unintentional exit aborts it. In the window this covers tab close/reload
+  // (beacon) and the window's own unmount-on-close cleanup. The arm is LIMP
+  // during manual range recording (torque is disabled), so this is a clean
+  // teardown, not a mid-motion stop. The abort reuses the module's existing
+  // /stop-calibration teardown.
   const { markHandled: markCalibHandled } = useSessionExitGuard({
     active: manualCalibLive,
     confirmMessage: t("robotConfig.window.leaveConfirm"),

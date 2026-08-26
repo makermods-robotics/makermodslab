@@ -114,7 +114,6 @@ export default {
       finishingTitle: "正在完成",
       finishingBody: "正在生成数据集…",
       stopFailedBody: "无法结束录制会话。",
-      discardedTitle: "录制已丢弃",
     },
   },
 
@@ -133,8 +132,6 @@ export default {
       confirm: "退出且不保存",
     },
     keepRecording: "继续录制",
-    leaveResume: "离开会退出录制且不保存 — 已保存的回合仍留在数据集中。",
-    leaveFresh: "离开会退出录制且不保存 — 本次录制及其所有回合都将被删除。",
   },
 
   log: {
