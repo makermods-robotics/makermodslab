@@ -916,7 +916,7 @@
         "type": "object"
       },
       "EndedSessionInfo": {
-        "description": "The last_ended summary (SessionTracker._last_ended). `phase` is the\nphase carried by the release event — the session's final phase.",
+        "description": "The last_ended summary (SessionTracker._last_ended). `phase` is the\nphase carried by the release event — the session's final phase. `reason`\nis \"session.lease_expired\" when the expiry watchdog safety-stopped the\nsession, null for every normal ending.",
         "properties": {
           "ended_at": {
             "title": "Ended At",
@@ -940,13 +940,25 @@
               }
             ],
             "title": "Phase"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           }
         },
         "required": [
           "id",
           "kind",
           "ended_at",
-          "phase"
+          "phase",
+          "reason"
         ],
         "title": "EndedSessionInfo",
         "type": "object"
@@ -3038,8 +3050,35 @@
         "title": "RunnersHardwareResponse",
         "type": "object"
       },
+      "SessionHeartbeatBody": {
+        "description": "POST /api/v1/sessions/{session_id}/heartbeat. `owner` must match the\nlease's owner (shape-checked in the handler like SessionStartBody's).",
+        "properties": {
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner"
+        ],
+        "title": "SessionHeartbeatBody",
+        "type": "object"
+      },
+      "SessionHeartbeatResponse": {
+        "description": "The renewed identity (`lease.expires_in_s` back at `timeout_s`); for a\nsession with no lease the heartbeat is a documented no-op and `lease`\nstays null.",
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/SessionInfo"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "SessionHeartbeatResponse",
+        "type": "object"
+      },
       "SessionInfo": {
-        "description": "Identity of the current session (SessionTracker._current). `robot` and\n`owner` are known only for sessions started through /api/v1/sessions —\nlegacy-started sessions carry null (the tracker never guesses).",
+        "description": "Identity of the current session (SessionTracker._current). `robot` and\n`owner` are known only for sessions started through /api/v1/sessions —\nlegacy-started sessions carry null (the tracker never guesses). `lease`\nis null for owner-less and legacy-started sessions — those are never\ntimeout-stopped.",
         "properties": {
           "id": {
             "title": "Id",
@@ -3048,6 +3087,16 @@
           "kind": {
             "title": "Kind",
             "type": "string"
+          },
+          "lease": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionLeaseInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "owner": {
             "anyOf": [
@@ -3098,13 +3147,38 @@
           "owner",
           "started_at",
           "revision",
-          "phase"
+          "phase",
+          "lease"
         ],
         "title": "SessionInfo",
         "type": "object"
       },
+      "SessionLeaseInfo": {
+        "description": "The public face of a session's lease. `expires_in_s` is computed at\nread time from the internal monotonic deadline (never exposed) and is\nnever negative; only a heartbeat pushes it back up — reads don't renew.",
+        "properties": {
+          "expires_in_s": {
+            "title": "Expires In S",
+            "type": "number"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "timeout_s": {
+            "title": "Timeout S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "owner",
+          "timeout_s",
+          "expires_in_s"
+        ],
+        "title": "SessionLeaseInfo",
+        "type": "object"
+      },
       "SessionStartBody": {
-        "description": "POST /api/v1/sessions. `options` is validated against the kind's model\nabove in the handler (422 request.validation on mismatch) — a plain dict\nhere keeps the error a single coded shape instead of a four-armed union\nblob.",
+        "description": "POST /api/v1/sessions. `options` is validated against the kind's model\nabove in the handler (422 request.validation on mismatch) — a plain dict\nhere keeps the error a single coded shape instead of a four-armed union\nblob.\n\n`owner` (non-empty, ≤ OWNER_MAX_LENGTH chars) attaches a lease to the\nsession: it must then be renewed via the heartbeat endpoint or the expiry\nwatchdog safety-stops it after `lease_timeout_s`. Without an owner there\nis no lease and no timeout-stop. Both fields' shape checks live in the\nhandler (see the constants above).",
         "properties": {
           "kind": {
             "enum": [
@@ -3115,6 +3189,11 @@
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "lease_timeout_s": {
+            "default": 60.0,
+            "title": "Lease Timeout S",
+            "type": "number"
           },
           "options": {
             "additionalProperties": true,
@@ -7031,7 +7110,7 @@
     },
     "/api/v1/sessions": {
       "post": {
-        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds this phase: teleoperation, recording, inference, replay.\nCalibration, auto-calibration and wiggle sessions are still started\nthrough their legacy wizard/flow endpoints — the identity tracker observes\nthem all the same, so they appear in /sessions/current and can be stopped\nby id.\n\n201 returns the session identity; 409 session.held (details name the\nholder) when any session already holds the hardware; 404 robot.not_found;\n400 robot.not_ready (readiness is scoped to the arms the kind drives —\ninference/replay never open the leader bus); 422 request.validation for\noptions that don't fit the kind. Other feature refusals pass through with\ntheir existing statuses and codes.",
+        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds this phase: teleoperation, recording, inference, replay.\nCalibration, auto-calibration and wiggle sessions are still started\nthrough their legacy wizard/flow endpoints — the identity tracker observes\nthem all the same, so they appear in /sessions/current and can be stopped\nby id.\n\n201 returns the session identity; 409 session.held (details name the\nholder) when any session already holds the hardware; 404 robot.not_found;\n400 robot.not_ready (readiness is scoped to the arms the kind drives —\ninference/replay never open the leader bus); 422 request.validation for\noptions that don't fit the kind, an empty/oversized owner, or a\nlease_timeout_s outside 10–600. Other feature refusals pass through with\ntheir existing statuses and codes.\n\n`owner` attaches a lease: heartbeat within `lease_timeout_s` (default\n60s) or the session is safety-stopped. No owner, no lease, no\ntimeout-stop — legacy-started and owner-less sessions are never killed.",
         "operationId": "start_session",
         "requestBody": {
           "content": {
@@ -7073,7 +7152,7 @@
     },
     "/api/v1/sessions/current": {
       "get": {
-        "description": "Identity of the current session (or null), plus a summary of the last\nended one. Identity only — kind-specific rich status stays on the feature\nstatus endpoints this phase. `robot`/`owner` are null for sessions started\nthrough the legacy endpoints (the tracker never guesses).",
+        "description": "Identity of the current session (or null), plus a summary of the last\nended one. Identity only — kind-specific rich status stays on the feature\nstatus endpoints this phase. `robot`/`owner` are null for sessions started\nthrough the legacy endpoints (the tracker never guesses); `lease` is null\nunless the session was created with an owner. Reading NEVER renews the\nlease — renewal is the owner's deliberate act via the heartbeat endpoint.",
         "operationId": "current_session",
         "responses": {
           "200": {
@@ -7088,6 +7167,59 @@
           }
         },
         "summary": "Current Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/heartbeat": {
+      "post": {
+        "description": "Renew the current session's lease deadline — the owner's deliberate\nact (GET /sessions/current never renews).\n\n200 with the renewed identity when `session_id` names the current session\nand `owner` matches its lease; a current session with NO lease is a\nharmless no-op 200 (eases client rollout while leases are opt-in). 404\nsession.not_found for an unknown or stale id — including a session the\nexpiry watchdog already stopped and released; 409 session.lease_expired\nonly in the window where the expiry stop is dispatched but the release\nhasn't landed; 409 session.not_owner on an owner mismatch.",
+        "operationId": "heartbeat_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionHeartbeatBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionHeartbeatResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Heartbeat Session",
         "tags": [
           "sessions"
         ]

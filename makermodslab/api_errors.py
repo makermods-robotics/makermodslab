@@ -83,11 +83,14 @@ class ErrorCode(StrEnum):
     CHECKPOINT_NOT_FOUND = "checkpoint.not_found"
     CHECKPOINT_INCOMPLETE = "checkpoint.incomplete"
 
-    # session.* — the /api/v1/sessions surface (sessions.py). `held` (another
-    # session holds the hardware; details name the holder) and `not_found`
-    # (stop aimed at anything but the current session's id) are wired;
-    # `not_owner` / `lease_expired` stay RESERVED for the lease commit — do
-    # not use them elsewhere.
+    # session.* — the /api/v1/sessions surface (sessions.py). `held`: another
+    # session holds the hardware (details name the holder). `not_found`: a
+    # stop or heartbeat aimed at anything but the current session's id.
+    # `not_owner`: a heartbeat whose owner doesn't match the lease — never
+    # stop, which is deliberately owner-ungated (safety over ownership).
+    # `lease_expired`: doubles as last_ended's safety-stop reason, and as an
+    # HTTP 409 only for a heartbeat in the window between the expiry
+    # watchdog's stop dispatch and the session's release.
     SESSION_HELD = "session.held"
     SESSION_NOT_OWNER = "session.not_owner"
     SESSION_LEASE_EXPIRED = "session.lease_expired"

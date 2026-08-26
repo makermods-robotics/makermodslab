@@ -224,6 +224,7 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
+        "POST /api/v1/sessions/{session_id}/heartbeat",
         "POST /api/v1/sessions/{session_id}/stop",
     ]
 )

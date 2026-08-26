@@ -159,6 +159,8 @@ from .schemas.models import (
 )
 from .schemas.sessions import (
     CurrentSessionResponse,
+    SessionHeartbeatBody,
+    SessionHeartbeatResponse,
     SessionStartBody,
     SessionStartResponse,
     SessionStopResponse,
@@ -181,6 +183,7 @@ from .schemas.system import (
 )
 from .sessions import (
     handle_current_session,
+    handle_heartbeat_session,
     handle_start_session,
     handle_stop_session,
 )
@@ -763,8 +766,13 @@ def start_session(body: SessionStartBody):
     holder) when any session already holds the hardware; 404 robot.not_found;
     400 robot.not_ready (readiness is scoped to the arms the kind drives —
     inference/replay never open the leader bus); 422 request.validation for
-    options that don't fit the kind. Other feature refusals pass through with
-    their existing statuses and codes."""
+    options that don't fit the kind, an empty/oversized owner, or a
+    lease_timeout_s outside 10–600. Other feature refusals pass through with
+    their existing statuses and codes.
+
+    `owner` attaches a lease: heartbeat within `lease_timeout_s` (default
+    60s) or the session is safety-stopped. No owner, no lease, no
+    timeout-stop — legacy-started and owner-less sessions are never killed."""
     return handle_start_session(body, manager)
 
 
@@ -773,8 +781,27 @@ def current_session():
     """Identity of the current session (or null), plus a summary of the last
     ended one. Identity only — kind-specific rich status stays on the feature
     status endpoints this phase. `robot`/`owner` are null for sessions started
-    through the legacy endpoints (the tracker never guesses)."""
+    through the legacy endpoints (the tracker never guesses); `lease` is null
+    unless the session was created with an owner. Reading NEVER renews the
+    lease — renewal is the owner's deliberate act via the heartbeat endpoint."""
     return handle_current_session()
+
+
+@v1_router.post(
+    "/sessions/{session_id}/heartbeat", response_model=SessionHeartbeatResponse, tags=["sessions"]
+)
+def heartbeat_session(session_id: str, body: SessionHeartbeatBody):
+    """Renew the current session's lease deadline — the owner's deliberate
+    act (GET /sessions/current never renews).
+
+    200 with the renewed identity when `session_id` names the current session
+    and `owner` matches its lease; a current session with NO lease is a
+    harmless no-op 200 (eases client rollout while leases are opt-in). 404
+    session.not_found for an unknown or stale id — including a session the
+    expiry watchdog already stopped and released; 409 session.lease_expired
+    only in the window where the expiry stop is dispatched but the release
+    hasn't landed; 409 session.not_owner on an owner mismatch."""
+    return handle_heartbeat_session(session_id, body.owner)
 
 
 @v1_router.post("/sessions/{session_id}/stop", response_model=SessionStopResponse, tags=["sessions"])

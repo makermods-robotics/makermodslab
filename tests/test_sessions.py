@@ -147,6 +147,7 @@ def test_release_clears_current_and_keeps_last_ended() -> None:
         "kind": "replay",
         "ended_at": ended["ended_at"],
         "phase": "stopping",
+        "reason": None,  # a normal ending, not a lease-expiry safety stop
     }
     assert before <= ended["ended_at"] <= after
 
@@ -444,8 +445,13 @@ def test_start_success_201_returns_the_attributed_identity(client, tmp_lerobot_h
     assert session["phase"] is None
     assert session["id"] == sessions.tracker.current()["id"]
 
-    # GET /sessions/current serves the same identity.
-    assert client.get("/api/v1/sessions/current").json()["session"] == session
+    # GET /sessions/current serves the same identity (the lease's
+    # expires_in_s is computed at read time, so compare it apart).
+    got = client.get("/api/v1/sessions/current").json()["session"]
+    assert {k: v for k, v in got.items() if k != "lease"} == {
+        k: v for k, v in session.items() if k != "lease"
+    }
+    assert got["lease"]["owner"] == "ui-abc"
 
 
 def test_start_success_without_a_claim_event_is_a_500(client, tmp_lerobot_home, monkeypatch) -> None:

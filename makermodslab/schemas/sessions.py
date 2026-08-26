@@ -37,18 +37,33 @@ from pydantic import BaseModel, ConfigDict
 from makermodslab.rollout import PolicyCameraDims
 
 __all__ = [
+    "LEASE_TIMEOUT_DEFAULT_S",
+    "LEASE_TIMEOUT_MAX_S",
+    "LEASE_TIMEOUT_MIN_S",
+    "OWNER_MAX_LENGTH",
     "CurrentSessionResponse",
     "EndedSessionInfo",
     "InferenceOptions",
     "PolicyCameraDims",
     "RecordingOptions",
     "ReplayOptions",
+    "SessionHeartbeatBody",
+    "SessionHeartbeatResponse",
     "SessionInfo",
+    "SessionLeaseInfo",
     "SessionStartBody",
     "SessionStartResponse",
     "SessionStopResponse",
     "TeleoperationOptions",
 ]
+
+# Lease bounds (inclusive), enforced in sessions.handle_start_session so the
+# refusal carries the coded 422 shape (`request.validation`) like the per-kind
+# options do — pydantic Field constraints would produce an uncoded 422.
+LEASE_TIMEOUT_DEFAULT_S = 60.0
+LEASE_TIMEOUT_MIN_S = 10.0
+LEASE_TIMEOUT_MAX_S = 600.0
+OWNER_MAX_LENGTH = 128
 
 
 # --- requests ---------------------------------------------------------------
@@ -115,21 +130,47 @@ class SessionStartBody(BaseModel):
     """POST /api/v1/sessions. `options` is validated against the kind's model
     above in the handler (422 request.validation on mismatch) — a plain dict
     here keeps the error a single coded shape instead of a four-armed union
-    blob."""
+    blob.
+
+    `owner` (non-empty, ≤ OWNER_MAX_LENGTH chars) attaches a lease to the
+    session: it must then be renewed via the heartbeat endpoint or the expiry
+    watchdog safety-stops it after `lease_timeout_s`. Without an owner there
+    is no lease and no timeout-stop. Both fields' shape checks live in the
+    handler (see the constants above)."""
 
     kind: Literal["teleoperation", "recording", "inference", "replay"]
     robot: str
     owner: str | None = None
+    lease_timeout_s: float = LEASE_TIMEOUT_DEFAULT_S
     options: dict[str, Any] = {}
+
+
+class SessionHeartbeatBody(BaseModel):
+    """POST /api/v1/sessions/{session_id}/heartbeat. `owner` must match the
+    lease's owner (shape-checked in the handler like SessionStartBody's)."""
+
+    owner: str
 
 
 # --- responses (shape authority: sessions.SessionTracker) -------------------
 
 
+class SessionLeaseInfo(BaseModel):
+    """The public face of a session's lease. `expires_in_s` is computed at
+    read time from the internal monotonic deadline (never exposed) and is
+    never negative; only a heartbeat pushes it back up — reads don't renew."""
+
+    owner: str
+    timeout_s: float
+    expires_in_s: float
+
+
 class SessionInfo(BaseModel):
     """Identity of the current session (SessionTracker._current). `robot` and
     `owner` are known only for sessions started through /api/v1/sessions —
-    legacy-started sessions carry null (the tracker never guesses)."""
+    legacy-started sessions carry null (the tracker never guesses). `lease`
+    is null for owner-less and legacy-started sessions — those are never
+    timeout-stopped."""
 
     id: str
     kind: str
@@ -138,16 +179,28 @@ class SessionInfo(BaseModel):
     started_at: float
     revision: int
     phase: str | None
+    lease: SessionLeaseInfo | None
 
 
 class EndedSessionInfo(BaseModel):
     """The last_ended summary (SessionTracker._last_ended). `phase` is the
-    phase carried by the release event — the session's final phase."""
+    phase carried by the release event — the session's final phase. `reason`
+    is "session.lease_expired" when the expiry watchdog safety-stopped the
+    session, null for every normal ending."""
 
     id: str
     kind: str
     ended_at: float
     phase: str | None
+    reason: str | None
+
+
+class SessionHeartbeatResponse(BaseModel):
+    """The renewed identity (`lease.expires_in_s` back at `timeout_s`); for a
+    session with no lease the heartbeat is a documented no-op and `lease`
+    stays null."""
+
+    session: SessionInfo
 
 
 class SessionStartResponse(BaseModel):
