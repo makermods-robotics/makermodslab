@@ -121,7 +121,12 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
       {children}
       {!isPrimary && (
         <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          // Radix's modal Dialog (e.g. UpdateNotice) sets `body { pointer-events:
+          // none }` while open to enforce its own modality, and pointer-events is
+          // inherited — without this override, this overlay would visually paint
+          // on top (z-[9999]) but silently stop receiving clicks, leaving the
+          // dialog underneath as the only interactive element.
+          className="pointer-events-auto fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
         >
