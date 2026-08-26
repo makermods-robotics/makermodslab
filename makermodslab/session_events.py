@@ -55,6 +55,13 @@ SESSION_KINDS = frozenset(
 
 _notifier: Callable[[dict], None] | None = None
 
+# In-process consumers of the same events, beside (not instead of) the WS
+# notifier. The session identity tracker (sessions.py) lives here; anything
+# else that needs to OBSERVE transitions without owning them can join. Kept
+# separate from `_notifier` so tests that rewire the broadcast (set_notifier)
+# never detach identity tracking by accident.
+_subscribers: list[Callable[[dict], None]] = []
+
 
 def set_notifier(cb: Callable[[dict], None] | None) -> None:
     """Install the callable that receives each session_changed event dict.
@@ -65,26 +72,53 @@ def set_notifier(cb: Callable[[dict], None] | None) -> None:
     _notifier = cb
 
 
+def subscribe(cb: Callable[[dict], None]) -> None:
+    """Add an in-process subscriber that receives every session_changed event.
+
+    Subscribers are delivered to BEFORE the WS notifier, so a state-keeping
+    subscriber (the session tracker) has committed the transition by the time
+    any client acts on the broadcast hint. Idempotent: subscribing the same
+    callable twice keeps a single entry."""
+    if cb not in _subscribers:
+        _subscribers.append(cb)
+
+
+def unsubscribe(cb: Callable[[dict], None]) -> None:
+    """Remove a subscriber; unknown callables are ignored."""
+    if cb in _subscribers:
+        _subscribers.remove(cb)
+
+
 def notify_session_changed(kind: str, active: bool, phase: str | None = None) -> None:
     """Broadcast that a feature's session state changed.
 
-    Builds the ``session_changed`` event and hands it to the wired notifier.
-    Never raises: an unknown ``kind`` is logged and dropped (a typo'd call
-    site must not take down a hardware flow — the whitelist keeps the wire
-    vocabulary in lockstep with the mutual-exclusion model), an unwired
-    notifier is a no-op, and a notifier exception is swallowed loudly.
+    Builds the ``session_changed`` event and hands it to every subscriber and
+    then the wired notifier. Never raises: an unknown ``kind`` is logged and
+    dropped (a typo'd call site must not take down a hardware flow — the
+    whitelist keeps the wire vocabulary in lockstep with the mutual-exclusion
+    model), an unwired notifier is a no-op, and each consumer's exception is
+    swallowed loudly and independently — one consumer blowing up must starve
+    neither the other consumers nor the hardware flow that emitted the event.
     """
     if kind not in SESSION_KINDS:
         logger.error(f"Dropped session_changed event with unknown kind {kind!r} (active={active})")
         return
+    subscribers = list(_subscribers)
     cb = _notifier
-    if cb is None:
+    if cb is None and not subscribers:
         return
     event = {
         "type": "session_changed",
         "session": {"kind": kind, "active": active, "phase": phase},
         "timestamp": time.time(),
     }
+    for sub in subscribers:
+        try:
+            sub(event)
+        except Exception as e:
+            logger.warning(f"session_changed subscriber failed for {kind} (active={active}): {e}")
+    if cb is None:
+        return
     try:
         cb(event)
     except Exception as e:

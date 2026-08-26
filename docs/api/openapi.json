@@ -360,6 +360,36 @@
         "title": "CheckpointPolicyConfigResponse",
         "type": "object"
       },
+      "CurrentSessionResponse": {
+        "properties": {
+          "last_ended": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EndedSessionInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "session",
+          "last_ended"
+        ],
+        "title": "CurrentSessionResponse",
+        "type": "object"
+      },
       "CustomDatasetRequest": {
         "properties": {
           "repo_id": {
@@ -883,6 +913,42 @@
           "error"
         ],
         "title": "DownloadStatusResponse",
+        "type": "object"
+      },
+      "EndedSessionInfo": {
+        "description": "The last_ended summary (SessionTracker._last_ended). `phase` is the\nphase carried by the release event — the session's final phase.",
+        "properties": {
+          "ended_at": {
+            "title": "Ended At",
+            "type": "number"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "ended_at",
+          "phase"
+        ],
+        "title": "EndedSessionInfo",
         "type": "object"
       },
       "EpisodeJointSeriesResponse": {
@@ -2970,6 +3036,144 @@
           "offline"
         ],
         "title": "RunnersHardwareResponse",
+        "type": "object"
+      },
+      "SessionInfo": {
+        "description": "Identity of the current session (SessionTracker._current). `robot` and\n`owner` are known only for sessions started through /api/v1/sessions —\nlegacy-started sessions carry null (the tracker never guesses).",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "robot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "robot",
+          "owner",
+          "started_at",
+          "revision",
+          "phase"
+        ],
+        "title": "SessionInfo",
+        "type": "object"
+      },
+      "SessionStartBody": {
+        "description": "POST /api/v1/sessions. `options` is validated against the kind's model\nabove in the handler (422 request.validation on mismatch) — a plain dict\nhere keeps the error a single coded shape instead of a four-armed union\nblob.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "teleoperation",
+              "recording",
+              "inference",
+              "replay"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "options": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Options",
+            "type": "object"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "robot": {
+            "title": "Robot",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "robot"
+        ],
+        "title": "SessionStartBody",
+        "type": "object"
+      },
+      "SessionStartResponse": {
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/SessionInfo"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "SessionStartResponse",
+        "type": "object"
+      },
+      "SessionStopResponse": {
+        "description": "`result` is the kind's existing stop handler's response, verbatim —\nrich per-kind status stays on the feature endpoints this phase.",
+        "properties": {
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionInfo"
+          }
+        },
+        "required": [
+          "session",
+          "result"
+        ],
+        "title": "SessionStopResponse",
         "type": "object"
       },
       "SuccessRepoIdResponse": {
@@ -6823,6 +7027,113 @@
           }
         },
         "summary": "Rename Robot"
+      }
+    },
+    "/api/v1/sessions": {
+      "post": {
+        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds this phase: teleoperation, recording, inference, replay.\nCalibration, auto-calibration and wiggle sessions are still started\nthrough their legacy wizard/flow endpoints — the identity tracker observes\nthem all the same, so they appear in /sessions/current and can be stopped\nby id.\n\n201 returns the session identity; 409 session.held (details name the\nholder) when any session already holds the hardware; 404 robot.not_found;\n400 robot.not_ready (readiness is scoped to the arms the kind drives —\ninference/replay never open the leader bus); 422 request.validation for\noptions that don't fit the kind. Other feature refusals pass through with\ntheir existing statuses and codes.",
+        "operationId": "start_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionStartBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/current": {
+      "get": {
+        "description": "Identity of the current session (or null), plus a summary of the last\nended one. Identity only — kind-specific rich status stays on the feature\nstatus endpoints this phase. `robot`/`owner` are null for sessions started\nthrough the legacy endpoints (the tracker never guesses).",
+        "operationId": "current_session",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurrentSessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Current Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/stop": {
+      "post": {
+        "description": "Stop the current session by its own id — 404 session.not_found unless\n`session_id` names the session that is actually running, so a stale stop\ncan never hit a session it didn't mean (the operation-identity guarantee).\nReturns the kind's stop-handler result verbatim beside the final\nidentity.",
+        "operationId": "stop_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStopResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Session",
+        "tags": [
+          "sessions"
+        ]
       }
     },
     "/api/v1/start-auto-calibration": {

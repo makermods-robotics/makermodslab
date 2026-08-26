@@ -83,8 +83,11 @@ class ErrorCode(StrEnum):
     CHECKPOINT_NOT_FOUND = "checkpoint.not_found"
     CHECKPOINT_INCOMPLETE = "checkpoint.incomplete"
 
-    # session.* — RESERVED for the Phase-2 /api/v1/sessions lease. Wired by a
-    # strict-xfail test until that surface exists; do not use elsewhere.
+    # session.* — the /api/v1/sessions surface (sessions.py). `held` (another
+    # session holds the hardware; details name the holder) and `not_found`
+    # (stop aimed at anything but the current session's id) are wired;
+    # `not_owner` / `lease_expired` stay RESERVED for the lease commit — do
+    # not use them elsewhere.
     SESSION_HELD = "session.held"
     SESSION_NOT_OWNER = "session.not_owner"
     SESSION_LEASE_EXPIRED = "session.lease_expired"
@@ -99,7 +102,9 @@ class ApiError(HTTPException):
 
     The registered handler (install_error_handlers) serializes it as
     ``{"detail": <message>, "code": <code>}`` — the legacy string ``detail``
-    unchanged, ``code`` an additive sibling.
+    unchanged, ``code`` an additive sibling. ``details`` (optional) adds a
+    machine-readable sibling of the same name for structured context a client
+    dispatches on beyond the code — e.g. session.held names its holder there.
     """
 
     def __init__(
@@ -108,9 +113,11 @@ class ApiError(HTTPException):
         detail: Any = None,
         code: ErrorCode | str | None = None,
         headers: dict[str, str] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(status_code=status_code, detail=detail, headers=headers)
         self.code = code
+        self.details = details
 
 
 def install_error_handlers(app: FastAPI) -> None:
@@ -121,4 +128,6 @@ def install_error_handlers(app: FastAPI) -> None:
         body: dict[str, Any] = {"detail": exc.detail}
         if exc.code is not None:
             body["code"] = str(exc.code)
+        if exc.details is not None:
+            body["details"] = exc.details
         return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)

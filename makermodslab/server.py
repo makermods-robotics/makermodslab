@@ -157,6 +157,12 @@ from .schemas.models import (
     ModelListItem,
     ModelUploadResponse,
 )
+from .schemas.sessions import (
+    CurrentSessionResponse,
+    SessionStartBody,
+    SessionStartResponse,
+    SessionStopResponse,
+)
 from .schemas.system import (
     AvailableCamerasResponse,
     AvailablePortsResponse,
@@ -172,6 +178,11 @@ from .schemas.system import (
     SupplyVoltageResponse,
     UpdateResult,
     UpdateStatus,
+)
+from .sessions import (
+    handle_current_session,
+    handle_start_session,
+    handle_stop_session,
 )
 
 # Import our custom teleoperation functionality
@@ -324,6 +335,11 @@ app.add_middleware(
 # and once under /api/v1 (the versioned surface SDK clients target). The two
 # stay identical by construction; tests/test_api_contract.py asserts it.
 router = APIRouter()
+
+# NEW surface registers here instead: this router is mounted ONLY under
+# /api/v1 (the flat mount is frozen — LEGACY_ROUTES is a shrink-only ratchet).
+# Each addition is documented in tests/test_api_contract.py V1_ONLY_ROUTES.
+v1_router = APIRouter()
 
 # ApiError responses carry a machine-readable `code` beside the legacy string
 # `detail` (see api_errors.py); plain HTTPException raises are untouched.
@@ -726,6 +742,49 @@ def stop_replay():
 @router.get("/replay-status")
 def replay_status():
     return handle_replay_status()
+
+
+# --- Sessions (v1-only surface; see v1_router note above) ---
+
+
+@v1_router.post("/sessions", response_model=SessionStartResponse, status_code=201, tags=["sessions"])
+def start_session(body: SessionStartBody):
+    """Start a robot session by robot name; ports, configs, mode, right-arm
+    fields and cameras resolve server-side from the saved robot record, and
+    `options` carries only the kind-specific fields (see schemas/sessions.py).
+
+    Startable kinds this phase: teleoperation, recording, inference, replay.
+    Calibration, auto-calibration and wiggle sessions are still started
+    through their legacy wizard/flow endpoints — the identity tracker observes
+    them all the same, so they appear in /sessions/current and can be stopped
+    by id.
+
+    201 returns the session identity; 409 session.held (details name the
+    holder) when any session already holds the hardware; 404 robot.not_found;
+    400 robot.not_ready (readiness is scoped to the arms the kind drives —
+    inference/replay never open the leader bus); 422 request.validation for
+    options that don't fit the kind. Other feature refusals pass through with
+    their existing statuses and codes."""
+    return handle_start_session(body, manager)
+
+
+@v1_router.get("/sessions/current", response_model=CurrentSessionResponse, tags=["sessions"])
+def current_session():
+    """Identity of the current session (or null), plus a summary of the last
+    ended one. Identity only — kind-specific rich status stays on the feature
+    status endpoints this phase. `robot`/`owner` are null for sessions started
+    through the legacy endpoints (the tracker never guesses)."""
+    return handle_current_session()
+
+
+@v1_router.post("/sessions/{session_id}/stop", response_model=SessionStopResponse, tags=["sessions"])
+def stop_session(session_id: str):
+    """Stop the current session by its own id — 404 session.not_found unless
+    `session_id` names the session that is actually running, so a stale stop
+    can never hit a session it didn't mean (the operation-identity guarantee).
+    Returns the kind's stop-handler result verbatim beside the final
+    identity."""
+    return handle_stop_session(session_id)
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
@@ -3234,6 +3293,8 @@ def _v1_operation_id(route: APIRoute) -> str:
 # so anything registered after the "/" mount would be unreachable.
 app.include_router(router)
 app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
+# v1-only surface: included ONCE, versioned — never on the flat mount.
+app.include_router(v1_router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
 
 
 def ui_enabled() -> bool:

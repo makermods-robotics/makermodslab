@@ -140,12 +140,10 @@ def test_endpoint_propagates_code(client, monkeypatch):
     assert isinstance(body["detail"], str)  # legacy shape untouched
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="session.* codes are reserved for the Phase-2 /api/v1/sessions lease; "
-    "this flips when that surface lands — remove the marker then",
-)
 def test_sessions_surface_uses_reserved_codes(client, monkeypatch):
+    """The exclusivity gate outranks robot resolution: while ANY session holds
+    the hardware, POST /api/v1/sessions is 409 session.held — even for a robot
+    name that doesn't resolve (there is one set of hardware per node)."""
     monkeypatch.setattr("makermodslab.record.recording_active", True)
     resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "nope"})
     assert resp.status_code == 409
