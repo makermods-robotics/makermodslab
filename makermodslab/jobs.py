@@ -59,10 +59,12 @@ JobState = Literal["running", "done", "failed", "interrupted"]
 
 class JobTarget(BaseModel):
     """Where a job should run. `local` ⇒ LocalJobRunner. `hf_cloud` requires
-    a non-empty `flavor` from HfApi.list_jobs_hardware()."""
+    a non-empty `flavor` from HfApi.list_jobs_hardware(). `lan_node` requires
+    a non-empty `node_instance_id` naming a registered peer (nodes.py)."""
 
-    runner: Literal["local", "hf_cloud"] = "local"
+    runner: Literal["local", "hf_cloud", "lan_node"] = "local"
     flavor: str | None = None
+    node_instance_id: str | None = None
 
 
 class TrainingMetrics(BaseModel):
@@ -111,10 +113,18 @@ class JobRecord(BaseModel):
     exit_code: int | None = None
     error_message: str | None = None
     metrics: TrainingMetrics = TrainingMetrics()
-    runner: Literal["local", "hf_cloud", "imported"] = "local"
+    runner: Literal["local", "hf_cloud", "imported", "lan_node"] = "local"
     # PID of the detached subprocess (local runner only); survives uvicorn
     # --reload so a fresh registry can re-attach by tailing the log file.
     process_pid: int | None = None
+    # LAN-node identifiers (lan_node runner only). The peer that runs the job
+    # (its registry identity), the URL the job was submitted to (kept so a
+    # restart can reattach without a registry probe at boot), and the job's id
+    # in THAT peer's registry. Additive nullables: records written before
+    # these fields existed load with all three as None.
+    node_instance_id: str | None = None
+    node_url: str | None = None
+    remote_job_id: str | None = None
     # HF Jobs identifiers (hf_cloud runner only)
     hf_job_id: str | None = None
     hf_flavor: str | None = None
@@ -279,6 +289,14 @@ def classify_terminal_state(
            chooses to report an enforced timeout) is left as `failed` rather
            than guessed at — see the module note in `JobRegistry.stop`.
          * DELETED   → `failed`, unchanged from before.
+         * INTERRUPTED → `interrupted`, regardless of `stop_requested`. Only
+           a runner RELAYING another MakerMods Lab registry's own verdict reports
+           this stage (LanNodeJobRunner, mapping the remote record's
+           `interrupted`): that registry already ran this very classification
+           next to the run, with the stop-intent evidence local to it — so a
+           stop pressed on the peer must not be re-derived here into `failed`
+           just because OUR registry recorded no intent. The remote analogue
+           of trusting the platform's stage.
     2. `returncode == 0` → `done`, whatever else is true. A clean exit means
        the trainer ran its own shutdown path to completion, which SIGTERM does
        not produce; intent never overrides it.
@@ -299,6 +317,8 @@ def classify_terminal_state(
         if stage == "COMPLETED":
             return "done"
         if stage == "CANCELED" and stop_requested:
+            return "interrupted"
+        if stage == "INTERRUPTED":
             return "interrupted"
         return "failed"
     if returncode == 0:
@@ -1102,7 +1122,11 @@ _INCOMPLETE_REMEDY = "Resume an earlier checkpoint, or fine-tune from its weight
 
 # Plain-language names for the runner ids, so a user-facing refusal reads like
 # the Compute control the user actually clicked rather than an internal literal.
-_RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
+_RUNNER_LABELS = {
+    "local": "Local — your machine",
+    "hf_cloud": "Hugging Face Cloud",
+    "lan_node": "Another MakerMods Lab node",
+}
 
 
 def hub_checkpoint_missing_files(api, repo_id: str, step_dir: str) -> list[str]:
@@ -2712,8 +2736,8 @@ class JobRegistry:
 
     On instantiation, scans outputs/train/ for existing job.json files. For
     each record marked 'running': local jobs reattach if the pid is alive
-    (else 'interrupted'); hf_cloud jobs always reattach and let the tail loop
-    drive finalisation.
+    (else 'interrupted'); hf_cloud and lan_node jobs always reattach and let
+    their polling drive finalisation.
     """
 
     def __init__(self, output_root: Path) -> None:
@@ -2925,8 +2949,29 @@ class JobRegistry:
         target = target or JobTarget()
         if target.runner == "hf_cloud" and not target.flavor:
             raise ValueError("flavor is required when runner is hf_cloud")
+        if target.runner == "lan_node":
+            if not target.node_instance_id:
+                raise ValueError("node_instance_id is required when runner is lan_node")
+            # Phase-1 scope: a lan_node run is always a FRESH run on the peer.
+            # Continuations/fine-tunes from an existing run would need the F7
+            # byte-movement machinery taught a third destination; refused with
+            # the remedy named rather than silently mis-launched (MT42's rule).
+            if config.resume or config.finetune_from_job_id:
+                raise ValueError(
+                    f"Continuing or fine-tuning an existing run on "
+                    f"{_RUNNER_LABELS['lan_node'].lower()} isn't supported yet. "
+                    "Run the continuation locally or on Hugging Face Cloud instead."
+                )
+            # Verify the peer BEFORE any record exists, so an unknown or dead
+            # node is a clean coded refusal (node.not_found / node.unreachable)
+            # with no failed record left behind — the same fail-fast placement
+            # as the cloud dataset preflight below. Read via the module
+            # attribute so tests can swap the singleton.
+            from . import nodes
 
-        # Cloud preflight (belt-and-braces): the HF Jobs pod resolves the
+            nodes.node_registry.resolve(target.node_instance_id)
+
+        # Remote preflight (belt-and-braces): both remote runners resolve the
         # dataset by repo_id from the Hub and can't see this machine's local
         # cache, so a local-only dataset would fail the remote job. Reject up
         # front with a clear error instead of submitting a doomed job. Only a
@@ -2935,7 +2980,7 @@ class JobRegistry:
         # fallback so a network blip doesn't wrongly refuse a Hub dataset. The
         # browser flow uploads-then-trains before ever reaching here, so this
         # path is primarily for non-UI callers.
-        if target.runner == "hf_cloud":
+        if target.runner in ("hf_cloud", "lan_node"):
             from .datasets import get_hub_status
 
             if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
@@ -3338,6 +3383,7 @@ class JobRegistry:
                 started_at=time.time(),
                 runner=target.runner,
                 hf_flavor=target.flavor,
+                node_instance_id=target.node_instance_id if target.runner == "lan_node" else None,
                 # Built AFTER the resume block above, which is what resolves a
                 # "latest checkpoint" request into a concrete step — see
                 # _initial_metrics / _resume_start_step.
@@ -3417,6 +3463,10 @@ class JobRegistry:
             else:
                 if target.runner == "local":
                     runner = LocalJobRunner(record.metrics, log_file_path=log_path)
+                elif target.runner == "lan_node":
+                    from .runners.lan_node import LanNodeJobRunner  # lazy, like HfCloudJobRunner
+
+                    runner = LanNodeJobRunner(record.metrics, log_path, target.node_instance_id)
                 else:
                     runner = HfCloudJobRunner(
                         record.metrics,
@@ -3438,6 +3488,9 @@ class JobRegistry:
                 # Capture runner-specific identifiers.
                 if target.runner == "local":
                     record.process_pid = runner.pid()
+                elif target.runner == "lan_node":
+                    record.node_url = runner.node_url()
+                    record.remote_job_id = runner.remote_job_id()
                 else:
                     record.hf_job_id = runner.hf_job_id()
                     record.hf_job_url = runner.hf_job_url()
@@ -4264,6 +4317,11 @@ class JobRegistry:
             return _list_imported_local(record.output_dir)
         if record.runner == "local":
             return _list_local_checkpoints(record.output_dir)
+        if record.runner == "lan_node":
+            # The run executed as a plain local run on the peer, so its
+            # checkpoints live on the PEER's disk — nothing to list here in
+            # this phase (remote checkpoint browsing comes with the SDK).
+            return []
         return self._list_cloud_cached(record.hf_repo_id)
 
     def list_checkpoints(self, job_id: str) -> builtins.list[JobCheckpoint]:
@@ -4441,6 +4499,27 @@ class JobRegistry:
                         _resume_total_steps(record.config),
                     )
                     runner.reattach(record.hf_job_id)
+                    self._runners[record.id] = runner
+                elif record.runner == "lan_node" and record.node_url and record.remote_job_id:
+                    # Same shape as the hf_cloud reattach above: the peer kept
+                    # training while we were down, so reattach by the record's
+                    # stored url + remote id and let the watchdog's polling
+                    # drive finalisation. A peer that has since vanished
+                    # resolves through the runner's lost-peer grace window.
+                    logger.info(
+                        "Re-attaching to LAN-node job %s (%s on %s)",
+                        record.id,
+                        record.remote_job_id,
+                        record.node_url,
+                    )
+                    from .runners.lan_node import LanNodeJobRunner
+
+                    runner = LanNodeJobRunner(
+                        record.metrics,
+                        _job_log_path(self._output_root, record.id),
+                        record.node_instance_id or "",
+                    )
+                    runner.reattach(record.remote_job_id, record.node_url)
                     self._runners[record.id] = runner
                 else:
                     # Malformed running record — mark interrupted.
@@ -4657,11 +4736,17 @@ class JobRegistry:
                     if state == "interrupted":
                         # Never the synthetic exit-code text here: that message
                         # on a run the user stopped themselves is what made a
-                        # deliberate pause look like a broken model. The
-                        # classifier only reaches `interrupted` when we asked,
-                        # so the unconfirmed wording belongs to the branch
-                        # above — a disappearance nobody asked for.
-                        record.error_message = (
+                        # deliberate pause look like a broken model. A
+                        # runner-supplied reason wins when one exists — a LAN
+                        # peer's record says in its own words whether ITS user
+                        # asked for the stop, which the local intent flags
+                        # cannot (the INTERRUPTED stage reaches here without
+                        # any local stop). Otherwise the classifier only
+                        # reaches `interrupted` when we asked, so the
+                        # unconfirmed wording belongs to the branch above — a
+                        # disappearance nobody asked for.
+                        reason = _runner_hook(runner, "terminal_message")
+                        record.error_message = reason or (
                             STOPPED_BY_REQUEST_MESSAGE if stop_requested else UNCONFIRMED_OUTCOME_MESSAGE
                         )
                     elif state == "failed":

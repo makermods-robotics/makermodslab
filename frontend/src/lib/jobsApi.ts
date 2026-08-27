@@ -147,7 +147,7 @@ export async function listJobs(
   const body = await apiRequest<{ jobs: JobRecord[] }>(
     baseUrl,
     fetcher,
-    `/jobs?limit=${limit}`,
+    `/api/v1/jobs?limit=${limit}`,
     { signal, action: "List jobs" },
   );
   return body.jobs;
@@ -159,7 +159,7 @@ export async function getJob(
   id: string,
   signal?: AbortSignal,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}`, {
+  return apiRequest<JobRecord>(baseUrl, fetcher, `/api/v1/jobs/${id}`, {
     signal,
     action: "Get job",
   });
@@ -174,7 +174,7 @@ export async function getJobLogs(
   const body = await apiRequest<{ logs: LogLine[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${id}/logs`,
+    `/api/v1/jobs/${id}/logs`,
     { signal, action: "Get job logs" },
   );
   return body.logs;
@@ -189,7 +189,7 @@ export async function getJobLogFile(
   const body = await apiRequest<{ logs: LogLine[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${id}/log-file`,
+    `/api/v1/jobs/${id}/log-file`,
     { signal, action: "Get job log file" },
   );
   return body.logs;
@@ -204,7 +204,7 @@ export async function getJobMetricsHistory(
   const body = await apiRequest<{ points: MetricsHistoryPoint[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${id}/metrics-history`,
+    `/api/v1/jobs/${id}/metrics-history`,
     { signal, action: "Get job metrics history" },
   );
   return body.points;
@@ -218,7 +218,7 @@ export async function startTrainingJob(
   const { target, ...config } = request;
   const body = target ? { config, target } : config;
   try {
-    return await apiRequest<JobRecord>(baseUrl, fetcher, "/jobs/training", {
+    return await apiRequest<JobRecord>(baseUrl, fetcher, "/api/v1/jobs/training", {
       method: "POST",
       body,
       action: "Start training",
@@ -259,7 +259,7 @@ export async function importModel(
   source: string,
   name?: string,
 ): Promise<ImportModelResult> {
-  return apiRequest<ImportModelResult>(baseUrl, fetcher, "/jobs/import", {
+  return apiRequest<ImportModelResult>(baseUrl, fetcher, "/api/v1/jobs/import", {
     method: "POST",
     body: name ? { source, name } : { source },
     action: "Import model",
@@ -322,7 +322,7 @@ export async function renameJob(
   id: string,
   newName: string,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}/rename`, {
+  return apiRequest<JobRecord>(baseUrl, fetcher, `/api/v1/jobs/${id}/rename`, {
     method: "POST",
     body: { new_name: newName },
     action: "Rename job",
@@ -334,7 +334,7 @@ export async function stopJob(
   fetcher: Fetcher,
   id: string,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}/stop`, {
+  return apiRequest<JobRecord>(baseUrl, fetcher, `/api/v1/jobs/${id}/stop`, {
     method: "POST",
     action: "Stop job",
   });
@@ -345,7 +345,7 @@ export async function deleteJob(
   fetcher: Fetcher,
   id: string,
 ): Promise<void> {
-  await apiRequest<void>(baseUrl, fetcher, `/jobs/${id}`, {
+  await apiRequest<void>(baseUrl, fetcher, `/api/v1/jobs/${id}`, {
     method: "DELETE",
     action: "Delete job",
   });
@@ -396,7 +396,7 @@ export async function listRunnerHardware(
     return await apiRequest<RunnerHardwareResponse>(
       baseUrl,
       fetcher,
-      "/jobs/runners/hardware",
+      "/api/v1/jobs/runners/hardware",
       { signal, action: "List runner hardware" },
     );
   } catch (e) {
@@ -462,7 +462,7 @@ export async function deleteHubModel(
   await apiRequest<void>(
     baseUrl,
     fetcher,
-    `/jobs/hub/models/${repoId}`,
+    `/api/v1/jobs/hub/models/${repoId}`,
     { method: "DELETE", action: "Delete hub model" },
   );
 }
@@ -480,7 +480,7 @@ export async function dismissHubJob(
   await apiRequest<void>(
     baseUrl,
     fetcher,
-    `/jobs/hub/jobs/${encodeURIComponent(jobId)}/dismiss`,
+    `/api/v1/jobs/hub/jobs/${encodeURIComponent(jobId)}/dismiss`,
     { method: "POST", action: "Dismiss hub job" },
   );
 }
@@ -492,7 +492,7 @@ export async function listHubJobs(
 ): Promise<HubJobsResponse> {
   // Same graceful degradation as listRunnerHardware.
   try {
-    return await apiRequest<HubJobsResponse>(baseUrl, fetcher, "/jobs/hub", {
+    return await apiRequest<HubJobsResponse>(baseUrl, fetcher, "/api/v1/jobs/hub", {
       signal,
       action: "List hub jobs",
     });

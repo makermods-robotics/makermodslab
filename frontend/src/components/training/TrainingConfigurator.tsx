@@ -357,7 +357,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   }, [policyType, resumeSeed]);
 
   useEffect(() => {
-    fetchWithHeaders(`${baseUrl}/system/training-extra`)
+    fetchWithHeaders(`${baseUrl}/api/v1/system/training-extra`)
       .then((r) => r.json())
       .then((data: { available: boolean; install_hint: string }) => {
         setTrainingExtraAvailable(data.available);
@@ -564,7 +564,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     if (config.target.runner === "local") {
       try {
         const r = await fetchWithHeaders(
-          `${baseUrl}/system/policy-extra/${config.policy_type}`,
+          `${baseUrl}/api/v1/system/policy-extra/${config.policy_type}`,
         );
         if (r.ok) {
           const extra = await r.json();

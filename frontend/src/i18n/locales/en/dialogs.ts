@@ -63,8 +63,6 @@ export default {
       done: "Done",
       error: "Error",
     },
-    // Native leave prompt + the in-app back-button confirm.
-    leaveConfirm: "Leaving stops the running replay. Continue?",
     // {{gap}} is the localized diagnosis from formatRobotSetupGap().
     robotNotReady: "Select a robot ready to replay: this robot {{gap}}.",
     noRobot:
@@ -78,7 +76,6 @@ export default {
       // Last-resort fallback: the backend hint and error text win when present.
       seeLog: "See the server log for details.",
       lostConnectionTitle: "Lost connection to backend",
-      startedWarningTitle: "Started with a warning",
       startFailedTitle: "Could not start replay",
       stopFailedTitle: "Could not stop replay",
     },

@@ -428,7 +428,7 @@ export function mockHubResponse(
     return null;
   }
 
-  if (method === "GET" && path === "/hf-auth-status") {
+  if (method === "GET" && path === "/api/v1/hf-auth-status") {
     return json({
       authenticated: true,
       username: USER,
@@ -437,7 +437,7 @@ export function mockHubResponse(
     });
   }
 
-  if (method === "GET" && path === "/jobs/hub") {
+  if (method === "GET" && path === "/api/v1/jobs/hub") {
     return json({
       authenticated: true,
       jobs_permission: true,
@@ -446,7 +446,7 @@ export function mockHubResponse(
     });
   }
 
-  const dismiss = path.match(/^\/jobs\/hub\/jobs\/([^/]+)\/dismiss$/);
+  const dismiss = path.match(/^\/api\/v1\/jobs\/hub\/jobs\/([^/]+)\/dismiss$/);
   if (method === "POST" && dismiss) {
     const idx = hubJobs.findIndex(
       (h) => h.id === decodeURIComponent(dismiss[1]),
@@ -455,7 +455,7 @@ export function mockHubResponse(
     return json({ status: "dismissed" });
   }
 
-  const hubModelDelete = path.match(/^\/jobs\/hub\/models\/(.+)$/);
+  const hubModelDelete = path.match(/^\/api\/v1\/jobs\/hub\/models\/(.+)$/);
   if (method === "DELETE" && hubModelDelete) {
     const repo = decodeURIComponent(hubModelDelete[1]);
     const idx = hubModels.findIndex((m) => m.repo_id === repo);
@@ -463,11 +463,11 @@ export function mockHubResponse(
     return json(undefined, 204);
   }
 
-  if (method === "GET" && path === "/models") {
+  if (method === "GET" && path === "/api/v1/models") {
     return json(modelItems());
   }
 
-  if (method === "POST" && path === "/jobs/import") {
+  if (method === "POST" && path === "/api/v1/jobs/import") {
     let source = "";
     try {
       source = JSON.parse(String(init.body ?? "{}")).source ?? "";
@@ -481,11 +481,11 @@ export function mockHubResponse(
     return json({ ...importRepo(source), already_imported: existing });
   }
 
-  if (method === "GET" && path === "/jobs") {
+  if (method === "GET" && path === "/api/v1/jobs") {
     return json({ jobs });
   }
 
-  const jobRoute = path.match(/^\/jobs\/([^/]+)(?:\/(.*))?$/);
+  const jobRoute = path.match(/^\/api\/v1\/jobs\/([^/]+)(?:\/(.*))?$/);
   if (jobRoute) {
     const id = decodeURIComponent(jobRoute[1]);
     const rest = jobRoute[2] ?? "";

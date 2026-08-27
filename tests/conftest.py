@@ -84,6 +84,8 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # BiSO staging root — without this, any bimanual staging test writes into the
     # developer's real ~/.cache dir.
     monkeypatch.setattr(cfg, "MAKERMODSLAB_BISO_STAGING_PATH", str(cache / "makermodslab_biso"))
+    # Persisted node-registry peer list.
+    monkeypatch.setattr(cfg, "NODES_FILE", str(cache / "nodes.json"))
 
     return cache
 

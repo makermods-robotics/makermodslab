@@ -38,10 +38,12 @@ from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from .api_errors import ErrorCode
 from .arm_identity import verify_devices
 from .datasets import get_episode_action_series
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
+from .session_events import notify_session_changed
 from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
 from .utils.config import get_robot_record, setup_follower_calibration_file
 
@@ -154,48 +156,56 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _record.recording_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Recording is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if _rollout.inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if replay_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Replay is already active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
         if replay_thread is not None and replay_thread.is_alive():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "The previous replay session is still shutting down. Try again in a few seconds.",
+                "code": ErrorCode.ROBOT_BUSY_RELEASING,
             }
 
         record = _load_robot_record(request.robot_name)
@@ -257,6 +267,10 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
             "error": None,
             "hint": None,
         }
+
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client (any page, any remote UI) refetches /replay-status.
+    notify_session_changed("replay", True, phase="easing_in")
 
     worker = threading.Thread(
         target=_replay_worker,
@@ -434,6 +448,7 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
 
                 with _state_lock:
                     _replay_meta["phase"] = "playing"
+                notify_session_changed("replay", True, phase="playing")
 
                 t0 = time.monotonic()
                 skipped = 0
@@ -507,6 +522,9 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
         with _state_lock:
             if _replay_meta.get("phase") != "error":
                 _replay_meta["phase"] = "stopping"
+        # Playback is over but the arm is still energized for the return —
+        # a phase of this session, not idle yet.
+        notify_session_changed("replay", True, phase=_replay_meta.get("phase"))
         return_to_rest_pose(robot.bus, start_pose, label="follower arm")
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
@@ -523,6 +541,9 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
             replay_active = False
             if _replay_meta.get("phase") not in ("error",):
                 _replay_meta["phase"] = "done"
+            final_phase = _replay_meta.get("phase")
+        # Final release: torque released and port freed, including error paths.
+        notify_session_changed("replay", False, phase=final_phase)
 
 
 def handle_replay_status() -> dict[str, Any]:

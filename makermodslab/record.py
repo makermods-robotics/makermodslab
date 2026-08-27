@@ -31,6 +31,7 @@ from lerobot.motors.motors_bus import MotorsBus
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
 
+from .api_errors import ErrorCode
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
 from .datasets import (
@@ -41,6 +42,7 @@ from .datasets import (
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
+from .session_events import notify_session_changed
 from .teleoperate import (
     _device_buses,
     _return_followers_to_rest,
@@ -205,6 +207,21 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
+
+
+def _set_phase(phase: str) -> None:
+    """Record the session phase and broadcast the transition as a
+    `session_changed` hint (see makermodslab/session_events.py).
+
+    Pure assignment plus a droppable notification — every consumer refetches
+    /recording-status rather than trusting the hint, so this changes no
+    behavior. Phase transitions go through here; the flag claim/release sites
+    emit their own hints where the active flag actually flips."""
+    global current_phase
+    current_phase = phase
+    notify_session_changed("recording", recording_active, phase=phase)
+
+
 # Set only while current_phase == "reconnecting_robot" (the teardown and
 # backoff sleep between connect retries below); 0 otherwise — including on a
 # successful connect and on the terminal failure, so a reader can treat
@@ -650,39 +667,50 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     if releasing
                     else "Recording is already active"
                 ),
+                "code": ErrorCode.ROBOT_BUSY_RELEASING if releasing else ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if _teleoperate.teleoperation_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _rollout.inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if _replay.replay_active:
-            return {"success": False, "message": "Replay is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
+            }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".
@@ -693,7 +721,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 request.dataset_repo_id,
                 name_reason,
             )
-            return {"success": False, "status_code": 400, "message": name_reason}
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": name_reason,
+                "code": ErrorCode.REQUEST_INVALID_NAME,
+            }
         # Resolve the session's cameras from the robot record NAMED BY THE
         # REQUEST — the request itself carries no camera payload. Done here,
         # before the flag is claimed, so a wrong robot name or an ambiguous
@@ -729,6 +762,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         # lock that claims the active flag (mirrors the _release_now reset), so a
         # stale flag can never make this fresh session delete its own dataset.
         discard_requested = False
+
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client (any page, any remote UI) refetches /recording-status.
+    notify_session_changed("recording", True, phase="preparing")
 
     # Backend camera previews hold the cv2 devices; hand them over before we open
     # the same indices. Ordered deliberately: `recording_active` is already True
@@ -838,12 +875,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 work_completed = current_phase == "completed"
                 last_session_outcome = classify_outcome(work_completed, last_session_error)
                 if not work_completed:
-                    current_phase = "error"
+                    _set_phase("error")
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
             finally:
                 if current_phase != "error":
-                    current_phase = "completed"
+                    _set_phase("completed")
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
 
@@ -872,6 +909,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
 
                 recording_active = False
+                # Final release: record_with_web_events' own finally already
+                # released torque and disconnected before this ran, so the
+                # ports are free now — including on error paths.
+                notify_session_changed("recording", False, phase=current_phase)
                 recording_start_time = None
                 phase_start_time = None
                 current_episode = 1
@@ -894,6 +935,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
     except Exception as e:
         recording_active = False
+        # The claim above already broadcast active=True; undo the hint now
+        # that the failed start released the flag.
+        notify_session_changed("recording", False)
         logger.error(f"Failed to start recording: {e}")
         return {"success": False, "message": f"Failed to start recording: {str(e)}"}
 
@@ -933,7 +977,7 @@ def handle_stop_recording(discard: bool = False) -> dict[str, Any]:
         discard_requested = True
     recording_events["stop_recording"] = True
     recording_events["exit_early"] = True
-    current_phase = "stopping"
+    _set_phase("stopping")
     phase_start_time = None
     logger.info("Stop recording triggered from web interface (discard=%s)", discard)
     if discard:
@@ -1694,7 +1738,7 @@ def record_with_web_events(
     # can't cleanly split arm-connect from camera-warmup — they share this
     # substep. (Both surface through the same current_phase global the status
     # handler already returns; no new plumbing.)
-    current_phase = "connecting_robot"
+    _set_phase("connecting_robot")
     phase_start_time = time.time()
     for attempt in range(1, _CONNECT_ATTEMPTS + 1):
         try:
@@ -1737,7 +1781,7 @@ def record_with_web_events(
                 # Logged at INFO through this module's own logger (already in
                 # _RECORD_LOG_LOGGER_NAMES) so it reaches the visible
                 # Record-page log panel, not just the server console.
-                current_phase = "reconnecting_robot"
+                _set_phase("reconnecting_robot")
                 # The attempt about to run, not the one that just failed —
                 # same convention as the log line below, so the Record page's
                 # dialog and its log panel can't disagree about the number
@@ -1761,7 +1805,7 @@ def record_with_web_events(
                 # Let the OS release settle past the turbulence window before
                 # re-rolling the connect.
                 time.sleep(2.0)
-                current_phase = "connecting_robot"
+                _set_phase("connecting_robot")
                 # Back to a plain connect attempt: keep the "0 unless we are
                 # in reconnecting_robot" contract this field documents, so a
                 # later reader can't mistake a healthy session for a retrying
@@ -1772,7 +1816,7 @@ def record_with_web_events(
 
     if teleop is not None:
         # Second detectable substep of the preparing window: the leader bus.
-        current_phase = "connecting_teleop"
+        _set_phase("connecting_teleop")
         phase_start_time = time.time()
         try:
             logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
@@ -1880,7 +1924,7 @@ def record_with_web_events(
     try:
         while saved_episodes < cfg.dataset.num_episodes:
             # RECORDING PHASE - with dataset (matches original record.py exactly)
-            current_phase = "recording"
+            _set_phase("recording")
             phase_start_time = time.time()
             # Defense in depth alongside the phase gate in handle_recording_status:
             # a reset phase's pause bookkeeping must never survive into the
@@ -1967,7 +2011,7 @@ def record_with_web_events(
 
                 # Go through reset phase before re-recording (don't increment episode counters)
                 # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
+                _set_phase("resetting")
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
@@ -2047,7 +2091,7 @@ def record_with_web_events(
             # Skip reset for the last episode that was just saved
             if saved_episodes < cfg.dataset.num_episodes:
                 # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
+                _set_phase("resetting")
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
@@ -2099,7 +2143,7 @@ def record_with_web_events(
                     break
 
         # Recording completed
-        current_phase = "completed"
+        _set_phase("completed")
         phase_start_time = None
         print("🏁 STATUS CHANGE: Recording session completed - all episodes finished")
         log_say("Stop recording", cfg.play_sounds, blocking=True)
@@ -2115,6 +2159,10 @@ def record_with_web_events(
                 # stop). A second stop (release-now) skips/aborts the return;
                 # error exits skip this — the bus may be gone, release ASAP.
                 releasing = True
+                # Still energized and holding the ports — a phase of this
+                # session, not idle yet (the worker's finally emits the final
+                # release hint once cleanup is done).
+                notify_session_changed("recording", True, phase="releasing")
                 _return_followers_to_rest(follower_rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).

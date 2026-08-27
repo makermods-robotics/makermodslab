@@ -55,8 +55,11 @@ REQUIRED_PATHS = {
 
 def test_app_exposes_required_endpoints() -> None:
     from makermodslab.server import app
+    from tests.test_api_contract import _walk_routes
 
-    paths = {route.path for route in app.routes}
+    # _walk_routes traverses FastAPI >= 0.138's lazy _IncludedRouter entries;
+    # a bare {route.path for route in app.routes} no longer sees the API routes.
+    paths = {path for path, _ in _walk_routes(app.routes)}
     missing = REQUIRED_PATHS - paths
     assert not missing, f"missing routes: {missing}"
 

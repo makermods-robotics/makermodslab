@@ -299,7 +299,7 @@ const JobCard: React.FC<Props> = ({
       return;
     }
     let cancelled = false;
-    fetchWithHeaders(`${baseUrl}/system/policy-extra/${policyType}`)
+    fetchWithHeaders(`${baseUrl}/api/v1/system/policy-extra/${policyType}`)
       .then((r) => r.json())
       .then(
         (d: {

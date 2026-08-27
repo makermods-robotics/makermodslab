@@ -28,7 +28,6 @@ export default {
     running: "运行中",
     finished: "已完成",
   },
-  leaveConfirm: "离开将停止正在运行的推理。是否继续？",
   toast: {
     startedWarningTitle: "已启动，但有警告",
     failedTitle: "推理失败",

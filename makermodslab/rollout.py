@@ -56,6 +56,7 @@ from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from .api_errors import ErrorCode
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
 from .eval_protocol import (
@@ -79,6 +80,7 @@ from .models import (
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
+from .session_events import notify_session_changed
 from .utils.config import (
     CameraResolutionError,
     bimanual_base_id,
@@ -473,10 +475,16 @@ def _set_phase(phase: str) -> None:
 
     Guarded by _state_lock (short critical section). A no-op when no session is
     active — a late stdout line arriving after teardown can't resurrect a
-    phase on an empty meta dict."""
+    phase on an empty meta dict (and must not broadcast a phantom phase).
+
+    Every recorded phase is also broadcast as a `session_changed` hint (see
+    makermodslab/session_events.py) — outside the lock; the notify is a
+    droppable queue put that consumers answer by refetching status."""
     with _state_lock:
-        if _inference_meta:
-            _inference_meta["phase"] = phase
+        if not _inference_meta:
+            return
+        _inference_meta["phase"] = phase
+    notify_session_changed("inference", True, phase=phase)
 
 
 def _advance_setup_phase(line: str) -> bool:
@@ -1344,6 +1352,9 @@ def _fail_startup_locked(error: str) -> None:
         "elapsed_s": 0,
         **_eval_fields(finished_eval),
     }
+    # Final release (startup failure path). Caller holds _state_lock; the
+    # notify is a lock-free droppable queue put, so this cannot deadlock.
+    notify_session_changed("inference", False, phase=PHASE_ERROR)
 
 
 def _spawn_rollout_process(
@@ -1661,18 +1672,21 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _record.recording_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Recording is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is already active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
         if _inference_startup_thread is not None and _inference_startup_thread.is_alive():
             # A previous session was stopped while its startup worker was
@@ -1685,30 +1699,35 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "The previous session is still shutting down. Try again in a few seconds.",
+                "code": ErrorCode.ROBOT_BUSY_RELEASING,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if _replay.replay_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first
@@ -1735,6 +1754,10 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         episodes = clamp_eval_episodes(request.eval_episodes)
         _eval_session = _EvalSession(request=request, episodes_total=episodes) if episodes > 1 else None
 
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client (any page, any remote UI) refetches /inference-status.
+    notify_session_changed("inference", True, phase=PHASE_STARTING)
+
     def _release_slot() -> None:
         global inference_active, _inference_started_at, _inference_cancel, _inference_meta
         global _eval_session
@@ -1744,6 +1767,9 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             _inference_cancel = None
             _inference_meta = {}
             _eval_session = None
+        # The pre-spawn guards below released the just-claimed slot: undo the
+        # claim's active=True hint.
+        notify_session_changed("inference", False)
 
     # Arm-count guard: reject a single-arm checkpoint on a bimanual robot (and
     # vice versa) BEFORE spawning the worker, where the shape mismatch would
@@ -1838,6 +1864,9 @@ def _go_idle_locked() -> None:
     _inference_rollout_started_at = None
     _inference_meta = {}
     _eval_session = None
+    # Final release. Caller holds _state_lock; the notify is a lock-free
+    # droppable queue put, so this cannot deadlock.
+    notify_session_changed("inference", False)
 
 
 def _abort_eval_locked(ev: _EvalSession) -> None:
@@ -2426,6 +2455,10 @@ def handle_inference_status() -> dict[str, Any]:
                     "elapsed_s": 0,
                     **_eval_fields(None),
                 }
+                # Final release (lazy finalisation of a subprocess that died
+                # on its own). Under _state_lock; the notify is a lock-free
+                # droppable queue put, so this cannot deadlock.
+                notify_session_changed("inference", False, phase=terminal_phase)
                 return {**_last_result, "shutting_down": shutting_down}
         elapsed = (time.time() - _inference_started_at) if _inference_started_at else 0
         rollout_elapsed = time.time() - _inference_rollout_started_at if _inference_rollout_started_at else 0

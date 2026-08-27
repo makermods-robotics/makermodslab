@@ -6,11 +6,26 @@ export type Fetcher = (
 export class ApiError extends Error {
   status: number;
   detail: string | null;
-  constructor(message: string, status: number, detail: string | null) {
+  /** Machine-readable error code (`<domain>.<condition>`, e.g. "session.held")
+   * — an additive sibling of `detail` in the backend's error bodies. Null when
+   * the response carried none. Branch on this, never on the prose. */
+  code: string | null;
+  /** Structured context beside the code (e.g. session.held's
+   * `{ holder: { kind, session_id } }`). Shape depends on the code. */
+  details: unknown;
+  constructor(
+    message: string,
+    status: number,
+    detail: string | null,
+    code: string | null = null,
+    details: unknown = null
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -40,6 +55,8 @@ export async function apiRequest<T = unknown>(
   const r = await fetcher(url, init);
   if (!r.ok) {
     let detail: string | null = null;
+    let code: string | null = null;
+    let details: unknown = null;
     try {
       const errBody = await r.json();
       const raw = errBody?.detail ?? errBody?.message ?? null;
@@ -52,6 +69,9 @@ export async function apiRequest<T = unknown>(
       } else {
         detail = JSON.stringify(raw);
       }
+      // Coded errors carry `code` (and sometimes `details`) beside `detail`.
+      if (typeof errBody?.code === "string") code = errBody.code;
+      if (errBody?.details != null) details = errBody.details;
     } catch {
       // body wasn't JSON
     }
@@ -59,7 +79,9 @@ export async function apiRequest<T = unknown>(
     throw new ApiError(
       `${label} failed: ${detail ?? r.status}`,
       r.status,
-      detail
+      detail,
+      code,
+      details
     );
   }
   // 204 No Content

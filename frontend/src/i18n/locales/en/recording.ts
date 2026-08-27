@@ -154,7 +154,6 @@ export default {
       finishingTitle: "Finishing",
       finishingBody: "Finalizing dataset…",
       stopFailedBody: "Failed to end the recording session.",
-      discardedTitle: "Recording discarded",
     },
   },
 
@@ -178,13 +177,6 @@ export default {
       confirm: "Quit without saving",
     },
     keepRecording: "Keep recording",
-    // Shown when an unintentional leave (route change) is treated as Quit.
-    // The native window.confirm on the browser-unload path deliberately keeps
-    // the English text — see leaveDiscardMessage in lib/recordingExit.ts.
-    leaveResume:
-      "Leaving quits the recording without saving — episodes already saved stay in the dataset.",
-    leaveFresh:
-      "Leaving quits the recording without saving — the recording and all its episodes will be deleted.",
   },
 
   log: {

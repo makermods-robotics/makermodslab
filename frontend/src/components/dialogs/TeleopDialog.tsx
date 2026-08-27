@@ -5,20 +5,32 @@ import UrdfViewer from "@/components/UrdfViewer";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useUnloadWarning } from "@/hooks/useUnloadWarning";
+import { stopSession } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 
 export interface TeleopDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Identity of the session the launcher started via POST /api/v1/sessions —
+   * this dialog heartbeats its lease and stops it by id. */
+  sessionId: string | null;
 }
 
 /**
  * Live teleoperation as a centered floating viewer — not a window dialog: a
- * big URDF visualizer card in the middle of the screen. The session state
- * machine is ported verbatim from pages/Teleoperation.tsx — every exit path
- * (Done, ESC, unmount, browser-level leave) stops the session exactly once,
- * and a mid-loop death surfaces as an inline banner.
+ * big URDF visualizer card in the middle of the screen. Every in-app exit
+ * path (Done, ESC, unmount) stops the session exactly once by its id; a
+ * browser-level leave is covered by the session's server-side lease (missed
+ * heartbeats → safety stop) instead of an unload beacon. A mid-loop death
+ * surfaces as an inline banner.
  */
-const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
+const TeleopDialog: React.FC<TeleopDialogProps> = ({
+  open,
+  onOpenChange,
+  sessionId,
+}) => {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -49,6 +61,14 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
     }
   }, [open]);
 
+  // Renew the session's lease while the dialog is up and the session hasn't
+  // died under us; if this tab goes away the missed heartbeats make the
+  // server safety-stop the arm — the authoritative replacement for the old
+  // unload beacon. The courtesy beforeunload just keeps an accidental ⌘W
+  // from walking away silently.
+  useSessionHeartbeat(sessionId, tabOwnerId(), open && finished === null);
+  useUnloadWarning(open && finished === null);
+
   // Poll the session status so a mid-loop death (unplugged bus, camera crash)
   // surfaces here instead of failing silently — the backend clears the
   // outcome fields on start, so a previous session's result can't trigger
@@ -60,7 +80,9 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
     const tick = async () => {
       if (cancelled || stoppedRef.current) return;
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/teleoperation-status`);
+        const res = await fetchWithHeaders(
+          `${baseUrl}/api/v1/teleoperation-status`,
+        );
         if (!res.ok) return;
         const status = await res.json();
         if (cancelled || stoppedRef.current) return;
@@ -93,10 +115,21 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
     if (stoppedRef.current) return;
     stoppedRef.current = true;
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/stop-teleoperation`, {
-        method: "POST",
-      });
-      const data = await res.json();
+      // Stop by session id (never owner-gated server-side). `result` is the
+      // legacy stop handler's response verbatim, so the toast logic below
+      // reads the same fields it always did. A 404 lands in the catch: the
+      // session is already gone (died mid-loop, safety-stopped, or stopped
+      // elsewhere) and there is nothing left to stop or announce.
+      const data = (sessionId
+        ? (await stopSession(baseUrl, fetchWithHeaders, sessionId)).result
+        : await fetchWithHeaders(`${baseUrl}/api/v1/stop-teleoperation`, {
+            method: "POST",
+          }).then((r) => r.json())) as {
+        success?: boolean;
+        releasing?: boolean;
+        message?: string;
+        warning?: string;
+      } | null;
       if (data?.warning) {
         // Cleanup could not release an arm — torque may still be enabled and
         // the arm can stay rigid. Make this loud instead of claiming success.
@@ -122,7 +155,7 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
         setTimeout(async () => {
           try {
             const status = await fetchWithHeaders(
-              `${baseUrl}/teleoperation-status`,
+              `${baseUrl}/api/v1/teleoperation-status`,
             ).then((r) => r.json());
             if (status?.last_cleanup_error) {
               toast({
@@ -148,37 +181,21 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
     } catch {
       /* best-effort */
     }
-  }, [baseUrl, fetchWithHeaders, toast, t]);
+  }, [sessionId, baseUrl, fetchWithHeaders, toast, t]);
 
-  // Cover every exit path while a session is live so it can't keep running and
-  // block the next start with "already active":
-  //   - Done and dialog-close await/fire stopTeleoperation;
-  //   - unmount while open stops via cleanup;
-  //   - a browser-level leave (URL change, reload, tab close) never runs React
-  //     cleanup, so `pagehide` fires a keepalive stop that survives the unload
-  //     and stashes a flag the next page reads to confirm the clean disconnect.
-  //     It uses a bare fetch (no JSON Content-Type) so the request stays a CORS
-  //     "simple request" and isn't dropped to a preflight mid-unload.
+  // Deliberate in-app exits stop the session: Done, ESC and dialog-close
+  // await/fire stopTeleoperation, and unmounting while open stops via this
+  // cleanup — closing this floating viewer IS ending the session. A
+  // browser-level leave (reload, tab close) no longer fires a stop beacon:
+  // the lease expires server-side and the arm is safety-stopped there (see
+  // the heartbeat above), which also means one tab's unload can never kill a
+  // session another tab is running.
   useEffect(() => {
     if (!open) return;
-    const handlePageHide = () => {
-      try {
-        sessionStorage.setItem("makermodslab:teleop-stopped", "1");
-      } catch {
-        /* sessionStorage may be unavailable; the stop below still runs */
-      }
-      fetch(`${baseUrl}/stop-teleoperation`, {
-        method: "POST",
-        keepalive: true,
-      }).catch(() => {});
-    };
-    window.addEventListener("pagehide", handlePageHide);
-
     return () => {
-      window.removeEventListener("pagehide", handlePageHide);
       stopTeleoperation();
     };
-  }, [open, baseUrl, stopTeleoperation]);
+  }, [open, stopTeleoperation]);
 
   // ESC ends the session (the Radix dialog used to own this). Capture phase +
   // preventDefault so StudioOverlay's own ESC handler (bubble, gated on

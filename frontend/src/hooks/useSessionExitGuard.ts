@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef } from "react";
 
 /**
- * Shared page-leave safety net for the live-hardware session screens
- * (Recording, Inference, Calibration). While a session is `active`, an
- * unintentional exit must stop / discard the session so the arm can't keep
- * driving (or the backend singleton stay latched) with nobody on the page.
+ * Page-leave safety net for CALIBRATION ONLY (RobotConfigDialog's manual
+ * calibration flow). Recording, inference and replay no longer use this:
+ * their sessions go through /api/v1/sessions and carry a server-side lease
+ * (useSessionHeartbeat) that safety-stops an abandoned session — those
+ * surfaces keep only a courtesy beforeunload confirm (useUnloadWarning).
+ * Calibration is not yet on the sessions surface, has no lease, and still
+ * needs the beacon; this hook retires when calibration migrates.
+ *
+ * While a session is `active`, an unintentional exit must stop / discard the
+ * session so the arm can't keep driving (or the backend singleton stay
+ * latched) with nobody on the page.
  *
  * It covers every leave vector with one mechanism:
  *  - **browser-level leave** (reload, tab/window close, typed URL): `beforeunload`
