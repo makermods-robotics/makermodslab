@@ -43,21 +43,7 @@ PLANNED: dict[str, frozenset[str]] = {
             "stop_job",
         }
     ),
-    "models": frozenset(
-        {
-            "models_delete",
-            "models_download",
-            "models_download_status",
-            "models_hide",
-            "models_import",
-            "models_info",
-            "models_list",
-            "models_remove_custom",
-            "models_save_custom",
-            "models_unhide",
-            "models_upload",
-        }
-    ),
+    "models": frozenset(),
     "nodes": frozenset(
         {
             "add_node",
