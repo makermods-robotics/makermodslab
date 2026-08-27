@@ -76,6 +76,14 @@ jobs:
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd  # v3.0.1
         with:
           extra_args: --all-files --show-diff-on-failure --color=always
+        env:
+          # export-openapi regenerates docs/api/openapi.json via `uv run`, which
+          # needs the repo venv (the full lerobot/torch stack) — far too heavy
+          # for this lint-only runner, which doesn't even have uv. Snapshot
+          # freshness is still CI-enforced: tests/test_api_contract.py's
+          # test_openapi_snapshot_is_fresh fails the Tests workflow on drift.
+          # The hook stays active locally, where uv and the venv exist.
+          SKIP: export-openapi
 
       # The run's own conclusion now carries the failure, so this step exists only
       # to put the fix instructions somewhere the author will actually read them:
