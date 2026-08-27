@@ -47,26 +47,7 @@ PLANNED: dict[str, frozenset[str]] = {
             "upload_status",
         }
     ),
-    "jobs": frozenset(
-        {
-            "create_training_job",
-            "delete_hub_model",
-            "delete_job",
-            "dismiss_hub_job",
-            "get_checkpoint_policy_config",
-            "get_job",
-            "get_job_checkpoints",
-            "get_job_log_file",
-            "get_job_logs",
-            "get_job_metrics_history",
-            "get_runners_hardware",
-            "import_model",
-            "list_hub_jobs",
-            "list_jobs",
-            "rename_job",
-            "stop_job",
-        }
-    ),
+    "jobs": frozenset(),
     "models": frozenset(
         {
             "models_delete",
