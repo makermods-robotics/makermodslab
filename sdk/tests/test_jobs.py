@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 from helpers import mock_client
-from makermodslab_sdk import ApiError, NotFoundError
+from makermodslab_sdk import ApiError, JobWaitTimeout, MakerModsError, NotFoundError
 from makermodslab_sdk.resources.jobs import (
     TERMINAL_STATES,
     Checkpoint,
@@ -394,6 +394,70 @@ def test_runners_hardware_flavor_catalog():
 
 
 # -------------------------------------------------------------- wait flagship
+
+
+def scripted_states(states: list[str]):
+    """A GET /jobs/{id} handler that walks a state sequence (last one sticks)."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state = states[min(calls["n"], len(states) - 1)]
+        calls["n"] += 1
+        return httpx.Response(200, json=job_body(state=state))
+
+    return handler, calls
+
+
+def test_terminal_states_match_the_server_jobstate_literal():
+    # makermodslab/jobs.py: JobState = Literal["running","done","failed","interrupted"]
+    assert frozenset({"done", "failed", "interrupted"}) == TERMINAL_STATES
+
+
+@pytest.mark.parametrize("final", sorted(TERMINAL_STATES))
+def test_wait_polls_until_terminal(final):
+    handler, calls = scripted_states(["running", "running", final])
+    sleeps: list[float] = []
+    job = call_via(handler, lambda c: c.jobs.wait("j1", poll_interval=2.0, sleep_fn=sleeps.append))
+    assert job.state == final
+    assert calls["n"] == 3
+    assert sleeps == [2.0, 2.0]  # injected fake — the test never slept
+
+
+def test_wait_timeout_raises_with_keep_waiting_guidance():
+    handler, calls = scripted_states(["running"])
+    sleeps: list[float] = []
+    with pytest.raises(JobWaitTimeout) as excinfo:
+        call_via(
+            handler,
+            lambda c: c.jobs.wait("j1", timeout=5.0, poll_interval=2.0, sleep_fn=sleeps.append),
+        )
+    err = excinfo.value
+    # Budget accounting is deterministic: polls at 0s, 2s, 4s; a third sleep
+    # would cross 5s, so it raises after three checks and two sleeps.
+    assert calls["n"] == 3
+    assert sleeps == [2.0, 2.0]
+    assert isinstance(err, MakerModsError)
+    assert isinstance(err, TimeoutError)
+    assert err.job_id == "j1"
+    assert err.last_state == "running"
+    assert "wait(" in str(err)  # says how to keep waiting
+    assert "stop(" in str(err)
+
+
+def test_wait_zero_timeout_still_checks_once():
+    handler, calls = scripted_states(["done"])
+    job = call_via(handler, lambda c: c.jobs.wait("j1", timeout=0, sleep_fn=lambda s: None))
+    assert job.state == "done"
+    assert calls["n"] == 1
+
+
+def test_wait_on_missing_job_surfaces_transport_error_as_is():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Job 'nope' not found", "code": "job.not_found"})
+
+    with pytest.raises(NotFoundError) as excinfo:
+        call_via(handler, lambda c: c.jobs.wait("nope", sleep_fn=lambda s: None))
+    assert excinfo.value.code == "job.not_found"
 
 
 # --------------------------------------------------- end-to-end (read-only)

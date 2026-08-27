@@ -9,18 +9,35 @@ must keep decoding values a newer server adds.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import quote
 
 from makermodslab_sdk._operations import operation
+from makermodslab_sdk.errors import MakerModsError
 from makermodslab_sdk.resources._base import Resource, SdkModel
 
 # The server's job lifecycle (makermodslab/jobs.py):
 #   JobState = Literal["running", "done", "failed", "interrupted"]
-# "running" is the only non-terminal state, so the terminal set is exactly
-# the other three.
+# "running" is the only non-terminal state, so the terminal set wait() polls
+# for is exactly the other three.
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "interrupted"})
+
+
+class JobWaitTimeout(MakerModsError, TimeoutError):  # noqa: N818 — "Timeout" IS the suffix, matching builtins.TimeoutError
+    """wait() gave up before the job reached a terminal state.
+
+    Not an error from the server — the job is still running; the message says
+    how to keep waiting. Catchable as either ``MakerModsError`` or the
+    built-in ``TimeoutError``.
+    """
+
+    def __init__(self, message: str, *, job_id: str, waited: float, last_state: str) -> None:
+        super().__init__(message)
+        self.job_id = job_id
+        self.waited = waited
+        self.last_state = last_state
 
 
 class TrainingMetrics(SdkModel):
@@ -238,8 +255,9 @@ class JobsResource(Resource):
 
     Example:
         >>> job = client.jobs.create_training("user/so101-pick", steps=20000)
-        >>> client.jobs.get(job.id).state
-        'running'
+        >>> done = client.jobs.wait(job.id, timeout=4 * 3600)
+        >>> done.state, client.jobs.checkpoints(job.id).checkpoints[-1].step
+        ('done', 20000)
     """
 
     @operation("list_jobs")
@@ -413,7 +431,7 @@ class JobsResource(Resource):
         config: Mapping[str, Any] | None = None,
     ) -> Job:
         """Start a training run; returns its record immediately (state
-        "running") — follow with ``get``, ``logs`` or ``metrics_history``.
+        "running") — follow with ``wait``, ``logs`` or ``metrics_history``.
 
         ``runner`` picks where it runs: "local" (this machine), "hf_cloud"
         (HF Jobs GPU — requires ``flavor``, see ``runners_hardware``), or
@@ -429,8 +447,8 @@ class JobsResource(Resource):
             ...     steps=20000,
             ...     config={"save_freq": 5000, "wandb_enable": True},
             ... )
-            >>> job.state
-            'running'
+            >>> client.jobs.wait(job.id, timeout=4 * 3600).state
+            'done'
         """
         cfg: dict[str, Any] = {
             "dataset_repo_id": dataset_repo_id,
@@ -543,3 +561,49 @@ class JobsResource(Resource):
         return RunnersHardware.model_validate(
             self._transport.request("GET", "/api/v1/jobs/runners/hardware", action="Get runner hardware")
         )
+
+    # Deliberately NOT @operation-tagged: a convenience over get_job, not an
+    # API surface of its own. Polling-only for now — a realtime hint-driven
+    # variant arrives with the integration stage.
+    def wait(
+        self,
+        job_id: str,
+        *,
+        timeout: float | None = None,
+        poll_interval: float = 2.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> Job:
+        """Block until the job ends; returns the final record.
+
+        Terminal means ``state`` in "done" / "failed" / "interrupted" (the
+        server's JobState minus "running" — makermodslab/jobs.py). This
+        returns on ANY terminal state; check ``.state`` (and
+        ``.error_message``) yourself — a failed run is a normal return, not an
+        exception. Raises :class:`JobWaitTimeout` when ``timeout`` seconds of
+        polling pass first (None = wait forever), and an unknown ``job_id``
+        raises the same error ``get`` would. ``sleep_fn`` is injectable so
+        tests can wait without sleeping.
+
+        Example:
+            >>> job = client.jobs.wait(job.id, timeout=3600)
+            >>> job.state, job.error_message
+            ('done', None)
+        """
+        waited = 0.0
+        while True:
+            job = self.get(job_id)  # a missing job surfaces get's error as-is
+            if job.state in TERMINAL_STATES:
+                return job
+            if timeout is not None and waited + poll_interval > timeout:
+                raise JobWaitTimeout(
+                    f"Job {job_id!r} is still {job.state!r} after {waited:.0f}s "
+                    f"(timeout={timeout}). The run may simply need longer — call "
+                    f"client.jobs.wait({job_id!r}, timeout=<more seconds>) to keep waiting, "
+                    f"check progress with client.jobs.get({job_id!r}).metrics, "
+                    f"or end it with client.jobs.stop({job_id!r}).",
+                    job_id=job_id,
+                    waited=waited,
+                    last_state=job.state,
+                )
+            sleep_fn(poll_interval)
+            waited += poll_interval

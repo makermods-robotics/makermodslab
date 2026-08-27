@@ -21,6 +21,7 @@ from makermodslab_sdk.errors import (
     RobotBusyError,
     SessionHeldError,
 )
+from makermodslab_sdk.resources.jobs import JobWaitTimeout
 
 __version__ = "0.0.1"
 
@@ -30,6 +31,7 @@ __all__ = [
     "CompatibilityWarning",
     "ConnectionFailedError",
     "InvalidRequestError",
+    "JobWaitTimeout",
     "MakerModsError",
     "NotFoundError",
     "RobotBusyError",
