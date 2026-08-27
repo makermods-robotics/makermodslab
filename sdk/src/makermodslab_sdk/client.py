@@ -114,3 +114,74 @@ class Client:
 
     def __repr__(self) -> str:
         return f"<makermodslab_sdk.Client {self.base_url} namespaces={sorted(RESOURCE_CLASSES)}>"
+
+    # --- Realtime (WebSocket; needs the [realtime] extra) -------------------
+    # The server's one WS (/api/v1/ws/joint-data) carries joint telemetry plus
+    # control events that are droppable REFETCH HINTS, never state — see
+    # realtime.py's module docstring for the contract. Imported lazily so the
+    # base SDK stays dependency-light.
+
+    def _realtime(self):
+        """Import the realtime module and fail fast if the extra is missing."""
+        from makermodslab_sdk import realtime
+
+        realtime.require_websockets()
+        return realtime
+
+    def events(self, *, kinds=None):
+        """Stream typed realtime events (open-ended generator; blocks).
+
+        Yields ``JointData`` telemetry frames and the control-event hints
+        (``JobsChanged``/``JobProgress``/``SessionChanged``); unknown messages
+        arrive as ``UnknownEvent``. Control events mean "refetch now" — never
+        treat their payload as state. ``kinds`` filters to event class(es).
+
+        Example:
+            >>> from makermodslab_sdk.realtime import SessionChanged
+            >>> for event in client.events(kinds=SessionChanged):
+            ...     print(event.session.kind, event.session.active)  # then refetch
+
+        Needs the realtime extra: pip install "makermodslab-sdk[realtime]".
+        For a bounded read of joint telemetry, use ``sample_joints``.
+        """
+        return self._realtime().events(self.base_url, kinds=kinds)
+
+    def sample_joints(self, duration_s: float = 2.0, *, max_frames: int | None = None, clock=None):
+        """Collect joint frames for up to ``duration_s`` seconds; returns a LIST.
+
+        The agent-friendly read: always returns (never an open-ended
+        iterator) — after ``duration_s`` seconds or ``max_frames`` frames,
+        whichever comes first. An empty list means no hardware flow is
+        streaming right now, which is an answer, not an error.
+
+        Example:
+            >>> frames = client.sample_joints(duration_s=1.0, max_frames=10)
+            >>> frames[-1].joints if frames else "arm idle"
+
+        ``clock`` is a test seam (defaults to time.monotonic); leave it unset.
+        Needs the realtime extra: pip install "makermodslab-sdk[realtime]".
+        """
+        import time
+
+        return self._realtime().sample_joints(
+            self.base_url,
+            duration_s,
+            max_frames=max_frames,
+            clock=time.monotonic if clock is None else clock,
+        )
+
+    def stream_joints(self):
+        """Stream ``JointData`` frames as an open-ended generator (blocks).
+
+        The human/dashboard variant — it runs for as long as the socket stays
+        open and yields ~20 frames/s while an arm is being driven. Agents
+        should normally use ``sample_joints`` (bounded) instead.
+
+        Example:
+            >>> for frame in client.stream_joints():  # doctest: +SKIP
+            ...     print(frame.joints)
+
+        Needs the realtime extra: pip install "makermodslab-sdk[realtime]".
+        """
+        realtime = self._realtime()
+        return realtime.events(self.base_url, kinds=realtime.JointData)
