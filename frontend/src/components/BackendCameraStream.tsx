@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { VideoOff, RefreshCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   uniqueId,
   className,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const imgRef = useRef<HTMLImageElement | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -139,11 +141,11 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
           className,
           "flex cursor-pointer flex-col items-center justify-center gap-1 bg-muted text-muted-foreground"
         )}
-        title="Click to retry now"
+        title={t("shared.camera.clickToRetry")}
       >
         <VideoOff className="h-5 w-5" />
         <span className="px-1 text-center text-[10px] leading-tight">
-          {reason ?? "Preview failed"}
+          {reason ?? t("shared.camera.previewFailed")}
         </span>
         <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
           <RefreshCw className="h-3 w-3" /> retrying...
@@ -161,7 +163,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
       }`}
       onError={handleError}
       className={className}
-      alt="Server camera preview"
+      alt={t("shared.camera.previewAlt")}
     />
   );
 };

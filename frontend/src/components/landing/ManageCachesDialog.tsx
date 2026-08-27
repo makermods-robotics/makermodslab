@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -38,6 +39,7 @@ const ManageCachesDialog: React.FC<Props> = ({
   datasets,
   onCleared,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
 
   // Datasets whose local cache can be cleared = cached AND on the Hub.
@@ -96,7 +98,11 @@ const ManageCachesDialog: React.FC<Props> = ({
     try {
       const res = await deleteDataset(baseUrl, fetchWithHeaders, repoId);
       if (!res.success) {
-        setError(res.message ?? `Could not clear the cache for ${repoId}.`);
+        // `res.message` is the backend's own explanation — English server
+        // prose, surfaced verbatim. Only our fallback is translated.
+        setError(
+          res.message ?? t("landing.manageCaches.clearFailed", { repoId }),
+        );
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -127,12 +133,11 @@ const ManageCachesDialog: React.FC<Props> = ({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <HardDrive className="w-5 h-5" /> Manage cached datasets
+            <HardDrive className="w-5 h-5" />{" "}
+            {t("landing.manageCaches.title")}
           </DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Free disk space by clearing the local cache of datasets that also
-            live on the Hugging Face Hub. The Hub copy stays — clearing only
-            removes the local copy.
+            {t("landing.manageCaches.description")}
           </DialogDescription>
         </DialogHeader>
 
@@ -141,17 +146,24 @@ const ManageCachesDialog: React.FC<Props> = ({
             <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-200">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                This backend is in offline mode (
-                <code className="text-amber-800 dark:text-amber-100">HF_HUB_OFFLINE</code>). A
-                cleared cache can&apos;t be re-downloaded from the Hub until
-                offline mode is switched off.
+                {/* The env var name is a literal; <Trans> keeps it inside the
+                    sentence instead of splitting the copy around it. */}
+                <Trans
+                  i18nKey="landing.manageCaches.offlineNote"
+                  components={[
+                    <code
+                      key="0"
+                      className="text-amber-800 dark:text-amber-100"
+                    />,
+                  ]}
+                />
               </span>
             </div>
           )}
 
           {cached.length === 0 ? (
             <p className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-              No HF datasets are cached locally.
+              {t("landing.manageCaches.empty")}
             </p>
           ) : (
             <div className="max-h-72 overflow-auto rounded-md border border-border divide-y divide-border">
@@ -179,11 +191,12 @@ const ManageCachesDialog: React.FC<Props> = ({
                       {isClearing ? (
                         <>
                           <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                          Clearing…
+                          {t("landing.manageCaches.clearing")}
                         </>
                       ) : (
                         <>
-                          <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Clear cache
+                          <Trash2 className="mr-1.5 h-3.5 w-3.5" />{" "}
+                          {t("landing.manageCaches.clear")}
                         </>
                       )}
                     </Button>
@@ -200,7 +213,7 @@ const ManageCachesDialog: React.FC<Props> = ({
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              Close
+              {t("common.close")}
             </Button>
             {cached.length > 0 && (
               <Button
@@ -210,12 +223,15 @@ const ManageCachesDialog: React.FC<Props> = ({
               >
                 {busy ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Clearing…
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />{" "}
+                    {t("landing.manageCaches.clearing")}
                   </>
                 ) : (
                   <>
-                    <Trash2 className="mr-2 h-4 w-4" /> Clear all (
-                    {cached.length})
+                    <Trash2 className="mr-2 h-4 w-4" />{" "}
+                    {t("landing.manageCaches.clearAll", {
+                      n: cached.length,
+                    })}
                   </>
                 )}
               </Button>

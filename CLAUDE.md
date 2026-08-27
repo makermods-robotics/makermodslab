@@ -107,6 +107,12 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makermod
 
 React + Vite + TypeScript with shadcn/radix primitives. Four pages (`Launchpad`, `Teleoperation`, `Training`, `NotFound`); ~100 components grouped by feature area (`calibration/`, `control/`, `dialogs/`, `studio/`, `library/`, `recording/`, `jobs/`, `launchpad/`, … plus shared `ui/`); state via React contexts (`ApiContext`, `StudioContext`, `InferenceSessionContext`, `UrdfContext`, …) and ~19 data/session hooks (`useRobots`, `useDatasets`, `useRealTimeJoints`, …). No Redux/Zustand.
 
+### Localization
+
+The UI ships English and Simplified Chinese via `react-i18next`; catalogs live in [`frontend/src/i18n/locales/`](frontend/src/i18n/locales/), one namespace file per feature area. **Read [frontend/docs/localization.md](frontend/docs/localization.md) before touching user-facing strings** — it is written to be the only thing you need.
+
+The governing rule is that localization is **cosmetic only**: no request/response, storage, form-value or on-disk change, and the Python backend is never localized (server prose renders in English in every language). A great many strings here are _data_ wearing a label — camera-name presets, codec ids, calibration file names, `formatDurationShort` output — and translating one corrupts a payload or a file on disk. Three tests enforce the invariants: catalog key parity, dynamic-key resolution, and frozen-English output for the helpers that had to be restructured.
+
 ## Hardware target
 
 SO-101 leader/follower arms, single or **bimanual** (two leader/follower pairs via `BiSOLeaderConfig`/`BiSOFollowerConfig`). Robot config construction is centralized in [utils/robot_factory.py](makermodslab/utils/robot_factory.py) — adding a robot type means extending the factory, plus calibrate.py and rollout.py which build their configs/args themselves.

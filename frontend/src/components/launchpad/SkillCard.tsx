@@ -1,6 +1,11 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { ModelItem } from "@/lib/modelsApi";
 import { policyTypeDisplayName } from "@/components/training/types";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
+import { cn } from "@/lib/utils";
 import sockThumb from "@/assets/skill-sock-orange.jpg";
 import bottleThumb from "@/assets/skill-bottle.jpg";
 import towelThumb from "@/assets/skill-towel.jpg";
@@ -38,14 +43,15 @@ export function skillThumbnail(m: ModelItem): string | undefined {
   return SKILL_THUMBNAILS[m.hf_repo_id ?? m.id];
 }
 
-/** Curated human-readable names for featured skills, keyed by Hub repo id —
- * shown in place of the raw policy-run name. */
-const SKILL_DISPLAY_NAMES: Record<string, string> = {
+/** Curated display names for featured skills, keyed by Hub repo id. The repo
+ * ids are DATA — they address a real repo, so they stay verbatim; only the
+ * slug they map to is a translation key. */
+const SKILL_NAME_KEYS: Record<string, string> = {
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
-    "Sorting socks",
-  [WIP_SKILL_IDS.bottleCap]: "Opening bottle caps",
-  [WIP_SKILL_IDS.towelFold]: "Folding towels",
-  [WIP_SKILL_IDS.stackCubes]: "Stacking cubes",
+    "sortingSocks",
+  [WIP_SKILL_IDS.bottleCap]: "openingBottleCaps",
+  [WIP_SKILL_IDS.towelFold]: "foldingTowels",
+  [WIP_SKILL_IDS.stackCubes]: "stackingCubes",
 };
 
 /** The marketplace provenance of a skill card. "wip" marks a preview card for
@@ -74,6 +80,14 @@ export function skillAuthorLabel(m: ModelItem): string {
   return skillNamespace(m) ?? "local checkpoint";
 }
 
+/** Translated author byline. Mirrors skillTitle/skillDisplayTitle: the plain
+ * function stays English for non-React callers, this one is what users read.
+ * A namespace is a Hub org/user handle — data, never translated. */
+export function skillDisplayAuthorLabel(t: TFunction, m: ModelItem): string {
+  if (isWipSkillId(m.id)) return t("launchpad.skills.comingSoon");
+  return skillNamespace(m) ?? t("launchpad.skills.localCheckpoint");
+}
+
 /** MINE when the skill is in the user's namespace (or a bare local run they own);
  * MAKERMODS for the makermods org; COMMUNITY otherwise. Author == the namespace,
  * matched case-insensitively (mirrors DatasetInfoCard's useCanEditHub). */
@@ -95,21 +109,44 @@ export function isMineSkill(m: ModelItem, username?: string | null): boolean {
   return classifySkill(m, username) === "mine";
 }
 
-/** The card/dialog title: a curated display name when the skill has one,
- * otherwise the name segment only (Hub rows carry the full "namespace/name" in
- * `name`), never an empty string. */
+/** The UNTRANSLATED title: a curated English display name when the skill has
+ * one, otherwise the name segment only (Hub rows carry the full
+ * "namespace/name" in `name`), never an empty string.
+ *
+ * Search matches against this so that typing "sock" keeps working no matter
+ * which language the UI is in — see SkillSlider's filter. Use
+ * `skillDisplayTitle` for anything the user actually reads.
+ */
 export function skillTitle(m: ModelItem): string {
-  const curated = SKILL_DISPLAY_NAMES[m.hf_repo_id ?? m.id];
-  if (curated) return curated;
+  const slug = SKILL_NAME_KEYS[m.hf_repo_id ?? m.id];
+  if (slug) return SKILL_NAME_EN[slug];
   const raw = m.name || m.id;
   return raw.includes("/") ? (raw.split("/").pop() ?? raw) : raw;
 }
 
-const BADGE_LABEL: Record<SkillBadge, string> = {
-  mine: "MINE",
-  makermods: "MAKERMODS SUPPORTED",
-  community: "COMMUNITY",
-  wip: "WIP",
+/** English copies of the curated names, so `skillTitle` stays a pure data
+ * function usable outside React (search, sorting) without an i18n instance. */
+const SKILL_NAME_EN: Record<string, string> = {
+  sortingSocks: "Sorting socks",
+  openingBottleCaps: "Opening bottle caps",
+  foldingTowels: "Folding towels",
+  stackingCubes: "Stacking cubes",
+};
+
+/** The title the user sees. Falls back to the raw name segment for any skill
+ * without a curated entry — those are repo-derived data and never translated. */
+export function skillDisplayTitle(t: TFunction, m: ModelItem): string {
+  const slug = SKILL_NAME_KEYS[m.hf_repo_id ?? m.id];
+  if (slug) return t(`launchpad.skillNames.${slug}` as never);
+  const raw = m.name || m.id;
+  return raw.includes("/") ? (raw.split("/").pop() ?? raw) : raw;
+}
+
+const BADGE_LABEL_KEY: Record<SkillBadge, string> = {
+  mine: "launchpad.badge.mine",
+  makermods: "launchpad.badge.makermods",
+  community: "launchpad.badge.community",
+  wip: "launchpad.badge.wip",
 };
 
 const BADGE_CLASS: Record<SkillBadge, string> = {
@@ -121,13 +158,23 @@ const BADGE_CLASS: Record<SkillBadge, string> = {
 
 /** Provenance pill (MINE / MAKERMODS / COMMUNITY) — token-styled, works in both
  * themes. */
-export const SkillBadgePill: React.FC<{ badge: SkillBadge }> = ({ badge }) => (
-  <span
-    className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${BADGE_CLASS[badge]}`}
-  >
-    {BADGE_LABEL[badge]}
-  </span>
-);
+export const SkillBadgePill: React.FC<{ badge: SkillBadge }> = ({ badge }) => {
+  const { t } = useTranslation();
+  const { language } = useLanguage();
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold",
+        // `uppercase` does nothing to Chinese, but the letter-spacing that
+        // pairs with it does — both come off together.
+        isCaselessScript(language) ? "" : "uppercase tracking-[0.06em]",
+        BADGE_CLASS[badge],
+      )}
+    >
+      {t(BADGE_LABEL_KEY[badge] as never)}
+    </span>
+  );
+};
 
 /** A small mono stat chip (policy type · steps · private). */
 const Stat: React.FC<{ children: React.ReactNode; tone?: "amber" }> = ({
@@ -156,7 +203,9 @@ export interface SkillCardProps {
  * Click opens the skill detail dialog.
  */
 const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
-  const author = skillAuthorLabel(model);
+  const { t } = useTranslation();
+  const author = skillDisplayAuthorLabel(t, model);
+  const title = skillDisplayTitle(t, model);
   const policy = model.policy_type
     ? policyTypeDisplayName(model.policy_type)
     : null;
@@ -167,24 +216,24 @@ const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
       type="button"
       onClick={() => onOpen(model)}
       className="group flex w-64 shrink-0 snap-start flex-col overflow-hidden rounded-lg border border-border bg-card text-left shadow-1 transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none"
-      aria-label={`Open skill ${skillTitle(model)}`}
+      aria-label={t("launchpad.skills.open", { title })}
     >
       {thumbnail ? (
         <img
           src={thumbnail}
-          alt={`${skillTitle(model)} rollout preview`}
+          alt={t("launchpad.skills.previewAlt", { title })}
           className="aspect-[4/3] w-full object-cover"
         />
       ) : (
         <div
           className="media-slot aspect-[4/3] w-full"
-          data-label="rollout preview"
+          data-label={t("launchpad.skills.previewPlaceholder")}
         />
       )}
       <div className="flex flex-1 flex-col gap-2 p-3">
         <div className="flex flex-col items-start gap-1.5">
           <span className="w-full min-w-0 truncate font-display font-semibold tracking-tight">
-            {skillTitle(model)}
+            {title}
           </span>
           <SkillBadgePill badge={badge} />
         </div>
@@ -193,8 +242,16 @@ const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
         </span>
         <div className="mt-auto flex flex-wrap gap-1.5 pt-1">
           {policy && <Stat>{policy}</Stat>}
-          {model.steps != null && <Stat>{formatCount(model.steps)} steps</Stat>}
-          {model.private && <Stat tone="amber">private</Stat>}
+          {model.steps != null && (
+            <Stat>
+              {t("launchpad.skills.steps", {
+                steps: formatCount(model.steps),
+              })}
+            </Stat>
+          )}
+          {model.private && (
+            <Stat tone="amber">{t("launchpad.skills.private")}</Stat>
+          )}
         </div>
       </div>
     </button>

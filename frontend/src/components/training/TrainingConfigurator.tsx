@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -220,6 +221,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const { auth } = useHfAuth();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const { openJobMonitor } = useStudio();
@@ -478,7 +480,11 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         fetchWithHeaders,
         configToRequest(config, checkpointUploadKind),
       );
-      toast({ title: "Training Started", description: job.name });
+      // The job's name is data — shown exactly as the backend returned it.
+      toast({
+        title: t("training.configurator.toast.startedTitle"),
+        description: job.name,
+      });
       onStarted?.(job.id);
       // The monitor is a dialog over the studio's Train panel, not a route.
       // openJobMonitor opens the studio; off-Launchpad callers (the
@@ -486,8 +492,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       openJobMonitor(job.id);
       if (location.pathname !== "/") navigate("/");
     } catch (e) {
+      // The backend's message, untranslated; only the title is ours.
       const msg = e instanceof Error ? e.message : String(e);
-      toast({ title: "Error", description: msg, variant: "destructive" });
+      toast({
+        title: t("training.configurator.toast.errorTitle"),
+        description: msg,
+        variant: "destructive",
+      });
       // If the failure was the 409 case, refresh our running-job knowledge.
       listJobs(baseUrl, fetchWithHeaders, 200)
         .then((j) =>
@@ -509,6 +520,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     location.pathname,
     openJobMonitor,
     onStarted,
+    t,
   ]);
 
   // Latest launchJob without re-subscribing the upload hook every render.
@@ -528,7 +540,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       setUploadError(message);
       setIsStarting(false);
       toast({
-        title: "Upload failed",
+        title: t("training.configurator.toast.uploadFailedTitle"),
         description: message,
         variant: "destructive",
       });
@@ -538,8 +550,8 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const handleStart = async () => {
     if (!datasetRepoId) {
       toast({
-        title: "Error",
-        description: "Dataset repository ID is required",
+        title: t("training.configurator.toast.errorTitle"),
+        description: t("training.configurator.toast.datasetRequired"),
         variant: "destructive",
       });
       return;
@@ -586,7 +598,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         setUploadError(err);
         setIsStarting(false);
         toast({
-          title: "Upload failed",
+          title: t("training.configurator.toast.uploadFailedTitle"),
           description: err,
           variant: "destructive",
         });
@@ -601,7 +613,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     return (
       <div className="flex items-center justify-center py-24 text-muted-foreground">
         <Loader2 className="w-6 h-6 animate-spin mr-3" />
-        Checking training environment…
+        {t("training.configurator.checkingEnvironment")}
       </div>
     );
   }
@@ -620,7 +632,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     resumeSeed != null &&
     resumeSeed.step != null &&
     config.steps <= resumeSeed.step
-      ? `Total steps must be greater than the checkpoint's step (${resumeSeed.step.toLocaleString()}).`
+      ? t("training.configurator.resumeStepError", {
+          // Pre-formatted; number formatting stays as it was.
+          step: resumeSeed.step.toLocaleString(),
+        })
       : null;
   // A local-only dataset on a cloud run is uploadable — unless the backend is
   // in offline mode, in which case uploads are impossible and Start is a hard
@@ -641,15 +656,15 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     checkpointUploadBlockedOffline ||
     resumeStepError != null;
   const startTooltip = localBlocked
-    ? "Another local training is already running"
+    ? t("training.configurator.tooltip.localBusy")
     : targetRequiresAuth && !authenticated
-      ? "Log in to Hugging Face to use cloud compute"
+      ? t("training.configurator.tooltip.needAuth")
       : targetMissingFlavor
-        ? "Select a hardware flavor"
+        ? t("training.configurator.tooltip.needFlavor")
         : uploadBlockedOffline
-          ? "Offline mode is on — the dataset can't be uploaded to the Hub"
+          ? t("training.configurator.tooltip.offlineDataset")
           : checkpointUploadBlockedOffline
-            ? "Offline mode is on — the checkpoint can't be uploaded to the Hub"
+            ? t("training.configurator.tooltip.offlineCheckpoint")
             : undefined;
 
   return (
@@ -657,30 +672,46 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       <HfAuthBanner />
       {resumeSeed ? (
         <div className="mb-4 rounded-lg border border-primary/40 bg-primary/5 p-4 text-sm text-foreground">
+          {/* The run name and both step numbers are data (the numbers keep
+              their existing toLocaleString formatting and are interpolated
+              pre-formatted). */}
           <div className="font-semibold">
-            Continuing “{resumeSeed.name}”
             {resumeSeed.step != null
-              ? ` from step ${resumeSeed.step.toLocaleString()}`
-              : " from its latest checkpoint"}
+              ? t("training.configurator.resume.titleFromStep", {
+                  name: resumeSeed.name,
+                  step: resumeSeed.step.toLocaleString(),
+                })
+              : t("training.configurator.resume.titleFromLatest", {
+                  name: resumeSeed.name,
+                })}
           </div>
+          {/* One complete sentence per runner — English spliced ", and the job
+              timeout" into the middle of a list, which no translation can
+              place the same way. */}
           <p className="mt-1 text-muted-foreground">
-            Settings are prefilled from that run and stay editable. The dataset,
-            policy, batch size, and optimizer are rebuilt from the checkpoint
-            itself, so changing them here won't affect the continuation — but{" "}
-            <span className="font-medium">Steps</span>, the checkpoint cadence
-            {isCloud ? ", and the job timeout" : ""} all apply. Set Steps above
-            the resumed step to train further (prefilled to{" "}
-            {config.steps.toLocaleString()}).
+            <Trans
+              i18nKey={
+                isCloud
+                  ? "training.configurator.resume.bodyCloud"
+                  : "training.configurator.resume.bodyLocal"
+              }
+              values={{ steps: config.steps.toLocaleString() }}
+              components={[<span key="0" className="font-medium" />]}
+            />
           </p>
           {isCloud ? (
             <p className="mt-1 text-muted-foreground">
-              Job timeout:{" "}
-              <span className="font-medium">
-                {config.hf_job_timeout?.trim()
-                  ? config.hf_job_timeout
-                  : "24h (default)"}
-              </span>{" "}
-              — a continuation needs at least as long as the tail it has left.
+              {/* The timeout is an HF-Jobs duration string — wire format, so
+                  it is rendered verbatim. */}
+              <Trans
+                i18nKey="training.configurator.resume.jobTimeout"
+                values={{
+                  timeout: config.hf_job_timeout?.trim()
+                    ? config.hf_job_timeout
+                    : t("training.configurator.resume.jobTimeoutDefault"),
+                }}
+                components={[<span key="0" className="font-medium" />]}
+              />
             </p>
           ) : null}
         </div>
@@ -688,16 +719,23 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       {finetuneSeed ? (
         <div className="mb-4 rounded-lg border border-border bg-muted/50 p-4 text-sm text-foreground">
           <div className="font-semibold">
-            Fine-tuning from “{finetuneSeed.name}”
             {finetuneSeed.step != null
-              ? ` (step ${finetuneSeed.step.toLocaleString()})`
-              : " (latest checkpoint)"}
+              ? t("training.configurator.finetune.titleWithStep", {
+                  name: finetuneSeed.name,
+                  step: finetuneSeed.step.toLocaleString(),
+                })
+              : t("training.configurator.finetune.titleLatest", {
+                  name: finetuneSeed.name,
+                })}
           </div>
           <p className="mt-1 text-muted-foreground">
-            This starts a <span className="font-medium">fresh run</span> (new
-            optimizer, from step 0) with the policy weights initialized from that
-            model. Pick a <span className="font-medium">dataset</span> to train
-            on and set your training parameters as usual.
+            <Trans
+              i18nKey="training.configurator.finetune.body"
+              components={[
+                <span key="0" className="font-medium" />,
+                <span key="1" className="font-medium" />,
+              ]}
+            />
           </p>
         </div>
       ) : null}
@@ -775,11 +813,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
                   swapped its disabled stand-in for this button. */}
               {uploading ? (
                 <>
-                  <Loader2 className="h-4 w-4 animate-spin" /> Uploading…
+                  <Loader2 className="h-4 w-4 animate-spin" />{" "}
+                  {t("training.configurator.button.uploading")}
                 </>
               ) : isStarting ? (
                 <>
-                  <Loader2 className="h-4 w-4 animate-spin" /> Starting…
+                  <Loader2 className="h-4 w-4 animate-spin" />{" "}
+                  {t("training.configurator.button.starting")}
                 </>
               ) : (
                 <>
@@ -789,19 +829,19 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
                       used to flip to Title Case the moment the form opened. */}
                   {resumeSeed
                     ? needsCheckpointUpload
-                      ? "Upload & continue training"
-                      : "Continue training"
+                      ? t("training.configurator.button.uploadAndContinue")
+                      : t("training.configurator.button.continueTraining")
                     : finetuneSeed
                       ? // A local base fine-tuned on the cloud has to push its
                         // weights first, so the button says what the click
                         // actually does — the same promise the resume branch
                         // above makes.
                         needsCheckpointUpload
-                        ? "Upload & start training"
-                        : "Start fine-tuning"
+                        ? t("training.configurator.button.uploadAndStart")
+                        : t("training.configurator.button.startFinetuning")
                       : needsUpload
-                        ? "Upload & start training"
-                        : "Start training"}
+                        ? t("training.configurator.button.uploadAndStart")
+                        : t("training.configurator.button.startTraining")}
                 </>
               )}
             </Button>

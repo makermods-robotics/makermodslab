@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Check, Copy, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +17,7 @@ interface HfAuthDialogProps {
 }
 
 const HfAuthDialog: React.FC<HfAuthDialogProps> = ({ open, onOpenChange }) => {
+  const { t } = useTranslation();
   const { auth, refetch } = useHfAuth();
   const [copied, setCopied] = useState(false);
   const [refetching, setRefetching] = useState(false);
@@ -48,11 +50,10 @@ const HfAuthDialog: React.FC<HfAuthDialogProps> = ({ open, onOpenChange }) => {
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="text-amber-700 dark:text-amber-200">
-            Hugging Face CLI not configured
+            {t("landing.hfAuthDialog.title")}
           </DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Uploads, training, and replay-from-Hub require a logged-in HF CLI.
-            Run this in a terminal:
+            {t("landing.hfAuthDialog.description")}
           </DialogDescription>
         </DialogHeader>
         <pre className="bg-muted p-3 rounded border border-border text-xs sm:text-sm overflow-x-auto flex items-center justify-between gap-2">
@@ -61,7 +62,7 @@ const HfAuthDialog: React.FC<HfAuthDialogProps> = ({ open, onOpenChange }) => {
             type="button"
             onClick={handleCopy}
             className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-            aria-label="Copy command"
+            aria-label={t("landing.hfAuthDialog.copyAria")}
           >
             {copied ? (
               <Check className="w-4 h-4 text-ok" />
@@ -80,7 +81,7 @@ const HfAuthDialog: React.FC<HfAuthDialogProps> = ({ open, onOpenChange }) => {
           <RefreshCw
             className={`w-4 h-4 mr-2 ${refetching ? "animate-spin" : ""}`}
           />
-          I've logged in — recheck
+          {t("landing.hfAuthDialog.recheck")}
         </Button>
       </DialogContent>
     </Dialog>

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Play } from "lucide-react";
 import {
   Dialog,
@@ -53,6 +54,7 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
   onChanged,
   onRun,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const [pendingDelete, setPendingDelete] = useState<ModelItem | null>(null);
@@ -71,18 +73,25 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
     try {
       if (resolution.action === "unpin") {
         await removeCustomModel(baseUrl, fetchWithHeaders, item.id);
-        toast({ title: "Removed from list", description: item.name });
+        // The model name is data — it stays the toast's verbatim description.
+        toast({
+          title: t("dialogs.skillManage.toast.removedFromList"),
+          description: item.name,
+        });
       } else if (resolution.action === "hide") {
         await hideModel(baseUrl, fetchWithHeaders, item.hf_repo_id ?? item.id);
-        toast({ title: "Removed from list", description: item.name });
+        toast({
+          title: t("dialogs.skillManage.toast.removedFromList"),
+          description: item.name,
+        });
       } else {
         const r = await deleteModel(baseUrl, fetchWithHeaders, item.id);
         if (!r.deleted) return;
         toast({
           title:
             resolution.action === "delete-local-copy"
-              ? "Local copy removed"
-              : "Model deleted",
+              ? t("dialogs.skillManage.toast.localCopyRemoved")
+              : t("dialogs.skillManage.toast.modelDeleted"),
           description: item.name,
         });
       }
@@ -91,7 +100,9 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
     } catch (e) {
       toast({
         title:
-          resolution.action === "delete-local" ? "Delete failed" : "Couldn't remove",
+          resolution.action === "delete-local"
+            ? t("dialogs.skillManage.toast.deleteFailed")
+            : t("dialogs.skillManage.toast.removeFailed"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -123,7 +134,7 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
 
           <Button onClick={() => onRun(model)} className="w-full gap-2">
             <Play className="h-4 w-4" />
-            Run on robot
+            {t("dialogs.skillManage.runOnRobot")}
           </Button>
         </DialogContent>
       </Dialog>
@@ -134,19 +145,23 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
+            {/* `resolveDeleteAction` names WHICH sentence to render; the
+                title is a whole question with the model name — data — dropped
+                in as `{{label}}` wherever the language wants it. */}
             <AlertDialogTitle className="break-words">
-              {res?.titlePrefix} "
-              <span className="break-all">{pendingDelete?.name}</span>"?
+              {res ? t(res.titleKey as never, { label: pendingDelete?.name }) : null}
             </AlertDialogTitle>
-            <AlertDialogDescription>{res?.description}</AlertDialogDescription>
+            <AlertDialogDescription>
+              {res ? t(res.descriptionKey as never) : null}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={confirmDelete}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {res?.confirmLabel}
+              {res ? t(res.confirmKey as never) : null}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

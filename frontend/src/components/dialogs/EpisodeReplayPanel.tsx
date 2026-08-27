@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Loader2, Square, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { useRobots, robotSetupGap } from "@/hooks/useRobots";
+import { useRobots } from "@/hooks/useRobots";
+import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
 import { useLiveJointReadout } from "@/hooks/useLiveJointReadout";
 import {
@@ -16,13 +18,16 @@ import {
 
 const POLL_MS = 1000;
 
-const PHASE_LABEL: Record<ReplayPhase, string> = {
-  idle: "Idle",
-  easing_in: "Easing to start position…",
-  playing: "Replaying",
-  stopping: "Stopping…",
-  done: "Done",
-  error: "Error",
+// Catalog KEYS, not resolved copy: this map is built once at import time, so
+// storing translated strings here would freeze whichever language loaded first.
+// The ReplayPhase values are backend data; only the labels are display.
+const PHASE_LABEL_KEY: Record<ReplayPhase, string> = {
+  idle: "dialogs.replay.phase.idle",
+  easing_in: "dialogs.replay.phase.easingIn",
+  playing: "dialogs.replay.phase.playing",
+  stopping: "dialogs.replay.phase.stopping",
+  done: "dialogs.replay.phase.done",
+  error: "dialogs.replay.phase.error",
 };
 
 export interface EpisodeReplayPanelProps {
@@ -36,6 +41,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   episodeIndex,
   onElapsedChange,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { selectedRecord } = useRobots();
@@ -49,7 +55,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
 
   const { markHandled } = useSessionExitGuard({
     active: status?.replay_active === true,
-    confirmMessage: "Leaving stops the running replay. Continue?",
+    confirmMessage: t("dialogs.replay.leaveConfirm"),
     beaconUrl: `${baseUrl}/stop-replay`,
     onLeave: () => {
       stopReplay(baseUrl, fetchWithHeaders).catch(() => {});
@@ -84,8 +90,11 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         if (!next.replay_active && (next.phase === "done" || next.phase === "error")) {
           if (next.phase === "error") {
             toast({
-              title: "Replay failed",
-              description: next.hint ?? next.error ?? "See the server log for details.",
+              title: t("dialogs.replay.toast.failedTitle"),
+              // The backend's hint/error is prose we don't translate; only the
+              // client-side fallback beside it is a catalog string.
+              description:
+                next.hint ?? next.error ?? t("dialogs.replay.toast.seeLog"),
               variant: "destructive",
               duration: 10000,
             });
@@ -96,7 +105,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
       } catch (e) {
         if (!cancelled) {
           toast({
-            title: "Lost connection to backend",
+            title: t("dialogs.replay.toast.lostConnectionTitle"),
             description: e instanceof Error ? e.message : String(e),
             variant: "destructive",
           });
@@ -109,7 +118,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
       cancelled = true;
       clearInterval(id);
     };
-  }, [baseUrl, fetchWithHeaders, toast, markHandled, onElapsedChange]);
+  }, [baseUrl, fetchWithHeaders, toast, markHandled, onElapsedChange, t]);
 
   const handleStart = async () => {
     if (!selectedRecord) return;
@@ -124,11 +133,15 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         robot_name: selectedRecord.name,
       });
       if (result.warning) {
-        toast({ title: "Started with a warning", description: result.warning, duration: 8000 });
+        toast({
+          title: t("dialogs.replay.toast.startedWarningTitle"),
+          description: result.warning,
+          duration: 8000,
+        });
       }
     } catch (e) {
       toast({
-        title: "Could not start replay",
+        title: t("dialogs.replay.toast.startFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -143,7 +156,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
       await stopReplay(baseUrl, fetchWithHeaders);
     } catch (e) {
       toast({
-        title: "Could not stop replay",
+        title: t("dialogs.replay.toast.stopFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -158,8 +171,12 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
     return (
       <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">
         {selectedRecord
-          ? `Select a robot ready to replay: this robot ${robotSetupGap(selectedRecord, "follower")}.`
-          : "Select a robot with a connected follower arm to replay this episode on hardware."}
+          ? t("dialogs.replay.robotNotReady", {
+              // Localized diagnosis of WHY the record is unclean — the shared
+              // renderer, not the English `robotSetupGap`.
+              gap: formatRobotSetupGap(t, selectedRecord, "follower"),
+            })
+          : t("dialogs.replay.noRobot")}
       </div>
     );
   }
@@ -169,11 +186,11 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
       <div className="flex items-center gap-3 rounded-md border border-border bg-muted/40 p-3">
         <Button onClick={handleStart} disabled={starting} size="sm" className="gap-2">
           {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-          Replay on hardware
+          {t("dialogs.replay.start")}
         </Button>
         <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
           <TriangleAlert className="h-3 w-3 shrink-0" />
-          Moves {selectedRecord.name}&apos;s arm — make sure the area is clear.
+          {t("dialogs.replay.movesArmWarning", { robot: selectedRecord.name })}
         </p>
       </div>
     );
@@ -182,10 +199,12 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
   return (
     <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-medium">{PHASE_LABEL[status?.phase ?? "idle"]}</span>
+        <span className="text-xs font-medium">
+          {t(PHASE_LABEL_KEY[status?.phase ?? "idle"] as never)}
+        </span>
         <Button onClick={handleStop} disabled={stopping} size="sm" variant="destructive" className="gap-2">
           <Square className="h-3 w-3" />
-          Stop
+          {t("dialogs.replay.stop")}
         </Button>
       </div>
       {Object.keys(liveJoints).length > 0 ? (

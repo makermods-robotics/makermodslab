@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
@@ -9,6 +10,7 @@ import { useRobots } from "@/hooks/useRobots";
 const TeleoperationPage = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   // The teleop session is for the currently-selected robot; show two arms when
   // it's bimanual.
@@ -80,7 +82,7 @@ const TeleoperationPage = () => {
         // Cleanup could not release an arm — torque may still be enabled and
         // the arm can stay rigid. Make this loud instead of claiming success.
         toast({
-          title: "Teleoperation stopped — check the arm",
+          title: t("pages.teleop.stoppedWarnTitle"),
           description: data.warning,
           variant: "destructive",
         });
@@ -88,9 +90,9 @@ const TeleoperationPage = () => {
         // The backend drives the follower straight back to its session-start
         // pose (no timed hold), then releases torque.
         toast({
-          title: "Teleoperation stopped",
+          title: t("pages.teleop.stoppedTitle"),
           description:
-            data.message ?? "The arm returns to its starting position, then goes limp.",
+            data.message ?? t("pages.teleop.releasingFallback"),
         });
         // The release happens after this response returns, so check once
         // after the return (progress-based, 10 s ceiling) whether it actually
@@ -103,7 +105,7 @@ const TeleoperationPage = () => {
             );
             if (status?.last_cleanup_error) {
               toast({
-                title: "Check the arm",
+                title: t("pages.teleop.checkArmTitle"),
                 // Lead with the plain-language hint when the backend mapped
                 // one (e.g. gripper overload) — the raw text follows.
                 description: status.hint
@@ -118,8 +120,8 @@ const TeleoperationPage = () => {
         }, 13000);
       } else if (data?.success) {
         toast({
-          title: "Teleoperation stopped",
-          description: "The arm was disconnected cleanly.",
+          title: t("pages.teleop.stoppedTitle"),
+          description: t("pages.teleop.disconnectedCleanly"),
         });
       }
     } catch {
@@ -184,8 +186,8 @@ const TeleoperationPage = () => {
               }`}
             />
             {finishedWarn
-              ? "Teleoperation ended with a cleanup warning"
-              : "Teleoperation failed"}
+              ? t("pages.teleop.endedWithWarning")
+              : t("pages.teleop.failed")}
           </div>
           {finished.hint && (
             <p

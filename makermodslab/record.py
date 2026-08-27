@@ -36,8 +36,8 @@ from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
-    invalidate_hub_dataset_info,
     invalidate_hub_status,
+    push_dataset_to_hub,
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
@@ -1466,32 +1466,28 @@ class UploadManager:
             return status
 
     def _worker(self, request: UploadRequest) -> None:
-        from lerobot.datasets import LeRobotDataset
-
         repo_id = request.dataset_repo_id
         try:
-            logger.info(f"Loading dataset {repo_id} for upload")
-            dataset = LeRobotDataset(repo_id)
-            logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
-
             tags = with_makermodslab_tag(request.tags)
             logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
-            dataset.push_to_hub(tags=tags, private=request.private)
-            logger.info(f"Dataset {repo_id} uploaded successfully to HuggingFace Hub")
+            # A locally-recorded dataset's id is bare; push_dataset_to_hub
+            # resolves it and returns the id it actually landed under, which is
+            # what the success message and url below must name — the bare one
+            # would send the user to a 404.
+            hub_repo_id = push_dataset_to_hub(repo_id, tags=tags, private=request.private)
+            logger.info(f"Dataset {hub_repo_id} uploaded successfully to HuggingFace Hub")
 
-            # The dataset now exists on the Hub; drop any cached "local_only"
-            # answer so the info card's next hub-status check flips to "On Hub",
-            # drop the cached /datasets listing so the newly-pushed repo appears
-            # immediately, and drop any cached hub summary (the push changed
-            # meta/info.json on the Hub).
-            invalidate_hub_status(repo_id)
+            # push_dataset_to_hub already dropped the cached Hub facts for this
+            # dataset (existence + summary), so the card's next hub-status check
+            # flips to "On Hub". The merged /datasets listing is this site's to
+            # drop: it isn't a Hub fact, but the newly-pushed repo should appear
+            # in it immediately rather than after the TTL.
             invalidate_dataset_listing_cache()
-            invalidate_hub_dataset_info(repo_id)
 
             with self._lock:
                 self.state = "done"
-                self.message = f"Dataset {repo_id} uploaded successfully to the Hugging Face Hub"
-                self.dataset_url = f"https://huggingface.co/datasets/{repo_id}"
+                self.message = f"Dataset {hub_repo_id} uploaded successfully to the Hugging Face Hub"
+                self.dataset_url = f"https://huggingface.co/datasets/{hub_repo_id}"
                 self.docs_url = None
         except Exception as e:
             logger.error(f"Error uploading dataset {repo_id}: {e}")
@@ -2132,7 +2128,14 @@ def record_with_web_events(
             releasing = False
 
     if cfg.dataset.push_to_hub:
-        dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+        # Same bare-id hazard as the UploadManager path, and the same single
+        # workaround: cfg.dataset.repo_id is the local (bare) id, and calling
+        # dataset.push_to_hub directly would let create_repo resolve it while
+        # the upload_folder right after it doesn't — stranding an empty repo.
+        # Unreachable from the browser today (the recording dialog sends
+        # push_to_hub: false and lets the user upload afterwards), but this is
+        # an HTTP API a non-UI caller can set.
+        push_dataset_to_hub(cfg.dataset.repo_id, tags=cfg.dataset.tags, private=cfg.dataset.private)
 
     log_say("Exiting", cfg.play_sounds)
     return dataset

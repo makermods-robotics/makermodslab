@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/contexts/ThemeContext";
+import { LanguageProvider } from "@/contexts/LanguageContext";
 import { UrdfProvider } from "@/contexts/UrdfContext";
 import { DragAndDropProvider } from "@/contexts/DragAndDropContext";
 import { Toaster } from "@/components/ui/toaster";
@@ -27,6 +28,7 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <ThemeProvider>
+          <LanguageProvider>
           <ApiProvider>
             <HfAuthProvider>
               <UrdfProvider>
@@ -73,6 +75,7 @@ function App() {
               </UrdfProvider>
             </HfAuthProvider>
           </ApiProvider>
+          </LanguageProvider>
         </ThemeProvider>
       </TooltipProvider>
     </QueryClientProvider>

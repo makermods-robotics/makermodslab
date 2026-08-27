@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,11 +23,15 @@ import { useJobsData } from "./JobsDataContext";
  * uploaded Hub repos no job tracks. */
 type ModelsFilter = "all" | "imported" | "uploaded";
 
-const FILTERS: Array<{ key: ModelsFilter; label: string }> = [
-  { key: "all", label: "All" },
-  { key: "imported", label: "Imported" },
-  { key: "uploaded", label: "Uploaded" },
-];
+/** `key` is LOGIC — it is what the grid filters on and never changes. `label`
+ * is a translation KEY, not a word: this array is built at import time, so a
+ * resolved label would freeze whichever language loaded first. It is resolved
+ * where the toolbar is rendered. */
+const FILTERS = [
+  { key: "all", label: "jobs.modelsLibrary.filters.all" },
+  { key: "imported", label: "jobs.modelsLibrary.filters.imported" },
+  { key: "uploaded", label: "jobs.modelsLibrary.filters.uploaded" },
+] as const satisfies ReadonlyArray<{ key: ModelsFilter; label: string }>;
 
 interface ModelsLibraryProps {
   /** Select this model (job record + optional checkpoint step) as the skill
@@ -43,6 +48,7 @@ interface ModelsLibraryProps {
  * Deploy panel instead of opening the legacy modal.
  */
 const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
+  const { t } = useTranslation();
   const { openStudio } = useStudio();
   const {
     importedJobs,
@@ -116,7 +122,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
       className="space-y-3"
     >
       <LibraryHeader
-        title="Your skills"
+        title={t("jobs.modelsLibrary.title")}
         count={count}
         open={libraryOpen}
         actions={
@@ -127,7 +133,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
             className="h-7 shrink-0 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
           >
             <Download className="h-3.5 w-3.5" />
-            Import skill
+            {t("jobs.modelsLibrary.importSkill")}
           </Button>
         }
       />
@@ -140,16 +146,20 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
               GRID_MIN_H,
             )}
           >
-            No skills yet. Train one, or use Import skill to add one from the
-            Hub or a local folder.
+            {t("jobs.modelsLibrary.empty")}
           </div>
         ) : (
           <div className="space-y-3">
             <LibraryToolbar
               query={search}
               onQueryChange={setSearch}
-              searchPlaceholder="Search skills"
-              filters={FILTERS}
+              searchPlaceholder={t("jobs.modelsLibrary.searchPlaceholder")}
+              // Only the LABEL is translated — `key` is what the grid filters
+              // on and is passed through untouched.
+              filters={FILTERS.map((f) => ({
+                key: f.key,
+                label: t(f.label),
+              }))}
               filter={filter}
               onFilterChange={setFilter}
             />
@@ -160,7 +170,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
                   GRID_MIN_H,
                 )}
               >
-                No models match.
+                {t("jobs.modelsLibrary.noMatch")}
               </p>
             ) : (
               // Imported and uploaded cards merged newest-first (import time

@@ -566,7 +566,7 @@ def _submitted_command(config, tmp_path, monkeypatch, job_id: str = "child_run")
     api = MagicMock()
     api.run_job.return_value = MagicMock(id="hfjob-1", url="https://hf/jobs/1")
     runner._api = api
-    monkeypatch.setattr(runner, "_ensure_dataset_on_hub", lambda repo_id: None)
+    monkeypatch.setattr(runner, "_ensure_dataset_on_hub", lambda *_ids: None)
     monkeypatch.setattr(runner, "_start_worker_threads", lambda label: None)
     runner.start(job_id, config, "/host/out")
     return api.run_job.call_args.kwargs["command"]

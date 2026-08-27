@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Loader2, Copy, Sparkles, ChevronRight } from "lucide-react";
 import {
   Dialog,
@@ -27,6 +28,7 @@ const UpdateNotice = () => {
   const { status, open, dismiss } = useUpdateCheck();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const [dontAsk, setDontAsk] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
@@ -35,21 +37,21 @@ const UpdateNotice = () => {
 
   const behind =
     typeof status.commits_behind === "number" && status.commits_behind > 0
-      ? `${status.commits_behind} commit${status.commits_behind === 1 ? "" : "s"} behind`
-      : "A new version is available";
+      ? t("shared.update.behind", { count: status.commits_behind })
+      : t("shared.update.available");
 
   const copyCommand = async () => {
     if (!status.update_command) return;
     try {
       await navigator.clipboard.writeText(status.update_command);
       toast({
-        title: "Copied",
-        description: "Update command copied to clipboard.",
+        title: t("shared.update.copiedTitle"),
+        description: t("shared.update.copiedDescription"),
       });
     } catch {
       toast({
-        title: "Copy failed",
-        description: "Select and copy the command manually.",
+        title: t("shared.update.copyFailedTitle"),
+        description: t("shared.update.copyFailedDescription"),
         variant: "destructive",
       });
     }
@@ -65,19 +67,23 @@ const UpdateNotice = () => {
       const body: { success: boolean; message: string; output: string } =
         await r.json();
       if (body.success) {
-        toast({ title: "Updated", description: body.message });
+        toast({
+          // body.message is backend prose — shown as-is.
+          title: t("shared.update.updatedTitle"),
+          description: body.message,
+        });
         dismiss(false);
       } else {
         setOutput(body.output || body.message);
         toast({
-          title: "Update failed",
+          title: t("shared.update.failedTitle"),
           description: body.message,
           variant: "destructive",
         });
       }
     } catch (e) {
       toast({
-        title: "Update failed",
+        title: t("shared.update.failedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -100,12 +106,12 @@ const UpdateNotice = () => {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-3 text-foreground">
             <Sparkles className="w-5 h-5 text-warn" />
-            MakerMods Lab update available
+            {t("shared.update.title")}
           </DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            You're {behind} 😱.
+            {t("shared.update.body", { behind })}
             <br />
-            Update to get the latest fixes and features 🤗.
+            {t("shared.update.bodyLine2")}
             {status.compare_url && (
               <>
                 {" "}
@@ -115,7 +121,7 @@ const UpdateNotice = () => {
                   rel="noreferrer"
                   className="text-info underline hover:text-info/80"
                 >
-                  See what changed
+                  {t("shared.update.seeChanges")}
                 </a>
                 .
               </>
@@ -127,7 +133,7 @@ const UpdateNotice = () => {
           <Collapsible>
             <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
               <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-              Or update manually
+              {t("shared.update.manual")}
             </CollapsibleTrigger>
             <CollapsibleContent className="pt-2">
               <div className="flex items-start gap-2">
@@ -138,7 +144,7 @@ const UpdateNotice = () => {
                   variant="outline"
                   size="icon"
                   onClick={copyCommand}
-                  title="Copy command"
+                  title={t("shared.update.copyCommand")}
                   className="shrink-0 bg-background border-border text-foreground hover:bg-accent"
                 >
                   <Copy className="w-4 h-4" />
@@ -160,7 +166,7 @@ const UpdateNotice = () => {
                 onCheckedChange={(v) => setDontAsk(v === true)}
                 className="border-border data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
               />
-              Don't ask me again
+              {t("shared.update.dontAsk")}
             </label>
             <div className="flex items-center gap-2">
               <Button
@@ -169,17 +175,17 @@ const UpdateNotice = () => {
                 disabled={updating}
                 className="text-muted-foreground hover:bg-accent hover:text-foreground"
               >
-                Later
+                {t("shared.update.later")}
               </Button>
               {status.can_auto_update && (
                 <Button onClick={runUpdate} disabled={updating}>
                   {updating ? (
                     <>
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Updating…
+                      {t("shared.update.updating")}
                     </>
                   ) : (
-                    "Update now"
+                    t("shared.update.now")
                   )}
                 </Button>
               )}
