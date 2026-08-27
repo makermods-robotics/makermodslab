@@ -122,6 +122,26 @@ class Client:
                 stacklevel=4,
             )
 
+    def describe(self):
+        """One call that answers "where do things stand?" — run this first.
+
+        Fans out over the read-only orientation endpoints and returns a
+        :class:`~makermodslab_sdk.describe.ServerSnapshot`: server health and
+        identity, the current session (or how the last one ended), running
+        and recent training jobs, and registered peer nodes. A failing
+        section lands in ``snapshot.errors`` instead of hiding the rest.
+
+        Example:
+            >>> print(client.describe().summary())
+            server: ok v0.1.0 (node ab12cd34…, accepts_jobs=True)
+            session: none — the robot is free
+            jobs: none running (3 recent)
+            nodes: none registered
+        """
+        from makermodslab_sdk.describe import snapshot
+
+        return snapshot(self)
+
     def close(self) -> None:
         self._transport.close()
 

@@ -21,6 +21,7 @@ from makermodslab_sdk.errors import (
     RobotBusyError,
     SessionHeldError,
 )
+from makermodslab_sdk.resources._waiting import OperationFailedError, WaitTimeoutError
 from makermodslab_sdk.resources.jobs import JobWaitTimeout
 from makermodslab_sdk.resources.sessions import SessionLostError
 
@@ -35,8 +36,10 @@ __all__ = [
     "JobWaitTimeout",
     "MakerModsError",
     "NotFoundError",
+    "OperationFailedError",
     "RobotBusyError",
     "SessionHeldError",
     "SessionLostError",
+    "WaitTimeoutError",
     "__version__",
 ]

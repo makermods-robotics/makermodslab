@@ -10,8 +10,15 @@ to be in context when it's needed.
 from makermodslab_sdk import Client
 
 client = Client("http://localhost:8000")
-print(client.system.health().version)
+print(client.describe().summary())   # one-call orientation: server, session, jobs, nodes
+
+with client.sessions.teleoperate("bench") as s:   # lease heartbeats + stop, automatic
+    print(s.id, s.warnings)
 ```
+
+`python -m makermodslab_sdk.docs` prints the full cheatsheet (~4k tokens,
+method reference introspected from the code) — made to be loaded into an
+agent's context. `SPEC.md` is the language-agnostic behavior contract.
 
 ## Layering (port guide)
 
