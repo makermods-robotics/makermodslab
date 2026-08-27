@@ -82,13 +82,7 @@ PLANNED: dict[str, frozenset[str]] = {
             "models_upload",
         }
     ),
-    "nodes": frozenset(
-        {
-            "add_node",
-            "list_nodes",
-            "remove_node",
-        }
-    ),
+    "nodes": frozenset(),
     "sessions": frozenset(
         {
             "current_session",
@@ -97,28 +91,7 @@ PLANNED: dict[str, frozenset[str]] = {
             "stop_session",
         }
     ),
-    "system": frozenset(
-        {
-            "get_available_cameras",
-            "get_available_ports",
-            "get_policy_extra",
-            "get_policy_optimizer_defaults",
-            "get_robot_port",
-            "get_training_extra",
-            "get_wandb_extra",
-            "hf_auth_login",
-            "hf_auth_status",
-            "install_policy_extra",
-            "install_policy_extra_status",
-            "install_training_extra",
-            "install_training_extra_status",
-            "install_wandb_extra",
-            "install_wandb_extra_status",
-            "run_update",
-            "supply_voltage",
-            "update_check",
-        }
-    ),
+    "system": frozenset(),
 }
 
 

@@ -61,3 +61,103 @@ def test_unknown_route_is_plain_api_error(sdk_client):
     with pytest.raises(ApiError) as excinfo:
         sdk_client._transport.request("GET", "/api/v1/definitely/not/a/route")
     assert excinfo.value.status == 404
+
+
+# --- the wider system namespace ---------------------------------------------
+
+
+def test_hf_login_sends_token():
+    import httpx
+    from helpers import mock_client
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.read()
+        return httpx.Response(
+            200,
+            json={
+                "authenticated": True,
+                "username": "someuser",
+                "orgs": ["makermods"],
+                "login_command": "hf auth login",
+            },
+        )
+
+    with mock_client(handler) as client:
+        result = client.system.hf_login(token="hf_secret")
+    assert seen["path"] == "/api/v1/hf-auth/login"
+    assert b"hf_secret" in seen["body"]
+    assert result.authenticated is True
+    assert result.orgs == ["makermods"]
+
+
+def test_supply_voltage_param_only_when_given():
+    import httpx
+    from helpers import mock_client
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"success": True, "voltage": 12.1, "message": None})
+
+    with mock_client(handler) as client:
+        assert client.system.supply_voltage(port="/dev/ttyUSB0").voltage == 12.1
+        assert "port=%2Fdev%2FttyUSB0" in seen["url"]
+        client.system.supply_voltage()
+        assert "port=" not in seen["url"]
+
+
+def test_policy_extra_paths_carry_policy_type():
+    import httpx
+    from helpers import mock_client
+
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/install"):
+            return httpx.Response(200, json={"started": True, "message": "installing"})
+        if request.url.path.endswith("/install-status"):
+            return httpx.Response(200, json={"state": "running", "error": None, "logs": []})
+        return httpx.Response(
+            200,
+            json={
+                "policy_type": "pi0",
+                "needs_extra": True,
+                "available": False,
+                "package": "lerobot[pi0]",
+                "install_target": "lerobot[pi0]",
+                "install_hint": "install it",
+            },
+        )
+
+    with mock_client(handler) as client:
+        assert client.system.policy_extra("pi0").needs_extra is True
+        assert client.system.install_policy_extra("pi0").started is True
+        assert client.system.policy_extra_install_status("pi0").state == "running"
+    assert paths == [
+        "/api/v1/system/policy-extra/pi0",
+        "/api/v1/system/policy-extra/pi0/install",
+        "/api/v1/system/policy-extra/pi0/install-status",
+    ]
+
+
+def test_policy_optimizer_defaults_end_to_end(sdk_client):
+    defaults = sdk_client.system.policy_optimizer_defaults()
+    assert isinstance(defaults.defaults, dict) and defaults.defaults
+    assert isinstance(defaults.available, dict)
+
+
+def test_training_extra_end_to_end(sdk_client):
+    status = sdk_client.system.training_extra()
+    assert isinstance(status.available, bool)
+    assert isinstance(status.install_hint, str)
+
+
+def test_robot_port_end_to_end(sdk_client):
+    port = sdk_client.system.robot_port("follower")
+    assert port.status == "success"
+    assert isinstance(port.default_port, str)
