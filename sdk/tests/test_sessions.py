@@ -283,3 +283,198 @@ def test_stop_current_swallows_the_race_404():
     )
     with mock_client(script) as client:
         assert client.sessions.stop_current() is None
+
+
+# --- ActiveSession: tick classification (no threads, no sleeps) --------------
+
+
+def make_active(script: Script, *, lease: bool = True, timeout_s: float = 60.0, warnings=None):
+    """An ActiveSession over a scripted client, heartbeat THREAD disabled —
+    tests drive ticks directly (house style: never sleep)."""
+    from makermodslab_sdk.resources.sessions import ActiveSession
+
+    client = mock_client(script)
+    started = StartedSession.model_validate(
+        {"session": session_body(lease=lease, timeout_s=timeout_s), "warnings": warnings}
+    )
+    return ActiveSession(client.sessions, started, owner=OWNER, auto_heartbeat=False), client
+
+
+def heartbeat_404():
+    return (404, {"detail": "No active session with id 'sess-1'.", "code": "session.not_found"})
+
+
+def stop_ok(phase="released"):
+    return (200, {"session": session_body(phase=phase), "result": {"success": True}})
+
+
+def test_interval_is_a_third_of_the_lease_floored():
+    s, _ = make_active(Script(), timeout_s=60.0)
+    assert s.heartbeat_interval_s == 20.0
+    s, _ = make_active(Script(), timeout_s=4.0)
+    assert s.heartbeat_interval_s == 2.0  # the floor
+    s, _ = make_active(Script(), lease=False)
+    assert s.heartbeat_interval_s is None
+
+
+def test_no_lease_means_no_heartbeat_thread_even_when_auto():
+    from makermodslab_sdk.resources.sessions import ActiveSession
+
+    client = mock_client(Script())
+    started = StartedSession.model_validate({"session": session_body(lease=False)})
+    s = ActiveSession(client.sessions, started, owner=OWNER)  # auto_heartbeat default True
+    assert s._thread is None
+    assert s.alive
+
+
+def test_tick_renewed_updates_info():
+    script = Script().add(
+        "POST",
+        "/api/v1/sessions/sess-1/heartbeat",
+        (200, {"session": session_body(phase="recording", expires_in_s=60.0)}),
+    )
+    s, _ = make_active(script)
+    assert s._tick() == "renewed"
+    assert s.alive
+    assert s.info.phase == "recording"
+
+
+def test_tick_gone_records_loss():
+    script = Script().add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+    s, _ = make_active(script)
+    assert s._tick() == "gone"
+    assert not s.alive
+    assert s.lost_reason == "session.not_found"
+
+
+@pytest.mark.parametrize("code", ["session.not_owner", "session.lease_expired"])
+def test_tick_unrenewable_409_records_loss(code):
+    script = Script().add(
+        "POST", "/api/v1/sessions/sess-1/heartbeat", (409, {"detail": "nope", "code": code})
+    )
+    s, _ = make_active(script)
+    assert s._tick() == "lost"
+    assert not s.alive
+    assert s.lost_reason == code
+
+
+def test_tick_network_blip_is_transient():
+    script = Script().add(
+        "POST", "/api/v1/sessions/sess-1/heartbeat", httpx.ConnectError("connection refused")
+    )
+    s, _ = make_active(script)
+    assert s._tick() == "transient"
+    assert s.alive  # never kill the session over a network blip
+    assert s.lost_reason is None
+
+
+def test_tick_unexpected_server_error_is_transient():
+    script = Script().add(
+        "POST", "/api/v1/sessions/sess-1/heartbeat", (500, {"detail": "boom", "code": None})
+    )
+    s, _ = make_active(script)
+    assert s._tick() == "transient"
+    assert s.alive
+
+
+def test_tick_after_stop_is_a_noop():
+    """A heartbeat racing our own stop() must not be recorded as a loss —
+    its 404 is the stop's success."""
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    s, _ = make_active(script)
+    s.stop()
+    assert s._tick() == "stopped"  # no heartbeat request was even sent
+    assert s.lost_reason is None
+    assert script.calls("POST", "/api/v1/sessions/sess-1/heartbeat") == []
+
+
+# --- ActiveSession: stop and the context manager -----------------------------
+
+
+def test_stop_is_idempotent():
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    s, _ = make_active(script)
+    first = s.stop()
+    second = s.stop()
+    assert first is not None and first.result == {"success": True}
+    assert second is first  # cached, no second request
+    assert len(script.calls("POST", "/api/v1/sessions/sess-1/stop")) == 1
+    assert not s.alive
+    assert s.info.phase == "released"
+
+
+def test_stop_swallows_already_gone():
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", heartbeat_404())
+    s, _ = make_active(script)
+    assert s.stop() is None
+    assert not s.alive
+
+
+def test_context_manager_clean_exit_stops_without_raising():
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    s, _ = make_active(script)
+    with s:
+        pass
+    assert len(script.calls("POST", "/api/v1/sessions/sess-1/stop")) == 1
+    assert not s.alive
+
+
+def test_exit_raises_session_lost_after_loss():
+    from makermodslab_sdk import SessionLostError
+
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+        .add("POST", "/api/v1/sessions/sess-1/stop", heartbeat_404())
+    )
+    s, _ = make_active(script)
+    with pytest.raises(SessionLostError) as excinfo, s:
+        s._tick()  # the heartbeat discovers the session gone
+    err = excinfo.value
+    assert err.reason == "session.not_found"
+    assert err.session_id == "sess-1"
+    assert err.kind == "teleoperation"
+    assert "Next step:" in str(err)
+    # Cleanup still ran: the stop was attempted (and its 404 swallowed).
+    assert len(script.calls("POST", "/api/v1/sessions/sess-1/stop")) == 1
+
+
+def test_exit_never_masks_the_body_exception():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions/sess-1/heartbeat", heartbeat_404())
+        .add("POST", "/api/v1/sessions/sess-1/stop", heartbeat_404())
+    )
+    s, _ = make_active(script)
+    with pytest.raises(ValueError, match="user error"), s:  # NOT SessionLostError
+        s._tick()
+        raise ValueError("user error")
+    # The stop cleanup still ran.
+    assert len(script.calls("POST", "/api/v1/sessions/sess-1/stop")) == 1
+
+
+def test_deliberate_stop_inside_the_body_does_not_raise_at_exit():
+    script = Script().add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    s, _ = make_active(script)
+    with s:
+        s.stop()
+    assert len(script.calls("POST", "/api/v1/sessions/sess-1/stop")) == 1
+
+
+def test_warnings_surface_verbatim():
+    s, _ = make_active(Script(), warnings=["left arm EEPROM disagrees with calibration"])
+    assert s.warnings == ["left arm EEPROM disagrees with calibration"]
+    s, _ = make_active(Script(), warnings=None)
+    assert s.warnings == []
+
+
+def test_heartbeat_thread_lifecycle_without_waiting():
+    """The timing loop honors the stop event immediately: pre-set it, start
+    the thread, and the loop exits without a single tick or any real wait."""
+    script = Script()  # strict: any request at all would fail the test
+    s, _ = make_active(script)
+    s._stop_event.set()
+    s._start_heartbeat_thread()
+    s._thread.join(timeout=5.0)
+    assert not s._thread.is_alive()
+    assert script.requests == []
