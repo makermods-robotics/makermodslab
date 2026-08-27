@@ -61,7 +61,9 @@ export default {
       body: "This starts a <0>fresh run</0> (new optimizer, from step 0) with the policy weights initialized from that model. Pick a <1>dataset</1> to train on and set your training parameters as usual.",
     },
     tooltip: {
-      localBusy: "Another local training is already running",
+      // A busy local slot no longer blocks Start — the submission queues.
+      willQueue:
+        "A training is already running — this run will wait in the queue.",
       needAuth: "Log in to Hugging Face to use cloud compute",
       needFlavor: "Select a hardware flavor",
       offlineDataset:
@@ -73,6 +75,9 @@ export default {
       uploading: "Uploading…",
       starting: "Starting…",
       startTraining: "Start training",
+      // Shown instead of "Start training" while the local slot is busy: the
+      // click ENQUEUES the run rather than starting it.
+      queueTraining: "Queue training",
       startFinetuning: "Start fine-tuning",
       continueTraining: "Continue training",
       uploadAndStart: "Upload & start training",
@@ -80,6 +85,10 @@ export default {
     },
     toast: {
       startedTitle: "Training Started",
+      queuedTitle: "Training queued",
+      // {{name}} is the run's name (data); {{position}} its 1-based place.
+      queuedBody:
+        "{{name}} — position #{{position}}. It starts when the current run finishes.",
       errorTitle: "Error",
       datasetRequired: "Dataset repository ID is required",
       uploadFailedTitle: "Upload failed",
@@ -382,6 +391,7 @@ export default {
     viewOnHub: "View on Hub ↗",
     viewOnWandb: "View on W&B ↗",
     stop: "Stop",
+    cancelQueued: "Cancel",
     delete: "Delete",
     runInference: "Run inference",
     noCheckpoints: "No checkpoints yet — wait for the first save.",
@@ -389,6 +399,8 @@ export default {
     toast: {
       stoppingTitle: "Stopping…",
       stopFailedTitle: "Stop failed",
+      cancelledTitle: "Removed from the queue",
+      cancelFailedTitle: "Cancel failed",
       removedTitle: "Job removed",
       deleteFailedTitle: "Delete failed",
     },

@@ -91,6 +91,13 @@ interface Presentation {
  * resolved word here would freeze whichever language loaded first. Colour, icon
  * and spin are not copy and stay as they are. */
 const statePresentation = {
+  // Same Clock + warn pairing as the Hub QUEUED stage below — one word, one
+  // look, whichever queue holds the run.
+  queued: {
+    labelKey: JOB_STATE_LABELS.queued,
+    color: "text-warn",
+    Icon: Clock,
+  },
   running: {
     labelKey: JOB_STATE_LABELS.running,
     color: "text-ok",
@@ -227,7 +234,15 @@ function describeEntry(entry: JobsEntry, t: Translate): Described {
   }
   const job = entry.job;
   const state = statePresentation[job.state];
-  const present: Presentation = { ...state, label: t(state.labelKey) };
+  const present: Presentation = {
+    ...state,
+    // A queued run's label carries its live 1-based position ("Queued · #2");
+    // the position is derived per response, so it is always current.
+    label:
+      job.state === "queued" && (job.queue_position ?? 0) > 0
+        ? t("jobs.jobState.queuedAt", { position: job.queue_position ?? 0 })
+        : t(state.labelKey),
+  };
   const isRunning = job.state === "running";
   const isCloud = job.runner === "hf_cloud";
   const isNode = job.runner === "lan_node";

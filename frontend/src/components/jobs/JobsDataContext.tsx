@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useJobsChangedSignal } from "@/hooks/useJobsChangedSignal";
+import { ApiError } from "@/lib/apiClient";
 import {
   HubJob,
   HubModel,
@@ -20,7 +21,9 @@ import {
   dismissHubJob,
   getJob,
   listHubJobs,
+  listJobQueue,
   listJobs,
+  reorderJobQueue,
   stopJob,
 } from "@/lib/jobsApi";
 
@@ -54,12 +57,23 @@ interface JobsDataValue {
   isJobActive: (job: JobRecord) => boolean;
   hubAuthenticated: boolean;
   hubJobsPermission: boolean;
+  /** The WHOLE local training queue, in run order (GET /api/v1/jobs/queue —
+   * uncapped, unlike the history page). What the reorder id list is built
+   * from, so positions can't drift from what the server will promote. */
+  queue: JobRecord[];
   error: string | null;
   hubError: string | null;
   refresh: () => Promise<void>;
   stop: (id: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
   dismissHub: (id: string) => Promise<void>;
+  /** Cancel a QUEUED run — the stop endpoint with the expect_state
+   * precondition, so a click against a stale queue 409s instead of killing a
+   * promoted run. */
+  cancelQueued: (id: string) => Promise<void>;
+  /** Move a queued run one slot up (-1) or down (+1), sending the FULL
+   * current id list; a 409 job.queue_stale refetches and asks to retry. */
+  moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
 }
 
 const JobsDataContext = createContext<JobsDataValue | null>(null);
@@ -78,6 +92,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
   const { t } = useTranslation();
 
   const [jobs, setJobs] = useState<JobRecord[]>([]);
+  const [queue, setQueue] = useState<JobRecord[]>([]);
   // Ancestors referenced via resume_from_job_id but paged out of the list, so a
   // resumed run can still nest its source even when the source is old.
   const [ancestorCache, setAncestorCache] = useState<Record<string, JobRecord>>(
@@ -91,11 +106,16 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
   const [hubError, setHubError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    // Settle the two fetches independently: a hub failure (network, HF outage,
-    // missing scope) must never blank the local jobs, and vice versa.
-    const [localRes, hubRes] = await Promise.allSettled([
+    // Settle the fetches independently: a hub failure (network, HF outage,
+    // missing scope) must never blank the local jobs, and vice versa. The
+    // queue is its own uncapped listing (the /jobs page truncates and orders
+    // by submit time, both wrong for a queue); a failed queue fetch keeps the
+    // last known list rather than blanking the dashboard — the reorder
+    // endpoint's stale check is the correctness backstop.
+    const [localRes, hubRes, queueRes] = await Promise.allSettled([
       listJobs(baseUrl, fetchWithHeaders, LIMIT),
       listHubJobs(baseUrl, fetchWithHeaders),
+      listJobQueue(baseUrl, fetchWithHeaders),
     ]);
     if (localRes.status === "fulfilled") {
       setJobs(localRes.value);
@@ -103,6 +123,9 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     } else {
       const r = localRes.reason;
       setError(r instanceof Error ? r.message : String(r));
+    }
+    if (queueRes.status === "fulfilled") {
+      setQueue(queueRes.value);
     }
     if (hubRes.status === "fulfilled") {
       setHubJobs(hubRes.value.jobs);
@@ -265,6 +288,71 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     [baseUrl, fetchWithHeaders, toast, refresh, t],
   );
 
+  const cancelQueued = useCallback(
+    async (id: string) => {
+      try {
+        // The precondition is the whole point: this click was drawn against a
+        // record saying "queued", and the backend refuses (409
+        // job.state_changed) rather than SIGTERM a run promoted meanwhile.
+        await stopJob(baseUrl, fetchWithHeaders, id, "queued");
+        toast({ title: t("jobs.jobsData.queueCancelled") });
+        refresh();
+      } catch (e) {
+        const code = e instanceof ApiError ? e.code : null;
+        // The two coded refusals worth our own words; anything else shows the
+        // backend's prose as it was written.
+        const description =
+          code === "job.has_queued_dependents"
+            ? t("jobs.jobsData.cancelBlockedDependents")
+            : code === "job.state_changed"
+              ? t("jobs.jobsData.cancelStateChanged")
+              : e instanceof Error
+                ? e.message
+                : String(e);
+        toast({
+          title: t("jobs.jobsData.cancelFailed"),
+          description,
+          variant: "destructive",
+        });
+        // Whatever the refusal said, the record this click was drawn against
+        // is suspect — refetch so the card catches up.
+        refresh();
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast, refresh, t],
+  );
+
+  const moveQueued = useCallback(
+    async (id: string, delta: -1 | 1) => {
+      // The FULL current id list, reordered — the endpoint refuses partial
+      // lists by design, so positions can never be merged from a stale view.
+      const ids = queue.map((j) => j.id);
+      const from = ids.indexOf(id);
+      const to = from + delta;
+      if (from < 0 || to < 0 || to >= ids.length) return;
+      [ids[from], ids[to]] = [ids[to], ids[from]];
+      try {
+        setQueue(await reorderJobQueue(baseUrl, fetchWithHeaders, ids));
+        // Positions ride on the /jobs records too — refetch so cards agree.
+        refresh();
+      } catch (e) {
+        if (e instanceof ApiError && e.code === "job.queue_stale") {
+          // The one refusal a refetch-and-retry clears: the queue moved under
+          // the click (a promotion, a cancel, another tab's reorder).
+          toast({ title: t("jobs.jobsData.queueStale") });
+          refresh();
+          return;
+        }
+        toast({
+          title: t("jobs.jobsData.reorderFailed"),
+          description: e instanceof Error ? e.message : String(e),
+          variant: "destructive",
+        });
+      }
+    },
+    [baseUrl, fetchWithHeaders, queue, toast, refresh, t],
+  );
+
   // Untracked hub jobs aren't deletable on the Hub (the Jobs API has no
   // delete), so "remove" is a persisted backend-side dismissal.
   const dismissHub = useCallback(
@@ -413,6 +501,9 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
   const isJobActive = useCallback(
     (job: JobRecord): boolean =>
       job.state === "running" ||
+      // A queued run is the machine's PLAN — hiding it in the untracked fold
+      // would hide the only place its position and Cancel live.
+      job.state === "queued" ||
       chainCheckpointCount(job) > 0 ||
       ancestorsPending(job),
     [chainCheckpointCount, ancestorsPending],
@@ -432,12 +523,15 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       isJobActive,
       hubAuthenticated,
       hubJobsPermission,
+      queue,
       error,
       hubError,
       refresh,
       stop,
       remove,
       dismissHub,
+      cancelQueued,
+      moveQueued,
     }),
     [
       jobs,
@@ -452,12 +546,15 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       isJobActive,
       hubAuthenticated,
       hubJobsPermission,
+      queue,
       error,
       hubError,
       refresh,
       stop,
       remove,
       dismissHub,
+      cancelQueued,
+      moveQueued,
     ],
   );
 

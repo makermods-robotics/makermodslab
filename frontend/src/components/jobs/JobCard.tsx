@@ -22,7 +22,10 @@ import {
   Square,
   Trash2,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
+  Clock,
   Globe,
   HardDrive,
   Loader2,
@@ -49,6 +52,7 @@ import {
   resumableCheckpoints,
 } from "./resumeSeed";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
+import { useJobsData } from "./JobsDataContext";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
 interface Props {
@@ -78,6 +82,13 @@ function relativeTime(epochSec: number): string {
  * and icon are not copy and stay put.
  */
 const statePresentation = {
+  // The same Clock + warn pairing the Hub's QUEUED stage wears in the run
+  // dropdown, so one word means one look everywhere.
+  queued: {
+    labelKey: JOB_STATE_LABELS.queued,
+    color: "text-warn",
+    Icon: Clock,
+  },
   running: {
     labelKey: JOB_STATE_LABELS.running,
     color: "text-ok",
@@ -104,6 +115,7 @@ const statePresentation = {
  * state rather than .toLowerCase() on a translated word — case is a property of
  * a script, not of a string. */
 const SUBTITLE_STATE_KEYS = {
+  queued: "jobs.jobCard.subtitleState.queued",
   running: "jobs.jobCard.subtitleState.running",
   done: "jobs.jobCard.subtitleState.done",
   failed: "jobs.jobCard.subtitleState.failed",
@@ -139,9 +151,14 @@ const JobCard: React.FC<Props> = ({
   const { toast } = useToast();
   const { t } = useTranslation();
   const { openStudio, openJobMonitor } = useStudio();
+  // Queue plumbing comes from the shared provider (this card is only ever
+  // mounted under it): the uncapped queue list is what the up/down controls
+  // reorder against, and cancelQueued carries the expect_state precondition.
+  const { queue, cancelQueued, moveQueued } = useJobsData();
   const present = statePresentation[job.state];
   const Icon = present.Icon;
   const isRunning = job.state === "running";
+  const isQueued = job.state === "queued";
   const isImported = job.runner === "imported";
   // A Hub-backed import (vs a local-folder import) — provenance stays visible
   // after an untracked Hub repo is unified into a tracked imported card.
@@ -157,9 +174,20 @@ const JobCard: React.FC<Props> = ({
   // title's hover reveals it too (DisplayName's `full`).
   const taskTitle = runTaskTitle(displayName);
   const importedSource = job.hf_repo_id || job.output_dir;
+  // A queued badge carries its 1-based queue position ("Queued · #2") — the
+  // position is derived per response server-side, never a frozen copy.
+  const queuePosition = isQueued ? (job.queue_position ?? 0) : 0;
+  // Where this run sits in the provider's uncapped queue list — what the
+  // up/down controls swap against. -1 while the two fetches disagree for a
+  // moment; both buttons then disable rather than reorder blind.
+  const queueIndex = isQueued
+    ? queue.findIndex((q) => q.id === job.id)
+    : -1;
   const stateLabel = isImported
     ? t("jobs.location.imported")
-    : t(present.labelKey);
+    : isQueued && queuePosition > 0
+      ? t("jobs.jobState.queuedAt", { position: queuePosition })
+      : t(present.labelKey);
   const isStarting = isRunning && job.metrics.total_steps === 0;
   const progressPct =
     job.metrics.total_steps > 0
@@ -344,7 +372,13 @@ const JobCard: React.FC<Props> = ({
   // Replacing them with AlertDialogs is a separate UX change.
   const handleAction = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (isRunning) {
+    if (isQueued) {
+      // Cancel, not stop: the run never started, and the record is removed
+      // outright. cancelQueued sends the expect_state precondition so a click
+      // against a stale queue refuses instead of killing a promoted run.
+      if (window.confirm("Cancel this queued run? It hasn't started training."))
+        cancelQueued(job.id);
+    } else if (isRunning) {
       if (window.confirm("Stop this run?")) onStop(job.id);
     } else if (isImported) {
       if (
@@ -552,12 +586,16 @@ const JobCard: React.FC<Props> = ({
 
   const showProgressBar = isRunning;
   // The action row carries Run / Resume / Fine-tune / Download, so it is gated
-  // on having a checkpoint at all rather than on Resume's own rule. (Upstream
+  // on having a checkpoint at all rather than on Resume's own rule. A QUEUED
+  // run suppresses it wholesale: it has trained nothing yet, and the lineage
+  // checkpoints it may inherit belong to the run it will continue — offering
+  // Run/Fine-tune off a card that says "Queued" reads as progress it hasn't
+  // made. Progress affordances (the bar above) are likewise running-only. (Upstream
   // of this branch the row exists to serve Resume alone and narrows to
   // `resumable.length > 0`; the model-shaped actions only move off this card
   // when ModelsLibrary is rewired to render ModelCard — see the header note.)
   const showInferenceRow =
-    lineageCheckpoints.length > 0 && selectedStep != null;
+    !isQueued && lineageCheckpoints.length > 0 && selectedStep != null;
   // The previous commit's delete-first hint is gone with the rule that needed
   // it: an empty-handed tip is simply resumable — it continues ITSELF from
   // the newest thing its ancestors saved — so there is no longer
@@ -650,6 +688,41 @@ const JobCard: React.FC<Props> = ({
             ) : null}
           </div>
           <div className="flex items-center gap-0.5">
+            {/* MINIMAL reorder: one slot up / one slot down, driving the
+                whole-list reorder endpoint (no drag-and-drop). Only on queued
+                cards, and only while there is something to reorder past. */}
+            {isQueued && queue.length > 1 ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  disabled={queueIndex <= 0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    moveQueued(job.id, -1);
+                  }}
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                  aria-label={t("jobs.jobCard.queueMoveUpAria")}
+                  title={t("jobs.jobCard.queueMoveUpAria")}
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  disabled={queueIndex < 0 || queueIndex >= queue.length - 1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    moveQueued(job.id, 1);
+                  }}
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                  aria-label={t("jobs.jobCard.queueMoveDownAria")}
+                  title={t("jobs.jobCard.queueMoveDownAria")}
+                >
+                  <ArrowDown className="w-3.5 h-3.5" />
+                </Button>
+              </>
+            ) : null}
             <Button
               variant="ghost"
               size="icon"
@@ -691,12 +764,16 @@ const JobCard: React.FC<Props> = ({
                   isRunning ? "hover:text-foreground" : "hover:text-destructive"
                 }`}
                 aria-label={
-                  isRunning
-                    ? t("jobs.jobCard.stopAria")
-                    : t("jobs.jobCard.deleteAria")
+                  isQueued
+                    ? t("jobs.jobCard.cancelQueuedAria")
+                    : isRunning
+                      ? t("jobs.jobCard.stopAria")
+                      : t("jobs.jobCard.deleteAria")
                 }
               >
-                {isRunning ? (
+                {isQueued ? (
+                  <XCircle className="w-3.5 h-3.5" />
+                ) : isRunning ? (
                   <Square className="w-3.5 h-3.5" />
                 ) : (
                   <Trash2 className="w-3.5 h-3.5" />

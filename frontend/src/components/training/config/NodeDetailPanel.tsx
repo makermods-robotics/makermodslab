@@ -57,10 +57,8 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
             kind: "ok",
             running: jobs.find((j) => j.state === "running") ?? null,
             // Peers queue local submissions (PR #83), so the waiting runs are
-            // part of an honest workload answer. The cast bridges the wire
-            // state this bundle's JobState hasn't adopted yet.
-            queuedCount: jobs.filter((j) => (j.state as string) === "queued")
-              .length,
+            // part of an honest workload answer.
+            queuedCount: jobs.filter((j) => j.state === "queued").length,
           });
         })
         .catch(() => {

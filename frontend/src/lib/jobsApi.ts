@@ -1,7 +1,9 @@
 import i18n from "@/i18n";
 import { ApiError, Fetcher, apiRequest } from "./apiClient";
 
-export type JobState = "running" | "done" | "failed" | "interrupted";
+// "queued" is LOCAL-ONLY: the run was accepted and validated, and waits for
+// the one local training slot (PR #83 — a busy slot queues, it never refuses).
+export type JobState = "queued" | "running" | "done" | "failed" | "interrupted";
 
 export interface TrainingMetrics {
   current_step: number;
@@ -107,6 +109,10 @@ export interface JobRecord {
   // hub repo id never change). Null/absent ⇒ show `name`.
   display_name?: string | null;
   state: JobState;
+  // 1-based position in the local training queue, DERIVED server-side per
+  // response (never trust a stale copy — anything ahead starting shifts it).
+  // 0 ⇒ not queued. Absent only on an older backend; treat as 0.
+  queue_position?: number;
   config: TrainingRequest;
   output_dir: string;
   started_at: number;
@@ -305,6 +311,7 @@ export function jobDisplayName(job: JobRecord): string {
  * through `useTranslation()` at render time instead.
  */
 export const JOB_STATE_LABELS = {
+  queued: "jobs.jobState.queued",
   running: "jobs.jobState.running",
   done: "jobs.jobState.done",
   failed: "jobs.jobState.failed",
@@ -340,15 +347,68 @@ export async function renameJob(
   });
 }
 
+/** Stop a running job — or cancel a queued one: they are the same request on
+ * the wire. `expectState` is the optimistic-concurrency precondition: pass the
+ * state the UI was showing when it drew the button, so a Cancel drawn against
+ * a stale queue can't SIGTERM a run the watchdog promoted in the meantime
+ * (the backend answers 409 job.state_changed instead). */
 export async function stopJob(
   baseUrl: string,
   fetcher: Fetcher,
   id: string,
+  expectState?: JobState,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/api/v1/jobs/${id}/stop`, {
-    method: "POST",
-    action: "Stop job",
-  });
+  const query = expectState
+    ? `?expect_state=${encodeURIComponent(expectState)}`
+    : "";
+  return apiRequest<JobRecord>(
+    baseUrl,
+    fetcher,
+    `/api/v1/jobs/${id}/stop${query}`,
+    {
+      method: "POST",
+      action: "Stop job",
+    },
+  );
+}
+
+/** The WHOLE local training queue, in the order it will run, each record
+ * annotated with its 1-based queue_position. Uncapped, unlike listJobs —
+ * the queue is the machine's plan, and reorder needs the full id list. */
+export async function listJobQueue(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<JobRecord[]> {
+  const body = await apiRequest<{ jobs: JobRecord[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/jobs/queue",
+    { signal, action: "List job queue" },
+  );
+  return body.jobs;
+}
+
+/** Set the order of the local training queue. `jobIds` must be the COMPLETE
+ * current queue (a partial list is refused); a list that no longer matches
+ * the live queue comes back 409 with code job.queue_stale — refetch and retry,
+ * nothing else clears it. Returns the queue in its new order. */
+export async function reorderJobQueue(
+  baseUrl: string,
+  fetcher: Fetcher,
+  jobIds: string[],
+): Promise<JobRecord[]> {
+  const body = await apiRequest<{ jobs: JobRecord[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/jobs/queue/reorder",
+    {
+      method: "POST",
+      body: { job_ids: jobIds },
+      action: "Reorder job queue",
+    },
+  );
+  return body.jobs;
 }
 
 export async function deleteJob(

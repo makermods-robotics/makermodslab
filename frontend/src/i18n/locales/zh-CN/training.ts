@@ -40,7 +40,8 @@ export default {
       body: "这会开启一次<0>全新运行</0>（新的优化器，从第 0 步开始），策略权重由该模型初始化。请选择用于训练的<1>数据集</1>，并像平常一样设置训练参数。",
     },
     tooltip: {
-      localBusy: "已有另一个本地训练在运行",
+      // 本地槽位被占不再阻止开始——提交会进入队列。
+      willQueue: "已有一个训练在运行 —— 这次运行会在队列中等待。",
       needAuth: "登录 Hugging Face 后才能使用云端算力",
       needFlavor: "请选择硬件规格",
       offlineDataset: "离线模式已开启 —— 数据集无法上传到 Hub",
@@ -50,6 +51,8 @@ export default {
       uploading: "正在上传…",
       starting: "正在启动…",
       startTraining: "开始训练",
+      // 本地槽位被占时替代「开始训练」：这次点击是把运行加入队列。
+      queueTraining: "加入训练队列",
       startFinetuning: "开始微调",
       continueTraining: "继续训练",
       uploadAndStart: "上传并开始训练",
@@ -57,6 +60,9 @@ export default {
     },
     toast: {
       startedTitle: "训练已开始",
+      queuedTitle: "训练已加入队列",
+      // {{name}} 是运行名（数据）；{{position}} 是其 1 起的队列位置。
+      queuedBody: "{{name}} —— 第 #{{position}} 位。当前运行结束后自动开始。",
       errorTitle: "出错",
       datasetRequired: "必须填写数据集仓库 ID",
       uploadFailedTitle: "上传失败",
@@ -300,6 +306,7 @@ export default {
     viewOnHub: "在 Hub 上查看 ↗",
     viewOnWandb: "在 W&B 上查看 ↗",
     stop: "停止",
+    cancelQueued: "取消",
     delete: "删除",
     runInference: "运行推理",
     noCheckpoints: "还没有检查点 —— 请等待第一次保存。",
@@ -307,6 +314,8 @@ export default {
     toast: {
       stoppingTitle: "正在停止…",
       stopFailedTitle: "停止失败",
+      cancelledTitle: "已从队列移除",
+      cancelFailedTitle: "取消失败",
       removedTitle: "任务已移除",
       deleteFailedTitle: "删除失败",
     },

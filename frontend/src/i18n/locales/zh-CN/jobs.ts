@@ -9,6 +9,9 @@
  */
 export default {
   jobState: {
+    queued: "排队中",
+    // 带实时队列位置（1 起）的徽标变体——位置由服务器每次响应重新计算。
+    queuedAt: "排队中 · #{{position}}",
     running: "运行中",
     done: "已完成",
     failed: "失败",
@@ -102,11 +105,15 @@ export default {
       ended: "结束于 {{when}}",
     },
     subtitleState: {
+      queued: "等待训练槽位",
       running: "运行中",
       done: "已完成",
       failed: "失败",
       interrupted: "已停止",
     },
+    cancelQueuedAria: "取消排队中的运行",
+    queueMoveUpAria: "在队列中上移",
+    queueMoveDownAria: "在队列中下移",
     resumeLatest: "从最新检查点继续",
     resumeStep: "从第 {{step}} 步继续",
     resumeHint:
@@ -148,6 +155,16 @@ export default {
     deleteFailed: "删除失败",
     dismissed: "任务已从列表中移除",
     dismissFailed: "移除失败",
+    queueCancelled: "已从队列移除",
+    cancelFailed: "取消失败",
+    // 两个值得翻译的编码拒绝；其余拒绝原样显示后端文案。
+    cancelBlockedDependents:
+      "另一个排队中的运行将从这次运行的检查点继续训练。请先取消那一个。",
+    cancelStateChanged:
+      "这次运行的状态在你查看期间发生了变化——没有任何内容被取消。请按它当前的状态重新决定。",
+    // 唯一一个「刷新后重试」就能解决的拒绝（409 job.queue_stale）。
+    queueStale: "队列已变化——请重试",
+    reorderFailed: "调整顺序失败",
   },
   jobsDropdown: {
     triggerAria: "选择一次训练运行",

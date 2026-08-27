@@ -184,7 +184,26 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
             job,
           }),
         ),
-      ].sort((a, b) => b.time - a.time),
+      ].sort((a, b) => {
+        // Queued rows render in QUEUE order, not submit order: a queued
+        // record's `started_at` is its submit time, which reordering the
+        // queue never changes — position is the truth. The queue block sits
+        // under the running run (the machine's present, then its plan), and
+        // everything finished keeps the newest-first history order.
+        const rank = (e: JobsEntry): number =>
+          e.kind === "job" && e.job.state === "queued"
+            ? 1
+            : e.kind === "job" && e.job.state !== "running"
+              ? 2
+              : 0;
+        const ra = rank(a);
+        const rb = rank(b);
+        if (ra !== rb) return ra - rb;
+        if (ra === 1 && a.kind === "job" && b.kind === "job") {
+          return (a.job.queue_position ?? 0) - (b.job.queue_position ?? 0);
+        }
+        return b.time - a.time;
+      }),
     [chainCheckpointCount],
   );
 
