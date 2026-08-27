@@ -6460,3 +6460,141 @@ def test_rewind_steps_guard_reads_the_chosen_checkpoint(tmp_path) -> None:
             _rewind_request(leaf="tip", owner="trunk", step=200, steps=200),
             JobTarget(runner="local"),
         )
+
+
+# -- shutdown: local runs end deliberately, cloud runs are left alone --------
+
+
+def test_shutdown_stops_local_run_and_explains_why(tmp_path) -> None:
+    """The whole point of the feature: a run the server takes down with it is
+    `interrupted` with a reason, not `failed` with "exited with code 1"."""
+    from makermodslab.jobs import STOPPED_BY_SERVER_SHUTDOWN_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    runner = _FakeSignallingRunner(on_stop_code=-15)
+    record = _start_with(reg, runner)
+
+    assert reg.stop_local_for_shutdown() == [record.id]
+
+    assert runner.stopped is True
+    assert record.state == "interrupted"
+    assert record.exit_code == -15
+    assert record.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+    # Not the "at your request" wording — nobody requested a reload.
+    assert "your request" not in record.error_message
+
+
+def test_shutdown_leaves_cloud_runs_alone(tmp_path) -> None:
+    """Cloud runs execute on HF's GPUs and do not care that we are exiting.
+    Cancelling one because somebody saved a .py file under --dev would throw
+    away a paid run."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cloud_runner = MagicMock()
+    cloud_runner.hf_job_id.return_value = "job-xyz"
+    cloud_runner.hf_job_url.return_value = "https://hf.co/jobs/job-xyz"
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/ds", "status": "on_hub", "url": "u"},
+        ),
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: cloud_runner),
+    ):
+        record = reg.start(
+            TrainingRequest(dataset_repo_id="user/ds"),
+            JobTarget(runner="hf_cloud", flavor="t4-small"),
+        )
+
+    assert reg.stop_local_for_shutdown() == []
+
+    cloud_runner.stop.assert_not_called()
+    assert record.state == "running"
+    assert record.error_message is None
+
+
+def test_shutdown_verdict_survives_a_restart(tmp_path) -> None:
+    """Persisted, not just in-memory: the watchdog may never tick again, so the
+    record has to be right on disk before the process exits."""
+    from makermodslab.jobs import STOPPED_BY_SERVER_SHUTDOWN_MESSAGE, JobRegistry
+
+    root = tmp_path / "root"
+    reg = JobRegistry(root)
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=-15))
+    reg.stop_local_for_shutdown()
+    reg.shutdown()
+
+    reloaded = JobRegistry(root).get(record.id)
+    assert reloaded.state == "interrupted"
+    assert reloaded.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+
+
+def test_shutdown_does_not_relabel_a_run_that_just_finished(tmp_path) -> None:
+    """A run that completed in the window between our intent and our signal was
+    never stopped — it must stay `done`, and must not carry a stop message."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    # Reports a clean exit the moment it is asked to stop.
+    record = _start_with(reg, _FakeSignallingRunner(on_stop_code=0))
+
+    reg.stop_local_for_shutdown()
+
+    assert record.state == "done"
+    assert record.error_message is None
+
+
+def test_shutdown_without_a_confirmable_code_is_interrupted_not_failed(tmp_path) -> None:
+    """A runner killed before it could report a code leaves no evidence.
+    classify_terminal_state falls through to `failed` on a missing code; that
+    is an assertion we cannot back up, so this path must not use it."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    # on_stop_code stays None => returncode() keeps answering None.
+    record = _start_with(reg, _FakeSignallingRunner())
+
+    reg.stop_local_for_shutdown()
+
+    assert record.state == "interrupted"
+    assert record.exit_code is None
+
+
+def test_shutdown_is_a_no_op_with_nothing_running(tmp_path) -> None:
+    """The common case — the server restarts far more often than it trains."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    assert reg.stop_local_for_shutdown() == []
+
+
+def test_shutdown_reconciles_a_racing_tick_verdict(tmp_path) -> None:
+    """A watchdog tick already in flight when shutdown starts classifies with
+    stop_signalled()==False — the normal case under systemd, where the cgroup
+    TERM reaches the trainer at the same instant it reaches us — and files
+    `failed`. The record must not be left saying `failed` under a message that
+    says the server stopped it."""
+    from makermodslab.jobs import STOPPED_BY_SERVER_SHUTDOWN_MESSAGE, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    box: dict = {}
+
+    class _RacingRunner(_FakeSignallingRunner):
+        def stop(self) -> None:
+            super().stop()
+            racing = box["record"]  # stand in for the in-flight tick
+            racing.state = "failed"
+            racing.exit_code = -15
+            racing.error_message = "Subprocess exited with code -15"
+
+    runner = _RacingRunner(on_stop_code=-15)
+    record = _start_with(reg, runner)
+    box["record"] = record
+
+    reg.stop_local_for_shutdown()
+
+    assert record.state == "interrupted"
+    assert record.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
