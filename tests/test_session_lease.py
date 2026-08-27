@@ -389,6 +389,88 @@ def test_heartbeat_in_the_expired_but_unreleased_window_409(client, monkeypatch,
     assert sessions.tracker.last_ended()["reason"] == "session.lease_expired"
 
 
+# --- the calibration kinds: lease attach + expiry dispatch --------------------
+
+
+def test_calibration_start_with_owner_attaches_a_lease(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The new kinds lease exactly like the original four."""
+    from makermodslab import calibrate
+
+    _make_robot()
+
+    def fake_start(request):
+        notify_session_changed("calibration", True, phase="connecting")
+        return {"success": True}
+
+    monkeypatch.setattr(calibrate.calibration_manager, "start_calibration", fake_start)
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "calibration",
+            "robot": "bench",
+            "owner": "ui-1",
+            "options": {"device_type": "teleop"},
+        },
+    )
+    assert resp.status_code == 201
+    lease = resp.json()["session"]["lease"]
+    assert lease["owner"] == "ui-1"
+    assert sessions._watchdog_thread is not None
+    notify_session_changed("calibration", False, phase="idle")
+    assert sessions._watchdog_thread is None
+
+
+def test_expiry_of_a_calibration_session_dispatches_its_stop(monkeypatch, fake_clock) -> None:
+    """The expiry safety stop must reach calibrate.py's real stop handler —
+    the wizard's teardown (torque baseline restore, disconnect), not a
+    generic kill."""
+    from makermodslab import calibrate
+
+    snap = _lease_directly(kind="calibration")
+    calls: list = []
+
+    def fake_stop():
+        calls.append("stop")
+        notify_session_changed("calibration", False, phase="idle")
+        return {"success": True, "message": "Calibration stopped"}
+
+    monkeypatch.setattr(calibrate.calibration_manager, "stop_calibration_process", fake_stop)
+    stopped = sessions.check_expiry(now=snap["lease"]["deadline"] + 1)
+    assert stopped is not None and stopped["id"] == snap["id"]
+    assert calls == ["stop"]
+    assert sessions.tracker.last_ended()["reason"] == "session.lease_expired"
+
+
+def test_expiry_of_an_auto_calibration_session_stops_whichever_manager_is_live(
+    monkeypatch, fake_clock
+) -> None:
+    """auto_calibration is an aggregate of the single-arm manager and the
+    batch manager: expiry tries the single manager first and falls through to
+    the batch when it reports nothing running — the same escalation the stop
+    endpoint uses."""
+    from makermodslab import auto_calibrate
+
+    snap = _lease_directly(kind="auto_calibration")
+    calls: list = []
+
+    monkeypatch.setattr(
+        auto_calibrate.auto_calibration_manager,
+        "stop",
+        lambda: calls.append("single") or {"success": False, "message": "No auto-calibration is running"},
+    )
+
+    def fake_batch_stop():
+        calls.append("batch")
+        notify_session_changed("auto_calibration", False, phase="stopped")
+        return {"success": True, "message": "Stopping 2 arm(s)"}
+
+    monkeypatch.setattr(auto_calibrate.auto_calibration_batch_manager, "stop", fake_batch_stop)
+    stopped = sessions.check_expiry(now=snap["lease"]["deadline"] + 1)
+    assert stopped is not None and stopped["id"] == snap["id"]
+    assert calls == ["single", "batch"]
+    assert sessions.tracker.last_ended()["reason"] == "session.lease_expired"
+
+
 # --- the watchdog: start/stop lifecycle only (no timing tests) ----------------
 
 

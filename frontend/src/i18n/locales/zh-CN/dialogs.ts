@@ -51,6 +51,7 @@ export default {
       failedTitle: "回放失败",
       seeLog: "详情请查看服务器日志。",
       lostConnectionTitle: "与后端的连接已断开",
+      startedWarningTitle: "已启动，但有警告",
       startFailedTitle: "无法开始回放",
       stopFailedTitle: "无法停止回放",
     },

@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import i18n from "@/i18n";
 import type { TFunction } from "i18next";
-import { ApiError } from "@/lib/apiClient";
-import { formatSessionHeld, sessionHeldHolder } from "@/lib/sessionApi";
+import { ApiError, type Fetcher } from "@/lib/apiClient";
+import {
+  formatSessionHeld,
+  sessionHeldHolder,
+  startSession,
+  type SessionInfo,
+} from "@/lib/sessionApi";
 
 /** A 409 session.held the way apiRequest surfaces it. */
 function heldError(kind: string | null, sessionId: string | null = "s1") {
@@ -14,6 +19,59 @@ function heldError(kind: string | null, sessionId: string | null = "s1") {
     { holder: { kind, session_id: sessionId } }
   );
 }
+
+const SESSION: SessionInfo = {
+  id: "abc123",
+  kind: "teleoperation",
+  robot: "bench",
+  owner: "ui:1",
+  started_at: 1,
+  revision: 1,
+  phase: null,
+  lease: null,
+};
+
+/** A Fetcher that returns the given 201 body for POST /api/v1/sessions. */
+function fetcherReturning(body: unknown): Fetcher {
+  return async () =>
+    new Response(JSON.stringify(body), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    });
+}
+
+describe("startSession warnings relay", () => {
+  const args = {
+    kind: "teleoperation" as const,
+    robot: "bench",
+    owner: "ui:1",
+    options: {},
+  };
+
+  it("passes the 201's warn-but-allow findings through", async () => {
+    const { session, warnings } = await startSession(
+      "http://x",
+      fetcherReturning({ session: SESSION, warnings: ["EEPROM drift"] }),
+      args
+    );
+    expect(session.id).toBe("abc123");
+    expect(warnings).toEqual(["EEPROM drift"]);
+  });
+
+  it("normalizes an absent or null warnings field to null", async () => {
+    for (const body of [
+      { session: SESSION },
+      { session: SESSION, warnings: null },
+    ]) {
+      const { warnings } = await startSession(
+        "http://x",
+        fetcherReturning(body),
+        args
+      );
+      expect(warnings).toBeNull();
+    }
+  });
+});
 
 describe("sessionHeldHolder", () => {
   it("extracts the holder kind from a coded 409", () => {

@@ -454,7 +454,7 @@ const InferenceModal: React.FC<Props> = ({
       // NAME plus policy-shaped options only — ports, configs, mode and the
       // camera devices behind the bindings all resolve server-side from the
       // saved record. The owner attaches the lease the dialog keeps renewed.
-      const session = await startSession(baseUrl, fetchWithHeaders, {
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "inference",
         robot: robot.name,
         owner: tabOwnerId(),

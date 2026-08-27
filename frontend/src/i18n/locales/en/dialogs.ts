@@ -76,6 +76,7 @@ export default {
       // Last-resort fallback: the backend hint and error text win when present.
       seeLog: "See the server log for details.",
       lostConnectionTitle: "Lost connection to backend",
+      startedWarningTitle: "Started with a warning",
       startFailedTitle: "Could not start replay",
       stopFailedTitle: "Could not stop replay",
     },

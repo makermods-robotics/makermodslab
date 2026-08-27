@@ -64,6 +64,8 @@ from .schemas.sessions import (
     LEASE_TIMEOUT_MAX_S,
     LEASE_TIMEOUT_MIN_S,
     OWNER_MAX_LENGTH,
+    AutoCalibrationOptions,
+    CalibrationOptions,
     InferenceOptions,
     RecordingOptions,
     ReplayOptions,
@@ -74,21 +76,36 @@ from .utils.config import get_robot_record, is_robot_record_clean, is_valid_robo
 
 logger = logging.getLogger(__name__)
 
-# Kinds a client can START through POST /api/v1/sessions. Calibration,
-# auto-calibration and wiggle sessions are still started through their legacy
-# wizard/flow endpoints this phase — the tracker observes them all the same.
-STARTABLE_KINDS = ("teleoperation", "recording", "inference", "replay")
+# Kinds a client can START through POST /api/v1/sessions. Only wiggle is left
+# on its legacy flow endpoint (a few seconds of open-loop gripper motion — no
+# stop handler, nothing to lease) — the tracker observes it all the same.
+STARTABLE_KINDS = (
+    "teleoperation",
+    "recording",
+    "inference",
+    "replay",
+    "calibration",
+    "auto_calibration",
+)
 
 # Kinds that never open the leader bus, mirroring the frontend's robotSetupGap
 # distinction: an unassigned leader port / missing leader calibration must not
 # block them (bimanual = both followers, still no leaders).
 _FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay"})
 
+# Setup kinds: calibration CREATES the record's calibrations (and writes the
+# port back on success), so the record-clean readiness gate the driving kinds
+# use would refuse exactly the robots these flows exist to fix. Their builders
+# check the one thing they do need — a port for each targeted slot.
+_SETUP_KINDS = frozenset({"calibration", "auto_calibration"})
+
 _OPTIONS_MODELS = {
     "teleoperation": TeleoperationOptions,
     "recording": RecordingOptions,
     "inference": InferenceOptions,
     "replay": ReplayOptions,
+    "calibration": CalibrationOptions,
+    "auto_calibration": AutoCalibrationOptions,
 }
 
 
@@ -525,16 +542,102 @@ def _build_replay_request(record: dict, opts: ReplayOptions):
     )
 
 
+# --- the setup kinds: per-slot resolution --------------------------------------
+
+
+def _slot_fields(device_type: str, arm: str) -> tuple[str, str]:
+    """The robot record's (port_field, config_field) for one physical arm slot
+    — the same mapping calibrate.py's and auto_calibrate.py's record
+    write-backs use ("left" is also the single-arm pair)."""
+    is_right = arm == "right"
+    if device_type == "teleop":
+        return (
+            "right_leader_port" if is_right else "leader_port",
+            "right_leader_config" if is_right else "leader_config",
+        )
+    return (
+        "right_follower_port" if is_right else "follower_port",
+        "right_follower_config" if is_right else "follower_config",
+    )
+
+
+def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, config_file: str | None):
+    """Resolve one calibration target slot into (port, config_file).
+
+    An explicit `port`/`config_file` in the options wins (calibration is the
+    setup flow — see CalibrationOptions); otherwise the record's saved slot
+    values, with the config falling back to the robot's default name for the
+    slot (the UI's own default: "<robot>_<arm>" bimanual, "<robot>" single).
+    No port anywhere → 400 robot.not_ready: you can't calibrate an arm whose
+    bus we can't open."""
+    port_field, config_field = _slot_fields(device_type, arm)
+    resolved_port = port or record.get(port_field) or ""
+    if not resolved_port:
+        side = "leader" if device_type == "teleop" else "follower"
+        raise ApiError(
+            status_code=400,
+            detail=f"Robot {record['name']!r} has no port assigned for its {arm} {side} arm; "
+            "assign (or pass) a port before calibrating it.",
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
+    default_name = f"{record['name']}_{arm}" if record.get("mode") == "bimanual" else record["name"]
+    resolved_config = config_file or record.get(config_field) or default_name
+    return resolved_port, resolved_config
+
+
+def _build_calibration_request(record: dict, opts: CalibrationOptions):
+    from .calibrate import CalibrationRequest
+
+    port, config_file = _resolve_slot(record, opts.device_type, opts.arm, opts.port, opts.config_file)
+    return CalibrationRequest(
+        device_type=opts.device_type,
+        port=port,
+        config_file=config_file,
+        robot_name=record["name"],
+        overwrite=opts.overwrite,
+        arm=opts.arm,
+    )
+
+
+def _build_auto_calibration_request(record: dict, opts: AutoCalibrationOptions):
+    """Always the BATCH request, even for one arm — the batch of one is
+    exactly how the UI runs a single arm, and the aggregate auto_calibration
+    session-event kind makes the whole batch one session (see
+    AutoCalibrationOptions)."""
+    from .auto_calibrate import AutoCalibrationBatchArm, AutoCalibrationBatchRequest
+
+    arms = []
+    for arm_opt in opts.arms:
+        port, config_file = _resolve_slot(
+            record, arm_opt.device_type, arm_opt.arm, arm_opt.port, arm_opt.config_file
+        )
+        arms.append(
+            AutoCalibrationBatchArm(
+                device_type=arm_opt.device_type, port=port, config_file=config_file, arm=arm_opt.arm
+            )
+        )
+    return AutoCalibrationBatchRequest(
+        arms=arms,
+        robot_name=record["name"],
+        overwrite=opts.overwrite,
+        # The record's persisted per-robot torque cap is the default; an
+        # explicit option (the UI's slider draft) overrides it.
+        motor_power=opts.motor_power if opts.motor_power is not None else record.get("motor_power"),
+    )
+
+
 _REQUEST_BUILDERS = {
     "teleoperation": _build_teleoperation_request,
     "recording": _build_recording_request,
     "inference": _build_inference_request,
     "replay": _build_replay_request,
+    "calibration": _build_calibration_request,
+    "auto_calibration": _build_auto_calibration_request,
 }
 
 
 def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
-    from . import record, replay, rollout, teleoperate
+    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate
 
     if kind == "teleoperation":
         return teleoperate.handle_start_teleoperation(request, websocket_manager)
@@ -542,6 +645,10 @@ def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
         return record.handle_start_recording(request)
     if kind == "inference":
         return rollout.handle_start_inference(request)
+    if kind == "calibration":
+        return calibrate.calibration_manager.start_calibration(request)
+    if kind == "auto_calibration":
+        return auto_calibrate.auto_calibration_batch_manager.start(request)
     return replay.handle_start_replay(request, websocket_manager)
 
 
@@ -550,12 +657,13 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
 
     Flow: hardware-hold gate (409 session.held) → robot record resolution
     (404 robot.not_found) → readiness with the arms the kind actually drives
-    (400 robot.not_ready) → owner/lease-timeout and per-kind options
-    validation (422 request.validation) → build the feature's request model
-    from the record → the feature's own ``handle_start_*``. A busy-coded
-    refusal from the feature (the gate raced another start) maps to 409
-    session.held as well; any other refusal passes through with its own
-    status/code.
+    (400 robot.not_ready; the setup kinds instead require only a port per
+    targeted slot) → owner/lease-timeout and per-kind options validation
+    (422 request.validation) → build the feature's request model from the
+    record → the feature's own start handler. A busy-coded refusal from the
+    feature (the gate raced another start) maps to 409 session.held as well;
+    any other refusal passes through with its own status/code (name_taken
+    defaults to 409).
 
     An ``owner`` attaches a lease (timeout ``lease_timeout_s``, default 60s,
     10–600 inclusive) and starts the expiry watchdog; no owner, no lease, no
@@ -578,15 +686,18 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
             code=ErrorCode.ROBOT_NOT_FOUND,
         )
 
-    arms = "follower" if kind in _FOLLOWER_ONLY_KINDS else "all"
-    if not is_robot_record_clean(record, arms=arms):
-        needs = "follower arm" if arms == "follower" else "arms"
-        raise ApiError(
-            status_code=400,
-            detail=f"Robot {body.robot!r} is not fully set up for {kind}: "
-            f"its {needs} need ports and existing calibrations.",
-            code=ErrorCode.ROBOT_NOT_READY,
-        )
+    # The setup kinds skip the record-clean gate (they exist to make records
+    # clean); their builders below still refuse a slot with no port.
+    if kind not in _SETUP_KINDS:
+        arms = "follower" if kind in _FOLLOWER_ONLY_KINDS else "all"
+        if not is_robot_record_clean(record, arms=arms):
+            needs = "follower arm" if arms == "follower" else "arms"
+            raise ApiError(
+                status_code=400,
+                detail=f"Robot {body.robot!r} is not fully set up for {kind}: "
+                f"its {needs} need ports and existing calibrations.",
+                code=ErrorCode.ROBOT_NOT_READY,
+            )
 
     # Owner / lease-timeout shape checks live here rather than as pydantic
     # Field constraints so the refusal carries the coded 422 shape, exactly
@@ -633,8 +744,12 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
                 snapshot = tracker.current()
                 holder = snapshot["kind"] if snapshot else None
             _raise_held(holder, message)
+        # The calibration flows' name-collision refusal carries no status_code
+        # of its own (legacy callers read it out of a 200 body) — it is a
+        # conflict, not a server fault.
+        default_status = 409 if code == "name_taken" else 500
         raise ApiError(
-            status_code=result.get("status_code", 500),
+            status_code=result.get("status_code", default_status),
             detail=message,
             code=result.get("code"),
         )
@@ -657,7 +772,13 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
         if leased is not None:
             session = leased
             _ensure_watchdog()
-    return {"session": _public_session(session)}
+    # Warn-but-allow findings from the feature's start (teleoperation/replay
+    # arm-identity checks) ride the 201 so the client can surface them — the
+    # legacy start responses carried them and the sessions surface must not
+    # drop them. The handlers join their findings into one `warning` string;
+    # relay it verbatim as a single entry.
+    warning = result.get("warning")
+    return {"session": _public_session(session), "warnings": [warning] if warning else None}
 
 
 # --- current / stop ----------------------------------------------------------

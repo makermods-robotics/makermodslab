@@ -171,17 +171,28 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   const handleTeleop = async (robot: RobotRecord) => {
     setTeleopStarting(true);
     try {
-      const session = await startSession(baseUrl, fetchWithHeaders, {
+      const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "teleoperation",
         robot: robot.name,
         owner: tabOwnerId(),
         options: {},
       });
       setTeleopSessionId(session.id);
-      toast({
-        title: t("robot.teleop.startedTitle"),
-        description: t("robot.teleop.startedFallback", { name: robot.name }),
-      });
+      if (warnings?.length) {
+        // A success can carry a warn-but-allow arm-identity finding (e.g. the
+        // arm's servos hold a different saved calibration). Make it visible —
+        // the warning text is backend prose, rendered verbatim.
+        toast({
+          title: t("robot.teleop.startedWarningTitle"),
+          description: warnings.join(" "),
+          duration: 10000,
+        });
+      } else {
+        toast({
+          title: t("robot.teleop.startedTitle"),
+          description: t("robot.teleop.startedFallback", { name: robot.name }),
+        });
+      }
       setTeleopOpen(true);
     } catch (e) {
       if (e instanceof ApiError) {

@@ -687,7 +687,7 @@ const DeployPanel: React.FC = () => {
       // Robot NAME + policy-shaped options only — ports, configs, mode and
       // the camera devices behind the bindings resolve server-side from the
       // saved record. The owner attaches the lease the session dialog renews.
-      const session = await startSession(baseUrl, fetchWithHeaders, {
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "inference",
         robot: robot.name,
         owner: tabOwnerId(),

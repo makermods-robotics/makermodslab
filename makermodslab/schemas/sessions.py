@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # The frame-size model the inference launch flow already speaks — reused, not
 # duplicated, so the sessions surface can never drift from InferenceRequest.
@@ -41,6 +41,9 @@ __all__ = [
     "LEASE_TIMEOUT_MAX_S",
     "LEASE_TIMEOUT_MIN_S",
     "OWNER_MAX_LENGTH",
+    "AutoCalibrationArmOption",
+    "AutoCalibrationOptions",
+    "CalibrationOptions",
     "CurrentSessionResponse",
     "EndedSessionInfo",
     "InferenceOptions",
@@ -132,6 +135,61 @@ class ReplayOptions(BaseModel):
     skip_identity_check: bool = False
 
 
+class CalibrationOptions(BaseModel):
+    """Manual step-by-step calibration (calibrate.py's CalibrationRequest).
+
+    Calibration is the flow that CREATES the record's hardware picture, so —
+    unlike every other kind — `port` and `config_file` may ride in the options:
+    a fresh robot has no saved port yet (the UI's port pick is a draft until
+    Save, and the backend writes port+config back into the record only on a
+    successful calibration). Omitted, both resolve from the record: the slot's
+    saved port, and the slot's assigned config name (else the robot's default
+    name for that slot — "<robot>_<arm>" bimanual, "<robot>" single)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Which physical arm slot to calibrate. "robot" = follower, "teleop" =
+    # leader; "left" is also the single-arm pair.
+    device_type: Literal["robot", "teleop"]
+    arm: Literal["left", "right"] = "left"
+    port: str | None = None
+    config_file: str | None = None
+    # Must be explicitly true to replace an existing config file of the name.
+    overwrite: bool = False
+
+
+class AutoCalibrationArmOption(BaseModel):
+    """One arm slot in an auto-calibration run — the caller-chosen half of
+    auto_calibrate.py's AutoCalibrationBatchArm; `port`/`config_file` resolve
+    from the record like CalibrationOptions' (same setup-flow reasoning)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_type: Literal["robot", "teleop"]
+    arm: Literal["left", "right"] = "left"
+    port: str | None = None
+    config_file: str | None = None
+
+
+class AutoCalibrationOptions(BaseModel):
+    """Auto-calibration (auto_calibrate.py). One options shape covers the
+    single-arm AND concurrent multi-arm flows: `arms` is a list of per-arm
+    slots, and the start wrapper always builds AutoCalibrationBatchRequest —
+    the batch of one is exactly how the UI already runs a single arm, and the
+    aggregate `auto_calibration` session-event kind makes a batch ONE session
+    (arms finishing are phase transitions, not releases), so the batch fits
+    the one-session model cleanly."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    arms: list[AutoCalibrationArmOption] = Field(min_length=1)
+    # Calibration drive torque (percent, clamped 10-100 server-side), applied
+    # to every arm. None resolves to the record's persisted motor_power — the
+    # UI passes its slider draft so what you see is what it drives at.
+    motor_power: int | None = None
+    overwrite: bool = False
+
+
 class SessionStartBody(BaseModel):
     """POST /api/v1/sessions. `options` is validated against the kind's model
     above in the handler (422 request.validation on mismatch) — a plain dict
@@ -144,7 +202,7 @@ class SessionStartBody(BaseModel):
     is no lease and no timeout-stop. Both fields' shape checks live in the
     handler (see the constants above)."""
 
-    kind: Literal["teleoperation", "recording", "inference", "replay"]
+    kind: Literal["teleoperation", "recording", "inference", "replay", "calibration", "auto_calibration"]
     robot: str
     owner: str | None = None
     lease_timeout_s: float = LEASE_TIMEOUT_DEFAULT_S
@@ -210,7 +268,14 @@ class SessionHeartbeatResponse(BaseModel):
 
 
 class SessionStartResponse(BaseModel):
+    """`warnings` relays the feature start handler's warn-but-allow findings
+    (teleoperation/replay arm-identity checks: the session RUNS, but e.g. the
+    servos' EEPROM disagrees with the saved calibration file). Backend prose,
+    rendered verbatim; null when the start raised none — kinds whose warnings
+    surface via status polling (recording, inference) keep them there."""
+
     session: SessionInfo
+    warnings: list[str] | None = None
 
 
 class CurrentSessionResponse(BaseModel):

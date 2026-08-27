@@ -768,19 +768,23 @@ def start_session(body: SessionStartBody):
     fields and cameras resolve server-side from the saved robot record, and
     `options` carries only the kind-specific fields (see schemas/sessions.py).
 
-    Startable kinds this phase: teleoperation, recording, inference, replay.
-    Calibration, auto-calibration and wiggle sessions are still started
-    through their legacy wizard/flow endpoints — the identity tracker observes
-    them all the same, so they appear in /sessions/current and can be stopped
-    by id.
+    Startable kinds: teleoperation, recording, inference, replay,
+    calibration, auto_calibration. Only wiggle still starts through its
+    legacy flow endpoint (seconds of open-loop motion, no stop handler) —
+    the identity tracker observes it all the same. Calibration's mid-session
+    wizard controls (complete-calibration-step, the status polls) stay on
+    their existing endpoints, like recording's pause/rerecord.
 
-    201 returns the session identity; 409 session.held (details name the
-    holder) when any session already holds the hardware; 404 robot.not_found;
-    400 robot.not_ready (readiness is scoped to the arms the kind drives —
-    inference/replay never open the leader bus); 422 request.validation for
-    options that don't fit the kind, an empty/oversized owner, or a
-    lease_timeout_s outside 10–600. Other feature refusals pass through with
-    their existing statuses and codes.
+    201 returns the session identity plus optional `warnings` — warn-but-
+    allow findings from the feature's start (teleoperation/replay
+    arm-identity checks) that the legacy start responses used to carry; 409
+    session.held (details name the holder) when any session already holds
+    the hardware; 404 robot.not_found; 400 robot.not_ready (readiness is
+    scoped to the arms the kind drives — inference/replay never open the
+    leader bus; the calibration kinds need only a port per targeted slot);
+    422 request.validation for options that don't fit the kind, an
+    empty/oversized owner, or a lease_timeout_s outside 10–600. Other
+    feature refusals pass through with their existing statuses and codes.
 
     `owner` attaches a lease: heartbeat within `lease_timeout_s` (default
     60s) or the session is safety-stopped. No owner, no lease, no

@@ -44,6 +44,7 @@ export default {
   teleop: {
     startedTitle: "Teleoperation started",
     startedFallback: "Started teleoperation for {{name}}.",
+    startedWarningTitle: "Started with a warning",
     failedTitle: "Couldn't start teleoperation",
     failedFallback: "Failed to start.",
     // {{gap}} is the rendered setup-gap phrase below.
