@@ -22,31 +22,7 @@ SNAPSHOT = json.loads((REPO_ROOT / "docs" / "api" / "openapi.json").read_text())
 HTTP_METHODS = {"get", "post", "put", "delete", "patch"}
 
 PLANNED: dict[str, frozenset[str]] = {
-    "datasets": frozenset(
-        {
-            "datasets_download",
-            "datasets_download_status",
-            "datasets_episode_joints",
-            "datasets_episodes",
-            "datasets_hide",
-            "datasets_hub_settings",
-            "datasets_hub_status",
-            "datasets_import",
-            "datasets_info",
-            "datasets_list",
-            "datasets_merge",
-            "datasets_merge_status",
-            "datasets_remove_custom",
-            "datasets_rename",
-            "datasets_save_custom",
-            "datasets_tags",
-            "datasets_unhide",
-            "datasets_visibility",
-            "delete_dataset",
-            "upload_dataset",
-            "upload_status",
-        }
-    ),
+    "datasets": frozenset(),
     "jobs": frozenset(
         {
             "create_training_job",
