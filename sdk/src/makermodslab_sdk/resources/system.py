@@ -7,16 +7,8 @@ working, and the extra keys stay readable on the object.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
-
 from makermodslab_sdk._operations import operation
-from makermodslab_sdk.resources._base import Resource
-
-
-class SdkModel(BaseModel):
-    """Base for all SDK response models: never reject server additions."""
-
-    model_config = ConfigDict(extra="allow")
+from makermodslab_sdk.resources._base import Resource, SdkModel
 
 
 class HealthCapabilities(SdkModel):
