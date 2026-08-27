@@ -390,3 +390,46 @@ def warn_if_cuda_mismatch() -> None:
         status["torch_version"],
         status["install_hint"],
     )
+
+
+# --- GPU capability probe -----------------------------------------------------
+
+# Cached for the process lifetime: hardware doesn't hotplug under a running
+# server, and /health is polled by every peer's registry. _GPU_UNPROBED is the
+# not-yet-probed sentinel (None is a real "no accelerator" answer).
+_GPU_UNPROBED = object()
+_gpu_cache: object = _GPU_UNPROBED
+
+
+def _probe_gpu_uncached() -> dict[str, str] | None:
+    """The accelerator torch sees, display-ready, or None.
+
+    torch is already resident in the server process (the lerobot import chain
+    pulls it in), so this costs microseconds — but stays defensive anyway: any
+    probe failure means "no accelerator", never an error, because /health is
+    the node-registry handshake and must not break over a driver hiccup.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            return {
+                "name": torch.cuda.get_device_name(0),
+                "vram": f"{props.total_memory / 2**30:.0f}GB",
+            }
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            # Apple unified memory: no discrete VRAM figure to report.
+            return {"name": "Apple Silicon (MPS)", "vram": ""}
+    except Exception:  # noqa: BLE001 — health must answer regardless
+        logger.debug("GPU probe failed", exc_info=True)
+    return None
+
+
+def probe_gpu() -> dict[str, str] | None:
+    """Cached _probe_gpu_uncached; the capabilities.gpu value for /health."""
+    global _gpu_cache
+    if _gpu_cache is _GPU_UNPROBED:
+        _gpu_cache = _probe_gpu_uncached()
+    return _gpu_cache  # type: ignore[return-value]
