@@ -77,8 +77,14 @@ export interface TrainingRequest {
   optimizer_weight_decay?: number;
   optimizer_grad_clip_norm?: number;
   use_policy_training_preset: boolean;
-  // Optional target for runner dispatch; omitted ⇒ local.
-  target?: { runner: "local" | "hf_cloud"; flavor?: string };
+  // Optional target for runner dispatch; omitted ⇒ local. "lan_node" routes
+  // the run to a registered peer and REQUIRES node_instance_id (the backend
+  // refuses it missing with 422 request.validation).
+  target?: {
+    runner: "local" | "hf_cloud" | "lan_node";
+    flavor?: string;
+    node_instance_id?: string;
+  };
   // HF Cloud only: optional override for the HF Jobs timeout, as a duration
   // string ("2h", "45m", "3h30m"). Omitted ⇒ backend falls back to its
   // default. The backend validates the format and ignores it for local runs.
@@ -108,7 +114,12 @@ export interface JobRecord {
   exit_code: number | null;
   error_message: string | null;
   metrics: TrainingMetrics;
-  runner: "local" | "hf_cloud" | "imported";
+  runner: "local" | "hf_cloud" | "imported" | "lan_node";
+  // lan_node runs only: which peer executes the run. The id is the routing
+  // key; the URL is a snapshot of where the peer was when the run launched
+  // (it survives the node leaving the registry). Null/absent elsewhere.
+  node_instance_id?: string | null;
+  node_url?: string | null;
   hf_job_id: string | null;
   hf_flavor: string | null;
   hf_repo_id: string | null;

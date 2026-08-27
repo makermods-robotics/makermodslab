@@ -96,8 +96,73 @@ export default {
 
   target: {
     computeLabel: "Compute",
-    runnerLocal: "Local — your machine",
+    // The section header's live summary. <0> is the bold name — "This
+    // machine" / the cloud label / a node's name (data).
+    runOn: "Run on: <0>{{name}}</0>",
     runnerCloud: "Hugging Face Cloud",
+    thisMachine: "This machine",
+    // "MakerMods Lab" is the product name and stays untranslated.
+    thisMachineSub: "Local — this MakerMods Lab server",
+    cloudSub: "Rented GPU, billed per hour — pick hardware below",
+    // The honest server-to-server sentence: choosing a node never moves the
+    // browser off this server.
+    selectorHint:
+      "Where this run executes. The interface stays on this server — a node runs the job, driven server-to-server.",
+    lanNodes: "LAN nodes",
+    nodesLoading: "Looking for nodes…",
+    // "Tailscale" is a product name.
+    nodesEmpty:
+      "No nodes yet — other MakerMods Lab servers appear here when discovered via Tailscale, or add one by URL.",
+    viaTailscale: "via tailscale",
+    verifying: "Verifying…",
+    verifyingTitle: "Discovered — waiting for the verify handshake to confirm it.",
+    unreachable: "Unreachable",
+    // {{when}} is a pre-formatted relative duration ("4m ago") — duration
+    // formatting stays English everywhere (lib/relativeTime.ts).
+    lastSeen: "last seen {{when}}",
+    unreachableTitle:
+      "Unreachable — it reappears as selectable when the next handshake succeeds.",
+    unreachableTitleLastSeen:
+      "Unreachable — last seen {{when}}. It reappears as selectable when the next handshake succeeds.",
+    // "makermodslab" is the package name; {{version}} is data.
+    nodeVersion: "makermodslab v{{version}}",
+    nodeGone: "No longer registered",
+    nodeGoneTitle:
+      "This node has left the registry. Pick another target, or starting will be refused.",
+    addNode: {
+      button: "Add node…",
+      title: "Register another MakerMods Lab server by URL",
+      urlLabel: "Node URL",
+      submit: "Add",
+      adding: "Adding…",
+      // Client-side sentences for the backend's CODED refusals (node.self /
+      // node.duplicate / node.unreachable). Every uncoded refusal shows the
+      // server's own detail verbatim instead.
+      errorSelf: "That URL answers as this server itself.",
+      errorDuplicate: "That node is already registered.",
+      errorUnreachable: "No MakerMods Lab server answered at that URL.",
+    },
+    detail: {
+      instance: "Instance",
+      version: "Version",
+      lastSeenLabel: "Last seen",
+      workloadLoading: "Checking workload…",
+      workloadUnreachable:
+        "Unreachable — couldn't ask this node for its workload.",
+      // {{name}} is the run's display name (data); {{pct}} is pre-formatted.
+      workloadRunningPct: "Running: {{name}} · {{pct}}%",
+      workloadRunning: "Running: {{name}}",
+      workloadIdle: "Idle",
+      // A plain figure, named `total` rather than `count` so i18next does not
+      // treat it as a plural selector.
+      workloadQueued: "+{{total}} queued",
+      // <0>/<1> both wrap the node's name (data). "Hub" / "HF" are product
+      // names.
+      hubSyncHint:
+        "The job runs on <0>{{name}}</0>; datasets sync via the Hub — this dataset uploads to your HF account first, and <1>{{name}}</1> pulls it from there.",
+      goneBody:
+        "This node is no longer in the registry. Pick another compute target — starting the run would be refused.",
+    },
     resumeRunnerHint:
       "Defaults to the runner this run started on — switch it to continue somewhere else.",
     deviceLabel: "Device",
@@ -311,6 +376,7 @@ export default {
     loadFailed: "Couldn't load job {{jobId}}: {{errorText}}",
     loading: "Loading job…",
     runnerLocal: "Local",
+    runnerNode: "LAN node",
     // Stand-in when a cloud job has no flavor recorded.
     cloudFallback: "cloud",
     viewOnHub: "View on Hub ↗",

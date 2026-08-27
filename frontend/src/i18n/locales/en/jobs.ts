@@ -47,6 +47,12 @@ export default {
     hub: "Hub",
     localTitle: "Runs on this machine",
     cloudTitle: "Runs on Hugging Face cloud",
+    // A lan_node run whose node id is missing falls back to this word; the
+    // chip normally shows the node's NAME or short instance id (data).
+    node: "Node",
+    nodeTitle: "Runs on a LAN node, driven by this server",
+    // {{name}} is the node's display name — data.
+    nodeTitleNamed: "Runs on the LAN node {{name}}, driven by this server",
     fromHub: "from Hub",
     fromHubTitle: "Imported from a Hugging Face Hub repo",
   },

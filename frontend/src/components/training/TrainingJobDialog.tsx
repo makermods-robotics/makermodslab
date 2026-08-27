@@ -366,6 +366,14 @@ const TrainingJobDialog: React.FC<{
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                         HF · {job.hf_flavor ?? t("training.jobDialog.cloudFallback")}
                       </span>
+                    ) : job.runner === "lan_node" ? (
+                      <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                        {/* The short instance id is the run's routing key — data. */}
+                        {t("training.jobDialog.runnerNode")}
+                        {job.node_instance_id
+                          ? ` · ${job.node_instance_id.slice(0, 8)}`
+                          : ""}
+                      </span>
                     ) : (
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                         {t("training.jobDialog.runnerLocal")}

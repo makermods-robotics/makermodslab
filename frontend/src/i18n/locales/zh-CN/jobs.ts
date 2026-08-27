@@ -33,6 +33,11 @@ export default {
     hub: "Hub",
     localTitle: "在本机运行",
     cloudTitle: "在 Hugging Face 云端运行",
+    // lan_node 运行缺少节点 id 时退回这个词；芯片通常显示节点名或短实例 id（数据）。
+    node: "节点",
+    nodeTitle: "在局域网节点上运行，由本服务器驱动",
+    // {{name}} 是节点的显示名——数据。
+    nodeTitleNamed: "在局域网节点 {{name}} 上运行，由本服务器驱动",
     fromHub: "来自 Hub",
     fromHubTitle: "从 Hugging Face Hub 仓库导入",
   },

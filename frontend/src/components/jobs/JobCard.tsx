@@ -36,6 +36,7 @@ import {
   Upload,
 } from "lucide-react";
 import MetaRows from "@/components/library/MetaRows";
+import NodeLocationChip from "@/components/jobs/NodeLocationChip";
 import DisplayName from "@/components/library/DisplayName";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
@@ -609,27 +610,34 @@ const JobCard: React.FC<Props> = ({
               />
               {stateLabel}
             </div>
-            {/* Location chip — with local and cloud runs mixed in one grid,
-                each card says where it runs (same family as the dataset
-                card's Local/Hub source badge). */}
+            {/* Location chip — with local, cloud and node runs mixed in one
+                grid, each card says where it runs (same family as the dataset
+                card's Local/Hub source badge). A lan_node run names its NODE
+                (falling back to the short instance id once the node has left
+                the registry) — its own component, so the registry lookup only
+                mounts when there is a node to name. */}
             {!isImported ? (
-              <div
-                className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground"
-                title={
-                  job.runner === "hf_cloud"
-                    ? t("jobs.location.cloudTitle")
-                    : t("jobs.location.localTitle")
-                }
-              >
-                {job.runner === "hf_cloud" ? (
-                  <Globe className="w-3 h-3" />
-                ) : (
-                  <HardDrive className="w-3 h-3" />
-                )}
-                {job.runner === "hf_cloud"
-                  ? t("jobs.location.cloud")
-                  : t("jobs.location.local")}
-              </div>
+              job.runner === "lan_node" ? (
+                <NodeLocationChip job={job} />
+              ) : (
+                <div
+                  className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground"
+                  title={
+                    job.runner === "hf_cloud"
+                      ? t("jobs.location.cloudTitle")
+                      : t("jobs.location.localTitle")
+                  }
+                >
+                  {job.runner === "hf_cloud" ? (
+                    <Globe className="w-3 h-3" />
+                  ) : (
+                    <HardDrive className="w-3 h-3" />
+                  )}
+                  {job.runner === "hf_cloud"
+                    ? t("jobs.location.cloud")
+                    : t("jobs.location.local")}
+                </div>
+              )
             ) : null}
             {isHubImport ? (
               <div

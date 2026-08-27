@@ -72,8 +72,60 @@ export default {
 
   target: {
     computeLabel: "算力",
-    runnerLocal: "本地 —— 你的机器",
+    // <0> 包裹加粗的名称——“本机”/云端标签/节点名（数据）。
+    runOn: "运行位置：<0>{{name}}</0>",
     runnerCloud: "Hugging Face 云端",
+    thisMachine: "本机",
+    // "MakerMods Lab" 是产品名，保持英文。
+    thisMachineSub: "本地 —— 这台 MakerMods Lab 服务器",
+    cloudSub: "按小时计费的租用 GPU —— 在下方选择硬件",
+    selectorHint:
+      "本次训练在哪里执行。界面始终留在这台服务器上 —— 任务由节点运行，服务器到服务器驱动。",
+    lanNodes: "局域网节点",
+    nodesLoading: "正在查找节点…",
+    // "Tailscale" 是产品名。
+    nodesEmpty:
+      "还没有节点 —— 通过 Tailscale 发现的其他 MakerMods Lab 服务器会出现在这里，也可以按 URL 添加。",
+    viaTailscale: "经 Tailscale",
+    verifying: "验证中…",
+    verifyingTitle: "已发现 —— 等待验证握手确认。",
+    unreachable: "无法连接",
+    // {{when}} 是英文的相对时间（"4m ago"）——时间格式化保持英文
+    // （lib/relativeTime.ts）。
+    lastSeen: "最后在线 {{when}}",
+    unreachableTitle: "无法连接 —— 下次握手成功后会重新变为可选。",
+    unreachableTitleLastSeen:
+      "无法连接 —— 最后在线 {{when}}。下次握手成功后会重新变为可选。",
+    // "makermodslab" 是包名；{{version}} 是数据。
+    nodeVersion: "makermodslab v{{version}}",
+    nodeGone: "已不在注册表中",
+    nodeGoneTitle: "该节点已离开注册表。请改选其他目标，否则启动会被拒绝。",
+    addNode: {
+      button: "添加节点…",
+      title: "按 URL 注册另一台 MakerMods Lab 服务器",
+      urlLabel: "节点 URL",
+      submit: "添加",
+      adding: "添加中…",
+      errorSelf: "该 URL 指向的正是这台服务器。",
+      errorDuplicate: "该节点已注册。",
+      errorUnreachable: "该 URL 上没有 MakerMods Lab 服务器应答。",
+    },
+    detail: {
+      instance: "实例",
+      version: "版本",
+      lastSeenLabel: "最后在线",
+      workloadLoading: "正在查询负载…",
+      workloadUnreachable: "无法连接 —— 无法向该节点查询当前负载。",
+      // {{name}} 是运行的显示名（数据）；{{pct}} 已预先格式化。
+      workloadRunningPct: "运行中：{{name}} · {{pct}}%",
+      workloadRunning: "运行中：{{name}}",
+      workloadIdle: "空闲",
+      workloadQueued: "+{{total}} 排队中",
+      // <0>/<1> 都包裹节点名（数据）。"Hub" / "HF" 是产品名。
+      hubSyncHint:
+        "任务在 <0>{{name}}</0> 上运行；数据集经 Hub 同步 —— 该数据集会先上传到你的 HF 账号，再由 <1>{{name}}</1> 从那里拉取。",
+      goneBody: "该节点已不在注册表中。请改选其他算力目标 —— 否则启动会被拒绝。",
+    },
     resumeRunnerHint: "默认沿用这次运行原先的执行位置 —— 也可以切换到别处继续。",
     deviceLabel: "设备",
     deviceAuto: "自动（有 GPU 就用 GPU）",
@@ -243,6 +295,7 @@ export default {
     loadFailed: "无法加载任务 {{jobId}}：{{errorText}}",
     loading: "正在加载任务…",
     runnerLocal: "本地",
+    runnerNode: "局域网节点",
     cloudFallback: "云端",
     viewOnHub: "在 Hub 上查看 ↗",
     viewOnWandb: "在 W&B 上查看 ↗",
