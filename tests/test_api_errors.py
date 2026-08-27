@@ -32,7 +32,19 @@ CODE_GRAMMAR = re.compile(r"^[a-z]+(_[a-z]+)*(\.[a-z]+(_[a-z]+)*){1,2}$")
 # Level-1 namespace. Closed set: extending it is a taxonomy decision, made
 # here first.
 DOMAINS = frozenset(
-    ["request", "robot", "hardware", "hub", "job", "dataset", "model", "checkpoint", "session", "internal"]
+    [
+        "request",
+        "robot",
+        "hardware",
+        "hub",
+        "job",
+        "dataset",
+        "model",
+        "checkpoint",
+        "session",
+        "node",
+        "internal",
+    ]
 )
 
 # The mutual-exclusion matrix (CLAUDE.md "State model & mutual exclusion"),

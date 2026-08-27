@@ -58,7 +58,7 @@ from . import (
 
 # Import our custom calibration functionality
 from .__version__ import __version__
-from .api_errors import ApiError, install_error_handlers
+from .api_errors import ApiError, ErrorCode, install_error_handlers
 from .auto_calibrate import (
     AutoCalibrationBatchRequest,
     AutoCalibrationRequest,
@@ -82,6 +82,13 @@ from .jobs import (
 )
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
+from .nodes import (
+    NodeNotFoundError,
+    NodeUnreachableError,
+    handle_add_node,
+    handle_list_nodes,
+    handle_remove_node,
+)
 
 # Import our custom recording functionality
 from .record import (
@@ -156,6 +163,11 @@ from .schemas.models import (
     ModelInfoResponse,
     ModelListItem,
     ModelUploadResponse,
+)
+from .schemas.nodes import (
+    NodeEntry,
+    NodeListResponse,
+    NodeRemoveResponse,
 )
 from .schemas.sessions import (
     CurrentSessionResponse,
@@ -835,6 +847,54 @@ def health_check():
     }
 
 
+# --- Node registry (v1-only surface; see v1_router note above) ---
+
+
+class AddNodeBody(BaseModel):
+    url: str
+    name: str | None = None
+
+
+@v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
+def list_nodes():
+    """All known nodes: this server first (is_self=true, built from the same
+    health fields the handshake reads, so clients render one uniform list),
+    then every registered peer. Peers whose last probe is older than the TTL
+    are re-verified inline; a peer that fails re-verification is reported
+    `unreachable` but kept until explicitly removed."""
+    health = health_check()
+    self_entry = {
+        "url": None,  # a server doesn't know its own external address
+        "instance_id": health["instance_id"],
+        "name": None,
+        "version": health["version"],
+        "capabilities": health["capabilities"],
+        "status": "ok",
+        "last_verified_at": None,  # no handshake needed with ourselves
+        "is_self": True,
+    }
+    return {"nodes": [self_entry, *handle_list_nodes()]}
+
+
+@v1_router.post("/nodes", response_model=NodeEntry, tags=["nodes"])
+def add_node(body: AddNodeBody):
+    """Verify-on-add: GET {url}/api/v1/health and register the peer's
+    identity. 200 returns the entry (also when a known peer's URL is updated
+    in place); 422 request.validation for a non-http(s) url; 409 node.self /
+    node.duplicate; 502 node.unreachable when the handshake fails (dead host
+    or a non-node answer) — an unreachable peer is an error, never a pending
+    state."""
+    return handle_add_node(body.url, name=body.name)
+
+
+@v1_router.delete("/nodes/{instance_id}", response_model=NodeRemoveResponse, tags=["nodes"])
+def remove_node(instance_id: str):
+    """Remove a registered peer. 404 node.not_found for an unknown
+    instance_id (including a saved peer that has never completed a handshake
+    this run — those carry a null instance_id until verified)."""
+    return handle_remove_node(instance_id)
+
+
 @router.get("/hf-auth-status", response_model=HfAuthStatusResponse, tags=["system"])
 def hf_auth_status():
     """Check whether the local HF CLI is authenticated and return user info."""
@@ -1496,6 +1556,16 @@ async def create_training_job(req: Request):
     raw = await req.json()
     body = StartTrainingBody.from_legacy(raw)
     cfg = body.config
+    # A lan_node target without a node is unroutable — refuse with the same
+    # 422 + code a malformed body would get, before any slower preflight.
+    # (JobRegistry.start re-checks as belt-and-braces, mirroring the flavor
+    # guard; that copy surfaces as a plain 400 for non-HTTP callers.)
+    if body.target is not None and body.target.runner == "lan_node" and not body.target.node_instance_id:
+        raise ApiError(
+            status_code=422,
+            detail="target.node_instance_id is required when target.runner is 'lan_node'",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
     # Soft warning (not a block): lerobot saves/logs on `step % freq == 0`, so a
     # frequency larger than the total step count means the action never fires —
     # no checkpoint gets saved / no metrics logged. Almost always a config
@@ -1618,6 +1688,16 @@ async def create_training_job(req: Request):
             status_code=409,
             detail=f"{source} was already continued by {continued_by}. {remedy}",
         ) from exc
+    except NodeNotFoundError as exc:
+        # The request named a node this install has never registered — a bad
+        # reference in the request, so 400 (not the DELETE route's 404: there
+        # is no /nodes/{id} resource being addressed here).
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        # Same status the node routes use for a peer that didn't answer.
+        # Raised by the pre-record resolve (no record) or by the runner's
+        # submission (record already finalised `failed` by the registry).
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
