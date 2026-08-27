@@ -7,7 +7,9 @@ import httpx
 from makermodslab_sdk._transport import DEFAULT_TIMEOUT, Transport
 from makermodslab_sdk.errors import ApiError
 from makermodslab_sdk.resources import (
+    DatasetsResource,
     JobsResource,
+    ModelsResource,
     NodesResource,
     Resource,
     SessionsResource,
@@ -21,7 +23,9 @@ MIN_SUPPORTED_SERVER_VERSION = (0, 1, 0)
 # tag -> namespace class. ONE line per namespace, kept alphabetical — parallel
 # tracks each add exactly their own line, so merges never collide here.
 RESOURCE_CLASSES: dict[str, type[Resource]] = {
+    "datasets": DatasetsResource,
     "jobs": JobsResource,
+    "models": ModelsResource,
     "nodes": NodesResource,
     "sessions": SessionsResource,
     "system": SystemResource,
@@ -80,7 +84,9 @@ class Client:
             http_client=http_client,
             on_first_request=self._verify_server_compatibility if check_compatibility else None,
         )
+        self.datasets = DatasetsResource(self._transport)
         self.jobs = JobsResource(self._transport)
+        self.models = ModelsResource(self._transport)
         self.nodes = NodesResource(self._transport)
         self.sessions = SessionsResource(self._transport)
         self.system = SystemResource(self._transport)
