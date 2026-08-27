@@ -307,6 +307,7 @@ export default {
     noMatch: "No models match.",
     filters: {
       all: "All",
+      trained: "Trained",
       imported: "Imported",
       uploaded: "Uploaded",
     },

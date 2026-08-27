@@ -426,7 +426,33 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-job_registry.set_on_change(manager.notify_jobs_changed)
+
+
+def _on_jobs_changed() -> None:
+    """Registry-change fan-out: drop the models listing cache, THEN announce.
+
+    A run reaching a terminal state changes what `/models` lists — that is the
+    moment it becomes a deployable skill — but no MODEL mutation ran, so until
+    now nothing invalidated the listing cache. The picker stayed up to
+    `_LISTING_CACHE_TTL_S` (45s) stale while the jobs-driven library, which
+    reads the registry directly over a WS push, was already current. That gap
+    is the transient half of "the two skill lists disagree". Registry renames
+    had the same shape: `rename` fires this hook, but no route invalidated the
+    listing, so the picker showed a run's old name for up to a TTL.
+
+    Two placement details, both load-bearing:
+
+      * Invalidation runs BEFORE the broadcast. Clients refetch on the event,
+        so announcing first races a cache this call exists to drop.
+      * Invalidation runs OUTSIDE `notify_jobs_changed`'s "are any clients
+        connected?" guard. The broadcast is pointless with nobody listening;
+        the cache drop is not — the next plain HTTP GET still wants the truth.
+    """
+    model_browser.invalidate_model_listing_cache()
+    manager.notify_jobs_changed()
+
+
+job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
 
 
@@ -1070,6 +1096,23 @@ def models_list():
     Each entry carries a `source` field: "local", "hub", or "both" (a local run
     that was also pushed to the Hub). Mirrors GET /datasets."""
     return model_browser.list_all_models()
+
+
+@app.get("/skills")
+def skills_list():
+    """Every trained policy, each saying whether it can actually run.
+
+    The deployable projection of the same merged build `/models` serves, so the
+    deploy picker and the models library can no longer disagree about what a
+    skill is — they were reading two different endpoints (`/models` and the
+    `/jobs` registry) and filtering them on two different rules.
+
+    Envelope, not a bare array: `{skills, hub}`. `hub` reports whether the Hub
+    half was reachable, because "the Hub is down" and "you own no skills" used
+    to render identically as an empty list. Each row carries `weights`
+    (ready/unverified/none), `superseded_by`, `deployable`, `origin` and the
+    `job_id` that deploys it."""
+    return model_browser.list_skills()
 
 
 @app.get("/models/info")
@@ -1762,7 +1805,11 @@ def delete_hub_model(repo_id: str):
         raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
 
     # The listing changed — drop the cached /jobs/hub response so the removed
-    # repo doesn't linger until the TTL expires.
+    # repo doesn't linger until the TTL expires. The models/skills listing has
+    # its own Hub cache and its own last-good fallback, so it needs telling
+    # separately: without this the deleted repo survives the TTL AND, worse,
+    # persists as a retained "stale" row every time a later fan-out degrades.
+    model_browser.forget_hub_repo(repo_id)
     invalidate_hub_jobs_cache()
     return {"status": "success", "repo_id": repo_id}
 
@@ -1827,9 +1874,17 @@ def get_job_metrics_history(job_id: str):
 
 
 @app.get("/jobs/{job_id}/checkpoints")
-def get_job_checkpoints(job_id: str):
-    """List the checkpoints saved for this job, ascending by step."""
+def get_job_checkpoints(job_id: str, lineage: bool = False):
+    """List the checkpoints saved for this job, ascending by step.
+
+    ``lineage=true`` widens that to the whole resume chain — this run plus the
+    runs it resumed. Opt-in rather than the default so existing callers keep
+    their exact semantics; the skill picker asks for it because a chain is one
+    model and splitting its steps across rows is what this fixes.
+    """
     try:
+        if lineage:
+            return {"checkpoints": job_registry.list_chain_checkpoints(job_id)}
         return {"checkpoints": job_registry.list_checkpoints(job_id)}
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc

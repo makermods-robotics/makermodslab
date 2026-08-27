@@ -25,6 +25,7 @@ export default {
     resumeStepError: "总步数必须大于检查点所在的步数（{{step}}）。",
     resume: {
       titleFromStep: "从第 {{step}} 步继续“{{name}}”",
+      lrSeam: "总步数与原运行不同（{{from}} → {{to}}）。LeRobot 会按新的总步数重建学习率调度，因此在恢复点学习率可能回升，而不是接着原来的衰减继续。保持 {{from}} 可获得连续的调度。",
       titleFromLatest: "从最新检查点继续“{{name}}”",
       bodyLocal:
         "设置已按那次运行预填，且仍可编辑。数据集、策略、批大小和优化器都会从检查点本身重建，在这里修改不会影响续训 —— 但<0>步数</0>和检查点保存频率会生效。把步数设为高于续训起点才能继续训练（已预填为 {{steps}}）。",
@@ -35,9 +36,11 @@ export default {
       jobTimeoutDefault: "24h（默认）",
     },
     finetune: {
+      title: "基于“{{name}}”微调",
       titleWithStep: "基于“{{name}}”微调（第 {{step}} 步）",
       titleLatest: "基于“{{name}}”微调（最新检查点）",
-      body: "这会开启一次<0>全新运行</0>（新的优化器，从第 0 步开始），策略权重由该模型初始化。请选择用于训练的<1>数据集</1>，并像平常一样设置训练参数。",
+      checkpointLabel: "检查点",
+      body: "<0>全新训练</0>，从第 0 步开始：优化器全新初始化，策略权重从该检查点载入。",
     },
     tooltip: {
       localBusy: "已有另一个本地训练在运行",
@@ -89,6 +92,10 @@ export default {
 
   essentials: {
     steps: "训练步数",
+    stepsTotal: "总训练步数",
+    stepsTotalHint: "从第 {{from}} 步恢复，将再训练 {{remaining}} 步。",
+    stepsTotalHintLatest: "这是总步数，而非额外增加的步数。",
+    stepsTotalTooLow: "必须大于 {{from}}——该运行已训练到这一步，否则不会训练任何内容。",
     batchSize: "批大小",
     runName: "运行名称",
     resumedFromStep: "从第 {{step}} 步开始",

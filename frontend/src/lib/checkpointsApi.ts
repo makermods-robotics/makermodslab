@@ -4,6 +4,16 @@ export interface JobCheckpoint {
   step: number;
   source: "local" | "hub";
   ref: string;
+  /** Which run in a resume chain actually saved this checkpoint. Present only
+   * on a `lineage: true` listing, where a step is no longer unique; a
+   * single-run listing omits it because every row would say the same thing.
+   *
+   * `(owner_job_id, step)` IS unique, so it is the safe way to address one
+   * checkpoint by step — e.g. the policy-config endpoint, which takes a job id
+   * and a step. */
+  owner_job_id?: string;
+  owner_job_number?: number;
+  owner_name?: string;
 }
 
 export interface PolicyConfigSummary {
@@ -46,11 +56,16 @@ export async function listJobCheckpoints(
   fetcher: Fetcher,
   jobId: string,
   signal?: AbortSignal,
+  /** Widen to the whole resume chain — this run plus the runs it resumed.
+   * A chain is ONE model trained across several records, so anything offering
+   * "which checkpoint do you want to run" needs all of them; without this the
+   * tip offers only the steps it personally saved. */
+  lineage = false,
 ): Promise<JobCheckpoint[]> {
   const body = await apiRequest<{ checkpoints: JobCheckpoint[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${jobId}/checkpoints`,
+    `/jobs/${jobId}/checkpoints${lineage ? "?lineage=true" : ""}`,
     { signal, action: "List checkpoints" },
   );
   return body.checkpoints;

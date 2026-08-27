@@ -30,7 +30,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-import { getModels, ModelItem } from "@/lib/modelsApi";
+import { ModelItem } from "@/lib/modelsApi";
+import { useModels } from "@/hooks/useModels";
 import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import {
@@ -197,7 +198,12 @@ const TrainPanel: React.FC = () => {
   const [actionsEl, setActionsEl] = useState<HTMLDivElement | null>(null);
 
   // ── Starting point (fine-tune base) ───────────────────────────────────────
-  const [models, setModels] = useState<ModelItem[]>([]);
+  // Shared with the Deploy picker and the launchpad slider (ModelsDataContext),
+  // so the three cannot drift apart. Note this list is a WIDER population than
+  // the Deploy picker's: a foundation checkpoint is a legitimate fine-tune base
+  // and not a deployable skill. They read one endpoint today; if that ever
+  // splits, this is the call site that keeps `/models`.
+  const { models } = useModels();
   const [baseModelId, setBaseModelId] = useState<string>(NONE);
   const [finetuneSeed, setFinetuneSeed] = useState<FinetuneSeed | null>(null);
   const [resolvingBase, setResolvingBase] = useState(false);
@@ -220,20 +226,6 @@ const TrainPanel: React.FC = () => {
     // way).
     if (!open) setResumeSeed(null);
   };
-
-  useEffect(() => {
-    let cancelled = false;
-    getModels(baseUrl, fetchWithHeaders)
-      .then((m) => {
-        if (!cancelled) setModels(m);
-      })
-      .catch(() => {
-        /* the starting point is optional — leave the list empty */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [baseUrl, fetchWithHeaders]);
 
   // ── Policy ────────────────────────────────────────────────────────────────
   // Chosen inside Run configuration (EssentialsCard's select); a base-skill or
@@ -703,13 +695,30 @@ const TrainPanel: React.FC = () => {
                 belt-and-braces; the fine-tune half is live, since ModelCard's
                 history selector really can re-fire at a different step. */}
             <TrainingConfigurator
+              // The fine-tune STEP is deliberately absent from this key. It
+              // used to be here so mount-derived values refreshed, but the
+              // checkpoint picker edits that step — remounting on every pick
+              // discarded whatever had already been typed into the form, and
+              // (worse) reset the pick itself back to the source's latest. The
+              // configurator now reads the fine-tune step live off the seed, so
+              // it needs no remount to see a change. The resume half keeps its
+              // step: resume is not step-selectable, so it only varies when the
+              // user really did arrive from a different checkpoint.
               key={`${resumeSeed?.jobId ?? ""}@${resumeSeed?.step ?? ""}@${
                 resumeSeed?.checkpointJobId ?? ""
-              }::${finetuneSeed?.jobId ?? "fresh"}@${finetuneSeed?.step ?? ""}`}
+              }::${finetuneSeed?.jobId ?? "fresh"}`}
               policyType={policyType}
               onPolicyTypeChange={setPolicyType}
               datasetRepoId={trainingDatasetRepoId}
               finetuneSeed={finetuneSeed}
+              // The seed owns the chosen base checkpoint, so the pick survives
+              // a remount of the form below. `checkpointSource` moves with it:
+              // it decides whether a cloud run must stage the weights first.
+              onFinetuneCheckpointChange={(c) =>
+                setFinetuneSeed((prev) =>
+                  prev ? { ...prev, step: c.step, checkpointSource: c.source } : prev,
+                )
+              }
               resumeSeed={resumeSeed}
               // Launch opens the monitor dialog over this panel (via
               // openJobMonitor in the configurator); fold the form back so
