@@ -326,6 +326,15 @@ class CalibrationManager:
                         "code": ErrorCode.ROBOT_BUSY_REPLAY,
                     }
 
+                # Lazy, because jobs imports this module back the same way.
+                from . import jobs as _jobs
+
+                if (training := _jobs.training_is_active()) is not None:
+                    return {
+                        "success": False,
+                        "message": (f"Training run '{training}' is using this machine. Stop it first."),
+                    }
+
                 # Refuse to silently overwrite an existing config file. Completing a
                 # calibration saves "<config_file>.json"; if that name is taken, the
                 # caller must pass overwrite=True (after confirming) or pick another

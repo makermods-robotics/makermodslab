@@ -857,6 +857,14 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 "message": "Replay is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
+        # Lazy, because jobs imports this module back the same way.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+            }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later grace/return short until the server

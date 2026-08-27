@@ -270,6 +270,15 @@ class _AutoCalArmRunner:
                     "code": ErrorCode.ROBOT_BUSY_REPLAY,
                 }
 
+            # Lazy, because jobs imports this module back the same way.
+            from . import jobs as _jobs
+
+            if (training := _jobs.training_is_active()) is not None:
+                return {
+                    "success": False,
+                    "message": f"Training run '{training}' is using this machine. Stop it first.",
+                }
+
             if request.device_type not in ("teleop", "robot"):
                 return {"success": False, "message": "Invalid device type"}
             if not request.port:
@@ -672,6 +681,15 @@ class AutoCalibrationBatchManager:
                     "success": False,
                     "message": "Replay is currently active. Stop it first.",
                     "code": ErrorCode.ROBOT_BUSY_REPLAY,
+                }
+
+            # Lazy, because jobs imports this module back the same way.
+            from . import jobs as _jobs
+
+            if (training := _jobs.training_is_active()) is not None:
+                return {
+                    "success": False,
+                    "message": f"Training run '{training}' is using this machine. Stop it first.",
                 }
 
             arms = request.arms

@@ -37,7 +37,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -72,11 +72,15 @@ from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
     JobAlreadyContinuedError,
-    JobAlreadyRunningError,
     JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
+    JobRemovalFailedError,
+    JobSourceOfQueuedRunError,
+    JobState,
+    JobStateChangedError,
     JobTarget,
+    QueueChangedError,
     _list_local_checkpoints,
     job_registry,
 )
@@ -1644,11 +1648,11 @@ async def create_training_job(req: Request):
         from .datasets import is_dataset_available_locally
 
         if not is_dataset_available_locally(cfg.dataset_repo_id):
-            # 400 (matching this endpoint's other preflight rejections — the
-            # resume-steps guard above and the ValueError->400 below), NOT 409:
-            # startTrainingJob (jobsApi.ts) rewrites EVERY 409 into "Another
-            # training is already running", which would mask this message. 400
-            # lets FastAPI's `detail` reach the toast verbatim.
+            # 400, matching this endpoint's other preflight rejections (the
+            # resume-steps guard above and the ValueError->400 below). It is a
+            # malformed request for this server's configuration, not a conflict
+            # with some other state — nothing is holding the dataset; it simply
+            # isn't here and can't be fetched.
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -1660,8 +1664,6 @@ async def create_training_job(req: Request):
             )
     try:
         record = job_registry.start(body.config, body.target)
-    except JobAlreadyRunningError as exc:
-        raise HTTPException(status_code=409, detail=f"Job already running: {exc}") from exc
     except DatasetNotOnHubError as exc:
         # Cloud run on a local-only dataset. 409: the caller must upload the
         # dataset first (the browser flow does this automatically before
@@ -2120,6 +2122,29 @@ def dismiss_hub_job(job_id: str):
     return {"status": "success", "job_id": job_id.strip()}
 
 
+# NEW surface, so it lives on v1_router (never the flat mount). It still MUST
+# match before GET /jobs/{job_id}: that route's single {job_id} segment happily
+# matches the literal "queue", answering this request with a 404 for a job of
+# that name — the same reason /jobs/hub sits above it. The two live on
+# different routers, so the ordering is enforced where the routers are
+# included: v1_router joins the /api/v1 mount BEFORE the shared router does.
+# (The POST twin, /jobs/queue/reorder, is not at risk — every POST
+# /jobs/{job_id}/… route ends in a literal segment.)
+@v1_router.get("/jobs/queue", tags=["jobs"])
+def list_job_queue():
+    """The whole local training queue, in the order it will run.
+
+    Separate from `GET /jobs` because that is a capped, newest-first PAGE of
+    history and this is a complete list. Deriving the queue from that page was
+    wrong twice over: a queued record carries its SUBMIT time, so queued runs
+    crowd the top of the page and pushed the actually-running job off it, and
+    past the page size the queue itself was truncated — which silently dropped
+    the runs at the HEAD of the line and made every reorder a 409, since
+    `reorder_queue` requires the whole list.
+    """
+    return {"jobs": [r.model_dump() for r in job_registry.list_queue()]}
+
+
 @router.get("/jobs/{job_id}", response_model=JobRecord, tags=["jobs"])
 def get_job(job_id: str):
     try:
@@ -2270,14 +2295,121 @@ def rename_job(job_id: str, body: RenameJobBody):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/jobs/{job_id}/stop", response_model=JobRecord, tags=["jobs"])
-def stop_job(job_id: str):
+class ReorderQueueRequest(BaseModel):
+    # The WHOLE queue, first to run first. A partial list is refused rather
+    # than merged — see JobRegistry.reorder_queue.
+    #
+    # Bounded because the queue is: it holds runs a user submitted by hand, one
+    # at a time, and a machine with a single local training slot will not have
+    # thousands waiting. Unbounded, a 20k-id body was validated INSIDE the
+    # registry lock (freezing every /jobs* request behind the set math) and came
+    # back as a 360 KB error detail echoing every bad id. 422 here costs neither.
+    job_ids: list[str] = Field(max_length=512)
+
+
+# NEW surface → v1_router (see the /jobs/queue GET above). Declared before
+# /jobs/{job_id}/... so the intent is readable together with stop; FastAPI
+# matches this path fine either way, since every {job_id} route ends in a
+# literal segment ("rename", "stop", …) that "queue" isn't.
+@v1_router.post("/jobs/queue/reorder", tags=["jobs"])
+def reorder_job_queue(body: ReorderQueueRequest):
+    """Set the order of the local training queue.
+
+    Local runs are one-at-a-time, so a second Start enqueues rather than
+    failing; this is how the user changes their mind about what goes next.
+    Only queued jobs can be reordered — the run already on the GPU is not in
+    the list, and a job that started while the drag was in flight makes the
+    request stale (409).
+    """
     try:
-        return job_registry.stop(job_id)
+        return {"jobs": job_registry.reorder_queue(body.job_ids)}
+    except ValueError as exc:
+        # The request itself is wrong — an id that names no run at all, or one
+        # listed twice. 400, not the 409 below: retrying it unchanged can never
+        # succeed, and the detail names the offending ids so a non-UI caller can
+        # fix them. An id that names a real run which has LEFT the queue is not
+        # this case: that is the race below, and it retries successfully.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except QueueChangedError as exc:
+        # A well-formed list that lost its race. Retrying after a refetch is
+        # exactly the right advice here, which is why it only appears here.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The training queue changed while you were reordering it — "
+                "a job started, finished, or was cancelled. The list has been "
+                "refreshed; try again."
+            ),
+        ) from exc
+
+
+@router.post("/jobs/{job_id}/stop", response_model=JobRecord, tags=["jobs"])
+def stop_job(job_id: str, expect_state: JobState | None = None):
+    """Stop a running job, or cancel a queued one.
+
+    `expect_state` is optional and is the caller's precondition: pass the state
+    the UI was showing when it drew the button. Cancel and kill are the same
+    request here, so a Cancel drawn against a stale queue would otherwise
+    SIGTERM a run the watchdog promoted in the meantime.
+
+    Typed as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value
+    used to reach the comparison, fail it, and come back as a 409 saying the job
+    "changed while you were looking at it" — reporting a client's typo as a race,
+    which no retry can ever clear. It is now a 422, and `/openapi.json`
+    advertises the real member set instead of "any string".
+    """
+    try:
+        return job_registry.stop(job_id, expect_state=expect_state)
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+    except JobStateChangedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} is {exc.actual!r}, not {exc.expected!r} — it changed while "
+                "you were looking at it. Refresh and decide again."
+            ),
+        ) from exc
     except JobNotRunningError as exc:
-        raise HTTPException(status_code=409, detail=f"Job {job_id!r} is not running") from exc
+        raise HTTPException(status_code=409, detail=f"Job {job_id!r} is neither running nor queued") from exc
+    # Cancelling a QUEUED run removes its record, so it carries the same two
+    # refusals as DELETE. Stopping a running run does not — it leaves a record
+    # behind — so these can only fire on the cancel path.
+    except JobHasChildrenError as exc:
+        continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} was continued by {continued_by}, which would be left "
+                "pointing at a cancelled run. Cancel the continuation(s) first."
+            ),
+        ) from exc
+    except JobSourceOfQueuedRunError as exc:
+        waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel those first."
+            ),
+        ) from exc
+    except JobRemovalFailedError as exc:
+        # 500, not 409: nothing about the request was wrong. Say plainly that
+        # the run is untouched, because the alternative reading — "cancel
+        # half-worked" — is what would make a user walk away from a run that is
+        # still going to train.
+        logger.exception("Could not cancel job %s", job_id)
+        raise HTTPException(
+            status_code=500,
+            # `strerror` only — see the delete twin below. The full OSError
+            # carries the job directory's absolute path, and this body is
+            # returned to the caller.
+            detail=(
+                f"Could not cancel job {job_id!r}: {exc.reason.strerror}. The run is still "
+                "queued and will still start when the slot frees — nothing was removed, so "
+                "it is safe to try again."
+            ),
+        ) from exc
 
 
 # 204 No Content — there is no body for a response_model to describe, so the
@@ -2300,6 +2432,44 @@ def delete_job(job_id: str):
             detail=(
                 f"Job {job_id!r} was continued by {continued_by}, which would be left "
                 "pointing at a deleted run. Delete the continuation(s) first."
+            ),
+        ) from exc
+    except JobSourceOfQueuedRunError as exc:
+        # Same shape as the mid-chain refusal above, for the dependency
+        # build_child_index does not model: a queued fine-tune froze this run's
+        # checkpoint PATH at submit time and reads it when the slot frees, so
+        # deleting the directory now fails that run hours from now with a
+        # not-found traceback the user could not connect to this click.
+        waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel them first, or wait for them to finish."
+            ),
+        ) from exc
+    except JobRemovalFailedError as exc:
+        # 500, not 409: nothing about the request was wrong. Say that the run is
+        # untouched, because the alternative reading — "delete half-worked" — is
+        # what would leave a user surprised to see it again after a restart.
+        # Where it is untouched depends on what it was: `delete` refuses only a
+        # RUNNING run, so a queued one reaches here, and telling that user it is
+        # "still in your history" describes the wrong place — it is still in the
+        # queue and still going to train, which is the part they need to act on.
+        logger.exception("Could not delete job %s", job_id)
+        still = (
+            "still queued and will still start when the slot frees"
+            if record.state == "queued"
+            else "untouched and still in your history"
+        )
+        raise HTTPException(
+            status_code=500,
+            # `strerror` only: the full OSError carries the absolute path of the
+            # job directory, and this body goes to whoever made the request —
+            # including anyone on the LAN under `--lan`. The path is in the log.
+            detail=(
+                f"Could not delete job {job_id!r}: {exc.reason.strerror}. The run is "
+                f"{still} — nothing was removed, so it is safe to try again."
             ),
         ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job
@@ -3316,6 +3486,23 @@ async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
 
+    # FIRST, before anything below takes its (bounded but real) time: stop the
+    # job watchdog, so the local training queue cannot promote a run while we
+    # are shutting down.
+    #
+    # `_drain_queue` runs every second from a thread uvicorn does not manage,
+    # and `LocalJobRunner` spawns a DETACHED wrapper — that detachment is
+    # deliberate (it is what `process_pid` + `exit_status` reattachment exists
+    # for), so a trainer started here outlives the server. The user would close
+    # MakerMods Lab and be left with a GPU training they never saw start and no
+    # UI able to stop it until they relaunch. Before the queue this was
+    # impossible: starting a run required an HTTP request, and uvicorn stops
+    # accepting those before this handler runs.
+    #
+    # Only the watchdog stops. A run already training is left alone on purpose,
+    # exactly as it is across a restart today.
+    job_registry.shutdown()
+
     # Stop the AVFoundation pump first so its next tick can't interleave with
     # shutdown (and so --reload restarts don't log a destroyed-pending-task).
     if _avf_pump_task is not None:
@@ -3420,9 +3607,13 @@ def _v1_operation_id(route: APIRoute) -> str:
 # Both precede the SPA mount below: starlette matches in registration order,
 # so anything registered after the "/" mount would be unreachable.
 app.include_router(router)
-app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
-# v1-only surface: included ONCE, versioned — never on the flat mount.
+# v1-only surface: included ONCE, versioned — never on the flat mount. It
+# joins /api/v1 BEFORE the shared router does, and that order is load-bearing:
+# starlette matches in registration order, and the shared router's
+# GET /jobs/{job_id} would otherwise swallow the v1-only GET /jobs/queue
+# (a single {job_id} segment happily matches the literal "queue").
 app.include_router(v1_router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
+app.include_router(router, prefix="/api/v1", generate_unique_id_function=_v1_operation_id)
 
 
 def ui_enabled() -> bool:

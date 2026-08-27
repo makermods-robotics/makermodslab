@@ -15,12 +15,34 @@
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+# Redirect the module-level `job_registry` singleton away from real training
+# history. This CANNOT be a fixture: `makermodslab.jobs` resolves
+# `_DEFAULT_OUTPUT_ROOT` from this variable at import time and constructs the
+# singleton (watchdog and all) at module scope, so by the time any fixture runs
+# the root is already bound. conftest is imported before test modules, which is
+# the only hook early enough.
+#
+# Without it the singleton points at ~/.cache/huggingface/lerobot/outputs/train,
+# and any test that drives it writes job records into the developer's real
+# history — and, because that registry's watchdog is a live thread, can promote
+# an injected `queued` record and spawn an ACTUAL lerobot subprocess against it.
+# `setdefault` so an explicit root set by the caller still wins.
+_TEST_OUTPUT_ROOT = tempfile.mkdtemp(prefix="makermodslab-tests-")
+if os.environ.setdefault("MAKERMODSLAB_OUTPUT_ROOT", _TEST_OUTPUT_ROOT) == _TEST_OUTPUT_ROOT:
+    atexit.register(shutil.rmtree, _TEST_OUTPUT_ROOT, ignore_errors=True)
+else:  # pragma: no cover - only when the caller pinned a root themselves
+    shutil.rmtree(_TEST_OUTPUT_ROOT, ignore_errors=True)
 
 
 @pytest.fixture
