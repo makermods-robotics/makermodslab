@@ -11,6 +11,10 @@ export interface DatasetItem {
    * their own namespace, no local copy). Such a row is "removed" by unpinning
    * (removeCustomDataset), never a destructive delete. */
   saved_custom?: boolean;
+  /** Carries per-episode sampling weights (a weighted merge). Present for
+   * datasets with a local copy; absent for Hub-only rows, where it is unknown
+   * rather than false — so read it as `weighted === true`, never `!weighted`. */
+  weighted?: boolean;
 }
 
 export async function listDatasets(
@@ -145,6 +149,9 @@ export interface DatasetInfo {
   tasks: DatasetTask[];
   /** On-disk size for a local dataset; null for a Hub summary (not on disk). */
   size_bytes: number | null;
+  /** Carries per-episode sampling weights. Local datasets only; absent means
+   * unknown (Hub-only), not false. */
+  weighted?: boolean;
   /** "local" = full detail from the local cache; "hub" = the meta/info.json
    * summary of a not-yet-downloaded Hub dataset (no tasks/size; rename not
    * applicable). Treat absent as "local". */
@@ -173,6 +180,11 @@ export interface EpisodeSummary {
   length: number;
   duration: number;
   tasks: string[];
+  /** How often this episode is sampled during training, relative to a weight of
+   * 1. Written at merge time; absent from an older backend's response, and
+   * absent means 1 (see R3 in docs/weighted-sampling-plan.md) — so read it as
+   * `sampling_weight ?? 1`, never as a bare number. */
+  sampling_weight?: number;
   /** Per-camera {from, to} seconds locating this episode's slice WITHIN its
    * (possibly shared) video file — v3.0 packs consecutive episodes into the
    * same mp4 per camera, so playback must seek to `from` and stop at `to`

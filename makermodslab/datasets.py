@@ -35,6 +35,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
+from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
     get_hidden_datasets,
     get_saved_custom_datasets,
@@ -47,6 +48,22 @@ from .utils.hf_auth import cached_whoami, canonical_writable_namespace, hf_hub_o
 logger = logging.getLogger(__name__)
 
 CAMERA_FEATURE_PREFIX = "observation.images."
+
+
+def _sampling_weight(value: Any) -> float:
+    """One episode's sampling weight, defaulting to 1.0.
+
+    Absent column, null cell, or an unreadable value all mean 1.0 (R3) — never an
+    error, and never 0.0, which would drop the episode from training entirely.
+    """
+    if value is None:
+        return 1.0
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    # Rejects negatives, infinities, and NaN (which satisfies no comparison).
+    return weight if 0 <= weight < float("inf") else 1.0
 
 
 def _safe_int(value: Any) -> int | None:
@@ -669,6 +686,29 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+def _has_sampling_weight_column(path: Path) -> bool:
+    """Whether ``path``'s episode metadata carries a ``sampling_weight`` column.
+
+    Reads only the parquet FOOTER (``read_schema``), never the rows, so it is
+    cheap enough to run per dataset while building a listing.
+
+    This is an exact proxy for "is weighted", not an approximation: a merge with
+    every weight at 1 writes no column at all, so a present column always means
+    at least one episode is weighted. The authoritative check that gates which
+    trainer launches is still ``dataset_is_weighted`` — this one only decides
+    whether to draw a badge.
+    """
+    episodes_dir = path / "meta" / "episodes"
+    if not episodes_dir.is_dir():
+        return False
+    for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+        try:
+            return SAMPLING_WEIGHT_COLUMN in pq.read_schema(parquet_path).names
+        except Exception:
+            return False
+    return False
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -703,6 +743,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": top.name,
                         "last_modified": _dir_mtime_iso(top),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(top),
                     }
                 )
             continue
@@ -724,6 +765,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": f"{top.name}/{sub.name}",
                         "last_modified": _dir_mtime_iso(sub),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(sub),
                     }
                 )
 
@@ -879,10 +921,17 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         # Hub dataset — see get_hub_dataset_info). The card gates its local-only
         # affordances (rename, size, task counts) on this.
         "source": "local",
+        # Per-episode sampling weights present. Drives the "weighted" badge and
+        # the cloud-target block (weighted datasets are local-only for now).
+        "weighted": _has_sampling_weight_column(path),
     }
 
 
-def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list[dict[str, Any]] | None:
+def _read_episode_rows(
+    meta_dir: Path,
+    columns: list[str] | None = None,
+    optional_columns: list[str] | None = None,
+) -> list[dict[str, Any]] | None:
     """Every row of ``meta/episodes/chunk-*/file-*.parquet``, column-pruned.
 
     v3.0-only: older v2.x datasets keep episodes in ``meta/episodes.jsonl``,
@@ -890,6 +939,14 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
     viewer (episode list, video, joint chart) isn't offered for them — callers
     treat a None return as "not viewable", not an error. Returns None if the
     directory is absent or nothing could be read.
+
+    ``optional_columns`` are requested only from the files that actually have
+    them. That distinction is load-bearing: pyarrow raises when ``columns`` names
+    a column a file lacks, and the ``except`` below logs and *continues*, so
+    naming a not-universally-present column in ``columns`` would silently drop
+    every parquet file of every dataset written before that column existed —
+    ending with ``rows == []`` and a None return, i.e. "not viewable". A per-file
+    schema probe (footer only, no row groups read) keeps that from happening.
     """
     episodes_dir = meta_dir / "episodes"
     if not episodes_dir.is_dir():
@@ -897,7 +954,11 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
     rows: list[dict[str, Any]] = []
     for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
         try:
-            table = pq.read_table(parquet_path, columns=columns)
+            requested = columns
+            if columns is not None and optional_columns:
+                present = set(pq.read_schema(parquet_path).names)
+                requested = [*columns, *[c for c in optional_columns if c in present]]
+            table = pq.read_table(parquet_path, columns=requested)
         except Exception as e:
             logger.warning(f"Could not read {parquet_path}: {e}")
             continue
@@ -988,7 +1049,14 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
         col_to_camera[from_col] = (camera, "from")
         col_to_camera[to_col] = (camera, "to")
 
-    rows = _read_episode_rows(path / "meta", columns=["episode_index", "tasks", "length", *video_cols])
+    rows = _read_episode_rows(
+        path / "meta",
+        columns=["episode_index", "tasks", "length", *video_cols],
+        # Only merged-with-weights datasets carry this. It MUST stay optional:
+        # see _read_episode_rows for what requiring it would do to every dataset
+        # recorded before the column existed (R3).
+        optional_columns=[SAMPLING_WEIGHT_COLUMN],
+    )
     if rows is None:
         return None
     out = []
@@ -1014,10 +1082,42 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
                 "duration": round(length / fps, 3),
                 "tasks": [str(t) for t in (row.get("tasks") or [])],
                 "video_offsets": video_offsets,
+                "sampling_weight": _sampling_weight(row.get(SAMPLING_WEIGHT_COLUMN)),
             }
         )
     out.sort(key=lambda e: e["episode_index"])
     return out
+
+
+def dataset_is_weighted(repo_id: str) -> bool:
+    """Whether any episode of ``repo_id`` carries a ``sampling_weight`` != 1.
+
+    Resolved from the dataset's own ``meta/episodes``, never from a request body:
+    weightedness decides which trainer module a run launches, and a client must
+    not be able to claim a dataset is (or isn't) weighted.
+
+    Local copy first, then the same Hub episode-metadata fetch the viewer uses,
+    so a dataset that only exists on the Hub is still classified correctly.
+    False when nothing resolves — a v2.x dataset, or one that predates the
+    column, has no weights to honour (R3).
+    """
+    try:
+        path = _resolve_local_dataset_path(repo_id)
+        if path is None:
+            path = _ensure_hub_episodes_root(repo_id)
+        if path is None:
+            return False
+        rows = _read_episode_rows(
+            path / "meta",
+            columns=["episode_index"],
+            optional_columns=[SAMPLING_WEIGHT_COLUMN],
+        )
+    except Exception as exc:
+        logger.warning("Could not read sampling weights for %s: %s", repo_id, exc)
+        return False
+    if rows is None:
+        return False
+    return any(_sampling_weight(row.get(SAMPLING_WEIGHT_COLUMN)) != 1.0 for row in rows)
 
 
 def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Path | None:
@@ -1734,6 +1834,12 @@ def list_all_datasets() -> list[dict[str, Any]]:
             a = existing.get("last_modified") or ""
             b = item.get("last_modified") or ""
             existing["last_modified"] = max(a, b) or None
+            # Carry the local-only facts the Hub row cannot know. Without this a
+            # dataset that exists in BOTH places lost its `weighted` flag, and
+            # the badge silently disappeared for exactly the datasets most
+            # likely to have been merged and pushed.
+            if "weighted" in item:
+                existing["weighted"] = item["weighted"]
         else:
             merged[rid] = {**item, "source": "local"}
 

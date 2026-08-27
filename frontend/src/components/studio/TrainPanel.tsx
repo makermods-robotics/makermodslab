@@ -123,6 +123,18 @@ const DatasetResultRow: React.FC<{
           {t("studio.train.dataset.row.episodes", { episodes })}
         </span>
       ) : null}
+      {/* A weighted merge and its unweighted sibling are otherwise
+          indistinguishable here, and picking the wrong one silently trains the
+          wrong mix. `=== true` on purpose: the flag is absent (unknown), not
+          false, for Hub-only rows. */}
+      {item.weighted === true ? (
+        <span
+          className="shrink-0 font-mono text-xs text-info"
+          title={t("studio.train.dataset.row.weightedTitle")}
+        >
+          {t("studio.train.dataset.row.weighted")}
+        </span>
+      ) : null}
       {item.source === "hub" ? (
         <span className="shrink-0 text-xs text-muted-foreground">
           {t("studio.train.dataset.row.hub")}

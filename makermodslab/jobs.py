@@ -606,9 +606,17 @@ class LocalJobRunner:
         self._resume_total = _resume_total_steps(config)
 
         # Build the command via the helper that lives in train.py.
+        from .datasets import dataset_is_weighted
         from .train import build_training_command  # avoid import cycle at module load
 
-        cmd = build_training_command(config, output_dir, sys.executable)
+        # Resolved here, at the last possible moment, from the dataset itself —
+        # never from the request. A dataset carrying per-episode sampling weights
+        # must run through the shim that honours them; training it on the stock
+        # sampler would silently ignore the weights and look like a clean run
+        # (R6). An unweighted dataset takes the untouched lerobot path (R2).
+        cmd = build_training_command(
+            config, output_dir, sys.executable, weighted=dataset_is_weighted(config.dataset_repo_id)
+        )
         logger.info("Starting job %s: %s", job_id, " ".join(cmd))
 
         # Open the persistent log sink (one JSON line per stdout line). Held
