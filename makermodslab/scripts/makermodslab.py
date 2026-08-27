@@ -24,6 +24,7 @@ and starts uvicorn with --reload. Opens the browser to :8080.
 
 import argparse
 import contextlib
+import ipaddress
 import logging
 import os
 import signal
@@ -283,6 +284,30 @@ def _run_stop() -> None:
     logger.info("✅ MakerMods Lab stopped.")
 
 
+def _resolve_bind_host(value: str) -> str:
+    """Resolve a --bind value to a bindable address.
+
+    A literal IP (v4 or v6) is used as-is; anything else is treated as a
+    network interface name and resolved to that interface's first IPv4 via
+    psutil.net_if_addrs. Raises ValueError — an unknown interface (the error
+    lists the ones that exist) or one without an IPv4 must fail fast before
+    anything starts, never fall back to a broader bind than the user asked
+    for.
+    """
+    with contextlib.suppress(ValueError):
+        return str(ipaddress.ip_address(value))
+    interfaces = psutil.net_if_addrs()
+    if value not in interfaces:
+        raise ValueError(
+            f"{value!r} is neither an IP address nor a network interface on this machine "
+            f"(interfaces here: {', '.join(sorted(interfaces))})"
+        )
+    for addr in interfaces[value]:
+        if addr.family == socket.AF_INET:
+            return addr.address
+    raise ValueError(f"interface {value!r} has no IPv4 address to bind")
+
+
 def _open_browser_when_ready():
     """Background-thread helper: poll the port, open the browser when up."""
     for _ in range(60):
@@ -297,27 +322,37 @@ def _open_browser_when_ready():
         return
 
 
-def _run_prod(lan: bool = False, no_ui: bool = False):
+def _run_prod(lan: bool = False, no_ui: bool = False, host: str | None = None):
     """Serve built frontend from backend on a single port.
 
     `lan` binds 0.0.0.0 for headless stations serving other machines on the
     network; it also skips the open-a-local-browser step (there is no local
-    browser worth opening in that deployment). `no_ui` skips serving (and
-    requiring) the built frontend entirely — a pure API node.
+    browser worth opening in that deployment). `host` is an already-resolved
+    --bind address and takes precedence over the --lan/default choice (main()
+    logs when both were given). `no_ui` skips serving (and requiring) the
+    built frontend entirely — a pure API node.
     """
     if not no_ui and not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
         logger.error("   Run `npm run build` in frontend/ first, or use `makermodslab --dev`.")
         sys.exit(1)
 
-    host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104  # nosec B104 — binds all interfaces only behind the explicit --lan opt-in; loopback otherwise
+    if host is None:
+        host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104  # nosec B104 — binds all interfaces only behind the explicit --lan opt-in; loopback otherwise
     _ensure_port_available("Backend", BACKEND_PORT, host)
-    if lan:
-        logger.info("🚀 Starting MakerMods Lab on http://0.0.0.0:%d (LAN) ...", BACKEND_PORT)
-    else:
+    if host == "127.0.0.1":
         logger.info("🚀 Starting MakerMods Lab on http://localhost:%d ...", BACKEND_PORT)
         if not no_ui:
             threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+    else:
+        # A non-loopback bind (LAN or --bind) serves other machines: log the
+        # real bind and don't open a browser at an address we may not answer.
+        logger.info(
+            "🚀 Starting MakerMods Lab on http://%s:%d%s ...",
+            host,
+            BACKEND_PORT,
+            " (LAN)" if host == "0.0.0.0" else "",  # noqa: S104
+        )
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
@@ -460,7 +495,18 @@ def main():
     parser.add_argument(
         "--lan",
         action="store_true",
-        help="Headless station mode: bind 0.0.0.0 (serve other machines), don't open a browser",
+        help=(
+            "Headless station mode: bind 0.0.0.0 (serve other machines), don't open a browser. "
+            "For narrower exposure, bind one address/interface with --bind instead"
+        ),
+    )
+    parser.add_argument(
+        "--bind",
+        metavar="ADDRESS_OR_INTERFACE",
+        help=(
+            "Bind this literal IP, or a network interface name (resolved to its first IPv4) — "
+            "e.g. a tailnet-only interface. Overrides the host --lan/default would pick"
+        ),
     )
     parser.add_argument(
         "--offline",
@@ -491,6 +537,18 @@ def main():
         _run_stop()
         return
 
+    # Resolve --bind before anything starts, so a typo'd interface name is a
+    # clean one-line failure instead of a half-started server.
+    bind_host: str | None = None
+    if args.bind:
+        try:
+            bind_host = _resolve_bind_host(args.bind)
+        except ValueError as exc:
+            logger.error("❌ --bind %s: %s", args.bind, exc)
+            sys.exit(1)
+        if args.lan:
+            logger.info("--bind wins over --lan: binding %s instead of 0.0.0.0", bind_host)  # noqa: S104
+
     _ensure_path_symlinks()
 
     if args.offline:
@@ -516,9 +574,11 @@ def main():
     if args.dev:
         if args.lan:
             logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
+        if args.bind:
+            logger.warning("--bind is ignored in --dev mode (Vite serves localhost only)")
         _run_dev()
     else:
-        _run_prod(lan=args.lan, no_ui=args.no_ui)
+        _run_prod(lan=args.lan, no_ui=args.no_ui, host=bind_host)
 
 
 def station():
