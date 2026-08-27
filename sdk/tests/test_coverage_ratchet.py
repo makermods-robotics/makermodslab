@@ -89,14 +89,7 @@ PLANNED: dict[str, frozenset[str]] = {
             "remove_node",
         }
     ),
-    "sessions": frozenset(
-        {
-            "current_session",
-            "heartbeat_session",
-            "start_session",
-            "stop_session",
-        }
-    ),
+    "sessions": frozenset(),
     "system": frozenset(
         {
             "get_available_cameras",

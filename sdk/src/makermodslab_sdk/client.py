@@ -6,7 +6,7 @@ import httpx
 
 from makermodslab_sdk._transport import DEFAULT_TIMEOUT, Transport
 from makermodslab_sdk.errors import ApiError
-from makermodslab_sdk.resources import Resource, SystemResource
+from makermodslab_sdk.resources import Resource, SessionsResource, SystemResource
 
 # The oldest server this SDK release is known to work against (the app's
 # version from the repo-root pyproject at the time the SDK was cut).
@@ -15,6 +15,7 @@ MIN_SUPPORTED_SERVER_VERSION = (0, 1, 0)
 # tag -> namespace class. ONE line per namespace, kept alphabetical — parallel
 # tracks each add exactly their own line, so merges never collide here.
 RESOURCE_CLASSES: dict[str, type[Resource]] = {
+    "sessions": SessionsResource,
     "system": SystemResource,
 }
 
@@ -46,8 +47,9 @@ class Client:
         >>> client.system.health().status
         'ok'
 
-    Namespaces mirror the API tags — ``client.system`` today; ``datasets``,
-    ``models``, ``jobs``, ``nodes`` and ``sessions`` arrive with their tracks.
+    Namespaces mirror the API tags — ``client.system`` and ``client.sessions``
+    today; ``datasets``, ``models``, ``jobs`` and ``nodes`` arrive with their
+    tracks.
     Every method's docstring carries a usage example, and every error names
     the next call to make; when something fails, read the exception text.
 
@@ -70,6 +72,7 @@ class Client:
             http_client=http_client,
             on_first_request=self._verify_server_compatibility if check_compatibility else None,
         )
+        self.sessions = SessionsResource(self._transport)
         self.system = SystemResource(self._transport)
 
     @property
