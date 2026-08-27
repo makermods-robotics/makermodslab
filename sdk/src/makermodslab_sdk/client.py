@@ -6,7 +6,13 @@ import httpx
 
 from makermodslab_sdk._transport import DEFAULT_TIMEOUT, Transport
 from makermodslab_sdk.errors import ApiError
-from makermodslab_sdk.resources import JobsResource, NodesResource, Resource, SystemResource
+from makermodslab_sdk.resources import (
+    JobsResource,
+    NodesResource,
+    Resource,
+    SessionsResource,
+    SystemResource,
+)
 
 # The oldest server this SDK release is known to work against (the app's
 # version from the repo-root pyproject at the time the SDK was cut).
@@ -17,6 +23,7 @@ MIN_SUPPORTED_SERVER_VERSION = (0, 1, 0)
 RESOURCE_CLASSES: dict[str, type[Resource]] = {
     "jobs": JobsResource,
     "nodes": NodesResource,
+    "sessions": SessionsResource,
     "system": SystemResource,
 }
 
@@ -48,8 +55,9 @@ class Client:
         >>> client.system.health().status
         'ok'
 
-    Namespaces mirror the API tags — ``client.system`` today; ``datasets``,
-    ``models``, ``jobs``, ``nodes`` and ``sessions`` arrive with their tracks.
+    Namespaces mirror the API tags — ``client.system`` and ``client.sessions``
+    today; ``datasets``, ``models``, ``jobs`` and ``nodes`` arrive with their
+    tracks.
     Every method's docstring carries a usage example, and every error names
     the next call to make; when something fails, read the exception text.
 
@@ -74,6 +82,7 @@ class Client:
         )
         self.jobs = JobsResource(self._transport)
         self.nodes = NodesResource(self._transport)
+        self.sessions = SessionsResource(self._transport)
         self.system = SystemResource(self._transport)
 
     @property

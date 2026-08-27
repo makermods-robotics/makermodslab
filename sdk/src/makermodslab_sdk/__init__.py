@@ -22,6 +22,7 @@ from makermodslab_sdk.errors import (
     SessionHeldError,
 )
 from makermodslab_sdk.resources.jobs import JobWaitTimeout
+from makermodslab_sdk.resources.sessions import SessionLostError
 
 __version__ = "0.0.1"
 
@@ -36,5 +37,6 @@ __all__ = [
     "NotFoundError",
     "RobotBusyError",
     "SessionHeldError",
+    "SessionLostError",
     "__version__",
 ]

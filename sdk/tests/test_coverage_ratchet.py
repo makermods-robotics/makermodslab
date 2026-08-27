@@ -64,14 +64,7 @@ PLANNED: dict[str, frozenset[str]] = {
         }
     ),
     "nodes": frozenset(),
-    "sessions": frozenset(
-        {
-            "current_session",
-            "heartbeat_session",
-            "start_session",
-            "stop_session",
-        }
-    ),
+    "sessions": frozenset(),
     "system": frozenset(),
 }
 
