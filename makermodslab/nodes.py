@@ -14,10 +14,10 @@
 
 """The node registry: peers running MakerMods Lab on the same LAN/tailnet.
 
-Phase 1 is deliberately static/manual: peers are added by URL (a Tailscale
-source and job offload come later). A peer's identity document is its
-/api/v1/health — version, instance_id, capabilities — and the registry never
-trusts anything else:
+Peers arrive two ways — added by URL, or proposed by a pluggable discovery
+source (node_sources.TailscaleSource; opt-in via --discover-tailscale). A
+peer's identity document is its /api/v1/health — version, instance_id,
+capabilities — and the registry never trusts anything else:
 
 - **Verify-on-add**: adding a peer performs that handshake immediately. An
   unreachable peer is an error, not a pending state; a peer reporting our own
@@ -26,10 +26,19 @@ trusts anything else:
   identities don't) and refused as a duplicate when nothing changed.
 - **Liveness with a TTL, no background thread**: listing re-probes entries
   whose last probe is older than NODE_TTL_S. A failed re-probe marks the
-  entry ``unreachable`` but keeps it — peers are only ever removed
+  entry ``unreachable`` but keeps it — manual peers are only ever removed
   explicitly.
-- **Persistence is url + name only** (utils/config.NODES_FILE): identity is
-  re-verified live on load/probe, never served stale from disk.
+- **Sources produce CANDIDATES, not peers**: discovery rides the same
+  TTL-gated list pass as the probes (same injected clock, still no threads)
+  and hands back bare urls. A candidate is `pending` until the verify
+  handshake — the single trust path — confirms it; at most
+  `discovery_probe_cap` unverified candidates are probed per pass. Discovered
+  entries dedupe against manual entries and each other on verified
+  instance_id (the manual record, name included, wins), and are evicted only
+  when they BOTH leave their source's latest discovery AND fail liveness.
+- **Persistence is url + name only, manual entries only**
+  (utils/config.NODES_FILE): identity is re-verified live on load/probe,
+  never served stale from disk, and sources never touch nodes.json.
 
 Module-level singleton guarded by a threading.Lock, matching the
 feature-module pattern; the clock and the httpx transport are injectable so
@@ -38,11 +47,13 @@ tests drive time and the network without sleeps or sockets.
 
 from __future__ import annotations
 
+import logging
+import os
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -60,6 +71,44 @@ NODE_TTL_S = 15.0
 # Handshake budget per probe. LAN/tailnet peers answer /health in
 # milliseconds; anything slower is as good as down for scheduling purposes.
 PROBE_TIMEOUT_S = 3.0
+
+# The `source` of a hand-added peer (vs. a discovery source's source_id).
+MANUAL_SOURCE = "manual"
+
+# Unverified candidates probed per discovery pass, at most. The verify
+# handshake's short timeout and non-node rejection already filter non-MakerMods
+# machines; the cap keeps a big tailnet from turning one list() into a storm.
+DISCOVERY_PROBE_CAP = 8
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DiscoveredPeer:
+    """One candidate a discovery source proposes: an address, nothing more.
+
+    Candidates carry no identity — the registry's verify handshake against the
+    url's /api/v1/health is the single trust path.
+    """
+
+    url: str
+    name: str | None = None
+
+
+class NodeSource(Protocol):
+    """A pluggable peer-discovery source (e.g. node_sources.TailscaleSource).
+
+    `source_id` labels the entries it produces (the wire `source` field);
+    `discover()` returns the CURRENT candidate set — the registry calls it on
+    the TTL cadence and diffs successive answers, so a source holds no state
+    about what it reported before. discover() should swallow its own failure
+    modes and return [] (the registry also guards, so a raising source is
+    logged and treated as an empty discovery, never fatal).
+    """
+
+    source_id: str
+
+    def discover(self) -> list[DiscoveredPeer]: ...
 
 
 class NodeError(Exception):
@@ -94,9 +143,13 @@ class PeerNode:
     instance_id: str | None = None
     version: str | None = None
     capabilities: dict[str, Any] | None = None
-    status: str = "unreachable"  # "ok" | "unreachable"
+    # "ok" | "unreachable" | "pending" — pending only for a discovered
+    # candidate that has never been probed (manual entries are probed on the
+    # very next list(), so they never surface it).
+    status: str = "unreachable"
     last_verified_at: float | None = None  # registry clock; last SUCCESSFUL handshake
     last_probe_at: float | None = None  # registry clock; last attempt, success or not
+    source: str = MANUAL_SOURCE  # MANUAL_SOURCE, or the discovering source_id
 
     def to_dict(self) -> dict[str, Any]:
         """The wire shape (schemas/nodes.py NodeEntry), minus internal fields."""
@@ -109,6 +162,7 @@ class PeerNode:
             "status": self.status,
             "last_verified_at": self.last_verified_at,
             "is_self": False,
+            "source": self.source,
         }
 
 
@@ -125,14 +179,33 @@ class NodeRegistry:
         transport: httpx.BaseTransport | None = None,
         ttl: float = NODE_TTL_S,
         probe_timeout: float = PROBE_TIMEOUT_S,
+        discovery_probe_cap: int = DISCOVERY_PROBE_CAP,
     ) -> None:
         self._lock = threading.Lock()
         self._clock = clock
         self._transport = transport
         self._ttl = ttl
         self._probe_timeout = probe_timeout
+        self._discovery_probe_cap = discovery_probe_cap
         self._peers: list[PeerNode] = []
         self._loaded = False
+        self._sources: list[NodeSource] = []
+        # Per source_id: when discover() last ran (the TTL gates re-discovery
+        # exactly as it gates re-probes) and the urls it last reported (the
+        # "still discovered" half of the eviction rule).
+        self._last_discovery_at: dict[str, float] = {}
+        self._latest_discovery: dict[str, set[str]] = {}
+        # Discovered urls that answered with OUR instance_id: our own tailnet
+        # address, remembered so re-discovery doesn't re-probe ourselves.
+        self._self_urls: set[str] = set()
+
+    def register_source(self, source: NodeSource) -> None:
+        """Plug in a discovery source; its discover() runs inside list_nodes()
+        on the TTL cadence. One source per source_id."""
+        with self._lock:
+            if any(s.source_id == source.source_id for s in self._sources):
+                raise ValueError(f"a node source with source_id {source.source_id!r} is already registered")
+            self._sources.append(source)
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -189,15 +262,18 @@ class NodeRegistry:
             self._peers.append(PeerNode(url=url, name=row["name"]))
 
     def _save(self) -> None:
-        save_saved_nodes([{"url": p.url, "name": p.name} for p in self._peers])
+        """Persist MANUAL entries only — discovered peers are re-found live by
+        their source and must never leak into nodes.json."""
+        save_saved_nodes([{"url": p.url, "name": p.name} for p in self._peers if p.source == MANUAL_SOURCE])
 
     def add(self, url: str, name: str | None = None) -> PeerNode:
         """Verify-on-add: handshake first, then register (or update) the peer.
 
         Raises ValueError (bad scheme), NodeUnreachableError, SelfAddError,
-        or DuplicateNodeError (same identity already registered at this URL).
-        A known identity answering from a NEW url updates that entry's url
-        instead of duplicating it.
+        or DuplicateNodeError (same identity already MANUALLY registered at
+        this URL). A known identity answering from a NEW url updates that
+        entry's url instead of duplicating it, and adding a discovered entry
+        by hand PROMOTES it to a manual one (persisted, never evicted).
         """
         url = self._normalize_url(url)
         with self._lock:
@@ -208,20 +284,21 @@ class NodeRegistry:
 
             existing = next((p for p in self._peers if p.instance_id == doc["instance_id"]), None)
             if existing is not None:
-                if existing.url == url:
+                if existing.url == url and existing.source == MANUAL_SOURCE:
                     raise DuplicateNodeError(f"peer {doc['instance_id']} is already registered at {url}")
-                # Same identity, new address: move the entry, drop any stale
-                # entry that previously held this URL.
+                # Same identity at a new address: move the entry, dropping any
+                # stale entry that previously held this URL.
                 self._peers = [p for p in self._peers if p is existing or p.url != url]
                 existing.url = url
             else:
-                # A URL match (e.g. an unverified entry loaded from disk, or a
-                # reinstalled machine at the same address) is adopted rather
-                # than duplicated.
+                # A URL match (e.g. an unverified entry loaded from disk, a
+                # discovered candidate, or a reinstalled machine at the same
+                # address) is adopted rather than duplicated.
                 existing = next((p for p in self._peers if p.url == url), None)
                 if existing is None:
                     existing = PeerNode(url=url)
                     self._peers.append(existing)
+            existing.source = MANUAL_SOURCE
             if name is not None:
                 existing.name = name
             self._apply_handshake(existing, doc)
@@ -254,17 +331,11 @@ class NodeRegistry:
         """
         with self._lock:
             self._ensure_loaded()
-            for candidate in self._peers:
+            for candidate in list(self._peers):
                 if candidate.instance_id is not None:
                     continue
-                now = self._clock()
-                try:
-                    doc = self._probe(candidate.url)
-                except NodeUnreachableError:
-                    candidate.status = "unreachable"
-                    candidate.last_probe_at = now
-                else:
-                    self._apply_handshake(candidate, doc)
+                if not self._probe_and_integrate(candidate):
+                    self._peers = [p for p in self._peers if p is not candidate]
             peer = next((p for p in self._peers if p.instance_id == instance_id), None)
             if peer is None:
                 raise NodeNotFoundError(f"no registered peer with instance_id {instance_id!r}")
@@ -288,29 +359,142 @@ class NodeRegistry:
                 self._apply_handshake(peer, doc)
             return replace(peer)
 
+    def _probe_and_integrate(self, peer: PeerNode) -> bool:
+        """Probe one entry and fold the answer into the table.
+
+        Returns False when the entry should be DROPPED: a discovered candidate
+        that answered as this server (our own tailnet address — remembered so
+        it isn't re-adopted next discovery) or as an identity another entry
+        already carries (dedupe on verified instance_id; the established
+        entry — manual always included — is the record, though a discovered
+        record that is currently down follows the identity to this fresher
+        address). Manual entries are never dropped: a failed probe marks them
+        unreachable, exactly as before sources existed.
+        """
+        now = self._clock()
+        try:
+            doc = self._probe(peer.url)
+        except NodeUnreachableError:
+            peer.status = "unreachable"
+            peer.last_probe_at = now
+            return True
+        if peer.source != MANUAL_SOURCE:
+            if doc["instance_id"] == get_instance_id():
+                self._self_urls.add(peer.url)
+                return False
+            twin = next(
+                (p for p in self._peers if p is not peer and p.instance_id == doc["instance_id"]), None
+            )
+            if twin is not None:
+                if twin.source != MANUAL_SOURCE and twin.status != "ok":
+                    twin.url = peer.url
+                    self._apply_handshake(twin, doc)
+                return False
+        self._apply_handshake(peer, doc)
+        return True
+
+    def _run_discovery(self) -> None:
+        """Ask each source (whose last run is older than the TTL) for its
+        current candidates and adopt the new urls as `pending` entries.
+
+        Candidates dedupe on url at this stage (identity-level dedupe needs a
+        handshake and happens in _probe_and_integrate); a raising source is an
+        empty discovery, logged, never fatal.
+        """
+        for source in self._sources:
+            now = self._clock()
+            last = self._last_discovery_at.get(source.source_id)
+            if last is not None and now - last < self._ttl:
+                continue
+            self._last_discovery_at[source.source_id] = now
+            try:
+                candidates = source.discover()
+            except Exception as exc:
+                logger.info("node source %r discovery failed (treated as empty): %s", source.source_id, exc)
+                candidates = []
+            urls: set[str] = set()
+            for candidate in candidates:
+                try:
+                    url = self._normalize_url(candidate.url)
+                except ValueError:
+                    continue
+                urls.add(url)
+                if url in self._self_urls:
+                    continue
+                existing = next((p for p in self._peers if p.url == url), None)
+                if existing is not None:
+                    if existing.source != MANUAL_SOURCE and existing.name is None:
+                        existing.name = candidate.name  # manual names always win
+                    continue
+                self._peers.append(
+                    PeerNode(url=url, name=candidate.name, source=source.source_id, status="pending")
+                )
+            self._latest_discovery[source.source_id] = urls
+
+    def _probe_due_peers(self) -> None:
+        """Re-probe entries whose last probe is older than the TTL
+        (never-probed entries — fresh loads and new candidates — probe now).
+
+        At most `discovery_probe_cap` UNVERIFIED discovered candidates are
+        probed per pass; the rest stay `pending` for later passes. Verified
+        peers — manual or discovered — always re-probe on the TTL, as before.
+        """
+        budget = self._discovery_probe_cap
+        for peer in list(self._peers):
+            now = self._clock()
+            if peer.last_probe_at is not None and now - peer.last_probe_at < self._ttl:
+                continue
+            if peer.source != MANUAL_SOURCE and peer.instance_id is None:
+                if budget <= 0:
+                    continue
+                budget -= 1
+            if not self._probe_and_integrate(peer):
+                self._peers = [p for p in self._peers if p is not peer]
+
+    def _evict_lost_discovered(self) -> None:
+        """Drop discovered entries that BOTH left their source's latest
+        discovery AND fail liveness. One signal alone never evicts (a peer the
+        source blinks on but that still answers stays; a discovered peer that
+        merely stops answering stays `unreachable` like a manual one), and
+        manual entries are never evicted at all."""
+        self._peers = [
+            p
+            for p in self._peers
+            if p.source == MANUAL_SOURCE
+            or p.status != "unreachable"
+            or p.url in self._latest_discovery.get(p.source, set())
+        ]
+
     def list_nodes(self) -> list[PeerNode]:
-        """Current peer table, re-probing entries whose last probe is older
-        than the TTL (never-probed entries — fresh loads — probe now). A
-        failed re-probe marks the entry unreachable and keeps it."""
+        """Current peer table: run due discovery, probe due entries (TTL-gated,
+        unverified-candidate probes capped), evict lost discovered peers. A
+        failed re-probe marks an entry unreachable and keeps it."""
         with self._lock:
             self._ensure_loaded()
-            for peer in self._peers:
-                now = self._clock()
-                if peer.last_probe_at is not None and now - peer.last_probe_at < self._ttl:
-                    continue
-                try:
-                    doc = self._probe(peer.url)
-                except NodeUnreachableError:
-                    peer.status = "unreachable"
-                    peer.last_probe_at = now
-                else:
-                    self._apply_handshake(peer, doc)
+            self._run_discovery()
+            self._probe_due_peers()
+            self._evict_lost_discovered()
             return [replace(p) for p in self._peers]
 
 
 # Module-level singleton, like every feature module's state. Handlers read it
 # at call time so tests can swap in a clock/transport-injected instance.
 node_registry = NodeRegistry()
+
+
+def register_sources_from_env(registry: NodeRegistry | None = None) -> None:
+    """Register the discovery sources the environment opts into (OFF by
+    default). The launcher's --discover-tailscale flag sets
+    MAKERMODSLAB_DISCOVER_TAILSCALE=1 before uvicorn imports the server — the
+    MAKERMODSLAB_NO_UI precedent — and this module reads it at import."""
+    registry = node_registry if registry is None else registry
+    if os.environ.get("MAKERMODSLAB_DISCOVER_TAILSCALE") == "1":
+        from .node_sources import TailscaleSource
+
+        registry.register_source(TailscaleSource())
+
+
+register_sources_from_env()
 
 
 def handle_list_nodes() -> list[dict[str, Any]]:

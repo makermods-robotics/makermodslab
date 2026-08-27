@@ -2655,7 +2655,7 @@
         "type": "object"
       },
       "NodeEntry": {
-        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started. capabilities is\na plain dict, not HealthCapabilities — it's the PEER's self-reported\nblock, and a version-skewed peer must not fail our response validation.\nlast_verified_at is the server's monotonic registry clock (ordering and\nfreshness relative to other entries, not wall-clock time).",
+        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started — and on a\ndiscovered candidate the verify handshake hasn't confirmed yet, which\nadditionally carries status \"pending\" (never \"pending\" with a non-null\ninstance_id). capabilities is a plain dict, not HealthCapabilities — it's\nthe PEER's self-reported block, and a version-skewed peer must not fail\nour response validation. last_verified_at is the server's monotonic\nregistry clock (ordering and freshness relative to other entries, not\nwall-clock time). source says how the entry got here: \"manual\" for the\nself entry and hand-added peers (the only ones persisted), a source id\nfor discovery-source candidates.",
         "properties": {
           "capabilities": {
             "anyOf": [
@@ -2706,10 +2706,19 @@
             ],
             "title": "Name"
           },
+          "source": {
+            "enum": [
+              "manual",
+              "tailscale"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "ok",
-              "unreachable"
+              "unreachable",
+              "pending"
             ],
             "title": "Status",
             "type": "string"
@@ -2745,7 +2754,8 @@
           "capabilities",
           "status",
           "last_verified_at",
-          "is_self"
+          "is_self",
+          "source"
         ],
         "title": "NodeEntry",
         "type": "object"

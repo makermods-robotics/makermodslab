@@ -473,6 +473,14 @@ def main():
         help="Don't serve the built frontend: pure API node (same binary, headless role)",
     )
     parser.add_argument(
+        "--discover-tailscale",
+        action="store_true",
+        help=(
+            "Discover peer nodes over Tailscale (needs the tailscale CLI); "
+            "candidates are verified against their /api/v1/health before being trusted"
+        ),
+    )
+    parser.add_argument(
         "--stop",
         action="store_true",
         help="Stop a running MakerMods Lab and free its ports (:8000/:8080), then exit.",
@@ -499,6 +507,11 @@ def main():
         # Like HF_HUB_OFFLINE above: must be in the environment before uvicorn
         # imports makermodslab.server, where ui_enabled() gates the SPA mount.
         os.environ["MAKERMODSLAB_NO_UI"] = "1"
+
+    if args.discover_tailscale:
+        # Same import-order rule: nodes.register_sources_from_env reads this
+        # when makermodslab.server first imports the registry module.
+        os.environ["MAKERMODSLAB_DISCOVER_TAILSCALE"] = "1"
 
     if args.dev:
         if args.lan:

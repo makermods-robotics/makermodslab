@@ -261,6 +261,33 @@ def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured["argv"] == ["makermodslab-station", "--lan", "--offline", "--dev"]
 
 
+def test_discover_tailscale_flag_sets_env_before_server_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--discover-tailscale` follows the MAKERMODSLAB_NO_UI precedent: the env
+    var must be in place before uvicorn imports makermodslab.server (where
+    nodes.register_sources_from_env reads it). OFF unless the flag is given."""
+    import os
+
+    from makermodslab.scripts import makermodslab as launcher
+
+    monkeypatch.setenv("MAKERMODSLAB_DISCOVER_TAILSCALE", "0")  # restored by monkeypatch
+    monkeypatch.delenv("MAKERMODSLAB_DISCOVER_TAILSCALE")
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    seen_at_run: dict[str, str | None] = {}
+
+    def fake_run_prod(**_kwargs) -> None:
+        seen_at_run["env"] = os.environ.get("MAKERMODSLAB_DISCOVER_TAILSCALE")
+
+    monkeypatch.setattr(launcher, "_run_prod", fake_run_prod)
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab"])
+    launcher.main()
+    assert seen_at_run["env"] is None  # off by default
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--discover-tailscale"])
+    launcher.main()
+    assert seen_at_run["env"] == "1"
+
+
 def test_entry_points_target_correct_functions() -> None:
     """`makermodslab` -> `main` (friendly default), `makermodslab-station` ->
     `station` (headless posture). The old `lelab*` / `makerlabs` / `makerlab*`

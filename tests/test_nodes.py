@@ -364,6 +364,235 @@ def test_corrupt_nodes_file_is_tolerated(local_identity, nodes_file, network, cl
 
 
 # ---------------------------------------------------------------------------
+# Discovery sources: candidates only — the verify handshake stays the trust path
+# ---------------------------------------------------------------------------
+
+TAILNET_A_URL = "http://100.64.0.7:8000"
+TAILNET_B_URL = "http://100.64.0.8:8000"
+
+
+class FakeSource:
+    """A programmable NodeSource: mutate `candidates` between passes to model
+    peers joining and leaving the tailnet. Counts discover() calls so tests can
+    assert the TTL actually gates re-discovery."""
+
+    def __init__(self, source_id: str = "tailscale", candidates: list | None = None) -> None:
+        self.source_id = source_id
+        self.candidates = candidates or []
+        self.discover_calls = 0
+
+    def discover(self):
+        self.discover_calls += 1
+        return list(self.candidates)
+
+
+def _tailnet_source(*urls: str):
+    from makermodslab.nodes import DiscoveredPeer
+
+    return FakeSource(candidates=[DiscoveredPeer(url=url) for url in urls])
+
+
+def test_discovered_candidate_is_verified_and_listed_with_its_source(registry, network, clock):
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    registry.register_source(_tailnet_source(TAILNET_A_URL))
+    [node] = registry.list_nodes()
+    assert node.url == TAILNET_A_URL
+    assert node.instance_id == PEER_A_ID
+    assert node.status == "ok"
+    assert node.source == "tailscale"
+    assert node.name is None
+
+
+def test_manual_entries_carry_the_manual_source(registry, network):
+    assert registry.add(PEER_A_URL).source == "manual"
+
+
+def test_discovery_is_ttl_gated_like_the_probes(registry, network, clock):
+    source = _tailnet_source()
+    registry.register_source(source)
+    registry.list_nodes()
+    clock.advance(14.9)
+    registry.list_nodes()
+    assert source.discover_calls == 1
+    clock.advance(0.2)  # past the TTL
+    registry.list_nodes()
+    assert source.discover_calls == 2
+
+
+def test_unverified_candidates_probed_per_pass_are_capped(local_identity, nodes_file, network, clock):
+    """A discovery pass probes at most `discovery_probe_cap` unverified
+    candidates; the rest stay `pending` (instance_id unknown) and are picked
+    up on later passes — the registry never storms the tailnet."""
+    from makermodslab.nodes import NodeRegistry
+
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    network.peers[TAILNET_B_URL] = _health_doc(PEER_B_ID)
+    registry = NodeRegistry(clock=clock, transport=network.transport(), discovery_probe_cap=1)
+    registry.register_source(_tailnet_source(TAILNET_A_URL, TAILNET_B_URL))
+
+    first, second = registry.list_nodes()
+    assert (first.status, first.instance_id) == ("ok", PEER_A_ID)
+    assert (second.status, second.instance_id) == ("pending", None)
+    assert TAILNET_B_URL not in network.probes  # never touched this pass
+
+    clock.advance(15.1)
+    statuses = {n.url: n.status for n in registry.list_nodes()}
+    assert statuses == {TAILNET_A_URL: "ok", TAILNET_B_URL: "ok"}
+
+
+def test_discovered_dedupes_against_manual_on_instance_id_and_manual_wins_name(registry, network, clock):
+    """The same machine known manually and discovered over the tailnet is ONE
+    entry: the manual record (name included) is authoritative."""
+    registry.add(PEER_A_URL, name="bench")
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    registry.register_source(_tailnet_source(TAILNET_A_URL))
+    [node] = registry.list_nodes()
+    assert node.instance_id == PEER_A_ID
+    assert node.source == "manual"
+    assert node.name == "bench"
+    assert node.url == PEER_A_URL
+
+
+def test_discovered_peers_dedupe_against_each_other_on_instance_id(registry, network, clock):
+    """One machine, two discovered addresses (e.g. two sources): the first
+    verified entry is the record, the duplicate candidate is dropped."""
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    network.peers[TAILNET_B_URL] = _health_doc(PEER_A_ID)
+    registry.register_source(_tailnet_source(TAILNET_A_URL, TAILNET_B_URL))
+    [node] = registry.list_nodes()
+    assert node.instance_id == PEER_A_ID
+    assert node.url == TAILNET_A_URL
+
+
+def test_discovered_peer_that_moves_address_converges_to_one_entry(registry, network, clock):
+    """DHCP-on-the-tailnet: the peer's old address dies and discovery reports
+    a new one. The entry follows the identity to the new url."""
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    source = _tailnet_source(TAILNET_A_URL)
+    registry.register_source(source)
+    registry.list_nodes()
+
+    del network.peers[TAILNET_A_URL]
+    network.down.add(TAILNET_A_URL)
+    network.peers[TAILNET_B_URL] = _health_doc(PEER_A_ID)
+    source.candidates = _tailnet_source(TAILNET_B_URL).candidates
+    clock.advance(15.1)
+    [node] = registry.list_nodes()
+    assert node.instance_id == PEER_A_ID
+    assert node.url == TAILNET_B_URL
+    assert node.status == "ok"
+
+
+def test_discovered_peer_gone_from_source_and_dead_is_evicted(registry, network, clock):
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    source = _tailnet_source(TAILNET_A_URL)
+    registry.register_source(source)
+    assert len(registry.list_nodes()) == 1
+
+    source.candidates = []
+    network.down.add(TAILNET_A_URL)
+    clock.advance(15.1)
+    assert registry.list_nodes() == []
+
+
+def test_discovered_peer_gone_from_source_but_alive_is_kept(registry, network, clock):
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    source = _tailnet_source(TAILNET_A_URL)
+    registry.register_source(source)
+    registry.list_nodes()
+
+    source.candidates = []  # e.g. tailscale briefly reports the peer offline
+    clock.advance(15.1)
+    [node] = registry.list_nodes()
+    assert node.status == "ok"
+
+
+def test_discovered_peer_still_in_source_but_down_is_kept_unreachable(registry, network, clock):
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    registry.register_source(_tailnet_source(TAILNET_A_URL))
+    registry.list_nodes()
+
+    network.down.add(TAILNET_A_URL)
+    clock.advance(15.1)
+    [node] = registry.list_nodes()
+    assert node.status == "unreachable"
+    assert node.instance_id == PEER_A_ID
+
+
+def test_manual_peer_is_never_evicted_even_with_sources_registered(registry, network, clock):
+    registry.add(PEER_A_URL)
+    registry.register_source(_tailnet_source())
+    network.down.add(PEER_A_URL)
+    clock.advance(15.1)
+    [node] = registry.list_nodes()
+    assert node.status == "unreachable"
+    assert node.source == "manual"
+
+
+def test_discovered_peers_are_never_persisted(registry, network, clock, nodes_file):
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    registry.register_source(_tailnet_source(TAILNET_A_URL))
+    registry.list_nodes()
+    assert not nodes_file.exists()  # discovery alone never writes nodes.json
+
+    registry.add(PEER_B_URL, name="bench")
+    registry.list_nodes()
+    assert json.loads(nodes_file.read_text()) == [{"url": PEER_B_URL, "name": "bench"}]
+
+
+def test_candidate_answering_as_self_is_dropped(registry, network, clock, local_identity):
+    """Tailscale can hand us our own address; the handshake recognises our
+    instance_id and the candidate silently disappears (never an error)."""
+    network.peers[TAILNET_A_URL] = _health_doc(local_identity)
+    registry.register_source(_tailnet_source(TAILNET_A_URL))
+    assert registry.list_nodes() == []
+
+
+def test_source_error_is_an_empty_discovery_never_fatal(registry, network, clock):
+    class ExplodingSource:
+        source_id = "tailscale"
+
+        def discover(self):
+            raise RuntimeError("boom")
+
+    registry.add(PEER_A_URL)
+    registry.register_source(ExplodingSource())
+    [node] = registry.list_nodes()
+    assert node.status == "ok"
+
+
+def test_manual_add_promotes_a_discovered_entry(registry, network, clock, nodes_file):
+    """Adding a discovered peer by hand makes it a manual entry — persisted,
+    never evicted — without duplicating it."""
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    registry.register_source(_tailnet_source(TAILNET_A_URL))
+    registry.list_nodes()
+
+    node = registry.add(TAILNET_A_URL, name="bench")
+    assert node.source == "manual"
+    assert node.name == "bench"
+    [only] = registry.list_nodes()
+    assert only.source == "manual"
+    assert json.loads(nodes_file.read_text()) == [{"url": TAILNET_A_URL, "name": "bench"}]
+
+
+def test_register_sources_from_env_is_opt_in(monkeypatch, local_identity, nodes_file, network, clock):
+    """--discover-tailscale sets MAKERMODSLAB_DISCOVER_TAILSCALE=1 before the
+    server imports; nothing is registered without it (OFF by default)."""
+    from makermodslab import nodes
+    from makermodslab.node_sources import TailscaleSource
+
+    registry = nodes.NodeRegistry(clock=clock, transport=network.transport())
+    monkeypatch.delenv("MAKERMODSLAB_DISCOVER_TAILSCALE", raising=False)
+    nodes.register_sources_from_env(registry)
+    assert registry._sources == []
+
+    monkeypatch.setenv("MAKERMODSLAB_DISCOVER_TAILSCALE", "1")
+    nodes.register_sources_from_env(registry)
+    assert [type(s) for s in registry._sources] == [TailscaleSource]
+
+
+# ---------------------------------------------------------------------------
 # Endpoints (v1-only surface)
 # ---------------------------------------------------------------------------
 
@@ -449,6 +678,46 @@ def test_delete_unknown_node_404(client, api_registry):
     resp = client.delete(f"/api/v1/nodes/{PEER_B_ID}")
     assert resp.status_code == 404
     assert resp.json()["code"] == "node.not_found"
+
+
+def test_get_nodes_reports_each_entry_source(client, api_registry, network):
+    """Additive `source` field: "manual" for the self entry and hand-added
+    peers, the source_id for discovered ones."""
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_B_ID)
+    api_registry.register_source(_tailnet_source(TAILNET_A_URL))
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL, "name": "bench"})
+
+    nodes = client.get("/api/v1/nodes").json()["nodes"]
+    by_id = {n["instance_id"]: n for n in nodes}
+    assert by_id[LOCAL_ID]["source"] == "manual"  # self
+    assert by_id[PEER_A_ID]["source"] == "manual"
+    assert by_id[PEER_B_ID]["source"] == "tailscale"
+    assert by_id[PEER_B_ID]["status"] == "ok"
+
+
+def test_get_nodes_marks_unverified_candidates_pending(
+    client, monkeypatch, local_identity, nodes_file, network, clock
+):
+    """An unverified candidate is clearly distinguishable in the payload:
+    status "pending", null instance_id, its source id — never mistakable for
+    a verified peer."""
+    from makermodslab import nodes
+
+    registry = nodes.NodeRegistry(clock=clock, transport=network.transport(), discovery_probe_cap=1)
+    monkeypatch.setattr(nodes, "node_registry", registry)
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    network.peers[TAILNET_B_URL] = _health_doc(PEER_B_ID)
+    registry.register_source(_tailnet_source(TAILNET_A_URL, TAILNET_B_URL))
+
+    nodes_body = client.get("/api/v1/nodes").json()["nodes"]
+    pending = next(n for n in nodes_body if n["url"] == TAILNET_B_URL)
+    assert pending["status"] == "pending"
+    assert pending["instance_id"] is None
+    assert pending["source"] == "tailscale"
+    assert pending["is_self"] is False
+    verified = next(n for n in nodes_body if n["url"] == TAILNET_A_URL)
+    assert verified["status"] == "ok"
+    assert verified["instance_id"] == PEER_A_ID
 
 
 def test_nodes_surface_is_v1_only(client, api_registry):

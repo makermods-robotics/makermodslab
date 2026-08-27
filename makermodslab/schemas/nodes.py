@@ -38,11 +38,16 @@ class NodeEntry(BaseModel):
     Nulls are meaningful, so None is never excluded: url is null only on the
     self entry (a server doesn't know its own external address); instance_id,
     version, capabilities and last_verified_at are null on a saved peer that
-    hasn't completed a handshake since this process started. capabilities is
-    a plain dict, not HealthCapabilities — it's the PEER's self-reported
-    block, and a version-skewed peer must not fail our response validation.
-    last_verified_at is the server's monotonic registry clock (ordering and
-    freshness relative to other entries, not wall-clock time).
+    hasn't completed a handshake since this process started — and on a
+    discovered candidate the verify handshake hasn't confirmed yet, which
+    additionally carries status "pending" (never "pending" with a non-null
+    instance_id). capabilities is a plain dict, not HealthCapabilities — it's
+    the PEER's self-reported block, and a version-skewed peer must not fail
+    our response validation. last_verified_at is the server's monotonic
+    registry clock (ordering and freshness relative to other entries, not
+    wall-clock time). source says how the entry got here: "manual" for the
+    self entry and hand-added peers (the only ones persisted), a source id
+    for discovery-source candidates.
     """
 
     url: str | None
@@ -50,9 +55,10 @@ class NodeEntry(BaseModel):
     name: str | None
     version: str | None
     capabilities: dict[str, Any] | None
-    status: Literal["ok", "unreachable"]
+    status: Literal["ok", "unreachable", "pending"]
     last_verified_at: float | None
     is_self: bool
+    source: Literal["manual", "tailscale"]
 
 
 class NodeListResponse(BaseModel):

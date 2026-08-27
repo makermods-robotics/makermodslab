@@ -876,6 +876,7 @@ def list_nodes():
         "status": "ok",
         "last_verified_at": None,  # no handshake needed with ourselves
         "is_self": True,
+        "source": "manual",  # intrinsic, like a hand-added peer — never discovered
     }
     return {"nodes": [self_entry, *handle_list_nodes()]}
 
