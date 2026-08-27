@@ -478,3 +478,221 @@ def test_heartbeat_thread_lifecycle_without_waiting():
     s._thread.join(timeout=5.0)
     assert not s._thread.is_alive()
     assert script.requests == []
+
+
+# --- per-kind sugar ----------------------------------------------------------
+
+
+def test_sugar_missing_robot_end_to_end(sdk_client):
+    """Sugar with an unknown robot name refuses with robot.not_found BEFORE
+    any hardware path — and before any ActiveSession (or thread) exists."""
+    with pytest.raises(NotFoundError) as excinfo:
+        sdk_client.sessions.teleoperate("__sdk_test_missing__")
+    assert excinfo.value.code == "robot.not_found"
+    assert "Next step:" in str(excinfo.value)
+
+
+def start_ok(kind="teleoperation", **session_kwargs):
+    return (201, {"session": session_body(kind=kind, **session_kwargs), "warnings": None})
+
+
+def started_body(script: Script) -> dict:
+    import json
+
+    return json.loads(script.calls("POST", "/api/v1/sessions")[0].content)
+
+
+def test_teleoperate_builds_body_and_defaults_owner():
+    from makermodslab_sdk.resources.sessions import ActiveSession
+
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions", start_ok())
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        s = client.sessions.teleoperate("bench")
+        assert isinstance(s, ActiveSession)
+        assert s.heartbeat_interval_s == 20.0  # 60s lease / 3
+        assert s._thread is not None  # sugar always heartbeats
+        s.stop()
+        assert not s._thread.is_alive()
+    body = started_body(script)
+    assert body["kind"] == "teleoperation"
+    assert body["robot"] == "bench"
+    assert body["options"] == {}  # unset knobs dropped — server defaults rule
+    assert "lease_timeout_s" not in body
+    assert body["owner"].startswith("sdk:")
+
+
+def test_default_owner_shape():
+    import os
+
+    from makermodslab_sdk.resources.sessions import default_session_owner
+
+    one, two = default_session_owner(), default_session_owner()
+    assert one != two  # unique per call: the 4-char token
+    prefix, host, pid, token = one.split(":")
+    assert prefix == "sdk" and host
+    assert pid == str(os.getpid())
+    assert len(token) == 4
+    assert len(one) <= 128  # the server's OWNER_MAX_LENGTH
+
+
+def test_explicit_owner_and_lease_timeout_pass_through():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions", start_ok())
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        client.sessions.teleoperate("bench", owner="agent:me", lease_timeout_s=120).stop()
+    body = started_body(script)
+    assert body["owner"] == "agent:me"
+    assert body["lease_timeout_s"] == 120
+
+
+def test_record_options_mirror_the_contract():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions", start_ok(kind="recording"))
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        client.sessions.record(
+            "bench",
+            dataset_repo_id="me/demo",
+            single_task="pick the cube",
+            num_episodes=3,
+            fps=25,
+            push_to_hub=False,
+            tags=["sdk"],
+        ).stop()
+    body = started_body(script)
+    assert body["kind"] == "recording"
+    assert body["options"] == {
+        "dataset_repo_id": "me/demo",
+        "single_task": "pick the cube",
+        "num_episodes": 3,
+        "fps": 25,
+        "push_to_hub": False,
+        "tags": ["sdk"],
+    }
+
+
+def test_infer_options_mirror_the_contract():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions", start_ok(kind="inference"))
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        client.sessions.infer(
+            "bench",
+            policy_ref="me/act-pick",
+            task="pick",
+            camera_bindings={"top": "overhead"},
+            camera_dims={"top": {"width": 640, "height": 480}},
+            inference_engine="rtc",
+            temporal_ensemble_coeff=0.9,
+        ).stop()
+    body = started_body(script)
+    assert body["kind"] == "inference"
+    assert body["options"] == {
+        "policy_ref": "me/act-pick",
+        "task": "pick",
+        "camera_bindings": {"top": "overhead"},
+        "camera_dims": {"top": {"width": 640, "height": 480}},
+        "inference_engine": "rtc",
+        "temporal_ensemble_coeff": 0.9,
+    }
+
+
+def test_replay_options_mirror_the_contract():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions", start_ok(kind="replay"))
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        client.sessions.replay("bench", repo_id="me/demo", episode_index=2).stop()
+    body = started_body(script)
+    assert body["kind"] == "replay"
+    assert body["options"] == {"repo_id": "me/demo", "episode_index": 2}
+
+
+def test_calibrate_options_mirror_the_contract():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions", start_ok(kind="calibration"))
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        client.sessions.calibrate(
+            "bench", device_type="teleop", arm="right", port="/dev/ttyUSB1", overwrite=True
+        ).stop()
+    body = started_body(script)
+    assert body["kind"] == "calibration"
+    assert body["options"] == {
+        "device_type": "teleop",
+        "arm": "right",
+        "port": "/dev/ttyUSB1",
+        "overwrite": True,
+    }
+
+
+def test_auto_calibrate_options_mirror_the_contract():
+    script = (
+        Script()
+        .add("POST", "/api/v1/sessions", start_ok(kind="auto_calibration", timeout_s=90.0))
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        s = client.sessions.auto_calibrate(
+            "bench",
+            arms=[{"device_type": "robot"}, {"device_type": "teleop"}],
+            motor_power=50,
+        )
+        assert s.heartbeat_interval_s == 30.0  # the server's 90s default / 3
+        s.stop()
+    body = started_body(script)
+    assert body["kind"] == "auto_calibration"
+    assert "lease_timeout_s" not in body  # the server's per-kind default rules
+    assert body["options"] == {
+        "arms": [{"device_type": "robot"}, {"device_type": "teleop"}],
+        "motor_power": 50,
+    }
+
+
+def test_sugar_relays_start_warnings():
+    script = (
+        Script()
+        .add(
+            "POST",
+            "/api/v1/sessions",
+            (201, {"session": session_body(), "warnings": ["EEPROM disagrees with calibration"]}),
+        )
+        .add("POST", "/api/v1/sessions/sess-1/stop", stop_ok())
+    )
+    with mock_client(script) as client:
+        s = client.sessions.teleoperate("bench")
+        assert s.warnings == ["EEPROM disagrees with calibration"]
+        s.stop()
+
+
+def test_sugar_held_raises_before_any_active_session():
+    script = Script().add(
+        "POST",
+        "/api/v1/sessions",
+        (
+            409,
+            {
+                "detail": "The robot hardware is held by an active inference session. Stop it first.",
+                "code": "session.held",
+                "details": {"holder": {"kind": "inference", "session_id": "sess-7"}},
+            },
+        ),
+    )
+    with mock_client(script) as client, pytest.raises(SessionHeldError) as excinfo:
+        client.sessions.teleoperate("bench")
+    assert excinfo.value.holder == {"kind": "inference", "session_id": "sess-7"}

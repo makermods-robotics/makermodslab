@@ -18,6 +18,9 @@ working, and the extra keys stay readable on the object.
 
 from __future__ import annotations
 
+import os
+import secrets
+import socket
 import threading
 from typing import Any
 from urllib.parse import quote
@@ -105,6 +108,22 @@ class StoppedSession(SdkModel):
 
 class _HeartbeatEnvelope(SdkModel):
     session: SessionInfo
+
+
+def default_session_owner() -> str:
+    """The lease owner the sugar methods use when none is given —
+    ``sdk:<host>:<pid>:<token>``, unique per call so two SDK processes (or two
+    clients in one process) never look like the same owner. Kept within the
+    server's 128-char owner cap."""
+    host = (socket.gethostname() or "unknown-host")[:96]
+    return f"sdk:{host}:{os.getpid()}:{secrets.token_hex(2)}"
+
+
+def _options(**kwargs: Any) -> dict[str, Any]:
+    """A kind-options dict with the unset (None) knobs dropped — the server's
+    options models are extra=\"forbid\" with their own defaults; never send a
+    null it didn't ask for."""
+    return {key: value for key, value in kwargs.items() if value is not None}
 
 
 class SessionLostError(MakerModsError):
@@ -328,17 +347,25 @@ class ActiveSession:
 class SessionsResource(Resource):
     """``client.sessions`` — start, watch, heartbeat and stop robot flows.
 
-    Example:
-        >>> started = client.sessions.start("teleoperation", "bench", owner="me", options={})
-        >>> started.session.id
-        'e3b0c44298fc1c149afbf4c8996fb924'
-        >>> client.sessions.stop(started.session.id).result["success"]
-        True
+    The pythonic way is the per-kind sugar, one method per flow, each
+    returning an :class:`ActiveSession` context manager:
 
-    Starting with an ``owner`` attaches a lease: renew it with
-    :meth:`heartbeat` before ``lease.expires_in_s`` runs out, or the server's
-    expiry watchdog safety-stops the session. Without an owner there is no
-    lease and no timeout-stop.
+        >>> with client.sessions.teleoperate("bench") as s:
+        ...     print(s.id, s.warnings)
+        ...     run_until_done()
+        ... # leaving the block stops the session; a lost lease raises
+        ... # SessionLostError here.
+
+    The lease in two sentences: every sugar-started session carries a lease
+    the ActiveSession's daemon thread renews by heartbeat, and if the
+    heartbeats stop arriving (crashed process, dead network) the server's
+    expiry watchdog safety-stops the session so the arm is never left
+    energized. Stopping is deliberately never owner-gated — anyone who can
+    reach the API can stop the arm (:meth:`stop_current` is the hammer).
+
+    The raw operations (:meth:`start`, :meth:`current`, :meth:`heartbeat`,
+    :meth:`stop`) are the same surface without the ergonomics — no default
+    owner, no heartbeat thread, errors always raised.
     """
 
     @operation("start_session")
@@ -475,3 +502,247 @@ class SessionsResource(Resource):
             return self.stop(now.id)
         except NotFoundError:
             return None
+
+    # --- per-kind sugar: the pythonic API ------------------------------------
+    #
+    # Each method mirrors its kind's options model (makermodslab/schemas/
+    # sessions.py; TypeScript twin frontend/src/lib/sessionApi.ts) kwarg for
+    # kwarg, drops the knobs left at None so the server's defaults rule,
+    # defaults the owner so the lease always attaches, and returns an
+    # ActiveSession whose daemon heartbeat keeps that lease alive.
+
+    def _start_managed(
+        self,
+        kind: str,
+        robot: str,
+        options: dict[str, Any],
+        owner: str | None,
+        lease_timeout_s: float | None,
+    ) -> ActiveSession:
+        owner = owner or default_session_owner()
+        started = self.start(kind, robot, owner=owner, options=options, lease_timeout_s=lease_timeout_s)
+        return ActiveSession(self, started, owner=owner)
+
+    def teleoperate(
+        self,
+        robot: str,
+        *,
+        skip_identity_check: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Leader→follower teleoperation on the saved robot ``robot``.
+
+        Example:
+            >>> with client.sessions.teleoperate("bench") as s:
+            ...     s.warnings  # arm-identity findings, surface verbatim
+            []
+
+        ``skip_identity_check=True`` proceeds past a servo-EEPROM /
+        calibration mismatch (only when an intentional arm swap was already
+        diagnosed — the mismatch error's text says when).
+        """
+        return self._start_managed(
+            "teleoperation",
+            robot,
+            _options(skip_identity_check=skip_identity_check),
+            owner,
+            lease_timeout_s,
+        )
+
+    def record(
+        self,
+        robot: str,
+        *,
+        dataset_repo_id: str,
+        single_task: str,
+        num_episodes: int | None = None,
+        episode_time_s: int | None = None,
+        reset_time_s: int | None = None,
+        fps: int | None = None,
+        video: bool | None = None,
+        push_to_hub: bool | None = None,
+        tags: list[str] | None = None,
+        private: bool | None = None,
+        resume: bool | None = None,
+        streaming_encoding: bool | None = None,
+        skip_identity_check: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Record a teleoperated dataset into ``dataset_repo_id``.
+
+        Only the dataset-shaped knobs live here; cameras resolve server-side
+        from the robot record. Server defaults (unset knobs): 5 episodes,
+        30s each, 10s reset, 30 fps, video on, local only (no Hub push).
+
+        Example:
+            >>> with client.sessions.record(
+            ...     "bench", dataset_repo_id="me/demo", single_task="pick the cube"
+            ... ) as s:
+            ...     wait_for_operator()
+        """
+        return self._start_managed(
+            "recording",
+            robot,
+            _options(
+                dataset_repo_id=dataset_repo_id,
+                single_task=single_task,
+                num_episodes=num_episodes,
+                episode_time_s=episode_time_s,
+                reset_time_s=reset_time_s,
+                fps=fps,
+                video=video,
+                push_to_hub=push_to_hub,
+                tags=tags,
+                private=private,
+                resume=resume,
+                streaming_encoding=streaming_encoding,
+                skip_identity_check=skip_identity_check,
+            ),
+            owner,
+            lease_timeout_s,
+        )
+
+    def infer(
+        self,
+        robot: str,
+        *,
+        policy_ref: str,
+        task: str | None = None,
+        camera_bindings: dict[str, str] | None = None,
+        camera_dims: dict[str, dict[str, int]] | None = None,
+        duration_s: int | None = None,
+        checkpoint_state_dim: int | None = None,
+        eval_episodes: int | None = None,
+        inference_engine: str | None = None,
+        temporal_ensemble_coeff: float | None = None,
+        skip_identity_check: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Run the trained policy ``policy_ref`` on the follower arm.
+
+        ``camera_bindings`` maps policy-expected camera names to the robot
+        record's camera names (the devices themselves come from the record);
+        ``camera_dims`` values are ``{"width": ..., "height": ...}``.
+        ``inference_engine`` is ``"sync"`` (server default) or ``"rtc"``.
+
+        Example:
+            >>> with client.sessions.infer("bench", policy_ref="me/act-pick", task="pick the cube") as s:
+            ...     wait_for_rollout()
+        """
+        return self._start_managed(
+            "inference",
+            robot,
+            _options(
+                policy_ref=policy_ref,
+                task=task,
+                camera_bindings=camera_bindings,
+                camera_dims=camera_dims,
+                duration_s=duration_s,
+                checkpoint_state_dim=checkpoint_state_dim,
+                eval_episodes=eval_episodes,
+                inference_engine=inference_engine,
+                temporal_ensemble_coeff=temporal_ensemble_coeff,
+                skip_identity_check=skip_identity_check,
+            ),
+            owner,
+            lease_timeout_s,
+        )
+
+    def replay(
+        self,
+        robot: str,
+        *,
+        repo_id: str,
+        episode_index: int,
+        skip_identity_check: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Replay one recorded episode on the follower arm.
+
+        Example:
+            >>> with client.sessions.replay("bench", repo_id="me/demo", episode_index=0) as s:
+            ...     wait_for_replay()
+        """
+        return self._start_managed(
+            "replay",
+            robot,
+            _options(repo_id=repo_id, episode_index=episode_index, skip_identity_check=skip_identity_check),
+            owner,
+            lease_timeout_s,
+        )
+
+    def calibrate(
+        self,
+        robot: str,
+        *,
+        device_type: str,
+        arm: str | None = None,
+        port: str | None = None,
+        config_file: str | None = None,
+        overwrite: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Manual step-by-step calibration of one arm slot.
+
+        ``device_type`` is ``"robot"`` (follower) or ``"teleop"`` (leader);
+        ``arm`` is ``"left"`` (server default; also the single-arm pair) or
+        ``"right"``. Calibration is the setup flow, so ``port`` and
+        ``config_file`` may ride here (a fresh robot has no saved port yet);
+        omitted, they resolve from the record. ``overwrite=True`` is required
+        to replace an existing config file of the same name.
+
+        Example:
+            >>> with client.sessions.calibrate("bench", device_type="robot") as s:
+            ...     drive_calibration_steps()
+        """
+        return self._start_managed(
+            "calibration",
+            robot,
+            _options(
+                device_type=device_type,
+                arm=arm,
+                port=port,
+                config_file=config_file,
+                overwrite=overwrite,
+            ),
+            owner,
+            lease_timeout_s,
+        )
+
+    def auto_calibrate(
+        self,
+        robot: str,
+        *,
+        arms: list[dict[str, Any]],
+        motor_power: int | None = None,
+        overwrite: bool | None = None,
+        owner: str | None = None,
+        lease_timeout_s: float | None = None,
+    ) -> ActiveSession:
+        """Automatic calibration — DRIVES the arm under torque and WRITES
+        servo EEPROM; make sure the workspace is clear.
+
+        ``arms`` is 1-4 slot dicts run concurrently, each
+        ``{"device_type": "robot"|"teleop", "arm": "left"|"right",
+        "port": ..., "config_file": ...}`` with everything after
+        ``device_type`` optional (a single arm is a batch of one).
+        ``motor_power`` is the drive torque percent (10-100); omitted, the
+        record's saved value. The server defaults this kind's lease to 90s —
+        a run takes ~60s+ on real hardware.
+
+        Example:
+            >>> with client.sessions.auto_calibrate("bench", arms=[{"device_type": "robot"}]) as s:
+            ...     wait_for_completion()
+        """
+        return self._start_managed(
+            "auto_calibration",
+            robot,
+            _options(arms=arms, motor_power=motor_power, overwrite=overwrite),
+            owner,
+            lease_timeout_s,
+        )
