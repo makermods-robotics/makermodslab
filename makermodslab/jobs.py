@@ -3348,19 +3348,19 @@ class JobRegistry:
             config.policy_pretrained_path = hub_ref
 
         # Asked BEFORE the lock, and for the same reason `_drain_queue` phase 1
-        # asks before its own: `_robot_busy` reads six feature modules whose
+        # asks before its own: `_robot_busy` reads seven feature modules whose
         # `training_is_active()` calls take THIS lock from inside their own
         # `_state_lock`. Reading them while holding it closes the cycle and
         # deadlocks. Never move this inside.
         #
         # Why `start` asks at all, when it historically did not: the mutex was
-        # one-way. All six features now refuse while a training run is live, but
+        # one-way. All seven features now refuse while a training run is live, but
         # nothing stopped the reverse — a submit made during a recording or a
         # rollout still launched a trainer straight on top of it, and inference
         # is the pairing this file calls the worst one (both want several GB of
         # VRAM; hours of work end as "exited with code 1"). The old rationale was
         # that a direct submit meant the user was present and knew what else they
-        # had running, which is exactly the reasoning the six features stopped
+        # had running, which is exactly the reasoning the seven features stopped
         # accepting from each other.
         #
         # It QUEUES rather than refuses, which is what makes this safe on a
@@ -5479,13 +5479,13 @@ class JobRegistry:
 
         Local training is bounded by this machine's GPU/USB (the premise
         `_local_slot_busy` is built on), and teleoperation, recording,
-        inference, calibration, auto-calibration and wiggle are all mutually
-        exclusive with each other for exactly that reason — each checks the
-        other five before starting (CLAUDE.md: "New features that drive the
-        robot must add the same reciprocal checks against every existing one").
-        Training never joined that set, which was survivable while a training
-        could only begin from an explicit user submit: the user was present and
-        knew what else they had running.
+        inference, replay, calibration, auto-calibration and wiggle are all
+        mutually exclusive with each other for exactly that reason — each
+        checks the other six before starting (CLAUDE.md: "New features that
+        drive the robot must add the same reciprocal checks against every
+        existing one"). Training never joined that set, which was survivable
+        while a training could only begin from an explicit user submit: the
+        user was present and knew what else they had running.
 
         The queue removes that. `_drain_queue` starts a trainer from a WATCHDOG
         THREAD, at an arbitrary moment, with nobody at the keyboard — several GB
@@ -5498,7 +5498,7 @@ class JobRegistry:
         globals, this is an advisory "is now a good moment" check rather than a
         mutex, and the cost of a stale read is one second's delay.
 
-        Never raises. These six modules pull in cv2, av and the lerobot robot
+        Never raises. These seven modules pull in cv2, av and the lerobot robot
         backends, none of which `jobs` depended on before the queue existed, and
         this runs as the FIRST statement of `_drain_queue` — so an ImportError
         here (a headless install, a half-installed optional extra, a broken cv2)
@@ -5517,6 +5517,7 @@ class JobRegistry:
                 auto_calibrate as _auto_calibrate,
                 calibrate as _calibrate,
                 record as _record,
+                replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
                 wiggle as _wiggle,
@@ -5528,6 +5529,8 @@ class JobRegistry:
                 return "an inference session"
             if _teleoperate.teleoperation_active:
                 return "teleoperation"
+            if _replay.replay_active:
+                return "a replay"
             if _calibrate.calibration_is_active():
                 return "calibration"
             if _auto_calibrate.auto_calibration_is_active():
@@ -5979,7 +5982,7 @@ def training_is_active() -> str | None:
     add the same reciprocal checks against every existing one"). Training sat
     outside that set for as long as a run could only begin from an explicit
     submit — the user was present and knew what else they had running. The queue
-    starts runs from a watchdog thread with nobody at the keyboard, so the six
+    starts runs from a watchdog thread with nobody at the keyboard, so the seven
     robot features have to be able to see one coming.
 
     Reports only LOCAL runs that are actually `running`. A cloud run is somebody

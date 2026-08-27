@@ -7894,6 +7894,7 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
     import makermodslab.calibrate as calibrate
     import makermodslab.jobs as jobs_mod
     import makermodslab.record as record_mod
+    import makermodslab.replay as replay_mod
     import makermodslab.rollout as rollout
     import makermodslab.teleoperate as teleop
     import makermodslab.wiggle as wiggle
@@ -7903,6 +7904,7 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
     monkeypatch.setattr(record_mod, "recording_active", False, raising=False)
     monkeypatch.setattr(rollout, "inference_active", False, raising=False)
     monkeypatch.setattr(teleop, "teleoperation_active", False, raising=False)
+    monkeypatch.setattr(replay_mod, "replay_active", False, raising=False)
     monkeypatch.setattr(wiggle, "wiggle_active", False, raising=False)
     monkeypatch.setattr(calibrate, "calibration_is_active", lambda: False, raising=False)
     monkeypatch.setattr(auto_calibrate, "auto_calibration_is_active", lambda: False, raising=False)
@@ -7949,6 +7951,16 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
 
     assert "ACT · user/ds" in _refused(asyncio.run(wiggle.wiggle_gripper("/dev/arm")))
 
+    # Replay was the feature PR #83 left out of the matrix; it drives the
+    # follower over the same USB bus as the rest.
+    assert "ACT · user/ds" in _refused(
+        replay_mod.handle_start_replay(
+            replay_mod.ReplayRequest(
+                repo_id="u/d", episode_index=0, follower_port="/dev/arm", follower_config="F"
+            )
+        )
+    )
+
 
 @pytest.mark.parametrize(
     "module_name, attr, busy_value, label",
@@ -7956,6 +7968,7 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
         ("record", "recording_active", True, "a recording session"),
         ("rollout", "inference_active", True, "an inference session"),
         ("teleoperate", "teleoperation_active", True, "teleoperation"),
+        ("replay", "replay_active", True, "a replay"),
         ("calibrate", "calibration_is_active", lambda: True, "calibration"),
         ("auto_calibrate", "auto_calibration_is_active", lambda: True, "auto-calibration"),
         ("wiggle", "wiggle_active", True, "a wiggle"),
@@ -7964,7 +7977,7 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
 def test_every_robot_activity_holds_the_queue(
     monkeypatch, tmp_path, module_name, attr, busy_value, label
 ) -> None:
-    """`_robot_busy`'s six legs, one case each — the queue side of the mutex.
+    """`_robot_busy`'s seven legs, one case each — the queue side of the mutex.
 
     Only the `recording_active` leg was exercised; the other four could be
     deleted outright with a green suite, which matters because they are read from

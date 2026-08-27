@@ -208,6 +208,19 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "code": ErrorCode.ROBOT_BUSY_RELEASING,
             }
 
+        # Lazy, because jobs imports this module back the same way. Replay was
+        # the one robot feature PR #83 left out of the training mutex; it
+        # drives the follower over the same USB bus every other feature does.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
+            }
+
         record = _load_robot_record(request.robot_name)
         if record is not None and record.get("mode") == "bimanual":
             return {

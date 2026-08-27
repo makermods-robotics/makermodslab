@@ -155,6 +155,18 @@ def test_replay_start_refusal_carries_code(monkeypatch):
     assert result["code"] == "robot.busy.recording"
 
 
+def test_replay_start_refusal_carries_training_code(monkeypatch):
+    from makermodslab import jobs
+    from makermodslab.replay import ReplayRequest, handle_start_replay
+
+    monkeypatch.setattr(jobs, "training_is_active", lambda: "ACT · user/ds")
+    result = handle_start_replay(
+        ReplayRequest(repo_id="u/d", episode_index=0, follower_port="/dev/null-f", follower_config="fc")
+    )
+    assert result["success"] is False
+    assert result["code"] == "robot.busy.training"
+
+
 def test_endpoint_propagates_code(client, monkeypatch):
     """The dict→HTTPException conversion in server.py must not drop the code:
     the HTTP body carries `code` beside the legacy string `detail`."""
