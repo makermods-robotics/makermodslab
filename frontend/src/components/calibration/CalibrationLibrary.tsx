@@ -111,7 +111,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   const refresh = useCallback(async () => {
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/calibration-configs/${device}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}`,
       );
       const data = await res.json();
       if (data.success) {
@@ -161,7 +161,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setPendingDelete(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(name)}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(name)}`,
         { method: "DELETE" },
       );
       const data = await res.json().catch(() => ({}));
@@ -234,7 +234,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           ? { [field]: name, [excludeConfigField as string]: assignedConfig ?? "" }
           : { [field]: name };
         const res = await fetchWithHeaders(
-          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+          `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -315,7 +315,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setRenameError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(selected)}/rename`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(selected)}/rename`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

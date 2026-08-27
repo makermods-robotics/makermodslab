@@ -356,7 +356,7 @@ const RecordingSessionDialog: React.FC<{
       // server resolves ports/configs/cameras from the saved record. The
       // owner attaches the lease the heartbeat above renews.
       const { robot, ...options } = recordingConfig;
-      const session = await startSession(baseUrl, fetchWithHeaders, {
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "recording",
         robot,
         owner: tabOwnerId(),

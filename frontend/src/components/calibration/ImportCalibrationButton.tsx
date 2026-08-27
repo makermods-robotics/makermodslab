@@ -75,7 +75,7 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
     setError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/calibration-configs/${device}/upload`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/upload`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

@@ -49,9 +49,6 @@ export default {
       cancel: "Keep calibrating",
       confirm: "Abort & close",
     },
-    // Native window.confirm() text for the back-button / tab-close guard.
-    leaveConfirm:
-      "Leaving aborts this calibration — nothing will be saved and the arm is released. Continue?",
   },
 
   // ---- Arm slot labels ---------------------------------------------------

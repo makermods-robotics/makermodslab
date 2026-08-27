@@ -40,6 +40,7 @@ export default {
   teleop: {
     startedTitle: "遥操作已启动",
     startedFallback: "已为 {{name}} 启动遥操作。",
+    startedWarningTitle: "已启动，但有警告",
     failedTitle: "无法启动遥操作",
     failedFallback: "启动失败。",
     disabledReason: "{{name}}{{gap}} — 请打开机器人设置",
