@@ -187,7 +187,9 @@ class LanNodeJobRunner:
         return nodes.node_registry
 
     def _client(self, timeout: float) -> httpx.Client:
-        return httpx.Client(transport=self._transport, timeout=timeout)
+        # trust_env=False: peer nodes sit on tailnet/LAN addresses no HTTP
+        # proxy can reach — see NodeRegistry._peer_client for the war story.
+        return httpx.Client(transport=self._transport, timeout=timeout, trust_env=False)
 
     def _log_line(self, message: str) -> None:
         """Append a wrapper-style line to the job's local log file."""

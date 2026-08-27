@@ -917,3 +917,19 @@ def test_nodes_surface_is_v1_only(client, api_registry):
     # POST falls through to the SPA static mount, which answers 405 for
     # non-GET — either way, no API route exists on the flat surface.
     assert client.post("/nodes", json={"url": PEER_A_URL}).status_code in {404, 405}
+
+
+def test_peer_clients_never_use_proxy_env(api_registry):
+    """Injected MockTransports bypass proxy resolution, so only this attribute
+    pin can guard the production path: a user's HTTP_PROXY must never carry
+    peer traffic (proxies can't reach tailnet/LAN addresses — field-debugged
+    as every node reading 'unreachable' while curl worked)."""
+    from makermodslab.nodes import node_registry
+    from makermodslab.runners.lan_node import LanNodeJobRunner
+
+    with node_registry._peer_client() as client:
+        assert client.trust_env is False
+    runner = LanNodeJobRunner.__new__(LanNodeJobRunner)
+    runner._transport = None
+    with runner._client(1.0) as client:
+        assert client.trust_env is False

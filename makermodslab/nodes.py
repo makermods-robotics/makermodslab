@@ -235,7 +235,7 @@ class NodeRegistry:
         is one condition regardless of which layer failed.
         """
         try:
-            with httpx.Client(transport=self._transport, timeout=self._probe_timeout) as client:
+            with self._peer_client() as client:
                 response = client.get(url + HEALTH_PATH)
                 response.raise_for_status()
                 doc = response.json()
@@ -382,6 +382,19 @@ class NodeRegistry:
         where the jobs page is limited and could undercount queued runs."""
         return self._fetch_peer_path(instance_id, QUEUE_PATH)
 
+    def _peer_client(self) -> httpx.Client:
+        """An httpx client for PEER traffic: trust_env=False, always.
+
+        Peers live on tailnet CGNAT (100.64/10) or RFC1918 LAN addresses that
+        no HTTP proxy can reach — with the default trust_env=True, a user's
+        HTTP_PROXY/ALL_PROXY silently reroutes every probe into a proxy that
+        cannot deliver it, and the whole registry reads "unreachable" while
+        curl (which ignores uppercase HTTP_PROXY for http URLs) works fine.
+        Field-debugged on exactly that symptom. Proxies stay honored where
+        they belong: Hub traffic (huggingface_hub) is untouched.
+        """
+        return httpx.Client(transport=self._transport, timeout=self._probe_timeout, trust_env=False)
+
     def _fetch_peer_path(self, instance_id: str, path: str) -> Any:
         """One read of a peer, passed through verbatim.
 
@@ -396,7 +409,7 @@ class NodeRegistry:
         """
         peer = self.resolve(instance_id)
         try:
-            with httpx.Client(transport=self._transport, timeout=self._probe_timeout) as client:
+            with self._peer_client() as client:
                 response = client.get(peer.url + path)
                 response.raise_for_status()
                 return response.json()
