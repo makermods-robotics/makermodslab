@@ -66,6 +66,7 @@ HEALTH_PATH = "/api/v1/health"
 # The peer's own typed jobs listing, proxied verbatim by
 # GET /api/v1/nodes/{instance_id}/jobs (see fetch_peer_jobs).
 JOBS_PATH = "/api/v1/jobs"
+QUEUE_PATH = "/api/v1/jobs/queue"
 
 # A peer verified within this window is trusted without a re-probe; listing
 # re-probes anything older. Also the back-off floor for unreachable peers, so
@@ -373,25 +374,34 @@ class NodeRegistry:
             return replace(peer)
 
     def fetch_peer_jobs(self, instance_id: str) -> Any:
-        """The peer's own GET /api/v1/jobs body, for the workload proxy.
+        """The peer's own GET /api/v1/jobs body, for the workload proxy."""
+        return self._fetch_peer_path(instance_id, JOBS_PATH)
+
+    def fetch_peer_queue(self, instance_id: str) -> Any:
+        """The peer's own GET /api/v1/jobs/queue body — the EXACT queue,
+        where the jobs page is limited and could undercount queued runs."""
+        return self._fetch_peer_path(instance_id, QUEUE_PATH)
+
+    def _fetch_peer_path(self, instance_id: str, path: str) -> Any:
+        """One read of a peer, passed through verbatim.
 
         resolve() is the pre-flight (probing if stale, so a dead or
-        reincarnated peer refuses before we ask it anything); the jobs GET
-        itself runs OUTSIDE the registry lock — it is a read of the peer, not
-        a mutation of the table. The body is returned verbatim (parsed JSON,
+        reincarnated peer refuses before we ask it anything); the GET itself
+        runs OUTSIDE the registry lock — it is a read of the peer, not a
+        mutation of the table. The body is returned verbatim (parsed JSON,
         not re-modeled): the peer runs this same code, and shaping is the
         route's response_model's job. Raises NodeNotFoundError from resolve,
-        NodeUnreachableError when either the resolve probe or the jobs
-        request fails.
+        NodeUnreachableError when either the resolve probe or the request
+        fails.
         """
         peer = self.resolve(instance_id)
         try:
             with httpx.Client(transport=self._transport, timeout=self._probe_timeout) as client:
-                response = client.get(peer.url + JOBS_PATH)
+                response = client.get(peer.url + path)
                 response.raise_for_status()
                 return response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise NodeUnreachableError(f"could not fetch {peer.url}{JOBS_PATH}: {exc}") from exc
+            raise NodeUnreachableError(f"could not fetch {peer.url}{path}: {exc}") from exc
 
     def _probe_and_integrate(self, peer: PeerNode) -> bool:
         """Probe one entry and fold the answer into the table.
@@ -559,6 +569,17 @@ def handle_get_node_jobs(instance_id: str) -> Any:
     pre-flight resolve or the jobs request itself)."""
     try:
         return node_registry.fetch_peer_jobs(instance_id)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_get_node_queue(instance_id: str) -> Any:
+    """Queue proxy for GET /api/v1/nodes/{instance_id}/jobs/queue; same error
+    mapping as the jobs proxy."""
+    try:
+        return node_registry.fetch_peer_queue(instance_id)
     except NodeNotFoundError as exc:
         raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
     except NodeUnreachableError as exc:

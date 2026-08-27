@@ -222,6 +222,7 @@ def test_no_new_routes_outside_api_v1():
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
         # Node registry (multi-node): static/manual peer source.
+        "GET /api/v1/nodes/{instance_id}/jobs/queue",
         "DELETE /api/v1/nodes/{instance_id}",
         "GET /api/v1/nodes",
         # Workload proxy: the peer's own typed jobs listing, passed through.

@@ -71,16 +71,25 @@ class FakeNetwork:
     def __init__(self) -> None:
         self.peers: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
+        self.queue: dict[str, dict] = {}
         self.down: set[str] = set()
         self.probes: dict[str, int] = {}
 
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             path = request.url.path
-            assert path in {"/api/v1/health", "/api/v1/jobs"}, f"unexpected probe path: {request.url}"
+            assert path in {
+                "/api/v1/health",
+                "/api/v1/jobs",
+                "/api/v1/jobs/queue",
+            }, f"unexpected probe path: {request.url}"
             base = str(request.url).removesuffix(path)
             if base in self.down:
                 raise httpx.ConnectError("connection refused", request=request)
+            if path == "/api/v1/jobs/queue":
+                if base not in self.queue:
+                    return httpx.Response(404, json={"detail": "Not Found"})
+                return httpx.Response(200, json=self.queue[base])
             if path == "/api/v1/jobs":
                 if base not in self.jobs:
                     return httpx.Response(404, json={"detail": "Not Found"})
@@ -828,6 +837,35 @@ def test_node_jobs_empty_listing(client, api_registry, network):
     resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs")
     assert resp.status_code == 200
     assert resp.json() == {"jobs": []}
+
+
+def test_node_queue_proxies_the_peers_queue_listing(client, api_registry, network):
+    """The queue proxy answers with the peer's own /api/v1/jobs/queue verbatim,
+    so queued counts are exact — the jobs page is limited and can undercount."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.queue[PEER_A_URL] = {
+        "jobs": [
+            _remote_job_doc(job_id="q-1", state="queued"),
+            _remote_job_doc(job_id="q-2", state="queued"),
+        ]
+    }
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs/queue")
+    assert resp.status_code == 200
+    assert [j["id"] for j in resp.json()["jobs"]] == ["q-1", "q-2"]
+
+
+def test_node_queue_unknown_node_404(client, api_registry):
+    resp = client.get("/api/v1/nodes/deadbeef/jobs/queue")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "node.not_found"
+
+
+def test_node_queue_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs/queue")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
 
 
 def test_node_jobs_tolerates_a_newer_peers_additive_fields(client, api_registry, network):

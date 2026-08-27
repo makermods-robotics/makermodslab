@@ -3,7 +3,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { JobRecord, jobDisplayName } from "@/lib/jobsApi";
-import { NodeEntry, getNodeJobs, nodeDisplayName } from "@/lib/nodesApi";
+import { NodeEntry, getNodeJobs, getNodeQueue, nodeDisplayName } from "@/lib/nodesApi";
 import { relativeTimeAgo } from "@/lib/relativeTime";
 
 interface NodeDetailPanelProps {
@@ -50,15 +50,18 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
     let cancelled = false;
     setWorkload({ kind: "loading" });
     const fetchWorkload = () => {
-      getNodeJobs(baseUrl, fetchWithHeaders, instanceId)
-        .then((jobs) => {
+      // Two reads: the jobs page for the running run, the queue endpoint for
+      // an EXACT queued count — the jobs page is limited and can undercount.
+      Promise.all([
+        getNodeJobs(baseUrl, fetchWithHeaders, instanceId),
+        getNodeQueue(baseUrl, fetchWithHeaders, instanceId),
+      ])
+        .then(([jobs, queue]) => {
           if (cancelled) return;
           setWorkload({
             kind: "ok",
             running: jobs.find((j) => j.state === "running") ?? null,
-            // Peers queue local submissions (PR #83), so the waiting runs are
-            // part of an honest workload answer.
-            queuedCount: jobs.filter((j) => j.state === "queued").length,
+            queuedCount: queue.length,
           });
         })
         .catch(() => {

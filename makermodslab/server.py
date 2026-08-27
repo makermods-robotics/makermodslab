@@ -91,6 +91,7 @@ from .nodes import (
     NodeUnreachableError,
     handle_add_node,
     handle_get_node_jobs,
+    handle_get_node_queue,
     handle_list_nodes,
     handle_remove_node,
 )
@@ -268,6 +269,7 @@ from .utils.system import (
     handle_install_wandb_extra,
     handle_install_wandb_extra_status,
     open_folder_in_file_browser,
+    probe_gpu,
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
@@ -853,6 +855,9 @@ def health_check():
         "capabilities": {
             "serves_ui": ui_enabled(),
             "accepts_jobs": True,
+            # Present only when the torch probe sees an accelerator — an
+            # absent key means none/unknown, never guess (see HealthResponse).
+            **({"gpu": gpu} if (gpu := probe_gpu()) else {}),
         },
     }
 
@@ -911,6 +916,16 @@ def get_node_jobs(instance_id: str):
     answer (short timeout — a peer that can't list its jobs promptly is as
     good as down for scheduling purposes)."""
     return handle_get_node_jobs(instance_id)
+
+
+@v1_router.get("/nodes/{instance_id}/jobs/queue", response_model=JobQueueResponse, tags=["nodes"])
+def get_node_queue(instance_id: str):
+    """The peer's own typed GET /api/v1/jobs/queue, passed through — the EXACT
+    queue. The sibling jobs proxy reads the peer's default jobs page, which is
+    limited and can undercount queued runs on a busy peer; a client that shows
+    a queued count reads this instead. Same passthrough/version-skew stance
+    and error mapping as the jobs proxy."""
+    return handle_get_node_queue(instance_id)
 
 
 @v1_router.delete("/nodes/{instance_id}", response_model=NodeRemoveResponse, tags=["nodes"])

@@ -79,6 +79,25 @@ export async function getNodeJobs(
   return body.jobs;
 }
 
+/**
+ * The peer's EXACT queue (its /api/v1/jobs/queue) — the jobs listing above is
+ * a limited page and can undercount queued runs on a busy peer.
+ */
+export async function getNodeQueue(
+  baseUrl: string,
+  fetcher: Fetcher,
+  instanceId: string,
+  signal?: AbortSignal,
+): Promise<JobRecord[]> {
+  const body = await apiRequest<{ jobs: JobRecord[] }>(
+    baseUrl,
+    fetcher,
+    `/api/v1/nodes/${encodeURIComponent(instanceId)}/jobs/queue`,
+    { signal, action: "Get node queue" },
+  );
+  return body.jobs;
+}
+
 /** A node the Compute selector can offer a training to: reachable, verified
  * (it has an identity to route by), and advertising that it accepts jobs. */
 export function isSelectableNode(node: NodeEntry): boolean {

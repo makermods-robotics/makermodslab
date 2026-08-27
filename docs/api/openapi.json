@@ -7224,6 +7224,49 @@
         ]
       }
     },
+    "/api/v1/nodes/{instance_id}/jobs/queue": {
+      "get": {
+        "description": "The peer's own typed GET /api/v1/jobs/queue, passed through — the EXACT\nqueue. The sibling jobs proxy reads the peer's default jobs page, which is\nlimited and can undercount queued runs on a busy peer; a client that shows\na queued count reads this instead. Same passthrough/version-skew stance\nand error mapping as the jobs proxy.",
+        "operationId": "get_node_queue",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Queue",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
     "/api/v1/open-calibration-folder": {
       "post": {
         "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
