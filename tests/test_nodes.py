@@ -63,21 +63,29 @@ class FakeNetwork:
     """Programmable LAN: base url -> health doc; `down` urls refuse connections.
 
     Counts probes per base url so tests can assert the TTL actually gates
-    re-verification instead of every list() hitting the network.
+    re-verification instead of every list() hitting the network. Peers can
+    also carry a jobs listing (base url -> the /api/v1/jobs body) for the
+    workload-proxy tests.
     """
 
     def __init__(self) -> None:
         self.peers: dict[str, dict] = {}
+        self.jobs: dict[str, dict] = {}
         self.down: set[str] = set()
         self.probes: dict[str, int] = {}
 
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/api/v1/health", f"unexpected probe path: {request.url}"
-            base = str(request.url).removesuffix("/api/v1/health")
-            self.probes[base] = self.probes.get(base, 0) + 1
+            path = request.url.path
+            assert path in {"/api/v1/health", "/api/v1/jobs"}, f"unexpected probe path: {request.url}"
+            base = str(request.url).removesuffix(path)
             if base in self.down:
                 raise httpx.ConnectError("connection refused", request=request)
+            if path == "/api/v1/jobs":
+                if base not in self.jobs:
+                    return httpx.Response(404, json={"detail": "Not Found"})
+                return httpx.Response(200, json=self.jobs[base])
+            self.probes[base] = self.probes.get(base, 0) + 1
             if base not in self.peers:
                 return httpx.Response(404, json={"detail": "Not Found"})
             return httpx.Response(200, json=self.peers[base])
@@ -119,10 +127,18 @@ def clock() -> FakeClock:
 
 
 @pytest.fixture
-def registry(local_identity, nodes_file, network, clock):
+def wall_clock() -> FakeClock:
+    """The wall-clock twin of `clock` (time.time in production). Starts at a
+    value far from the monotonic clock's so a test that conflates the two
+    clocks fails loudly instead of passing by coincidence."""
+    return FakeClock(now=1_700_000_000.0)
+
+
+@pytest.fixture
+def registry(local_identity, nodes_file, network, clock, wall_clock):
     from makermodslab.nodes import NodeRegistry
 
-    return NodeRegistry(clock=clock, transport=network.transport())
+    return NodeRegistry(clock=clock, transport=network.transport(), wall_clock=wall_clock)
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +334,48 @@ def test_resolve_probes_loaded_unverified_entries_first(local_identity, nodes_fi
     node = reloaded.resolve(PEER_A_ID)
     assert node.instance_id == PEER_A_ID
     assert node.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# last_seen_at: wall-clock sibling of the monotonic last_verified_at
+# ---------------------------------------------------------------------------
+
+
+def test_handshake_stamps_wall_clock_last_seen(registry, network, clock, wall_clock):
+    """Every successful handshake stamps last_seen_at from the WALL clock
+    (time.time in production) — a sibling of the monotonic last_verified_at,
+    which keeps its registry-clock semantics untouched."""
+    node = registry.add(PEER_A_URL)
+    assert node.last_seen_at == wall_clock.now
+    assert node.last_verified_at == clock.now  # monotonic field unchanged
+
+
+def test_last_seen_survives_failure_and_refreshes_on_recovery(registry, network, clock, wall_clock):
+    registry.add(PEER_A_URL)
+    seen_at = wall_clock.now
+    network.down.add(PEER_A_URL)
+    clock.advance(15.1)
+    wall_clock.advance(240.0)
+    [node] = registry.list_nodes()
+    assert node.status == "unreachable"
+    assert node.last_seen_at == seen_at  # last SUCCESSFUL handshake, like last_verified_at
+
+    network.down.discard(PEER_A_URL)
+    clock.advance(15.1)
+    wall_clock.advance(240.0)
+    [node] = registry.list_nodes()
+    assert node.status == "ok"
+    assert node.last_seen_at == wall_clock.now
+
+
+def test_never_verified_peer_has_no_last_seen(local_identity, nodes_file, network, clock, wall_clock):
+    from makermodslab.nodes import NodeRegistry
+
+    nodes_file.write_text(json.dumps([{"url": PEER_A_URL, "name": "bench"}]))
+    network.down.add(PEER_A_URL)
+    registry = NodeRegistry(clock=clock, transport=network.transport(), wall_clock=wall_clock)
+    [node] = registry.list_nodes()
+    assert node.last_seen_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -598,12 +656,12 @@ def test_register_sources_from_env_is_opt_in(monkeypatch, local_identity, nodes_
 
 
 @pytest.fixture
-def api_registry(monkeypatch: pytest.MonkeyPatch, local_identity, nodes_file, network, clock):
+def api_registry(monkeypatch: pytest.MonkeyPatch, local_identity, nodes_file, network, clock, wall_clock):
     """Swap the module singleton for a test-driven registry; handlers look the
     global up at call time, so the routes see this instance."""
     from makermodslab import nodes
 
-    reg = nodes.NodeRegistry(clock=clock, transport=network.transport())
+    reg = nodes.NodeRegistry(clock=clock, transport=network.transport(), wall_clock=wall_clock)
     monkeypatch.setattr(nodes, "node_registry", reg)
     return reg
 
@@ -718,6 +776,100 @@ def test_get_nodes_marks_unverified_candidates_pending(
     verified = next(n for n in nodes_body if n["url"] == TAILNET_A_URL)
     assert verified["status"] == "ok"
     assert verified["instance_id"] == PEER_A_ID
+
+
+def test_get_nodes_reports_wall_clock_last_seen(client, api_registry, wall_clock):
+    """Additive `last_seen_at`: wall-clock seconds on verified peers, null on
+    the self entry (no handshake with ourselves) and on never-verified rows."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    nodes = client.get("/api/v1/nodes").json()["nodes"]
+    by_id = {n["instance_id"]: n for n in nodes}
+    assert by_id[LOCAL_ID]["last_seen_at"] is None
+    assert by_id[PEER_A_ID]["last_seen_at"] == wall_clock.now
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/nodes/{instance_id}/jobs — the node-workload proxy
+# ---------------------------------------------------------------------------
+
+
+def _remote_job_doc(job_id: str = "job-1", state: str = "running") -> dict:
+    """A JobRecord as the peer's own GET /api/v1/jobs serves it — built from
+    the real model, because the peer runs this same code."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    record = JobRecord(
+        id=job_id,
+        job_number=7,
+        name="act_so101_run",
+        state=state,  # type: ignore[arg-type]
+        config=TrainingRequest(dataset_repo_id="user/ds"),
+        output_dir=f"outputs/train/{job_id}",
+        started_at=1_700_000_000.0,
+    )
+    return json.loads(record.model_dump_json())
+
+
+def test_node_jobs_proxies_the_peers_typed_listing(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.jobs[PEER_A_URL] = {"jobs": [_remote_job_doc()]}
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs")
+    assert resp.status_code == 200
+    [job] = resp.json()["jobs"]
+    assert job["id"] == "job-1"
+    assert job["state"] == "running"
+    assert job["name"] == "act_so101_run"
+
+
+def test_node_jobs_empty_listing(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.jobs[PEER_A_URL] = {"jobs": []}
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs")
+    assert resp.status_code == 200
+    assert resp.json() == {"jobs": []}
+
+
+def test_node_jobs_tolerates_a_newer_peers_additive_fields(client, api_registry, network):
+    """Version-skew stance: the peer usually runs the same code, but a NEWER
+    peer may serve additive fields this build doesn't know. The proxy must
+    pass the listing through without failing on them (unknown fields are
+    dropped, never an error)."""
+    doc = _remote_job_doc()
+    doc["shiny_new_field"] = {"from": "the future"}
+    network.jobs[PEER_A_URL] = {"jobs": [doc], "next_page": None}
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"][0]["id"] == "job-1"
+
+
+def test_node_jobs_unknown_node_404(client, api_registry):
+    resp = client.get(f"/api/v1/nodes/{PEER_B_ID}/jobs")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "node.not_found"
+
+
+def test_node_jobs_dead_peer_502(client, api_registry, network, clock):
+    """The peer fails the pre-flight resolve (stale + down): 502 node.unreachable."""
+    from makermodslab.nodes import NODE_TTL_S
+
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    clock.advance(NODE_TTL_S + 1)
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def test_node_jobs_fetch_failure_502(client, api_registry, network):
+    """resolve() trusts a fresh handshake, but the jobs request itself can
+    still fail — same 502 node.unreachable either way."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)  # freshly verified, so no re-probe; the jobs GET hits the outage
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
 
 
 def test_nodes_surface_is_v1_only(client, api_registry):

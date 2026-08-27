@@ -86,6 +86,7 @@ from .nodes import (
     NodeNotFoundError,
     NodeUnreachableError,
     handle_add_node,
+    handle_get_node_jobs,
     handle_list_nodes,
     handle_remove_node,
 )
@@ -875,6 +876,7 @@ def list_nodes():
         "capabilities": health["capabilities"],
         "status": "ok",
         "last_verified_at": None,  # no handshake needed with ourselves
+        "last_seen_at": None,
         "is_self": True,
         "source": "manual",  # intrinsic, like a hand-added peer — never discovered
     }
@@ -890,6 +892,20 @@ def add_node(body: AddNodeBody):
     or a non-node answer) — an unreachable peer is an error, never a pending
     state."""
     return handle_add_node(body.url, name=body.name)
+
+
+@v1_router.get("/nodes/{instance_id}/jobs", response_model=JobListResponse, tags=["nodes"])
+def get_node_jobs(instance_id: str):
+    """Server-to-server workload proxy: the peer's own typed GET /api/v1/jobs,
+    returned verbatim (the browser talks to ITS server; only servers talk to
+    peers). The response reuses JobListResponse because the peer runs this
+    same code — and on version skew the stance is passthrough: a newer peer's
+    additive fields are dropped by the model, never an error, so the proxy
+    doesn't break the moment one machine updates first. 404 node.not_found
+    for an unknown instance_id; 502 node.unreachable when the peer doesn't
+    answer (short timeout — a peer that can't list its jobs promptly is as
+    good as down for scheduling purposes)."""
+    return handle_get_node_jobs(instance_id)
 
 
 @v1_router.delete("/nodes/{instance_id}", response_model=NodeRemoveResponse, tags=["nodes"])

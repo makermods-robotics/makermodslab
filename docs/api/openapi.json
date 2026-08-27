@@ -2655,7 +2655,7 @@
         "type": "object"
       },
       "NodeEntry": {
-        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started — and on a\ndiscovered candidate the verify handshake hasn't confirmed yet, which\nadditionally carries status \"pending\" (never \"pending\" with a non-null\ninstance_id). capabilities is a plain dict, not HealthCapabilities — it's\nthe PEER's self-reported block, and a version-skewed peer must not fail\nour response validation. last_verified_at is the server's monotonic\nregistry clock (ordering and freshness relative to other entries, not\nwall-clock time). source says how the entry got here: \"manual\" for the\nself entry and hand-added peers (the only ones persisted), a source id\nfor discovery-source candidates.",
+        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started — and on a\ndiscovered candidate the verify handshake hasn't confirmed yet, which\nadditionally carries status \"pending\" (never \"pending\" with a non-null\ninstance_id). capabilities is a plain dict, not HealthCapabilities — it's\nthe PEER's self-reported block, and a version-skewed peer must not fail\nour response validation. last_verified_at is the server's monotonic\nregistry clock (ordering and freshness relative to other entries, not\nwall-clock time); last_seen_at is its wall-clock sibling — epoch seconds\nof the same last successful handshake, null until one happens (and always\nnull on the self entry), so clients can render \"last seen X ago\". source\nsays how the entry got here: \"manual\" for the self entry and hand-added\npeers (the only ones persisted), a source id for discovery-source\ncandidates.",
         "properties": {
           "capabilities": {
             "anyOf": [
@@ -2683,6 +2683,17 @@
           "is_self": {
             "title": "Is Self",
             "type": "boolean"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
           },
           "last_verified_at": {
             "anyOf": [
@@ -2754,6 +2765,7 @@
           "capabilities",
           "status",
           "last_verified_at",
+          "last_seen_at",
           "is_self",
           "source"
         ],
@@ -7009,6 +7021,49 @@
           }
         },
         "summary": "Remove Node",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs": {
+      "get": {
+        "description": "Server-to-server workload proxy: the peer's own typed GET /api/v1/jobs,\nreturned verbatim (the browser talks to ITS server; only servers talk to\npeers). The response reuses JobListResponse because the peer runs this\nsame code — and on version skew the stance is passthrough: a newer peer's\nadditive fields are dropped by the model, never an error, so the proxy\ndoesn't break the moment one machine updates first. 404 node.not_found\nfor an unknown instance_id; 502 node.unreachable when the peer doesn't\nanswer (short timeout — a peer that can't list its jobs promptly is as\ngood as down for scheduling purposes).",
+        "operationId": "get_node_jobs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Jobs",
         "tags": [
           "nodes"
         ]

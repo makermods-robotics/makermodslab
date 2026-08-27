@@ -63,6 +63,10 @@ from .utils.config import get_instance_id, load_saved_nodes, save_saved_nodes
 # Identity handshake path on a peer (its own /api/v1/health).
 HEALTH_PATH = "/api/v1/health"
 
+# The peer's own typed jobs listing, proxied verbatim by
+# GET /api/v1/nodes/{instance_id}/jobs (see fetch_peer_jobs).
+JOBS_PATH = "/api/v1/jobs"
+
 # A peer verified within this window is trusted without a re-probe; listing
 # re-probes anything older. Also the back-off floor for unreachable peers, so
 # a down host is retried once per window instead of on every list().
@@ -149,6 +153,11 @@ class PeerNode:
     status: str = "unreachable"
     last_verified_at: float | None = None  # registry clock; last SUCCESSFUL handshake
     last_probe_at: float | None = None  # registry clock; last attempt, success or not
+    # Wall-clock (time.time) sibling of last_verified_at, stamped by the same
+    # successful handshakes. The monotonic field keeps its registry-clock
+    # semantics for TTL bookkeeping; this one exists so clients can render a
+    # human "last seen X ago" against their own wall clock.
+    last_seen_at: float | None = None
     source: str = MANUAL_SOURCE  # MANUAL_SOURCE, or the discovering source_id
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,6 +170,7 @@ class PeerNode:
             "capabilities": self.capabilities,
             "status": self.status,
             "last_verified_at": self.last_verified_at,
+            "last_seen_at": self.last_seen_at,
             "is_self": False,
             "source": self.source,
         }
@@ -176,6 +186,7 @@ class NodeRegistry:
         self,
         *,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
         transport: httpx.BaseTransport | None = None,
         ttl: float = NODE_TTL_S,
         probe_timeout: float = PROBE_TIMEOUT_S,
@@ -183,6 +194,7 @@ class NodeRegistry:
     ) -> None:
         self._lock = threading.Lock()
         self._clock = clock
+        self._wall_clock = wall_clock
         self._transport = transport
         self._ttl = ttl
         self._probe_timeout = probe_timeout
@@ -244,6 +256,7 @@ class NodeRegistry:
         peer.status = "ok"
         peer.last_verified_at = now
         peer.last_probe_at = now
+        peer.last_seen_at = self._wall_clock()
 
     def _ensure_loaded(self) -> None:
         """Lazy first load of the saved url+name rows (under the lock).
@@ -358,6 +371,27 @@ class NodeRegistry:
                     )
                 self._apply_handshake(peer, doc)
             return replace(peer)
+
+    def fetch_peer_jobs(self, instance_id: str) -> Any:
+        """The peer's own GET /api/v1/jobs body, for the workload proxy.
+
+        resolve() is the pre-flight (probing if stale, so a dead or
+        reincarnated peer refuses before we ask it anything); the jobs GET
+        itself runs OUTSIDE the registry lock — it is a read of the peer, not
+        a mutation of the table. The body is returned verbatim (parsed JSON,
+        not re-modeled): the peer runs this same code, and shaping is the
+        route's response_model's job. Raises NodeNotFoundError from resolve,
+        NodeUnreachableError when either the resolve probe or the jobs
+        request fails.
+        """
+        peer = self.resolve(instance_id)
+        try:
+            with httpx.Client(transport=self._transport, timeout=self._probe_timeout) as client:
+                response = client.get(peer.url + JOBS_PATH)
+                response.raise_for_status()
+                return response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise NodeUnreachableError(f"could not fetch {peer.url}{JOBS_PATH}: {exc}") from exc
 
     def _probe_and_integrate(self, peer: PeerNode) -> bool:
         """Probe one entry and fold the answer into the table.
@@ -514,6 +548,19 @@ def handle_add_node(url: str, name: str | None = None) -> dict[str, Any]:
         raise ApiError(status_code=409, detail=str(exc), code=ErrorCode.NODE_SELF) from exc
     except DuplicateNodeError as exc:
         raise ApiError(status_code=409, detail=str(exc), code=ErrorCode.NODE_DUPLICATE) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_get_node_jobs(instance_id: str) -> Any:
+    """Workload proxy for GET /api/v1/nodes/{instance_id}/jobs: the peer's own
+    typed jobs listing, passed through. 404 node.not_found for an unknown
+    instance_id; 502 node.unreachable when the peer doesn't answer (the
+    pre-flight resolve or the jobs request itself)."""
+    try:
+        return node_registry.fetch_peer_jobs(instance_id)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
     except NodeUnreachableError as exc:
         raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
 

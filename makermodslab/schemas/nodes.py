@@ -45,9 +45,12 @@ class NodeEntry(BaseModel):
     the PEER's self-reported block, and a version-skewed peer must not fail
     our response validation. last_verified_at is the server's monotonic
     registry clock (ordering and freshness relative to other entries, not
-    wall-clock time). source says how the entry got here: "manual" for the
-    self entry and hand-added peers (the only ones persisted), a source id
-    for discovery-source candidates.
+    wall-clock time); last_seen_at is its wall-clock sibling — epoch seconds
+    of the same last successful handshake, null until one happens (and always
+    null on the self entry), so clients can render "last seen X ago". source
+    says how the entry got here: "manual" for the self entry and hand-added
+    peers (the only ones persisted), a source id for discovery-source
+    candidates.
     """
 
     url: str | None
@@ -57,6 +60,7 @@ class NodeEntry(BaseModel):
     capabilities: dict[str, Any] | None
     status: Literal["ok", "unreachable", "pending"]
     last_verified_at: float | None
+    last_seen_at: float | None
     is_self: bool
     source: Literal["manual", "tailscale"]
 

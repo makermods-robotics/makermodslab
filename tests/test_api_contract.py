@@ -224,6 +224,8 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Node registry (multi-node): static/manual peer source.
         "DELETE /api/v1/nodes/{instance_id}",
         "GET /api/v1/nodes",
+        # Workload proxy: the peer's own typed jobs listing, passed through.
+        "GET /api/v1/nodes/{instance_id}/jobs",
         "POST /api/v1/nodes",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
