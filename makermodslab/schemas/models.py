@@ -51,7 +51,11 @@ __all__ = [
     "ModelDeleteResponse",
     "ModelInfoResponse",
     "ModelListItem",
+    "ModelPublishStartResponse",
+    "ModelPublishStatusResponse",
     "ModelUploadResponse",
+    "RunCheckpointItem",
+    "RunCheckpointsResponse",
     "SuccessRepoIdResponse",
 ]
 
@@ -125,6 +129,54 @@ class ModelUploadResponse(BaseModel):
     repo_id: str
     url: str
     tags: list[str]
+
+
+class RunCheckpointItem(BaseModel):
+    """One saved checkpoint of a local run (models.py list_run_checkpoints)."""
+
+    step: int
+    path: str
+    published: bool
+
+
+class RunCheckpointsResponse(BaseModel):
+    """GET /api/v1/models/checkpoints (models.py list_run_checkpoints) — what the
+    publish picker needs for one run: its checkpoints, which are already on the
+    Hub, and the repo a publish would target. `hub_readable` is False when the
+    Hub could not be asked, in which case every `published` means "unknown"."""
+
+    id: str
+    default_repo_id: str
+    hf_repo_id: str | None
+    legacy_root_checkpoint: bool
+    hub_readable: bool
+    checkpoints: list[RunCheckpointItem]
+
+
+class ModelPublishStartResponse(BaseModel):
+    """POST /api/v1/models/publish (models.py ModelUploadManager.start) — the
+    queue was accepted and runs in the background; poll publish-status."""
+
+    started: bool
+    model_id: str
+    message: str
+
+
+class ModelPublishStatusResponse(BaseModel):
+    """GET /api/v1/models/publish-status (models.py ModelUploadManager.get_status).
+    `done_steps` stays meaningful on `error` — a queue that fails part-way keeps
+    everything it published before it died."""
+
+    state: Literal["idle", "running", "done", "error"]
+    model_id: str | None
+    repo_id: str | None
+    url: str | None
+    message: str | None
+    error: str | None
+    total: int
+    done: int
+    current_step: int | None
+    done_steps: list[int]
 
 
 class ModelDeleteResponse(BaseModel):

@@ -4196,6 +4196,32 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def set_hf_repo_id(self, job_id: str, repo_id: str) -> JobRecord:
+        """Record the Hub model repo a LOCAL run has been published to.
+
+        Unlike `rename` this is identity, not decoration. It is what makes a
+        SECOND publish land in the same repo as the first — models.
+        `upload_local_model` defaults its target to `record.hf_repo_id` — and
+        what the training dialog reads to render "View on Hub" and to offer
+        "add more checkpoints" instead of a fresh publish.
+
+        Cloud runs get theirs at submit time (see `start`); this is the
+        local-run equivalent, written after the first successful upload.
+        Idempotent: re-publishing to the same repo rewrites the same value."""
+        target = repo_id.strip()
+        if not target:
+            raise ValueError("Hub repo id cannot be empty.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            if record.hf_repo_id == target:
+                return record
+            record.hf_repo_id = target
+            self._persist(record, force=True)
+        self._notify_change()
+        return record
+
     def stop(self, job_id: str) -> JobRecord:
         """Ask a running job to stop, and record that we asked.
 

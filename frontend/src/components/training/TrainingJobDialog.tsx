@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
@@ -24,6 +24,7 @@ import {
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useEyebrowClass } from "@/components/studio/panel/primitives";
+import PublishToHubRow from "@/components/training/PublishToHubRow";
 import { useStudio } from "@/contexts/StudioContext";
 
 const POLL_INTERVAL_MS = 1000;
@@ -291,6 +292,19 @@ const TrainingJobDialog: React.FC<{
     }
   };
 
+  /** Re-read the job after a publish — the first one pins hf_repo_id, which the
+   * header renders as "View on Hub". A refetch blip is swallowed: the publish
+   * already reported its own outcome, so a failure here must not read as a
+   * failed upload. The header picks the repo up on the next reopen. */
+  const refreshJob = useCallback(async () => {
+    try {
+      const next = await getJob(baseUrl, fetchWithHeaders, jobId);
+      setJob(next);
+    } catch {
+      // transient — see above
+    }
+  }, [baseUrl, fetchWithHeaders, jobId]);
+
   const isRunning = job?.state === "running";
 
   // Before the trainer's first metric tick the stats panel can only say
@@ -371,9 +385,11 @@ const TrainingJobDialog: React.FC<{
                         {t("training.jobDialog.runnerLocal")}
                       </span>
                     )}
-                    {job.runner === "hf_cloud" &&
-                      job.hf_repo_id &&
-                      job.state === "done" && (
+                    {/* A cloud run's repo exists only once it finishes; a local
+                        run's hf_repo_id is pinned only after a checkpoint has
+                        actually been published, so its presence is enough. */}
+                    {job.hf_repo_id &&
+                      (job.runner !== "hf_cloud" || job.state === "done") && (
                         <a
                           href={`https://huggingface.co/${job.hf_repo_id}`}
                           target="_blank"
@@ -494,6 +510,9 @@ const TrainingJobDialog: React.FC<{
                 </>
               )}
             </div>
+            {!isRunning && (
+              <PublishToHubRow jobId={jobId} onPublished={refreshJob} />
+            )}
             <TrainingLogs logs={logs} logContainerRef={logContainerRef} />
           </div>
         )}

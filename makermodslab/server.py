@@ -162,7 +162,10 @@ from .schemas.models import (
     ModelDeleteResponse,
     ModelInfoResponse,
     ModelListItem,
+    ModelPublishStartResponse,
+    ModelPublishStatusResponse,
     ModelUploadResponse,
+    RunCheckpointsResponse,
 )
 from .schemas.nodes import (
     NodeEntry,
@@ -1383,11 +1386,61 @@ def models_upload(body: ModelUploadBody):
     """Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged
     model repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when
     the token can't write the namespace; 404 when the local model has no saved
-    checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}."""
+    checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.
+
+    The single-checkpoint synchronous push, frozen for SDK clients. The training
+    view's multi-checkpoint picker uses POST /api/v1/models/publish instead."""
     try:
         return model_browser.upload_local_model(body.id, body.repo_id)
     except model_browser.ModelError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+@v1_router.get("/models/checkpoints", response_model=RunCheckpointsResponse, tags=["models"])
+def models_checkpoints(id: str):
+    """The publish picker's source of truth for one local run: every checkpoint
+    it saved, which steps are already on the Hub, and the repo a publish would
+    target. `id` is a run id (query param for symmetry with /models/info).
+    404 when the run has no uploadable checkpoint."""
+    try:
+        return model_browser.list_run_checkpoints(id)
+    except model_browser.ModelError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class ModelPublishBody(BaseModel):
+    id: str
+    repo_id: str | None = None
+    # Which checkpoints to publish. Omitted ⇒ the run's final checkpoint only.
+    # Every step lands in the SAME repo under checkpoints/<step>/pretrained_model,
+    # so a later call adds to the same model card instead of creating a second repo.
+    steps: list[int] | None = None
+
+
+@v1_router.post("/models/publish", response_model=ModelPublishStartResponse, tags=["models"])
+def models_publish(body: ModelPublishBody):
+    """START publishing a local run's checkpoints to the Hub as ONE PUBLIC,
+    MakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).
+
+    Returns immediately with {started, model_id, message} — the queue runs
+    sequentially in a background thread (a run's worth of checkpoints is
+    gigabytes, far past what an inline request should hold open) and
+    GET /api/v1/models/publish-status reports progress. 409 when a publish is
+    already running; the per-step failures (400 offline, 403 permission, 404
+    unknown step, 502 Hub) surface through that status, not this call."""
+    result = model_browser.model_upload_manager.start(body.id, body.repo_id, body.steps)
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("message", "Publish busy"))
+    return result
+
+
+@v1_router.get("/models/publish-status", response_model=ModelPublishStatusResponse, tags=["models"])
+def models_publish_status():
+    """Poll the single background publish: state (idle/running/done/error),
+    target repo + url, `done`/`total`/`current_step` for the queue position, and
+    `done_steps` — the steps already on the Hub, which stay meaningful after an
+    error because a failed queue keeps everything it published before it died."""
+    return model_browser.model_upload_manager.get_status()
 
 
 class ModelDeleteBody(BaseModel):
