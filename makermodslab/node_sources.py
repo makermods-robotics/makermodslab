@@ -31,7 +31,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import os
+import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 
 from .nodes import DiscoveredPeer
@@ -51,10 +54,39 @@ STATUS_TIMEOUT_S = 5.0
 _TAILNET_IPV4 = ipaddress.ip_network("100.64.0.0/10")
 
 
+# The macOS GUI app (App Store or standalone) ships its CLI inside the app
+# bundle and installs NO PATH symlink — the number-one reason discovery "works
+# on Ubuntu but not macOS". Homebrew's locations are covered by shutil.which
+# when brew's bin is on PATH, and listed here for GUI-launched processes whose
+# PATH doesn't include it.
+_MACOS_APP_BUNDLE_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+_MACOS_FALLBACK_CLIS = (
+    _MACOS_APP_BUNDLE_CLI,
+    "/opt/homebrew/bin/tailscale",
+    "/usr/local/bin/tailscale",
+)
+
+
+def _resolve_tailscale_binary() -> str | None:
+    """The tailscale CLI to run: PATH first, then the macOS fallbacks."""
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    if sys.platform == "darwin":
+        for candidate in _MACOS_FALLBACK_CLIS:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
 def _run_tailscale_status() -> str:
     """The default runner: the real CLI's stdout (raises on any failure)."""
+    binary = _resolve_tailscale_binary()
+    if binary is None:
+        searched = "PATH" + (", " + ", ".join(_MACOS_FALLBACK_CLIS) if sys.platform == "darwin" else "")
+        raise FileNotFoundError(f"tailscale CLI not found (searched: {searched})")
     return subprocess.run(
-        ["tailscale", "status", "--json"],
+        [binary, "status", "--json"],
         capture_output=True,
         text=True,
         timeout=STATUS_TIMEOUT_S,
@@ -82,7 +114,9 @@ class TailscaleSource:
         """Current candidates: each online peer's tailnet IPv4 at our port.
 
         Any failure is an empty discovery; the first failure of an outage logs
-        at INFO, and a successful run re-arms that log for the next outage.
+        at WARNING (--discover-tailscale is an explicit opt-in, so its silent
+        absence is exactly what a user debugs), and a successful run re-arms
+        that log for the next outage.
         """
         try:
             doc = json.loads(self._runner())
@@ -92,7 +126,7 @@ class TailscaleSource:
             candidates = self._parse_peers(doc.get("Peer") or {})
         except Exception as exc:
             if not self._outage_logged:
-                logger.info("tailscale discovery unavailable (continuing without it): %s", exc)
+                logger.warning("tailscale discovery unavailable (continuing without it): %s", exc)
                 self._outage_logged = True
             return []
         self._outage_logged = False

@@ -195,3 +195,51 @@ def test_failure_log_rearms_after_a_successful_discovery(caplog: pytest.LogCaptu
         source.discover()
     failure_logs = [r for r in caplog.records if "no tailscale" in r.getMessage()]
     assert len(failure_logs) == 2
+
+
+# --- binary resolution (the macOS GUI app installs no PATH symlink) -----------
+
+
+def test_binary_resolution_prefers_path(monkeypatch):
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns.shutil, "which", lambda name: "/usr/bin/tailscale")
+    assert ns._resolve_tailscale_binary() == "/usr/bin/tailscale"
+
+
+def test_binary_resolution_falls_back_to_macos_app_bundle(monkeypatch):
+    """The Mac App Store / standalone GUI Tailscale ships its CLI inside the
+    app bundle with no PATH symlink — the number-one reason discovery 'works
+    on Ubuntu but not macOS'."""
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns.shutil, "which", lambda name: None)
+    monkeypatch.setattr(ns.sys, "platform", "darwin")
+    monkeypatch.setattr(ns.os.path, "isfile", lambda p: p == ns._MACOS_APP_BUNDLE_CLI)
+    monkeypatch.setattr(ns.os, "access", lambda p, mode: p == ns._MACOS_APP_BUNDLE_CLI)
+    assert ns._resolve_tailscale_binary() == ns._MACOS_APP_BUNDLE_CLI
+
+
+def test_binary_resolution_none_found(monkeypatch):
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns.shutil, "which", lambda name: None)
+    monkeypatch.setattr(ns.os.path, "isfile", lambda p: False)
+    assert ns._resolve_tailscale_binary() is None
+
+
+def test_missing_binary_warns_once_with_searched_locations(monkeypatch, caplog):
+    """--discover-tailscale is an explicit opt-in: a missing binary is a
+    WARNING naming what was searched, once per outage — not a buried INFO."""
+    import logging
+
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns, "_resolve_tailscale_binary", lambda: None)
+    src = ns.TailscaleSource()
+    with caplog.at_level(logging.WARNING, logger="makermodslab.node_sources"):
+        assert src.discover() == []
+        assert src.discover() == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "tailscale" in warnings[0].getMessage()
