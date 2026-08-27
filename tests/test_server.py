@@ -1347,6 +1347,169 @@ def test_hub_job_run_name_ignores_blank_label_and_trailing_flag() -> None:
     assert server_mod._hub_job_run_name(_job_with(command=["--policy.repo_id"])) is None
 
 
+# --- _argv_value / _hub_job_provenance ------------------------------------
+#
+# A cloud card's flavor/created/owner/image rows are near-identical across every
+# run on an account. The provenance parser reads what the run started FROM off
+# its own argv, which is the only Hub-side record of it: a repo id contains a
+# "/", and the Hub's label charset forbids one, so no label could carry it.
+
+
+def test_argv_value_reads_both_spellings() -> None:
+    argv = ["--a", "1", "--b=2"]
+    assert server_mod._argv_value(argv, "--a") == "1"
+    assert server_mod._argv_value(argv, "--b") == "2"
+    assert server_mod._argv_value(argv, "--c") is None
+
+
+def test_argv_value_treats_blank_and_dangling_as_absent() -> None:
+    # A trailing flag must not index past the end, and an empty value carries no
+    # more information than no flag at all.
+    assert server_mod._argv_value(["--a"], "--a") is None
+    assert server_mod._argv_value(["--a", "   "], "--a") is None
+    assert server_mod._argv_value(["--a="], "--a") is None
+
+
+def test_argv_value_does_not_match_a_flag_by_prefix() -> None:
+    # "--steps" must not be answered by "--steps_per_epoch".
+    assert server_mod._argv_value(["--steps_per_epoch", "7"], "--steps") is None
+
+
+def test_provenance_finetune_from_a_user_chosen_base() -> None:
+    job = _job_with(
+        command=["--policy.pretrained_path=makermods/my_base", "--dataset.repo_id", "u/d", "--steps", "9000"]
+    )
+    prov = server_mod._hub_job_provenance(job)
+    assert prov["kind"] == "finetune"
+    assert prov["base_repo"] == "makermods/my_base"
+    assert prov["dataset_repo_id"] == "u/d"
+    assert prov["steps"] == "9000"
+
+
+def test_the_frontend_foundation_list_cannot_drift_from_the_python_one() -> None:
+    # jobsApi.ts carries its own copy of these repo ids (the local JobCard has no
+    # backend round-trip to classify against). Nothing links the two, so a fifth
+    # policy added in Python would silently mis-chip local VLA runs as
+    # "Fine-tune". This test is that link: if it fails, update
+    # frontend/src/lib/jobsApi.ts FOUNDATION_BASE_REPO_IDS to match.
+    from makermodslab.jobs import _KNOWN_FOUNDATION_BASE_REPO_IDS
+
+    assert (
+        frozenset(
+            {
+                "lerobot/smolvla_base",
+                "lerobot/pi0_base",
+                "lerobot/pi05_base",
+                "lerobot/pi0fast-base",
+            }
+        )
+        == _KNOWN_FOUNDATION_BASE_REPO_IDS
+    )
+
+
+def test_argv_value_rejects_an_option_shaped_value() -> None:
+    # A dangling flag followed by another flag must not swallow it as a value:
+    # that turned "--policy.pretrained_path --resume true" into a confident
+    # fine-tune whose base model was the string "--resume".
+    argv = ["--policy.pretrained_path", "--resume", "true"]
+    assert server_mod._argv_value(argv, "--policy.pretrained_path") is None
+    assert server_mod._hub_job_provenance(_job_with(command=argv))["kind"] == "resume"
+
+
+def test_argv_value_does_not_close_gaps_left_by_junk_tokens() -> None:
+    # Dropping non-string tokens made two tokens adjacent that never were, so a
+    # flag read the token AFTER the junk as its value.
+    argv = ["--policy.type", None, "act"]
+    assert server_mod._argv_value(argv, "--policy.type") is None
+
+
+def test_provenance_handles_a_non_numeric_checkpoint_ref() -> None:
+    # hf_cloud can emit "@checkpoints/last", which the digits-only ref regex
+    # will not split — without a guard the whole raw ref reaches the card.
+    prov = server_mod._hub_job_provenance(_job_with(command=["--resume-from=u/run@checkpoints/last"]))
+    assert prov["base_repo"] == "u/run"
+    assert prov["base_step"] == "last"
+
+
+def test_provenance_calls_a_vla_default_start_foundation_not_finetune() -> None:
+    # JobRegistry.start pins policy_pretrained_path to the public foundation
+    # checkpoint for ANY smolvla/pi0 run that named no starting point, so
+    # `--policy.pretrained_path` is on the argv of every from-scratch VLA run.
+    # Reading that as a fine-tune would mislabel most cards on a VLA account.
+    for base in ("lerobot/smolvla_base", "lerobot/pi0_base", "lerobot/pi05_base", "lerobot/pi0fast-base"):
+        prov = server_mod._hub_job_provenance(_job_with(command=[f"--policy.pretrained_path={base}"]))
+        assert prov["kind"] == "foundation", base
+        assert prov["base_repo"] == base
+
+
+def test_provenance_recovers_the_run_id_from_a_staged_checkpoint_base() -> None:
+    # A local run's checkpoint uploaded for a cloud fine-tune lives in a
+    # "<user>/<job id>_checkpoints" staging repo. The job id is the thing a
+    # person recognizes; the raw ref must never reach the card.
+    job = _job_with(
+        command=[
+            "--policy.pretrained_path=makermods/act_cube_2026-08-01_12-00-00_checkpoints@checkpoints/012000"
+        ]
+    )
+    prov = server_mod._hub_job_provenance(job)
+    assert prov["kind"] == "finetune"
+    assert prov["base_job_id"] == "act_cube_2026-08-01_12-00-00"
+    assert prov["base_step"] == "012000"
+
+
+def test_provenance_reads_a_continuation_from_the_wrapper_directive() -> None:
+    # NOT from --config_path: on a cloud continuation that is a container path
+    # that names nothing the user could recognize.
+    job = _job_with(
+        command=[
+            "python",
+            "-c",
+            "…",
+            "--resume-from=makermods/act_cube_2026-08-01_12-00-00@checkpoints/020000",
+            "--",
+            "--config_path=/tmp/makermodslab/train/checkpoints/020000/pretrained_model/train_config.json",
+            "--resume",
+            "true",
+        ]
+    )
+    prov = server_mod._hub_job_provenance(job)
+    assert prov["kind"] == "resume"
+    assert prov["base_repo"] == "makermods/act_cube_2026-08-01_12-00-00"
+    assert prov["base_step"] == "020000"
+    # The container path must not have leaked into anything user-facing.
+    assert "/tmp/" not in str(prov["base_repo"])
+    assert prov["base_job_id"] is None  # not a staging repo
+
+
+def test_provenance_knows_an_old_continuation_without_naming_its_source() -> None:
+    # Submitted before the wrapper carried --resume-from: we know it continued
+    # something, but not what. Honest beats invented.
+    prov = server_mod._hub_job_provenance(_job_with(command=["--resume", "true"]))
+    assert prov["kind"] == "resume"
+    assert prov["base_repo"] is None
+
+
+def test_provenance_omits_rather_than_guesses_on_a_continuation() -> None:
+    # build_training_command's resume branch emits neither --dataset.repo_id nor
+    # --policy.type; lerobot rebuilds both from the checkpoint config.
+    prov = server_mod._hub_job_provenance(_job_with(command=["--resume-from=u/r@checkpoints/000500"]))
+    assert prov["dataset_repo_id"] is None
+    assert prov["policy_type"] is None
+
+
+def test_provenance_of_a_scratch_run_and_a_foreign_job() -> None:
+    prov = server_mod._hub_job_provenance(
+        _job_with(command=["--dataset.repo_id", "u/d", "--policy.type", "act", "--resume", "false"])
+    )
+    assert prov["kind"] == "scratch"
+    assert prov["base_ref"] is None
+    assert prov["policy_type"] == "act"
+    # Someone else's job on the same account: no argv we understand at all.
+    bare = server_mod._hub_job_provenance(_FakeHubJob("bare", "COMPLETED"))
+    assert bare["kind"] == "scratch"
+    assert bare["dataset_repo_id"] is None
+
+
 def test_list_hub_jobs_exposes_the_run_name(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
     named = _job_with(labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"})
     named.id = "job-named"

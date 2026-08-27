@@ -63,7 +63,14 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 # `name` defaults to a value derived from the image when the caller omits it
 # ("lerobot-gpu-latest-<hash>"), so a `name` read back off a job is not
 # necessarily one we chose; _RUN_LABEL is unambiguous.
-_RUN_LABEL = "makermodslab.run"
+# NOTE the underscore, not a dot. The Hub validates job labels under its `tags`
+# rules — "1-256 characters, alphanumeric, '-', '_', or '='" — which a '.' fails,
+# so a key of "makermodslab.run" made EVERY cloud submission 400 once the
+# unpinned huggingface_hub reached a version whose backend enforced it. Jobs
+# submitted under the old key are still readable: see _LEGACY_RUN_LABELS.
+_RUN_LABEL = "makermodslab_run"
+#: Keys a previously-submitted job may carry, newest first. Read-only.
+_LEGACY_RUN_LABELS = ("makermodslab.run",)
 
 # The Hub rejects a label whose key or value exceeds 100 characters or strays
 # outside [alphanumeric . - _]. A job id is built from a _SLUG_RE-sanitised

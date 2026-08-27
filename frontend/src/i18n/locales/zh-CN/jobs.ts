@@ -45,6 +45,37 @@ export default {
     owner: "所有者",
     image: "镜像",
     updated: "更新于",
+    base: "基础模型",
+  },
+  kind: {
+    finetune: "微调",
+    resume: "续训",
+    unknownBase: "已上传的检查点",
+  },
+  remote: {
+    groupLabel: "其他设备",
+    noneYet: "还没有其他设备在共享运行。",
+    state: {
+      running: "运行中",
+      done: "已完成",
+      failed: "失败",
+      interrupted: "已停止",
+      unknown: "状态未知",
+    },
+    lastSeen: "最后一次通信在 {{when}} —— 状态未知",
+    presumedStopped: "最近没有通信 —— 推测已停止",
+    manageThere: "在 {{device}} 上 · 请在那台设备上管理",
+    forget: "忘记此设备",
+    forgetTitle: "把此设备从列表中移除。设备本身不受影响。",
+    forgotten: "设备已从列表中移除",
+    sharing: "共享此设备的运行",
+    sharingHint:
+      "将此设备的运行名称与进度发布到你 Hugging Face 账号下的一个私有仓库，供你的其他设备查看。",
+    announced: "正在通过 {{repo}} 共享此设备的运行",
+    disabled: {
+      offline: "共享已关闭：Hugging Face 处于离线模式。",
+      forbidden: "共享已关闭：你的 Hugging Face 令牌没有 Hub 写入权限。",
+    },
   },
   actions: {
     run: "运行",
@@ -104,6 +135,8 @@ export default {
     },
     resumeLatest: "从最新检查点继续",
     resumeStep: "从第 {{step}} 步继续",
+    continues: "\u21b3 续训自 {{parent}}",
+    continuesTitle: "本次运行是对更早一次运行的续训。链路：{{chain}}",
     resumeHint:
       "打开训练表单，从该检查点继续训练。算力默认沿用该检查点所属运行的位置，开始前可以改选。",
     install: "安装 {{target}}",

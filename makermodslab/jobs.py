@@ -1897,6 +1897,13 @@ def upload_local_pretrained(pretrained_dir: Path, repo_id: str, step_dir: str, *
     )
 
 
+#: Suffix distinguishing a checkpoint STAGING repo from a run's output repo.
+#: Read back by the /jobs/hub provenance parser (server.py) to recover the
+#: originating run's job id from a staged base ref, so the two sides of the
+#: convention cannot drift apart.
+CHECKPOINTS_STAGING_SUFFIX = "_checkpoints"
+
+
 def checkpoints_staging_repo_id(username: str, job_id: str) -> str:
     """The Hub repo a LOCAL run's checkpoints are staged in for a cloud resume.
 
@@ -1911,7 +1918,7 @@ def checkpoints_staging_repo_id(username: str, job_id: str) -> str:
         into this one, so parent and child checkpoints stay distinguishable —
         the ambiguity MT12 records for cloud→cloud is not inherited here.
     """
-    return f"{username}/{job_id}_checkpoints"
+    return f"{username}/{job_id}{CHECKPOINTS_STAGING_SUFFIX}"
 
 
 def needs_local_materialization(pretrained_path: str) -> bool:
