@@ -7,7 +7,9 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 from helpers import mock_client
+from makermodslab_sdk.resources._waiting import OperationFailedError
 from makermodslab_sdk.resources.datasets import DownloadStart, DownloadStatus, ImportResult, SuccessRepoId
 from makermodslab_sdk.resources.models import (
     ModelDeleteResult,
@@ -175,6 +177,38 @@ def test_hide_and_unhide():
     request, _ = call_one({"success": True, "repo_id": REPO}, lambda c: c.models.unhide(REPO))
     assert (request.method, request.url.path) == ("DELETE", "/api/v1/models/hide")
     assert body_of(request) == {"repo_id": REPO}
+
+
+# ---------------------------------------------------------------- waiters
+
+
+def test_wait_for_download_polls_the_models_slot():
+    bodies = [
+        {"state": "running", "repo_id": REPO, "message": "Downloading…", "error": None},
+        {"state": "done", "repo_id": REPO, "message": "Downloaded", "error": None},
+    ]
+    served: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        served.append(request.url.path)
+        return httpx.Response(200, json=bodies[min(len(served) - 1, len(bodies) - 1)])
+
+    slept: list[float] = []
+    with mock_client(handler) as client:
+        status = client.models.wait_for_download(REPO, poll_interval=3.0, sleep_fn=slept.append)
+    assert status.state == "done"
+    assert served == ["/api/v1/models/download-status"] * 2  # the models slot, not the datasets one
+    assert slept == [3.0]
+
+
+def test_wait_for_download_failure_raises_with_server_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"state": "error", "repo_id": REPO, "message": "…", "error": "repo gated"}
+        )
+
+    with mock_client(handler) as client, pytest.raises(OperationFailedError, match="repo gated"):
+        client.models.wait_for_download(REPO, sleep_fn=lambda s: None)
 
 
 # ---------------------------------------------------------------- e2e (read-only, offline-safe)

@@ -1,13 +1,16 @@
 """The datasets namespace against httpx.MockTransport: every operation sends
 the documented request (path, method, params/body) and parses the documented
-response shape — house style: never sleeps, never network."""
+response shape; waiter tests drive scripted status sequences with a recording
+fake sleep — house style: never sleeps, never network."""
 
 from __future__ import annotations
 
 import json
 
 import httpx
+import pytest
 from helpers import mock_client
+from makermodslab_sdk.resources._waiting import OperationFailedError, WaitTimeoutError
 from makermodslab_sdk.resources.datasets import (
     DatasetHubSettings,
     DatasetHubStatus,
@@ -290,6 +293,110 @@ def test_delete():
     assert body_of(request) == {"dataset_repo_id": REPO}
     assert isinstance(result, DeleteDatasetResult)
     assert result.success is True
+
+
+# ---------------------------------------------------------------- waiters
+
+
+def scripted_status_client(path: str, bodies: list[dict]):
+    """A client whose GET ``path`` replays ``bodies`` (last one repeats)."""
+    served: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == path
+        index = min(len(served), len(bodies) - 1)
+        served.append(index)
+        return httpx.Response(200, json=bodies[index])
+
+    return mock_client(handler), served
+
+
+def download_body(state, repo_id=REPO, error=None):
+    return {"state": state, "repo_id": repo_id, "message": "…", "error": error}
+
+
+def test_wait_for_download_polls_until_done_without_real_sleep():
+    client, served = scripted_status_client(
+        "/api/v1/datasets/download-status",
+        [download_body("running"), download_body("running"), download_body("done")],
+    )
+    slept: list[float] = []
+    with client:
+        status = client.datasets.wait_for_download(REPO, poll_interval=2.0, sleep_fn=slept.append)
+    assert status.state == "done"
+    assert status.repo_id == REPO
+    assert len(served) == 3
+    assert slept == [2.0, 2.0]  # one sleep between each poll, never a real one
+
+
+def test_wait_for_download_error_state_raises_with_server_text():
+    client, _ = scripted_status_client(
+        "/api/v1/datasets/download-status",
+        [download_body("running"), download_body("error", error="401 unauthorized")],
+    )
+    with client, pytest.raises(OperationFailedError, match="401 unauthorized"):
+        client.datasets.wait_for_download(REPO, sleep_fn=lambda s: None)
+
+
+def test_wait_for_download_times_out_in_virtual_time():
+    client, served = scripted_status_client("/api/v1/datasets/download-status", [download_body("running")])
+    slept: list[float] = []
+    with client, pytest.raises(WaitTimeoutError, match="still running"):
+        client.datasets.wait_for_download(REPO, timeout=5.0, poll_interval=2.0, sleep_fn=slept.append)
+    assert slept == [2.0, 2.0, 2.0]  # 6s of virtual time crosses the 5s budget
+    assert len(served) == 4
+
+
+def test_wait_for_download_idle_means_nothing_running():
+    client, _ = scripted_status_client(
+        "/api/v1/datasets/download-status",
+        [{"state": "idle", "repo_id": None, "message": None, "error": None}],
+    )
+    with client, pytest.raises(OperationFailedError, match="idle"):
+        client.datasets.wait_for_download(REPO, sleep_fn=lambda s: None)
+
+
+def test_wait_for_download_other_repo_in_slot_raises():
+    client, _ = scripted_status_client(
+        "/api/v1/datasets/download-status", [download_body("running", repo_id="someone/else")]
+    )
+    with client, pytest.raises(OperationFailedError, match="someone/else"):
+        client.datasets.wait_for_download(REPO, sleep_fn=lambda s: None)
+
+
+def test_wait_for_upload_polls_upload_status():
+    bodies = [
+        {"state": "running", "repo_id": REPO, "message": "Uploading…", "dataset_url": None},
+        {
+            "state": "done",
+            "repo_id": REPO,
+            "message": "Uploaded",
+            "dataset_url": f"https://huggingface.co/datasets/{REPO}",
+        },
+    ]
+    client, served = scripted_status_client("/api/v1/upload-status", bodies)
+    slept: list[float] = []
+    with client:
+        status = client.datasets.wait_for_upload(REPO, poll_interval=1.5, sleep_fn=slept.append)
+    assert status.state == "done"
+    assert status.dataset_url.endswith(REPO)
+    assert slept == [1.5]
+    assert len(served) == 2
+
+
+def test_wait_for_upload_error_carries_message():
+    bodies = [
+        {
+            "state": "error",
+            "repo_id": REPO,
+            "message": "Upload failed: token has no write scope",
+            "dataset_url": None,
+            "docs_url": "https://huggingface.co/docs/hub/security-tokens",
+        }
+    ]
+    client, _ = scripted_status_client("/api/v1/upload-status", bodies)
+    with client, pytest.raises(OperationFailedError, match="write scope"):
+        client.datasets.wait_for_upload(REPO, sleep_fn=lambda s: None)
 
 
 # ---------------------------------------------------------------- e2e (read-only, offline-safe)

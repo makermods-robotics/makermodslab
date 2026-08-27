@@ -10,10 +10,13 @@ working, extra keys stay readable.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Literal
 
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources._waiting import wait_for_repo_operation
 from makermodslab_sdk.resources.datasets import (
     DownloadStart,
     DownloadStatus,
@@ -269,4 +272,36 @@ class ModelsResource(Resource):
             self._transport.request(
                 "DELETE", "/api/v1/models/hide", json={"repo_id": repo_id}, action="Unhide model"
             )
+        )
+
+    # ---------------------------------------------------- waiters (ergonomics, not operations)
+
+    def wait_for_download(
+        self,
+        repo_id: str,
+        *,
+        timeout: float = 600.0,
+        poll_interval: float = 2.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> DownloadStatus:
+        """Block until the Hub download of checkpoint ``repo_id`` finishes;
+        return the final status. Raises OperationFailedError if it failed (or
+        was never the one running), WaitTimeoutError if still running after
+        ``timeout`` seconds — the download itself keeps going server-side.
+
+        (Model uploads need no waiter: ``upload()`` is synchronous.)
+
+        Example:
+            >>> client.models.download("maker/act-pick-place")
+            >>> client.models.wait_for_download("maker/act-pick-place").state
+            'done'
+        """
+        return wait_for_repo_operation(
+            self.download_status,
+            repo_id=repo_id,
+            describe="model download",
+            status_call="client.models.download_status()",
+            timeout=timeout,
+            poll_interval=poll_interval,
+            sleep_fn=sleep_fn,
         )

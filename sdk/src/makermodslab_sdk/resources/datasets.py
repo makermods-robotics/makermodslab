@@ -9,10 +9,13 @@ SDK against a newer server keeps working, extra keys stay readable.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Literal
 
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources._waiting import wait_for_repo_operation
 
 
 class DatasetListItem(SdkModel):
@@ -543,4 +546,62 @@ class DatasetsResource(Resource):
                 json={"dataset_repo_id": repo_id},
                 action="Delete local dataset",
             )
+        )
+
+    # ---------------------------------------------------- waiters (ergonomics, not operations)
+
+    def wait_for_download(
+        self,
+        repo_id: str,
+        *,
+        timeout: float = 600.0,
+        poll_interval: float = 2.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> DownloadStatus:
+        """Block until the Hub download of ``repo_id`` finishes; return the
+        final status. Raises OperationFailedError if it failed (or was never
+        the one running), WaitTimeoutError if still running after ``timeout``
+        seconds — the download itself keeps going server-side.
+
+        Example:
+            >>> client.datasets.download("lerobot/svla_so101_pickplace")
+            >>> client.datasets.wait_for_download("lerobot/svla_so101_pickplace").state
+            'done'
+        """
+        return wait_for_repo_operation(
+            self.download_status,
+            repo_id=repo_id,
+            describe="dataset download",
+            status_call="client.datasets.download_status()",
+            timeout=timeout,
+            poll_interval=poll_interval,
+            sleep_fn=sleep_fn,
+        )
+
+    def wait_for_upload(
+        self,
+        repo_id: str,
+        *,
+        timeout: float = 600.0,
+        poll_interval: float = 2.0,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> UploadStatus:
+        """Block until the Hub upload of ``repo_id`` finishes; return the final
+        status (``dataset_url`` points at the pushed repo). Raises
+        OperationFailedError on failure, WaitTimeoutError if still running
+        after ``timeout`` seconds — the upload keeps going server-side.
+
+        Example:
+            >>> client.datasets.upload("maker/pick-place")
+            >>> client.datasets.wait_for_upload("maker/pick-place").dataset_url
+            'https://huggingface.co/datasets/maker/pick-place'
+        """
+        return wait_for_repo_operation(
+            self.upload_status,
+            repo_id=repo_id,
+            describe="dataset upload",
+            status_call="client.datasets.upload_status()",
+            timeout=timeout,
+            poll_interval=poll_interval,
+            sleep_fn=sleep_fn,
         )
