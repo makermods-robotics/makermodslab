@@ -323,7 +323,12 @@ class LanNodeJobRunner:
         if self._wandb_run_url is None and doc.get("wandb_run_url"):
             self._wandb_run_url = doc["wandb_run_url"]
         state = doc.get("state")
-        if state == "running":
+        if state in ("running", "queued"):
+            # Both are in-flight. "queued" appears when the PEER's local slot
+            # (or robot) is busy and its registry parked our submission in its
+            # own training queue (PR #83) — the run has not started, but it is
+            # coming. Filing it as terminal here classified a healthy queued
+            # offload as ERROR on the very first poll.
             return
         # The peer's registry already classified the outcome with the evidence
         # local to the run; relay its verdict as a stage (see module docstring).
@@ -389,7 +394,22 @@ class LanNodeJobRunner:
         if response.status_code < 400:
             self._stop_accepted = True
             with contextlib.suppress(Exception):
-                self._adopt_remote_record(response.json())
+                doc = response.json()
+                self._adopt_remote_record(doc)
+                # A stop accepted for a QUEUED run is the peer's CANCEL: its
+                # registry removed the record outright (nothing ever started,
+                # so there is no history to keep), and the body we adopted is
+                # that removed record — still saying "queued", which the
+                # adoption above rightly reads as in-flight. Without settling
+                # it here, the next poll 404s and DELETED classifies a
+                # deliberate cancel as `failed`. INTERRUPTED is the relayed
+                # verdict a stop of a live run would have produced.
+                if doc.get("state") == "queued":
+                    self._set_terminal(
+                        "INTERRUPTED",
+                        "Cancelled while it was still queued on the node — the run never started.",
+                        None,
+                    )
         else:
             # 409 (not running) / 404: the run had already ended on its own —
             # the next poll adopts its real outcome, and we must not claim it.
