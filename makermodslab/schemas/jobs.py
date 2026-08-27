@@ -54,6 +54,7 @@ __all__ = [
     "JobCheckpointsResponse",
     "JobListResponse",
     "JobLogsResponse",
+    "JobQueueResponse",
     "JobMetricsHistoryResponse",
     "JobRecord",
     "LogLine",
@@ -66,6 +67,17 @@ __all__ = [
 class JobListResponse(BaseModel):
     """server.py list_jobs — JobRegistry.list() records (checkpoint_count and
     the resume lineage annotated at read time), newest first."""
+
+    jobs: list[JobRecord]
+
+
+class JobQueueResponse(BaseModel):
+    """server.py list_job_queue / reorder_job_queue — the WHOLE local training
+    queue (JobRegistry.list_queue / reorder_queue), in the order it will run,
+    each record annotated with its 1-based queue_position. Same JobRecord model
+    as the history list — a queued record is uniform-with-defaults, not a
+    different shape — but the ordering contract differs (run order, uncapped),
+    which is why this is not JobListResponse."""
 
     jobs: list[JobRecord]
 

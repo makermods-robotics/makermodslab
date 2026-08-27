@@ -227,6 +227,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Workload proxy: the peer's own typed jobs listing, passed through.
         "GET /api/v1/nodes/{instance_id}/jobs",
         "POST /api/v1/nodes",
+        # Local training queue (PR #83): the machine's plan, in run order, and
+        # the whole-list reorder that goes with it.
+        "GET /api/v1/jobs/queue",
+        "POST /api/v1/jobs/queue/reorder",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",

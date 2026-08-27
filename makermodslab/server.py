@@ -160,6 +160,7 @@ from .schemas.jobs import (
     JobListResponse,
     JobLogsResponse,
     JobMetricsHistoryResponse,
+    JobQueueResponse,
     JobRecord,
     RunnersHardwareResponse,
 )
@@ -2130,7 +2131,7 @@ def dismiss_hub_job(job_id: str):
 # included: v1_router joins the /api/v1 mount BEFORE the shared router does.
 # (The POST twin, /jobs/queue/reorder, is not at risk — every POST
 # /jobs/{job_id}/… route ends in a literal segment.)
-@v1_router.get("/jobs/queue", tags=["jobs"])
+@v1_router.get("/jobs/queue", response_model=JobQueueResponse, tags=["jobs"])
 def list_job_queue():
     """The whole local training queue, in the order it will run.
 
@@ -2142,7 +2143,7 @@ def list_job_queue():
     the runs at the HEAD of the line and made every reorder a 409, since
     `reorder_queue` requires the whole list.
     """
-    return {"jobs": [r.model_dump() for r in job_registry.list_queue()]}
+    return {"jobs": job_registry.list_queue()}
 
 
 @router.get("/jobs/{job_id}", response_model=JobRecord, tags=["jobs"])
@@ -2311,7 +2312,7 @@ class ReorderQueueRequest(BaseModel):
 # /jobs/{job_id}/... so the intent is readable together with stop; FastAPI
 # matches this path fine either way, since every {job_id} route ends in a
 # literal segment ("rename", "stop", …) that "queue" isn't.
-@v1_router.post("/jobs/queue/reorder", tags=["jobs"])
+@v1_router.post("/jobs/queue/reorder", response_model=JobQueueResponse, tags=["jobs"])
 def reorder_job_queue(body: ReorderQueueRequest):
     """Set the order of the local training queue.
 

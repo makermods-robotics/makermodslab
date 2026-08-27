@@ -1797,6 +1797,23 @@
         "title": "JobMetricsHistoryResponse",
         "type": "object"
       },
+      "JobQueueResponse": {
+        "description": "server.py list_job_queue / reorder_job_queue — the WHOLE local training\nqueue (JobRegistry.list_queue / reorder_queue), in the order it will run,\neach record annotated with its 1-based queue_position. Same JobRecord model\nas the history list — a queued record is uniform-with-defaults, not a\ndifferent shape — but the ordering contract differs (run order, uncapped),\nwhich is why this is not JobListResponse.",
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobRecord"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs"
+        ],
+        "title": "JobQueueResponse",
+        "type": "object"
+      },
       "JobRecord": {
         "properties": {
           "ancestor_ids": {
@@ -1987,6 +2004,38 @@
             ],
             "title": "Process Pid"
           },
+          "queue_position": {
+            "default": 0,
+            "title": "Queue Position",
+            "type": "integer"
+          },
+          "queue_seq": {
+            "default": 0,
+            "title": "Queue Seq",
+            "type": "integer"
+          },
+          "queued_hub_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued Hub Ref"
+          },
+          "queued_resume_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued Resume Ref"
+          },
           "remote_job_id": {
             "anyOf": [
               {
@@ -2015,6 +2064,7 @@
           },
           "state": {
             "enum": [
+              "queued",
               "running",
               "done",
               "failed",
@@ -3083,6 +3133,23 @@
           "new_name"
         ],
         "title": "RenameJobBody",
+        "type": "object"
+      },
+      "ReorderQueueRequest": {
+        "properties": {
+          "job_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 512,
+            "title": "Job Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_ids"
+        ],
+        "title": "ReorderQueueRequest",
         "type": "object"
       },
       "ReplayRequest": {
@@ -5978,6 +6045,70 @@
         ]
       }
     },
+    "/api/v1/jobs/queue": {
+      "get": {
+        "description": "The whole local training queue, in the order it will run.\n\nSeparate from `GET /jobs` because that is a capped, newest-first PAGE of\nhistory and this is a complete list. Deriving the queue from that page was\nwrong twice over: a queued record carries its SUBMIT time, so queued runs\ncrowd the top of the page and pushed the actually-running job off it, and\npast the page size the queue itself was truncated — which silently dropped\nthe runs at the HEAD of the line and made every reorder a 409, since\n`reorder_queue` requires the whole list.",
+        "operationId": "list_job_queue",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Job Queue",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/queue/reorder": {
+      "post": {
+        "description": "Set the order of the local training queue.\n\nLocal runs are one-at-a-time, so a second Start enqueues rather than\nfailing; this is how the user changes their mind about what goes next.\nOnly queued jobs can be reordered — the run already on the GPU is not in\nthe list, and a job that started while the drag was in flight makes the\nrequest stale (409).",
+        "operationId": "reorder_job_queue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderQueueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reorder Job Queue",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/v1/jobs/runners/hardware": {
       "get": {
         "description": "Return HF Jobs flavor catalog + auth state for the TargetCard.\n\nBoth the flavors list and the whoami result are cached in-process to\nkeep this endpoint cheap (it can be re-fetched whenever auth state\nchanges). The whoami cache is invalidated on login.",
@@ -6421,6 +6552,7 @@
     },
     "/api/v1/jobs/{job_id}/stop": {
       "post": {
+        "description": "Stop a running job, or cancel a queued one.\n\n`expect_state` is optional and is the caller's precondition: pass the state\nthe UI was showing when it drew the button. Cancel and kill are the same\nrequest here, so a Cancel drawn against a stale queue would otherwise\nSIGTERM a run the watchdog promoted in the meantime.\n\nTyped as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value\nused to reach the comparison, fail it, and come back as a 409 saying the job\n\"changed while you were looking at it\" — reporting a client's typo as a race,\nwhich no retry can ever clear. It is now a 422, and `/openapi.json`\nadvertises the real member set instead of \"any string\".",
         "operationId": "stop_job",
         "parameters": [
           {
@@ -6430,6 +6562,29 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
             }
           }
         ],
@@ -10524,6 +10679,7 @@
     },
     "/jobs/{job_id}/stop": {
       "post": {
+        "description": "Stop a running job, or cancel a queued one.\n\n`expect_state` is optional and is the caller's precondition: pass the state\nthe UI was showing when it drew the button. Cancel and kill are the same\nrequest here, so a Cancel drawn against a stale queue would otherwise\nSIGTERM a run the watchdog promoted in the meantime.\n\nTyped as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value\nused to reach the comparison, fail it, and come back as a 409 saying the job\n\"changed while you were looking at it\" — reporting a client's typo as a race,\nwhich no retry can ever clear. It is now a 422, and `/openapi.json`\nadvertises the real member set instead of \"any string\".",
         "operationId": "stop_job_jobs__job_id__stop_post",
         "parameters": [
           {
@@ -10533,6 +10689,29 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
             }
           }
         ],
