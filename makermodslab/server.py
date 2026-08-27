@@ -2330,17 +2330,20 @@ def reorder_job_queue(body: ReorderQueueRequest):
         # succeed, and the detail names the offending ids so a non-UI caller can
         # fix them. An id that names a real run which has LEFT the queue is not
         # this case: that is the race below, and it retries successfully.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ApiError(status_code=400, detail=str(exc), code=ErrorCode.REQUEST_VALIDATION) from exc
     except QueueChangedError as exc:
         # A well-formed list that lost its race. Retrying after a refetch is
-        # exactly the right advice here, which is why it only appears here.
-        raise HTTPException(
+        # exactly the right advice here, which is why the code appears only
+        # here: job.queue_stale is the one refusal in this family a plain
+        # refetch-and-retry clears.
+        raise ApiError(
             status_code=409,
             detail=(
                 "The training queue changed while you were reordering it — "
                 "a job started, finished, or was cancelled. The list has been "
                 "refreshed; try again."
             ),
+            code=ErrorCode.JOB_QUEUE_STALE,
         ) from exc
 
 
@@ -2364,12 +2367,13 @@ def stop_job(job_id: str, expect_state: JobState | None = None):
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobStateChangedError as exc:
-        raise HTTPException(
+        raise ApiError(
             status_code=409,
             detail=(
                 f"Job {job_id!r} is {exc.actual!r}, not {exc.expected!r} — it changed while "
                 "you were looking at it. Refresh and decide again."
             ),
+            code=ErrorCode.JOB_STATE_CHANGED,
         ) from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is neither running nor queued") from exc
@@ -2378,21 +2382,23 @@ def stop_job(job_id: str, expect_state: JobState | None = None):
     # behind — so these can only fire on the cancel path.
     except JobHasChildrenError as exc:
         continued_by = ", ".join(repr(cid) for cid in exc.child_ids)
-        raise HTTPException(
+        raise ApiError(
             status_code=409,
             detail=(
                 f"Job {job_id!r} was continued by {continued_by}, which would be left "
                 "pointing at a cancelled run. Cancel the continuation(s) first."
             ),
+            code=ErrorCode.JOB_HAS_CHILDREN,
         ) from exc
     except JobSourceOfQueuedRunError as exc:
         waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
-        raise HTTPException(
+        raise ApiError(
             status_code=409,
             detail=(
                 f"Job {job_id!r} holds the checkpoint queued run(s) {waiting} will train "
                 "from. Cancel those first."
             ),
+            code=ErrorCode.JOB_HAS_QUEUED_DEPENDENTS,
         ) from exc
     except JobRemovalFailedError as exc:
         # 500, not 409: nothing about the request was wrong. Say plainly that
@@ -2400,7 +2406,7 @@ def stop_job(job_id: str, expect_state: JobState | None = None):
         # half-worked" — is what would make a user walk away from a run that is
         # still going to train.
         logger.exception("Could not cancel job %s", job_id)
-        raise HTTPException(
+        raise ApiError(
             status_code=500,
             # `strerror` only — see the delete twin below. The full OSError
             # carries the job directory's absolute path, and this body is
@@ -2410,6 +2416,7 @@ def stop_job(job_id: str, expect_state: JobState | None = None):
                 "queued and will still start when the slot frees — nothing was removed, so "
                 "it is safe to try again."
             ),
+            code=ErrorCode.JOB_REMOVAL_FAILED,
         ) from exc
 
 
@@ -2442,12 +2449,13 @@ def delete_job(job_id: str):
         # deleting the directory now fails that run hours from now with a
         # not-found traceback the user could not connect to this click.
         waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
-        raise HTTPException(
+        raise ApiError(
             status_code=409,
             detail=(
                 f"Job {job_id!r} holds the checkpoint queued run(s) {waiting} will train "
                 "from. Cancel them first, or wait for them to finish."
             ),
+            code=ErrorCode.JOB_HAS_QUEUED_DEPENDENTS,
         ) from exc
     except JobRemovalFailedError as exc:
         # 500, not 409: nothing about the request was wrong. Say that the run is
@@ -2463,7 +2471,7 @@ def delete_job(job_id: str):
             if record.state == "queued"
             else "untouched and still in your history"
         )
-        raise HTTPException(
+        raise ApiError(
             status_code=500,
             # `strerror` only: the full OSError carries the absolute path of the
             # job directory, and this body goes to whoever made the request —
@@ -2472,6 +2480,7 @@ def delete_job(job_id: str):
                 f"Could not delete job {job_id!r}: {exc.reason.strerror}. The run is "
                 f"{still} — nothing was removed, so it is safe to try again."
             ),
+            code=ErrorCode.JOB_REMOVAL_FAILED,
         ) from exc
     # Deleting a tracked cloud run removes the local record, but its Hub job
     # would resurface in /jobs/hub as an untracked card on the next poll (the

@@ -277,6 +277,7 @@ class _AutoCalArmRunner:
                 return {
                     "success": False,
                     "message": f"Training run '{training}' is using this machine. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TRAINING,
                 }
 
             if request.device_type not in ("teleop", "robot"):
@@ -690,6 +691,7 @@ class AutoCalibrationBatchManager:
                 return {
                     "success": False,
                     "message": f"Training run '{training}' is using this machine. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_TRAINING,
                 }
 
             arms = request.arms

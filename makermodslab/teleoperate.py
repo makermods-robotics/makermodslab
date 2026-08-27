@@ -864,6 +864,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             return {
                 "success": False,
                 "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
             }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop

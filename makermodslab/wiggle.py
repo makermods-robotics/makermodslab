@@ -179,6 +179,7 @@ async def wiggle_gripper(port: str) -> dict:
             "message": (
                 f"Training run '{training}' is using this machine — wait for it to stop before wiggling."
             ),
+            "code": ErrorCode.ROBOT_BUSY_TRAINING,
         }
 
     wiggle_active = True

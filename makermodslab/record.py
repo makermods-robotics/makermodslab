@@ -720,6 +720,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
             }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
