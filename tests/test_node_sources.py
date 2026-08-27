@@ -152,14 +152,16 @@ def test_missing_or_null_peer_map_is_empty_discovery():
     assert _source(json.dumps(doc)).discover() == []
 
 
-def test_missing_binary_is_empty_discovery_logged_once_at_info(caplog: pytest.LogCaptureFixture):
+def test_missing_binary_is_empty_discovery_logged_once_at_warning(caplog: pytest.LogCaptureFixture):
     source = _source(FileNotFoundError("No such file or directory: 'tailscale'"))
     with caplog.at_level(logging.INFO):
         assert source.discover() == []
         assert source.discover() == []
     failure_logs = [r for r in caplog.records if "tailscale" in r.getMessage().lower()]
     assert len(failure_logs) == 1
-    assert failure_logs[0].levelno == logging.INFO
+    # WARNING since the macOS-CLI fix: --discover-tailscale is an explicit
+    # opt-in, so its silent absence is exactly what a user ends up debugging.
+    assert failure_logs[0].levelno == logging.WARNING
 
 
 def test_malformed_output_is_empty_discovery():
