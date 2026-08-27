@@ -236,7 +236,7 @@ export function episodeVideoUrl(
     episode_index: String(episodeIndex),
     camera,
   });
-  return `${baseUrl}/datasets/episode-video?${params.toString()}`;
+  return `${baseUrl}/api/v1/datasets/episode-video?${params.toString()}`;
 }
 
 /** Where a dataset with this id lives. "local_only" = a local copy exists but
