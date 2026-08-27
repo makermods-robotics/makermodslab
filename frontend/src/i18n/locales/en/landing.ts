@@ -190,6 +190,36 @@ export default {
     created: "Created <0>{{repoId}}</0>",
     failed: "Merge failed",
     done: "Done",
+    // --- Per-source weights ---------------------------------------------
+    // Incompatibility reasons. Camera lists and robot types are DATA — the
+    // names come from the dataset and are never translated.
+    incompatibleFps: "Can't merge: {{theirs}} fps, but the first dataset you picked is {{anchor}} fps.",
+    incompatibleCameras: "Can't merge: cameras are [{{theirs}}], but the first dataset you picked has [{{anchor}}].",
+    incompatibleRobot: "Can't merge: robot is {{theirs}}, but the first dataset you picked is {{anchor}}.",
+    weightColumn: "Weight",
+    // repoId is a dataset id — data, never translated.
+    weightAria: "Weight for {{repoId}}",
+    decreaseWeight: "Decrease weight",
+    increaseWeight: "Increase weight",
+    resetWeights: "Reset",
+    // Multiplication sign + the number; no translatable words.
+    weightTimes: "\u00d7{{weight}}",
+    mixTitle: "Resulting mix",
+    mixEpisodesPlain_one: "{{count}} episode",
+    mixEpisodesPlain_other: "{{count}} episodes",
+    // {{base}} is the source's own episode count, {{count}} the weighted total.
+    mixEpisodesWeighted_one: "{{base}} \u2192 {{count}} episode",
+    mixEpisodesWeighted_other: "{{base}} \u2192 {{count}} episodes",
+    mixTotal_one: "{{count}} episode total",
+    mixTotal_other: "{{count}} episodes total",
+    episodesUnknown: "Unavailable",
+    sharePercent: "{{percent}}%",
+    // {{size}} is a pre-formatted byte size ("1.4 GB") — not a `count`.
+    diskEstimate: "~{{size}} on disk",
+    weightHint:
+      "Raise a dataset's weight to include its episodes more than once, so training samples them more often.",
+    weightedHint:
+      "Weighted sources are copied on disk, so the merged dataset will be larger.",
   },
   usageInstructions: {
     title: "Get Started with MakerMods Lab",

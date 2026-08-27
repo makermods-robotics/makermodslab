@@ -426,16 +426,32 @@ export interface MergeStatus {
   logs: { timestamp: number; message: string }[];
 }
 
+/** Largest per-source weight the backend accepts (mirrors
+ * `MAX_SOURCE_WEIGHT` in makermodslab/merge.py — keep the two in step). */
+export const MAX_SOURCE_WEIGHT = 20;
+
+/** Start a merge. `sourceWeights` is a per-source integer repeat count,
+ * positionally aligned with `sourceRepoIds`; omit it (or pass all 1s) for an
+ * unweighted merge. A source with weight 3 contributes its episodes three
+ * times, so training samples them three times as often. */
 export async function startDatasetMerge(
   baseUrl: string,
   fetcher: Fetcher,
   sourceRepoIds: string[],
   outputRepoId: string,
+  sourceWeights?: number[],
 ): Promise<{ started: boolean; message: string }> {
+  // Only send weights when at least one is non-default, so an ordinary merge
+  // keeps the exact request body it had before weights existed.
+  const weighted = sourceWeights?.some((w) => w !== 1) ?? false;
   // apiRequest JSON.stringifies `body` itself — pass a raw object, not a string.
   return apiRequest(baseUrl, fetcher, "/datasets/merge", {
     method: "POST",
-    body: { source_repo_ids: sourceRepoIds, output_repo_id: outputRepoId },
+    body: {
+      source_repo_ids: sourceRepoIds,
+      output_repo_id: outputRepoId,
+      ...(weighted ? { source_weights: sourceWeights } : {}),
+    },
     action: "Merge datasets",
   });
 }

@@ -19,7 +19,29 @@ so it can take minutes for large datasets. We run it in a subprocess (same
 shape as training/pip-install) and stream its stdout for a live progress log,
 rather than blocking a server thread on CPU-bound work.
 
-The subprocess entry is ``python -m makermodslab.merge <output_repo_id> <src> <src>…``.
+The subprocess entry is ``python -m makermodslab.merge <output_repo_id> <src> <src>…``,
+optionally with ``--weights <n> <n>…`` (one per source).
+
+**Weights are sampling weights, not copies.** Every source is handed to
+``aggregate_datasets`` exactly once; the weight is then stamped into the
+output's ``meta/episodes/**/*.parquet`` as a ``sampling_weight`` column, one row
+per episode. A weight-3 source therefore costs 1x disk and is oversampled at
+*training* time by ``makermodslab.sampling.WeightedEpisodeAwareSampler`` (see
+``makermodslab/train_weighted.py``). Retuning a ratio is an edit to a number,
+not a re-merge.
+
+Stamping is skipped entirely when every weight is 1, so an unweighted merge
+writes byte-for-byte what it wrote before this feature existed and the output
+carries no new column at all.
+
+``--duplicate`` restores the old physical-duplication behaviour: each source is
+passed to ``aggregate_datasets`` ``weight`` times (``_expand_weighted``) and no
+``sampling_weight`` is written. It is an escape hatch for the CLI only — the UI
+never sends it — kept until weighted sampling has trained a model end to end.
+Repeating a source is safe by construction: ``aggregate_datasets`` offsets each
+source's ``episode_index`` by the destination's running ``total_episodes`` and
+re-keys its ``src_to_dst`` video map per source, so copy N never collides with
+copy N-1. The cost is honest and on-disk: weight 3 stores 3 copies.
 """
 
 import argparse
@@ -36,6 +58,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import (
     RepositoryNotFoundError,
@@ -45,6 +69,9 @@ from pydantic import BaseModel
 
 from lerobot.datasets.aggregate import aggregate_datasets
 
+# The column name lives with the sampler that consumes it, so the writer here
+# and the reader in datasets.py can never drift apart.
+from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import validate_dataset_repo_id
 
 
@@ -284,9 +311,154 @@ def _merge_incompatibility(repo_ids: list[str]) -> str | None:
     return None
 
 
+#: Largest weight the UI/API will accept for one source. A fat-fingered "300"
+#: no longer fills the drive (weights are metadata now), but it would still make
+#: that source ~99% of every epoch — and, under ``--duplicate``, write hundreds
+#: of GB into the cache.
+MAX_SOURCE_WEIGHT = 20
+
+
 class MergeRequest(BaseModel):
     source_repo_ids: list[str]
     output_repo_id: str
+    #: Per-source sampling weight, positionally aligned with ``source_repo_ids``.
+    #: Stored per episode in the merged dataset and applied at training time — it
+    #: costs no extra disk. ``None`` means "all 1" (the pre-weights behaviour).
+    source_weights: list[int] | None = None
+
+
+def _weights_problem(n_sources: int, weights: list[int] | None) -> str | None:
+    """Return a friendly message if ``weights`` can't be applied to
+    ``n_sources`` sources, else None. ``None`` weights are always valid."""
+    if weights is None:
+        return None
+    if len(weights) != n_sources:
+        return (
+            f"Got {len(weights)} weights for {n_sources} datasets — there must be "
+            "exactly one weight per selected dataset."
+        )
+    for weight in weights:
+        if weight < 1:
+            return "Each dataset's weight must be at least 1."
+        if weight > MAX_SOURCE_WEIGHT:
+            return (
+                f"A weight of {weight} is too high — the maximum is "
+                f"{MAX_SOURCE_WEIGHT}. A weight multiplies how often a source is "
+                "sampled per epoch, so a large one drowns out everything else."
+            )
+    return None
+
+
+def _source_episode_counts(roots: list[Path]) -> list[int]:
+    """Each source's ``total_episodes``, read from its own ``meta/info.json``.
+
+    Read rather than assumed: ``aggregate_datasets`` lays the sources out
+    back-to-back and renumbers ``episode_index`` contiguously from 0, so these
+    counts ARE the source boundaries in the output. Guessing them (e.g. from
+    equal splits) would stamp the wrong source's weight onto an episode.
+    """
+    counts: list[int] = []
+    for root in roots:
+        info = json.loads((root / "meta" / "info.json").read_text())
+        counts.append(int(info["total_episodes"]))
+    return counts
+
+
+def _weight_per_episode(episode_counts: list[int], weights: list[int]) -> list[float]:
+    """Flatten per-SOURCE weights into one weight per OUTPUT episode index.
+
+    ``([2, 3], [1, 3])`` -> ``[1.0, 1.0, 3.0, 3.0, 3.0]``.
+    """
+    return [
+        float(weight) for count, weight in zip(episode_counts, weights, strict=True) for _ in range(count)
+    ]
+
+
+def _stamp_sampling_weights(output_root: Path, weight_by_episode: list[float]) -> int:
+    """Write ``sampling_weight`` into every ``meta/episodes/**/*.parquet`` of the
+    merged dataset, keyed by each row's own ``episode_index``. Returns the number
+    of episode rows stamped.
+
+    Keyed by ``episode_index`` rather than by row order because the episode rows
+    are chunked across several parquet files and only the column is authoritative
+    about which output episode a row is.
+
+    Raises if the episode rows don't line up with ``weight_by_episode`` — a
+    mis-stamped weight is worse than a failed merge, because it would silently
+    oversample the wrong episodes.
+    """
+    episodes_dir = output_root / "meta" / "episodes"
+    if not episodes_dir.is_dir():
+        raise RuntimeError(
+            f"{output_root} has no meta/episodes directory, so per-episode sampling "
+            "weights cannot be written. The merge did not produce a v3.0 dataset."
+        )
+
+    # Pass 1: read only the episode_index column (cheap — the rest of an episode
+    # row is per-feature stats) and validate the whole layout BEFORE writing
+    # anything. Half a merged dataset carrying weights and half not is worse than
+    # a merge that refuses.
+    paths = sorted(episodes_dir.glob("**/*.parquet"))
+    per_file: list[tuple[Path, list[float]]] = []
+    total_rows = 0
+    for parquet_path in paths:
+        indices = pq.read_table(parquet_path, columns=["episode_index"]).column(0).to_pylist()
+        try:
+            weights = [weight_by_episode[int(idx)] for idx in indices]
+        except (IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"{parquet_path} references an episode_index outside "
+                f"0..{len(weight_by_episode) - 1}, so its sampling weight is unknown: {exc}"
+            ) from exc
+        per_file.append((parquet_path, weights))
+        total_rows += len(indices)
+
+    if total_rows != len(weight_by_episode):
+        raise RuntimeError(
+            f"Merged dataset has {total_rows} episode rows but the sources account for "
+            f"{len(weight_by_episode)}. Refusing to write sampling weights that would "
+            "not line up with the episodes."
+        )
+
+    # Pass 2: rewrite each chunk with the column attached.
+    for parquet_path, weights in per_file:
+        table = pq.read_table(parquet_path)
+        column = pa.array(weights, type=pa.float64())
+        if SAMPLING_WEIGHT_COLUMN in table.column_names:
+            table = table.set_column(
+                table.column_names.index(SAMPLING_WEIGHT_COLUMN), SAMPLING_WEIGHT_COLUMN, column
+            )
+        else:
+            table = table.append_column(SAMPLING_WEIGHT_COLUMN, column)
+        # Write beside the target and rename: a crash mid-write must not leave a
+        # truncated episodes chunk, which would make the whole dataset unreadable.
+        tmp_path = parquet_path.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmp_path)
+        os.replace(tmp_path, parquet_path)
+
+    return total_rows
+
+
+def _expand_weighted(sources: list[str], weights: list[int] | None) -> list[str]:
+    """Repeat each source according to its weight, preserving order.
+
+    ``(["a", "b"], [1, 3])`` -> ``["a", "b", "b", "b"]``.
+
+    Only the ``--duplicate`` escape hatch passes real weights here; the default
+    path passes ``None`` (one copy per source) and stores the weights as metadata
+    instead — see ``_stamp_sampling_weights``. Every guard and preflight still
+    runs against the *unique* sources so errors name a dataset once.
+    """
+    if weights is None:
+        return list(sources)
+    return [repo_id for repo_id, weight in zip(sources, weights, strict=True) for _ in range(weight)]
+
+
+def _describe_weights(sources: list[str], weights: list[int] | None) -> str:
+    """One-line ``a/base x1, a/corrections x3`` summary for the run log."""
+    if weights is None:
+        return ", ".join(sources)
+    return ", ".join(f"{repo_id} x{weight}" for repo_id, weight in zip(sources, weights, strict=True))
 
 
 class MergeManager:
@@ -304,13 +476,42 @@ class MergeManager:
         self._lock = threading.Lock()
 
     def start(self, request: MergeRequest) -> dict[str, Any]:
-        sources = [s for s in request.source_repo_ids if s.strip()]
+        # Validate the weights against the RAW source list, before blanks are
+        # dropped — weights are positional, so checking length after filtering
+        # would silently accept a mismatched pairing.
+        weights_problem = _weights_problem(len(request.source_repo_ids), request.source_weights)
+        if weights_problem is not None:
+            logger.warning("Rejected merge: %s", weights_problem)
+            return {"started": False, "message": weights_problem}
+
+        # Pair each source with its weight, then drop blanks as a unit so the
+        # two lists can never drift apart.
+        raw_weights = request.source_weights or [1] * len(request.source_repo_ids)
+        pairs = [
+            (repo_id.strip(), weight)
+            for repo_id, weight in zip(request.source_repo_ids, raw_weights, strict=True)
+            if repo_id.strip()
+        ]
+        sources = [repo_id for repo_id, _ in pairs]
+        weights = [weight for _, weight in pairs]
+        weighted = any(weight != 1 for weight in weights)
+
         output = request.output_repo_id.strip()
         with self._lock:
             if self.state == "running":
                 return {"started": False, "message": "A merge is already in progress"}
             if len(sources) < 2:
                 return {"started": False, "message": "Select at least two datasets to merge"}
+            if len(set(sources)) != len(sources):
+                # Selecting the same dataset twice is what weights replace; two
+                # identical rows would double-count against its weight.
+                return {
+                    "started": False,
+                    "message": (
+                        "The same dataset is selected more than once. Use its weight "
+                        "to include it multiple times instead."
+                    ),
+                }
             if not output:
                 return {"started": False, "message": "An output dataset name is required"}
             name_ok, name_reason = validate_dataset_repo_id(output)
@@ -346,6 +547,8 @@ class MergeManager:
         self._open_log()
 
         cmd = [sys.executable, "-m", "makermodslab.merge", output, *sources]
+        if weighted:
+            cmd.extend(["--weights", *(str(weight) for weight in weights)])
         logger.info("Starting dataset merge: %s", " ".join(cmd))
         try:
             self.process = subprocess.Popen(
@@ -590,24 +793,78 @@ def _run_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Merge LeRobot datasets")
     parser.add_argument("output_repo_id")
     parser.add_argument("source_repo_ids", nargs="+")
+    parser.add_argument(
+        "--weights",
+        nargs="+",
+        type=int,
+        default=None,
+        help=(
+            "Sampling weight per source (same order and count as the sources). "
+            "Stored as a per-episode `sampling_weight` in the output's metadata "
+            "and honoured at training time — it does not copy anything on disk."
+        ),
+    )
+    parser.add_argument(
+        "--duplicate",
+        action="store_true",
+        help=(
+            "Escape hatch: apply --weights by physically repeating each source "
+            "that many times instead of writing sampling weights. Costs N x disk "
+            "and cannot be retuned without re-merging. Not reachable from the UI."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-    print(f"Merging {len(args.source_repo_ids)} datasets → {args.output_repo_id}", flush=True)
+
+    weights_problem = _weights_problem(len(args.source_repo_ids), args.weights)
+    if weights_problem is not None:
+        print(weights_problem, flush=True)
+        return 1
+
+    # Weights are applied as metadata unless --duplicate asks for the old
+    # physical expansion. All-1 weights are indistinguishable from no weights, so
+    # neither path does anything special for them and the output is byte-for-byte
+    # what an unweighted merge has always produced (R2).
+    stamp_weights = bool(args.weights) and not args.duplicate and any(w != 1 for w in args.weights)
+    expanded = _expand_weighted(args.source_repo_ids, args.weights if args.duplicate else None)
+    if args.weights is None:
+        print(f"Merging {len(args.source_repo_ids)} datasets → {args.output_repo_id}", flush=True)
+    else:
+        print(
+            f"Merging {len(args.source_repo_ids)} datasets "
+            f"({_describe_weights(args.source_repo_ids, args.weights)}) "
+            f"→ {args.output_repo_id}",
+            flush=True,
+        )
+        if args.duplicate:
+            print(
+                f"Weighted merge (--duplicate): {len(expanded)} dataset copies will be written.",
+                flush=True,
+            )
+        elif stamp_weights:
+            print(
+                "Weighted merge: one copy of each source, weights stored per episode "
+                "as `sampling_weight` and applied at training time.",
+                flush=True,
+            )
 
     # Make every source local first (downloading any that aren't), then pass its
     # root so lerobot loads from cache instead of resolving a version against the
     # Hub — the latter 404s for never-pushed datasets and, under
     # huggingface_hub >=1.x, crashes outright. A download failure is reported
     # per-source and aborts before aggregation.
+    # Download once per UNIQUE source, then fan the resolved root back out over
+    # the expanded list — a weight-3 source must not be fetched three times.
     cache_root = _lerobot_cache_root()
-    roots: list[Path | None] = []
+    root_by_repo: dict[str, Path] = {}
     for repo_id in args.source_repo_ids:
         try:
-            roots.append(_ensure_local_source(repo_id, cache_root))
+            root_by_repo[repo_id] = _ensure_local_source(repo_id, cache_root)
         except Exception as exc:
             print(_download_failed_message(repo_id, exc), flush=True)
             return 1
+    roots: list[Path | None] = [root_by_repo[repo_id] for repo_id in expanded]
 
     # If aggregation dies mid-copy it leaves a partial output (e.g. meta/info.json
     # + videos/ with no completed episodes) that then makes the retry crash with a
@@ -618,7 +875,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
 
     try:
         aggregate_datasets(
-            repo_ids=args.source_repo_ids,
+            repo_ids=expanded,
             aggr_repo_id=args.output_repo_id,
             roots=roots,
         )
@@ -628,6 +885,26 @@ def _run_cli(argv: list[str] | None = None) -> int:
         if not output_pre_existed and output_root.exists():
             _cleanup_partial_output(output_root)
         return 1
+
+    # Stamp the weights only after aggregation has written the metadata it owns.
+    # A failure here leaves a correct-but-unweighted dataset, which R6 forbids
+    # training on silently — so the output is removed and the merge reported as
+    # failed rather than handing back a dataset whose weights were dropped.
+    if stamp_weights:
+        try:
+            counts = _source_episode_counts([root_by_repo[r] for r in args.source_repo_ids])
+            stamped = _stamp_sampling_weights(output_root, _weight_per_episode(counts, args.weights))
+        except Exception as exc:
+            print(
+                f"Merged the datasets but could not store their sampling weights: {exc}\n"
+                "The output has been removed — training on it would have silently "
+                "ignored the weights.",
+                flush=True,
+            )
+            if not output_pre_existed and output_root.exists():
+                _cleanup_partial_output(output_root)
+            return 1
+        print(f"Stored sampling weights on {stamped} episodes.", flush=True)
 
     print(f"Done. Created {args.output_repo_id}", flush=True)
     return 0
