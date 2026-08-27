@@ -61,6 +61,8 @@ from pydantic import ValidationError
 from . import session_events
 from .api_errors import ApiError, ErrorCode
 from .schemas.sessions import (
+    LEASE_TIMEOUT_AUTO_CALIBRATION_S,
+    LEASE_TIMEOUT_DEFAULT_S,
     LEASE_TIMEOUT_MAX_S,
     LEASE_TIMEOUT_MIN_S,
     OWNER_MAX_LENGTH,
@@ -708,7 +710,12 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
             detail=f"`owner` must be a non-empty string of at most {OWNER_MAX_LENGTH} characters.",
             code=ErrorCode.REQUEST_VALIDATION,
         )
-    if not (LEASE_TIMEOUT_MIN_S <= body.lease_timeout_s <= LEASE_TIMEOUT_MAX_S):
+    lease_timeout_s = body.lease_timeout_s
+    if lease_timeout_s is None:
+        lease_timeout_s = (
+            LEASE_TIMEOUT_AUTO_CALIBRATION_S if body.kind == "auto_calibration" else LEASE_TIMEOUT_DEFAULT_S
+        )
+    if not (LEASE_TIMEOUT_MIN_S <= lease_timeout_s <= LEASE_TIMEOUT_MAX_S):
         raise ApiError(
             status_code=422,
             detail=f"`lease_timeout_s` must be between {LEASE_TIMEOUT_MIN_S:.0f} and "
@@ -768,7 +775,7 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
         # The ONLY place a lease attaches (module docstring). None here means
         # the session already ended between attribute and now — nothing left
         # to guard, so no lease and no watchdog.
-        leased = tracker.attach_lease(kind, owner=body.owner, timeout_s=body.lease_timeout_s)
+        leased = tracker.attach_lease(kind, owner=body.owner, timeout_s=lease_timeout_s)
         if leased is not None:
             session = leased
             _ensure_watchdog()

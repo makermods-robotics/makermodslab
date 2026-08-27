@@ -127,6 +127,33 @@ def test_owner_post_attaches_a_lease(client, tmp_lerobot_home, monkeypatch) -> N
     assert "deadline" not in lease  # the monotonic deadline stays internal
 
 
+def test_auto_calibration_default_timeout_is_longer(client, tmp_lerobot_home, monkeypatch) -> None:
+    """auto_calibration defaults to a 90s lease: a real batch run measures
+    ~60s+ on hardware, so the plain 60s default leaves no closed-tab survival
+    margin for the reopen-and-recover flow. An explicit lease_timeout_s still
+    wins (next test asserts the generic override path)."""
+    from makermodslab import auto_calibrate
+    from tests.test_sessions import _fake_start, _make_robot as _make_sessions_robot
+
+    _make_sessions_robot("bench")
+    monkeypatch.setattr(
+        auto_calibrate.auto_calibration_batch_manager, "start", _fake_start("auto_calibration", [])
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "auto_calibration",
+            "robot": "bench",
+            "owner": "ui-1",
+            "options": {"arms": [{"device_type": "robot", "arm": "left"}]},
+        },
+    )
+    assert resp.status_code == 201
+    lease = resp.json()["session"]["lease"]
+    assert lease["timeout_s"] == 90
+    assert 0 < lease["expires_in_s"] <= 90
+
+
 def test_custom_timeout_is_honoured(client, tmp_lerobot_home, monkeypatch) -> None:
     _make_robot()
     _fake_teleop_start(monkeypatch)

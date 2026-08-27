@@ -37,6 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from makermodslab.rollout import PolicyCameraDims
 
 __all__ = [
+    "LEASE_TIMEOUT_AUTO_CALIBRATION_S",
     "LEASE_TIMEOUT_DEFAULT_S",
     "LEASE_TIMEOUT_MAX_S",
     "LEASE_TIMEOUT_MIN_S",
@@ -64,6 +65,10 @@ __all__ = [
 # refusal carries the coded 422 shape (`request.validation`) like the per-kind
 # options do — pydantic Field constraints would produce an uncoded 422.
 LEASE_TIMEOUT_DEFAULT_S = 60.0
+# auto_calibration runs ~60s+ on real hardware (measured), so the generic
+# default leaves no closed-tab margin for the reopen-and-recover flow; give it
+# headroom. Applies only when the client sends no explicit lease_timeout_s.
+LEASE_TIMEOUT_AUTO_CALIBRATION_S = 90.0
 LEASE_TIMEOUT_MIN_S = 10.0
 LEASE_TIMEOUT_MAX_S = 600.0
 OWNER_MAX_LENGTH = 128
@@ -205,7 +210,10 @@ class SessionStartBody(BaseModel):
     kind: Literal["teleoperation", "recording", "inference", "replay", "calibration", "auto_calibration"]
     robot: str
     owner: str | None = None
-    lease_timeout_s: float = LEASE_TIMEOUT_DEFAULT_S
+    # None → the per-kind default (LEASE_TIMEOUT_AUTO_CALIBRATION_S for
+    # auto_calibration, LEASE_TIMEOUT_DEFAULT_S otherwise), resolved in the
+    # handler so an explicit client value always wins.
+    lease_timeout_s: float | None = None
     options: dict[str, Any] = {}
 
 

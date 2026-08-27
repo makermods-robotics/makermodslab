@@ -3384,9 +3384,15 @@
             "type": "string"
           },
           "lease_timeout_s": {
-            "default": 60.0,
-            "title": "Lease Timeout S",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Timeout S"
           },
           "options": {
             "additionalProperties": true,
