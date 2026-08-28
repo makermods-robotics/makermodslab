@@ -122,6 +122,7 @@ from .dagger_protocol import (
     CMD_HANDBACK,
     CMD_HOLD,
     CMD_QUIT,
+    CMD_RECOVERED,
     CMD_RESET,
     CMD_RESUME,
     CMD_TAKEOVER,
@@ -134,6 +135,7 @@ from .dagger_protocol import (
     EVENT_ERROR,
     EVENT_PHASE,
     EVENT_READY,
+    EVENT_RECOVERY_MARK,
     PHASE_HANDING_OVER,
     PHASE_RESETTING,
     PHASE_SAVING,
@@ -279,6 +281,15 @@ class WebDAggerStrategy(DAggerStrategy):
         # is not a handover), so the next takeover must align it first or the
         # follower would snap to wherever the leader happens to be.
         self._needs_leader_align = False
+        # RaC: where recovery ended and the correction began, in frames, for the
+        # correction currently recording. None means the operator has not marked
+        # it — which is NOT the same as zero, and the two must stay
+        # distinguishable all the way to the sidecar (see the protocol module).
+        self._recovery_frames: int | None = None
+        # Armed by RECOVERED, consumed on the next tick that is actually
+        # recording. Deliberately not applied inside `_translate`: the frame
+        # count it has to capture lives in the control loop.
+        self._recovery_mark_requested = False
 
     # -- setup: everything upstream does, minus the input listener -----------
 
@@ -350,6 +361,18 @@ class WebDAggerStrategy(DAggerStrategy):
         elif command == CMD_RESUME:
             if phase == DAggerPhase.PAUSED:
                 return [_EV_PAUSE_RESUME]
+        elif command == CMD_RECOVERED:
+            # An ANNOTATION, not a transition — recovery and correction are the
+            # same control mode, and inventing a phase for a distinction lerobot
+            # does not have would desync the vendored loop from upstream's state
+            # machine for nothing. Ignored outside a correction (there is no
+            # boundary to mark) and ignored twice (the first mark is the one the
+            # operator meant; a second would silently move it).
+            if phase == DAggerPhase.CORRECTING and self._recovery_frames is None:
+                self._recovery_mark_requested = True
+            else:
+                logger.info("Ignoring RECOVERED — no unmarked correction in progress")
+            return []
         elif command == CMD_RESET:
             # Deliberately ignored mid-correction: the operator is holding the
             # leader and has frames in the buffer, and silently discarding or
@@ -386,22 +409,22 @@ class WebDAggerStrategy(DAggerStrategy):
             events.request_transition(self._pending.popleft())
 
     @staticmethod
-    def _transition_moves_the_arm(old_phase, new_phase, ctx) -> bool:
+    def _transition_moves_the_arm(old_phase, new_phase, ctx, prev_action=None) -> bool:
         """True when `_apply_transition` is about to drive hardware for ~2s.
 
-        Mirrors upstream's own branching in `_apply_transition`, which picks its
-        handover by whether the teleop is actuated:
+        A MIRROR of upstream's branching, which is why it takes `prev_action`
+        it never reads for anything else: upstream skips both smooth-handover
+        paths when there is no previous action to move toward, and a mirror that
+        announced travel there would promise motion that never comes. That
+        happens for real — a takeover during warmup, or the first tick after a
+        reset, both reach here with none.
 
-          * actuated (single SO-101 leader): AUTONOMOUS→PAUSED glides the LEADER
-            to the follower's pose;
-          * non-actuated (BiSOLeader on this pin): PAUSED→CORRECTING slides BOTH
-            FOLLOWERS to meet the leaders.
-
-        Every other edge is a torque flip or an engine reset — fast enough that
-        announcing travel would be its own small lie.
+        Which edge moves the arm, and why the UI needs to know at all, is argued
+        once in `dagger_protocol.PHASE_HANDING_OVER`. Keep it there.
         """
-        actuated = teleop_supports_feedback(ctx.hardware.teleop)
-        if actuated:
+        if prev_action is None:
+            return False
+        if teleop_supports_feedback(ctx.hardware.teleop):
             return old_phase == DAggerPhase.AUTONOMOUS and new_phase == DAggerPhase.PAUSED
         return old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING
 
@@ -615,23 +638,19 @@ class WebDAggerStrategy(DAggerStrategy):
                         if restored:
                             last_action = restored
                         old_phase, new_phase = transition
-                        # Announce the travel BEFORE the blocking call. Both
-                        # smooth-handover paths inside `_apply_transition` drive
-                        # a physical arm for ~2s, and until this existed the
-                        # banner spent that entire window asserting the opposite
-                        # of what the hardware was doing (see PHASE_HANDING_OVER).
-                        # stdout is flushed per event, so the orchestrator reads
-                        # this while the control-loop thread is still blocked.
                         # After a reset the leader was never brought to the
-                        # follower, so do it now — otherwise the first
-                        # CORRECTING tick sends the follower straight to
-                        # wherever the operator left the leader.
+                        # follower — a reset is not a handover — so do it now,
+                        # or the first CORRECTING tick sends the follower
+                        # straight to wherever the operator left the leader.
                         aligning = (
                             self._needs_leader_align
                             and new_phase == DAggerPhase.CORRECTING
                             and teleop_supports_feedback(ctx.hardware.teleop)
                         )
-                        if self._transition_moves_the_arm(old_phase, new_phase, ctx) or aligning:
+                        # BEFORE the blocking call, never after: stdout is
+                        # flushed per event, so the orchestrator reads this
+                        # while the control-loop thread is still travelling.
+                        if self._transition_moves_the_arm(old_phase, new_phase, ctx, last_action) or aligning:
                             _emit(EVENT_PHASE, f"phase={PHASE_HANDING_OVER}")
                         if aligning:
                             self._needs_leader_align = False
@@ -650,6 +669,8 @@ class WebDAggerStrategy(DAggerStrategy):
                         if old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING:
                             correction_frames = 0
                             correction_started_at = time.perf_counter()
+                            self._recovery_frames = None
+                            self._recovery_mark_requested = False
 
                         # Correction ended. Upstream saves unconditionally; we
                         # honour a CANCEL armed by the operator instead.
@@ -710,10 +731,18 @@ class WebDAggerStrategy(DAggerStrategy):
                                     seconds,
                                     correction_frames,
                                 )
+                                # `labelled` and `recovery` are separate on
+                                # purpose: an unmarked correction is not a
+                                # correction whose recovery took zero frames,
+                                # and a consumer that conflated them would
+                                # train on a claim the operator never made.
+                                marked = self._recovery_frames is not None
                                 _emit(
                                     EVENT_CORRECTION_SAVED,
                                     f"n={self._corrections_saved} frames={correction_frames} "
-                                    f"seconds={seconds:.1f}",
+                                    f"seconds={seconds:.1f} "
+                                    f"recovery={self._recovery_frames if marked else -1} "
+                                    f"labelled={'true' if marked else 'false'}",
                                 )
 
                         _emit(EVENT_PHASE, f"phase={new_phase.value}")
@@ -783,6 +812,16 @@ class WebDAggerStrategy(DAggerStrategy):
                             )
                             correction_frames += 1
                         record_tick += 1
+
+                        # RaC: "the arm is back somewhere sane — the correction
+                        # starts here." Read AFTER this tick's frame is counted,
+                        # so the boundary lands between the frame the operator
+                        # was looking at when they pressed and the next one.
+                        if self._recovery_mark_requested:
+                            self._recovery_mark_requested = False
+                            self._recovery_frames = correction_frames
+                            logger.info("Recovery marked complete at %d frames", correction_frames)
+                            _emit(EVENT_RECOVERY_MARK, f"frames={correction_frames}")
 
                     # --- PAUSED: hold position ---
                     elif phase == DAggerPhase.PAUSED:
@@ -860,10 +899,13 @@ class WebDAggerStrategy(DAggerStrategy):
                     # leave the summary one short — the ordinary outcome of
                     # pressing Stop while driving.
                     if saved:
+                        marked = self._recovery_frames is not None
                         _emit(
                             EVENT_CORRECTION_SAVED,
                             f"n={self._corrections_saved} frames={correction_frames} "
-                            f"seconds={time.perf_counter() - correction_started_at:.1f}",
+                            f"seconds={time.perf_counter() - correction_started_at:.1f} "
+                            f"recovery={self._recovery_frames if marked else -1} "
+                            f"labelled={'true' if marked else 'false'}",
                         )
 
 

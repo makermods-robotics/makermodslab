@@ -39,6 +39,7 @@ Two subprocess shapes, chosen by `eval_episodes`:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import re
@@ -74,12 +75,14 @@ from .dagger_protocol import (
     EVENT_ERROR as DAGGER_EVENT_ERROR,
     EVENT_PHASE,
     EVENT_READY as DAGGER_EVENT_READY,
+    EVENT_RECOVERY_MARK,
     PHASE_CORRECTING as DAGGER_PHASE_CORRECTING,
     PHASE_HANDING_OVER as DAGGER_PHASE_HANDING_OVER,
     PHASE_PAUSED as DAGGER_PHASE_PAUSED,
     PHASE_RESETTING as DAGGER_PHASE_RESETTING,
     PHASE_SAVING as DAGGER_PHASE_SAVING,
     PHASES as DAGGER_PHASES,
+    RAC_SIDECAR_NAME,
     parse_event as parse_dagger_event,
     parse_fields as parse_dagger_fields,
 )
@@ -108,6 +111,7 @@ from .session_events import notify_session_changed
 from .utils.config import (
     LEADER_CONFIG_PATH,
     CameraResolutionError,
+    _atomic_write_text,
     bimanual_base_id,
     bind_robot_cameras,
     list_robot_records,
@@ -557,6 +561,16 @@ class _CoachSession:
     # None until the runner reports it.
     dataset_repo_id: str | None = None
     dataset_root: str | None = None
+    # RaC recovery/correction split, per saved episode, keyed by episode index
+    # (the runner's `n` minus one — a coaching dataset is created fresh per
+    # session, so its episodes are numbered from zero). Written to a sidecar in
+    # the dataset directory when the session ends. See dagger_protocol's
+    # "RECOVERED and the recovery boundary".
+    rac_episodes: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # Frames into the CURRENT correction at which the operator marked recovery
+    # complete, or None while unmarked. Live UI state only; the durable record
+    # is `rac_episodes`, written when the correction is actually saved.
+    recovery_marked_at: int | None = None
     # Set when a takeover was refused because the leader sits too far from the
     # follower; carries the joint deltas for the UI. Cleared on the next
     # successful phase change, so it reads as "your last attempt", not history.
@@ -645,6 +659,8 @@ def _coach_fields(cs: _CoachSession | None) -> dict[str, Any]:
             "correction_seconds": None,
             "coaching_dataset": None,
             "align_error": None,
+            "recovery_marked_at": None,
+            "corrections_labelled": None,
         }
     return {
         "coaching": True,
@@ -656,6 +672,11 @@ def _coach_fields(cs: _CoachSession | None) -> dict[str, Any]:
         "correction_seconds": round(cs.correction_seconds, 1),
         "coaching_dataset": cs.dataset_repo_id,
         "align_error": cs.align_error,
+        "recovery_marked_at": cs.recovery_marked_at,
+        # How many saved corrections carry an operator-marked recovery boundary.
+        # Surfaced live so the habit is visible while it is still formable,
+        # rather than only in the end-of-session summary.
+        "corrections_labelled": sum(1 for e in cs.rac_episodes.values() if e["labelled"]),
     }
 
 
@@ -985,6 +1006,8 @@ def _handle_dagger_line(line: str) -> None:
         _on_correction_cancelled(parse_dagger_fields(payload))
     elif event == EVENT_ALIGN_REQUIRED:
         _on_align_required(parse_dagger_fields(payload))
+    elif event == EVENT_RECOVERY_MARK:
+        _on_recovery_mark(parse_dagger_fields(payload))
     elif event == EVENT_ATTEMPT_RESET:
         _on_attempt_reset(parse_dagger_fields(payload))
     elif event == DAGGER_EVENT_ERROR:
@@ -1046,6 +1069,11 @@ def _on_dagger_phase(phase: str) -> None:
         cs.phase = phase
         # A phase actually changed, so the last refused takeover is history.
         cs.align_error = None
+        # A fresh takeover starts unmarked. Clearing on ENTRY rather than exit
+        # keeps the marker visible through the save, which is when the operator
+        # is most likely to glance at it.
+        if phase == DAGGER_PHASE_CORRECTING:
+            cs.recovery_marked_at = None
         # Leaving the parked-after-reset state: any phase other than the two
         # the reset itself passes through means the operator has moved on.
         if phase not in (DAGGER_PHASE_PAUSED, DAGGER_PHASE_RESETTING):
@@ -1072,6 +1100,30 @@ def _on_correction_saved(fields: dict[str, str]) -> None:
             cs.corrections_saved += 1
         with contextlib.suppress(ValueError):
             cs.correction_seconds += float(fields.get("seconds", 0.0))
+        # RaC split for THIS episode. `labelled=false` means the operator never
+        # marked the boundary, which is deliberately not the same as a recovery
+        # of zero frames — see dagger_protocol.
+        labelled = fields.get("labelled") == "true"
+        try:
+            frames = int(fields.get("frames", 0))
+        except ValueError:
+            frames = 0
+        try:
+            recovery = int(fields.get("recovery", -1))
+        except ValueError:
+            recovery = -1
+        if labelled and 0 <= recovery <= frames:
+            cs.rac_episodes[cs.corrections_saved - 1] = {
+                "recovery_frames": recovery,
+                "correction_frames": frames - recovery,
+                "labelled": True,
+            }
+        else:
+            cs.rac_episodes[cs.corrections_saved - 1] = {
+                "recovery_frames": None,
+                "correction_frames": frames,
+                "labelled": False,
+            }
         saved = cs.corrections_saved
         target = cs.corrections_target
     logger.info("Correction %d/%d saved", saved, target)
@@ -1137,6 +1189,21 @@ def _on_align_required(fields: dict[str, str]) -> None:
         if cs is not None:
             cs.align_error = message
     logger.warning(message)
+    _push_coaching_state()
+
+
+def _on_recovery_mark(fields: dict[str, str]) -> None:
+    """The operator marked the end of recovery inside the correction in progress.
+
+    Live UI state only — the authoritative per-episode record arrives with
+    CORRECTION_SAVED, because a correction that is later discarded must leave
+    nothing behind. Cleared when the next correction starts."""
+    with _state_lock:
+        cs = _coach_session
+        if cs is None:
+            return
+        with contextlib.suppress(ValueError, TypeError):
+            cs.recovery_marked_at = int(fields.get("frames", 0))
     _push_coaching_state()
 
 
@@ -2886,6 +2953,47 @@ def _abort_eval_locked(ev: _EvalSession) -> None:
     }
 
 
+def _write_rac_sidecar(cs: _CoachSession) -> None:
+    """Persist the recovery/correction split next to the coaching dataset.
+
+    Written ONCE, at session end, rather than per episode: the runner still owns
+    the directory while it is recording (it finalizes and may re-encode video on
+    teardown), and a partial file is worse than a late one for something nothing
+    reads yet.
+
+    Why it exists at all when no trainer consumes it: the boundary is
+    unrecoverable after the fact. Nobody can look at a finished correction
+    episode later and say where the operator stopped rewinding and started
+    demonstrating. If it is not captured live it is gone, and RaC
+    (arXiv:2509.07953) is clear that the decomposition is what carries the
+    10x data-efficiency claim.
+
+    Best-effort by design. A coaching session whose corrections are safely on
+    disk must not be reported as failed because an annotation file could not be
+    written — the episodes are the deliverable, this is a note about them."""
+    root = cs.dataset_root
+    if not root or not cs.rac_episodes:
+        return
+    payload = {
+        # Versioned from the start: this is a private format with no reader yet,
+        # which is exactly the kind of file that gets a breaking change later.
+        "version": 1,
+        "dataset_repo_id": cs.dataset_repo_id,
+        "note": (
+            "Recovery/correction split per correction episode, recorded live by "
+            "MakerMods Lab coaching. labelled=false means the operator never marked "
+            "the boundary — NOT that recovery took zero frames."
+        ),
+        "episodes": {str(index): entry for index, entry in sorted(cs.rac_episodes.items())},
+    }
+    try:
+        path = Path(root) / RAC_SIDECAR_NAME
+        _atomic_write_text(str(path), json.dumps(payload, indent=2))
+        logger.info("Wrote the recovery/correction split to %s", path)
+    except Exception:
+        logger.exception("Could not write the recovery/correction sidecar; corrections are unaffected")
+
+
 def _finalise_coaching_locked(rc: int | None, cs: _CoachSession, *, aborted: bool = False) -> None:
     """End a coaching session and leave its terminal payload behind.
 
@@ -2918,6 +3026,8 @@ def _finalise_coaching_locked(rc: int | None, cs: _CoachSession, *, aborted: boo
     else:
         terminal_phase = PHASE_FINISHED
     outcome = "ok" if aborted else _classify_outcome(rc, finished_rollout_started is not None, error)
+    # Before `_go_idle_locked` clears the session out from under us.
+    _write_rac_sidecar(cs)
     _go_idle_locked()
     _last_result = {
         "inference_active": False,

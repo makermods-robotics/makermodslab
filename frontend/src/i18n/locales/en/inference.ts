@@ -78,6 +78,17 @@ export default {
       title: "READY",
       hint: "Arm is home and limp — reposition it and the scene freely. Space starts the next attempt.",
     },
+    // The two halves of a takeover. Both are `correcting` to lerobot; they
+    // differ only in the INSTRUCTION, which is the point — RaC's data
+    // efficiency comes from the operator treating them as separate jobs.
+    recovering: {
+      title: "RECOVERING",
+      hint: "Bring the arm back to a state the policy has seen before. Press G when you're there — everything after that counts as the correction.",
+    },
+    correcting2: {
+      title: "CORRECTING",
+      hint: "Now show it the right thing. Confident and clean, complete the subtask, don't overcorrect. Space hands back and saves.",
+    },
     starting: {
       title: "STARTING…",
       hint: "Loading the policy and connecting the arms.",
@@ -99,6 +110,7 @@ export default {
     offer: "Policy failing? Coach it",
     offerWithGap: "Coach it — fix the {{percent}}% it got wrong",
     reset: "Task done — reset for next attempt",
+    recovered: "Recovered — the correction starts here",
     startAttempt: "Start attempt {{attempt}}",
     takeOverInstead: "Take over instead",
     // Trailing separator included: it prefixes the recorded-time span.
@@ -146,6 +158,8 @@ export default {
       reset: "Reset",
       resetting: "Returning home…",
       startNextAttempt: "Start next attempt",
+      recovered: "Recovery marked",
+      marking: "Marking…",
       starting: "Starting…",
     },
   },

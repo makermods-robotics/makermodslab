@@ -73,6 +73,17 @@ export default {
       title: "就绪",
       hint: "机械臂已归位并松力 — 可自由挪动它和现场。按空格键开始下一次尝试。",
     },
+    // 一次接管的两个阶段。在 lerobot 看来它们都是 `correcting`，
+    // 区别只在于给出的指示 —— 而这正是关键：RaC 的数据效率来自操作者
+    // 把这两件事当成两项不同的工作来做。
+    recovering: {
+      title: "正在挽回",
+      hint: "先把机械臂带回策略见过的状态。到位后按 G 键 — 此后的一切都算作纠正。",
+    },
+    correcting2: {
+      title: "正在纠正",
+      hint: "现在把正确做法示范给它。干净利落地完成这一子任务，不要过度纠正。按空格键交还并保存。",
+    },
     starting: {
       title: "正在启动…",
       hint: "正在加载策略并连接机械臂。",
@@ -94,6 +105,7 @@ export default {
     offer: "策略表现不佳？来指导它",
     offerWithGap: "指导它 — 修好它做错的那 {{percent}}%",
     reset: "任务完成 — 复位以开始下一次尝试",
+    recovered: "已挽回 — 纠正从这里开始",
     startAttempt: "开始第 {{attempt}} 次尝试",
     takeOverInstead: "改为接管",
     // 末尾的分隔符是特意保留的：它作为已录制时长的前缀。
@@ -138,6 +150,8 @@ export default {
       reset: "复位",
       resetting: "正在归位…",
       startNextAttempt: "开始下一次尝试",
+      recovered: "标记挽回结束",
+      marking: "正在标记…",
       starting: "正在启动…",
     },
   },

@@ -156,6 +156,14 @@ export interface InferenceStatus {
   // follower, with the offending joints named. Cleared on the next successful
   // phase change, so it always describes the LAST attempt, not a history.
   align_error?: string | null;
+  // RaC: frames into the CURRENT correction at which the operator marked
+  // recovery complete, or null while unmarked. Live only — it describes the
+  // takeover in progress and clears when the next one starts.
+  recovery_marked_at?: number | null;
+  // How many SAVED corrections carry an operator-marked boundary. Surfaced
+  // live so the habit is visible while it is still formable, rather than only
+  // in the end-of-session summary.
+  corrections_labelled?: number | null;
 }
 
 // The coaching block on its own, as pushed over the websocket the instant it
@@ -173,6 +181,8 @@ export type CoachingState = Pick<
   | "correction_seconds"
   | "coaching_dataset"
   | "align_error"
+  | "recovery_marked_at"
+  | "corrections_labelled"
 >;
 
 // Kind-agnostic fallback stop. The session dialog stops by session id
@@ -305,6 +315,28 @@ export async function coachingReset(
   return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-reset", {
     method: "POST",
     action: "Reset for next attempt",
+  });
+}
+
+// Mark the end of RECOVERY inside the correction in progress: "the arm is back
+// somewhere the policy has seen — what I do from here is the correction."
+//
+// An intervention is two things wearing one name, and lerobot's HIL guide names
+// RaC (arXiv:2509.07953) as the protocol its DAgger strategy follows while
+// recording both halves as one undifferentiated `intervention=True`. The
+// boundary is unrecoverable after the fact, so it is captured live and written
+// to a sidecar beside the dataset.
+//
+// Changes no phase — recovery and correction are the same control mode. The
+// backend ignores it outside a correction and ignores a second press within
+// one, so this is safe to fire on any keystroke.
+export async function coachingRecovered(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-recovered", {
+    method: "POST",
+    action: "Mark recovery complete",
   });
 }
 

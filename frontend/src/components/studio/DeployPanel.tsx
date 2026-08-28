@@ -1376,6 +1376,30 @@ const DeployPanel: React.FC = () => {
               ) : null}
               {runMode === "coach" ? (
                 <>
+                  {/* Readiness, stated before the operator commits an hour to
+                      it. Coaching corrects a policy's OWN failures, so it has
+                      nothing to work with until the policy sometimes succeeds:
+                      CR-DAgger (arXiv:2506.16685) recommends starting only once
+                      the base policy is at 10-20%, and below that the honest
+                      answer is more demonstrations, not more corrections. This
+                      is the cheapest possible place to say so — the alternative
+                      is discovering it after a session spent rescuing an arm
+                      that never got close. */}
+                  <div className="rounded-lg border border-border bg-muted/40 p-3">
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      <span className="font-semibold text-foreground">
+                        Coaching pays off once the skill already works sometimes.
+                      </span>{" "}
+                      It learns from rescuing the policy's own mistakes, so it
+                      needs the policy to get far enough to make interesting
+                      ones — roughly a 1-in-10 success rate. If it fails
+                      immediately every time, record more demonstrations first;
+                      that's faster than correcting your way there.{" "}
+                      <span className="whitespace-nowrap">
+                        Score it above to check.
+                      </span>
+                    </p>
+                  </div>
                   <div className="space-y-2">
                     <Label htmlFor="deploy-corrections">
                       {t("studio.deploy.coaching.correctionsLabel")}

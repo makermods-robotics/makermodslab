@@ -74,6 +74,7 @@ from .dagger_protocol import (
     CMD_CANCEL,
     CMD_HANDBACK,
     CMD_HOLD,
+    CMD_RECOVERED,
     CMD_RESET,
     CMD_RESUME,
     CMD_TAKEOVER,
@@ -911,6 +912,29 @@ def coaching_reset():
 
     Refused mid-correction; hand back or discard first."""
     return _coaching_route(CMD_RESET)
+
+
+@v1_router.post(
+    "/coaching-recovered", response_model=CoachingCommandResponse, tags=["inference"]
+)
+def coaching_recovered():
+    """Coaching mode only: mark the end of RECOVERY inside the correction.
+
+    An intervention is two things wearing one name — first the operator rewinds
+    the arm back to a state the policy has actually seen, then they demonstrate
+    the behaviour that should follow. lerobot's own HIL guide names RaC
+    (arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's
+    entire claim rests on that decomposition; the strategy nonetheless records
+    both halves as one undifferentiated `intervention=True`.
+
+    This records the boundary out of band (a sidecar beside the dataset — see
+    dagger_protocol) because the dataset's feature dict is assembled inside
+    lerobot with no hook to add a column. It requests no phase change: recovery
+    and correction are the same control mode.
+
+    Ignored outside a correction, and ignored a second time within one — the
+    first mark is the one the operator meant."""
+    return _coaching_route(CMD_RECOVERED)
 
 
 @router.get("/inference-status")

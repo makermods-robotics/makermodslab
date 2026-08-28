@@ -34,6 +34,8 @@ Commands — orchestrator → runner stdin, one bare word per line:
     CANCEL    end the correction and DISCARD it (the fumbled-takeover escape)
     HOLD      freeze the policy without taking over
     RESUME    unfreeze, returning control to the policy
+    RECOVERED mid-correction: "the arm is back somewhere sane, the correction
+              starts here" — records a boundary, changes no phase (see below)
     RESET     end this attempt: ease the follower home and park for a scene reset
     QUIT      finalize the dataset, ease the arm home, disconnect, exit
 
@@ -53,10 +55,51 @@ runner's stderr is merged into the same pipe):
     MAKERMODSLAB-DAGGER DATASET repo_id=<final id> root=<path>
     MAKERMODSLAB-DAGGER PHASE phase=autonomous|paused|correcting
     MAKERMODSLAB-DAGGER CORRECTION_SAVED n=<count> frames=<n> seconds=<s>
-    MAKERMODSLAB-DAGGER CORRECTION_CANCELLED
+                                        recovery=<n|-1> labelled=<true|false>
+    MAKERMODSLAB-DAGGER CORRECTION_CANCELLED reason=<operator|too_short> …
+    MAKERMODSLAB-DAGGER RECOVERY_MARK frames=<n>
     MAKERMODSLAB-DAGGER ALIGN_REQUIRED max_delta=<deg> joints=<name:delta,…>
     MAKERMODSLAB-DAGGER ERROR <message, whitespace collapsed to one line>
     MAKERMODSLAB-DAGGER BYE
+
+RECOVERED and the recovery boundary
+------------------------------------
+
+An intervention is two different things wearing one name. lerobot's own HIL
+guide says so: the DAgger strategy follows RaC (Hu et al., 2025,
+arXiv:2509.07953), which "explicitly decompos[es] interventions into recovery
+(teleoperating back to a good state) and correction (demonstrating the right
+behavior from there)". RaC reports 10x less collection time than baselines from
+that decomposition alone, and that policy performance scales linearly in the
+number of recovery maneuvers the trained policy exhibits.
+
+The strategy records neither half separately — every frame between takeover and
+hand-back gets one undifferentiated `intervention=True`. We cannot fix that
+where it belongs: the dataset's feature dict is assembled inside
+`build_rollout_context` with `intervention` hardcoded (lerobot rollout/context.py)
+and no hook to add a column, so a per-frame label would mean monkeypatching or
+vendoring dataset creation — the coupling this branch already has too much of.
+
+So the boundary is recorded OUT OF BAND. RECOVERED marks the frame at which the
+operator judges the arm to be back in a sane state; the runner reports it on
+CORRECTION_SAVED, and the orchestrator writes per-episode counts to a sidecar
+next to the dataset. Nothing consumes it at training time yet. It is written
+anyway because it is unrecoverable after the fact — nobody can look at a
+finished episode later and say where recovery ended — and because the gesture
+itself is most of the value: RaC's mechanism is the OPERATOR working in
+recovery-then-correction terms, which they will not do while the UI calls the
+whole thing "you're driving".
+
+RECOVERED deliberately requests NO phase transition. Recovery and correction are
+the same control mode — human on the leader, frames recording — and inventing a
+lerobot phase for a distinction lerobot does not have would put the vendored
+loop and the upstream state machine out of step for no gain. It is an
+annotation, not a state change.
+
+`labelled=false` on CORRECTION_SAVED means the operator never pressed it, which
+is NOT the same as "recovery took zero frames": one says unannotated, the other
+says the operator went straight to correcting. A consumer that conflates them
+would train on a lie.
 
 DATASET is not a nicety. lerobot stamps a timestamp onto the rollout dataset's
 repo_id inside `build_rollout_context` (`DatasetRecordConfig.stamp_repo_id`,
@@ -75,13 +118,27 @@ CMD_CANCEL = "CANCEL"
 CMD_HOLD = "HOLD"
 CMD_RESUME = "RESUME"
 CMD_RESET = "RESET"
+# "I have the arm back somewhere sane; the correction starts here." Valid only
+# mid-correction, records a boundary, changes no phase. See the module docstring.
+CMD_RECOVERED = "RECOVERED"
 CMD_QUIT = "QUIT"
 
 # Every command the runner accepts. The orchestrator validates against this
 # before writing to the pipe so a typo'd endpoint fails at the HTTP layer with a
 # 400 rather than silently reaching a runner that logs "unrecognised" and
 # carries on driving the arm.
-COMMANDS = frozenset({CMD_TAKEOVER, CMD_HANDBACK, CMD_CANCEL, CMD_HOLD, CMD_RESUME, CMD_RESET, CMD_QUIT})
+COMMANDS = frozenset(
+    {
+        CMD_TAKEOVER,
+        CMD_HANDBACK,
+        CMD_CANCEL,
+        CMD_HOLD,
+        CMD_RESUME,
+        CMD_RESET,
+        CMD_RECOVERED,
+        CMD_QUIT,
+    }
+)
 
 # --- Events (stdout) --------------------------------------------------------
 # Distinct from eval_protocol's prefix on purpose: both runners tee into
@@ -120,6 +177,16 @@ CANCEL_REASON_TOO_SHORT = "too_short"
 # the running attempt count so the UI can show "attempt 4" without keeping its
 # own tally that a dropped event would desynchronise.
 EVENT_ATTEMPT_RESET = "ATTEMPT_RESET"
+# The operator marked the end of recovery inside the correction in progress.
+# Carries the frame count at the boundary so the UI can show it live; the
+# authoritative per-episode record arrives on CORRECTION_SAVED.
+EVENT_RECOVERY_MARK = "RECOVERY_MARK"
+
+# Filename of the sidecar the orchestrator writes into the dataset directory,
+# holding the recovery/correction split per episode. Named for this app rather
+# than dropped into `meta/` so it can never be mistaken for something lerobot
+# wrote or expects, and so a `LeRobotDataset` load ignores it entirely.
+RAC_SIDECAR_NAME = "makermodslab_rac.json"
 EVENT_ERROR = "ERROR"
 EVENT_BYE = "BYE"
 

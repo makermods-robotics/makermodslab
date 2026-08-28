@@ -4234,3 +4234,153 @@ def test_no_push_wired_is_fine(monkeypatch) -> None:
     monkeypatch.setattr(rollout, "_on_coaching_state", None)
     rollout._on_dagger_phase("correcting")
     assert session.phase == "correcting"
+
+
+# --- RaC: the recovery/correction boundary -----------------------------------
+#
+# An intervention is two things wearing one name — rewind to a state the policy
+# has seen, then demonstrate what should follow. lerobot's own HIL guide names
+# RaC (arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's
+# data-efficiency claim rests entirely on that decomposition; the strategy then
+# records both halves as one undifferentiated `intervention=True`. We record the
+# boundary out of band because lerobot's dataset feature dict has no hook.
+#
+# The distinction these pin over and over: UNMARKED is not ZERO. One says the
+# operator never annotated it, the other says they went straight to correcting.
+
+
+def test_a_marked_correction_records_both_halves(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved(
+        {"n": "1", "frames": "120", "seconds": "4.0", "recovery": "40", "labelled": "true"}
+    )
+    assert session.rac_episodes[0] == {
+        "recovery_frames": 40,
+        "correction_frames": 80,
+        "labelled": True,
+    }
+
+
+def test_an_unmarked_correction_is_recorded_as_unlabelled_not_as_zero_recovery(monkeypatch) -> None:
+    """THE distinction. A consumer that read `recovery_frames: 0` here would
+    believe the operator asserted there was no recovery phase, when in fact they
+    asserted nothing at all."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved(
+        {"n": "1", "frames": "120", "seconds": "4.0", "recovery": "-1", "labelled": "false"}
+    )
+    assert session.rac_episodes[0]["labelled"] is False
+    assert session.rac_episodes[0]["recovery_frames"] is None
+    assert session.rac_episodes[0]["correction_frames"] == 120
+
+
+def test_a_recovery_of_zero_frames_is_kept_as_a_real_claim(monkeypatch) -> None:
+    """The operator pressed the key immediately: they DID assert there was no
+    recovery to do. That is information, and distinct from the case above."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved(
+        {"n": "1", "frames": "90", "seconds": "3.0", "recovery": "0", "labelled": "true"}
+    )
+    assert session.rac_episodes[0]["labelled"] is True
+    assert session.rac_episodes[0]["recovery_frames"] == 0
+
+
+def test_a_nonsensical_boundary_is_demoted_to_unlabelled(monkeypatch) -> None:
+    """A recovery longer than the episode cannot be true. Recording it would put
+    a negative correction length in the sidecar; dropping to unlabelled loses
+    only an annotation nothing reads yet."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved(
+        {"n": "1", "frames": "50", "seconds": "2.0", "recovery": "999", "labelled": "true"}
+    )
+    assert session.rac_episodes[0]["labelled"] is False
+    assert session.rac_episodes[0]["correction_frames"] == 50
+
+
+def test_episodes_are_keyed_by_dataset_episode_index(monkeypatch) -> None:
+    """The sidecar is useless if its keys don't line up with the episodes on
+    disk. A coaching dataset is created fresh per session, so index = n - 1."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    for n in (1, 2, 3):
+        rollout._on_correction_saved(
+            {"n": str(n), "frames": "60", "seconds": "2.0", "recovery": "10", "labelled": "true"}
+        )
+    assert sorted(session.rac_episodes) == [0, 1, 2]
+
+
+def test_the_live_recovery_marker_is_exposed_and_cleared_per_takeover(monkeypatch) -> None:
+    """Shown while the correction is still recording, then cleared when the next
+    takeover begins — it describes the correction in progress, not a history."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_recovery_mark({"frames": "35"})
+    assert session.recovery_marked_at == 35
+    assert rollout._coach_fields(session)["recovery_marked_at"] == 35
+    rollout._on_dagger_phase("correcting")  # a fresh takeover
+    assert session.recovery_marked_at is None
+
+
+def test_the_sidecar_is_written_next_to_the_dataset(monkeypatch, tmp_path) -> None:
+    """The boundary is unrecoverable after the fact — nobody can look at a saved
+    episode later and say where recovery ended — so it has to reach disk."""
+    import json
+
+    from makermodslab import rollout
+    from makermodslab.dagger_protocol import RAC_SIDECAR_NAME
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.dataset_root = str(tmp_path)
+    session.dataset_repo_id = "user/rollout_fixes_20260819_120000"
+    session.rac_episodes = {
+        0: {"recovery_frames": 40, "correction_frames": 80, "labelled": True},
+        1: {"recovery_frames": None, "correction_frames": 95, "labelled": False},
+    }
+    rollout._write_rac_sidecar(session)
+
+    written = json.loads((tmp_path / RAC_SIDECAR_NAME).read_text())
+    assert written["version"] == 1
+    assert written["dataset_repo_id"] == "user/rollout_fixes_20260819_120000"
+    # JSON has no integer keys; the reader has to know they are indices.
+    assert written["episodes"]["0"]["recovery_frames"] == 40
+    assert written["episodes"]["1"]["labelled"] is False
+
+
+def test_no_sidecar_is_written_when_nothing_was_recorded(monkeypatch, tmp_path) -> None:
+    """An empty annotation file beside a dataset invites the reader to conclude
+    the operator marked nothing, when the session may simply have saved nothing."""
+    from makermodslab import rollout
+    from makermodslab.dagger_protocol import RAC_SIDECAR_NAME
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.dataset_root = str(tmp_path)
+    rollout._write_rac_sidecar(session)
+    assert not (tmp_path / RAC_SIDECAR_NAME).exists()
+
+
+def test_an_unwritable_sidecar_never_fails_the_session(monkeypatch) -> None:
+    """The corrections are the deliverable; this is a note about them. A session
+    whose episodes are safely on disk must not be reported as failed because an
+    annotation could not be written."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.dataset_root = "/definitely/not/a/directory/anywhere"
+    session.rac_episodes = {0: {"recovery_frames": 1, "correction_frames": 2, "labelled": True}}
+    rollout._write_rac_sidecar(session)  # must not raise

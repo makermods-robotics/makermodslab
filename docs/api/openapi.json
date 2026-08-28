@@ -5625,6 +5625,28 @@
         ]
       }
     },
+    "/api/v1/coaching-recovered": {
+      "post": {
+        "description": "Coaching mode only: mark the end of RECOVERY inside the correction.\n\nAn intervention is two things wearing one name — first the operator rewinds\nthe arm back to a state the policy has actually seen, then they demonstrate\nthe behaviour that should follow. lerobot's own HIL guide names RaC\n(arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's\nentire claim rests on that decomposition; the strategy nonetheless records\nboth halves as one undifferentiated `intervention=True`.\n\nThis records the boundary out of band (a sidecar beside the dataset — see\ndagger_protocol) because the dataset's feature dict is assembled inside\nlerobot with no hook to add a column. It requests no phase change: recovery\nand correction are the same control mode.\n\nIgnored outside a correction, and ignored a second time within one — the\nfirst mark is the one the operator meant.",
+        "operationId": "coaching_recovered",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Recovered",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
     "/api/v1/coaching-reset": {
       "post": {
         "description": "Coaching mode only: end this ATTEMPT at the task and reset for the next.\n\nCorrections-only DAgger has no task-episode concept — an \"episode\" there is\none takeover — so this is what tells the session that the cube is finally in\nthe tray. The policy stops, the follower eases back to the pose captured at\nconnect, and the session parks so the scene can be rearranged. Nothing is\nwritten to the dataset: corrections are the only thing ever recorded.\n\nRefused mid-correction; hand back or discard first.",

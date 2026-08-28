@@ -71,7 +71,7 @@ ALL_EVENTS = [
 def test_commands_set_contains_every_verb() -> None:
     """The orchestrator validates against COMMANDS before writing to the pipe,
     so a verb missing from it is a 400 on a control that should work."""
-    from makermodslab.dagger_protocol import CMD_RESET
+    from makermodslab.dagger_protocol import CMD_RECOVERED, CMD_RESET
 
     assert {
         CMD_TAKEOVER,
@@ -80,6 +80,7 @@ def test_commands_set_contains_every_verb() -> None:
         CMD_HOLD,
         CMD_RESUME,
         CMD_RESET,
+        CMD_RECOVERED,
         CMD_QUIT,
     } == COMMANDS
 

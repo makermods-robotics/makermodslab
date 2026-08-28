@@ -234,13 +234,18 @@ class _FakeCtx:
         self.hardware = type("HW", (), {"teleop": _FakeTeleop(actuated)})()
 
 
+# A previous action for the handover to move toward. Upstream skips both smooth
+# handovers without one, so its presence is a precondition for any travel.
+_PREV = {"shoulder_pan.pos": 0.0}
+
+
 def test_actuated_teleop_announces_travel_on_the_pause_edge(strategy) -> None:
     """Single SO-101 leader: AUTONOMOUS->PAUSED drives the LEADER to the
     follower's pose for ~2s. Announcing it is what stops the banner insisting
     the policy is still driving while the operator's arm moves under them."""
     ctx = _FakeCtx(actuated=True)
-    assert strategy._transition_moves_the_arm(AUTONOMOUS, PAUSED, ctx) is True
-    assert strategy._transition_moves_the_arm(PAUSED, CORRECTING, ctx) is False
+    assert strategy._transition_moves_the_arm(AUTONOMOUS, PAUSED, ctx, _PREV) is True
+    assert strategy._transition_moves_the_arm(PAUSED, CORRECTING, ctx, _PREV) is False
 
 
 def test_non_actuated_teleop_announces_travel_on_the_correction_edge(strategy) -> None:
@@ -248,8 +253,8 @@ def test_non_actuated_teleop_announces_travel_on_the_correction_edge(strategy) -
     the workspace to meet the leaders. That edge used to render as "HELD — the
     arm is frozen", which is the worst thing this UI could have said."""
     ctx = _FakeCtx(actuated=False)
-    assert strategy._transition_moves_the_arm(PAUSED, CORRECTING, ctx) is True
-    assert strategy._transition_moves_the_arm(AUTONOMOUS, PAUSED, ctx) is False
+    assert strategy._transition_moves_the_arm(PAUSED, CORRECTING, ctx, _PREV) is True
+    assert strategy._transition_moves_the_arm(AUTONOMOUS, PAUSED, ctx, _PREV) is False
 
 
 def test_edges_with_no_motion_are_not_announced(strategy) -> None:
@@ -257,8 +262,8 @@ def test_edges_with_no_motion_are_not_announced(strategy) -> None:
     engine reset. Claiming travel there would be its own small lie."""
     for actuated in (True, False):
         ctx = _FakeCtx(actuated=actuated)
-        assert strategy._transition_moves_the_arm(PAUSED, AUTONOMOUS, ctx) is False
-        assert strategy._transition_moves_the_arm(CORRECTING, PAUSED, ctx) is False
+        assert strategy._transition_moves_the_arm(PAUSED, AUTONOMOUS, ctx, _PREV) is False
+        assert strategy._transition_moves_the_arm(CORRECTING, PAUSED, ctx, _PREV) is False
 
 
 # --- Limp / torque during the reset window ----------------------------------
@@ -391,3 +396,61 @@ def test_the_retry_patch_is_idempotent() -> None:
     importlib.reload(bus_retry)
     assert MotorsBus.sync_read.__name__ == "_sync_read_with_default_retries"
     assert bus_retry.BUS_SYNC_READ_RETRIES >= 1
+
+
+# --- RECOVERED: an annotation, not a transition ------------------------------
+
+
+def test_recovered_marks_the_boundary_without_requesting_a_transition(strategy) -> None:
+    """Recovery and correction are the SAME control mode — human on the leader,
+    frames recording. Inventing a lerobot phase for a distinction lerobot does
+    not have would put the vendored loop out of step with upstream's state
+    machine and buy nothing."""
+    from makermodslab.dagger_protocol import CMD_RECOVERED
+
+    assert strategy._translate(CMD_RECOVERED, CORRECTING) == []
+    assert strategy._recovery_mark_requested is True
+
+
+def test_recovered_is_ignored_outside_a_correction(strategy) -> None:
+    """There is no boundary to mark while the policy is driving or the arm is
+    held — nothing is being recorded to divide."""
+    from makermodslab.dagger_protocol import CMD_RECOVERED
+
+    for phase in (AUTONOMOUS, PAUSED):
+        strategy._recovery_mark_requested = False
+        assert strategy._translate(CMD_RECOVERED, phase) == []
+        assert strategy._recovery_mark_requested is False
+
+
+def test_a_second_recovered_cannot_move_an_already_marked_boundary(strategy) -> None:
+    """The first mark is the one the operator meant. Silently moving it on a
+    stray second press would rewrite a claim they already made, and they would
+    have no way to tell."""
+    from makermodslab.dagger_protocol import CMD_RECOVERED
+
+    strategy._recovery_frames = 40  # already marked
+    assert strategy._translate(CMD_RECOVERED, CORRECTING) == []
+    assert strategy._recovery_mark_requested is False
+    assert strategy._recovery_frames == 40
+
+
+def test_a_fresh_strategy_starts_unmarked(strategy) -> None:
+    """Unmarked is None, never 0 — the sidecar has to keep "the operator said
+    nothing" distinguishable from "the operator said there was no recovery"."""
+    assert strategy._recovery_frames is None
+    assert strategy._recovery_mark_requested is False
+
+
+def test_no_travel_is_announced_without_a_previous_action(strategy) -> None:
+    """Upstream skips BOTH smooth-handover paths when `prev_action` is None, so
+    a mirror that ignored it would promise a movement that never happens.
+
+    Reachable in ordinary use: a takeover during policy warmup, and the first
+    transition after a reset, both arrive here with no previous action. The
+    window is short, but the whole reason this mirror exists is that the banner
+    must not describe hardware that isn't doing what it says."""
+    for actuated in (True, False):
+        ctx = _FakeCtx(actuated=actuated)
+        assert strategy._transition_moves_the_arm(AUTONOMOUS, PAUSED, ctx, None) is False
+        assert strategy._transition_moves_the_arm(PAUSED, CORRECTING, ctx, None) is False

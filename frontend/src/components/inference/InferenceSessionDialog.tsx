@@ -27,6 +27,7 @@ import {
   getInferenceLog,
   coachingCancel,
   coachingHandback,
+  coachingRecovered,
   coachingHold,
   coachingReset,
   coachingResume,
@@ -146,6 +147,26 @@ const COACH_BANNER_PARKED = {
   hintKey: "inference.coachBanner.parked.hint",
   accent: "text-ok border-ok/40",
   bg: "bg-ok/10",
+};
+
+// The two halves of a takeover. Both are `correcting` to lerobot — human on the
+// leader, every frame recording — and both are the LOUDEST thing on the display
+// for that reason. They differ only in the instruction, which is the point:
+// RaC (arXiv:2509.07953) gets its data efficiency from the operator treating
+// recovery and correction as separate jobs, and they will not do that if the
+// screen calls both of them the same thing.
+const COACH_BANNER_RECOVERING = {
+  titleKey: "inference.coachBanner.recovering.title",
+  hintKey: "inference.coachBanner.recovering.hint",
+  accent: "text-destructive-foreground border-destructive",
+  bg: "bg-destructive",
+};
+
+const COACH_BANNER_CORRECTING = {
+  titleKey: "inference.coachBanner.correcting2.title",
+  hintKey: "inference.coachBanner.correcting2.hint",
+  accent: "text-destructive-foreground border-destructive",
+  bg: "bg-destructive",
 };
 
 const COACH_BANNER_STARTING = {
@@ -528,6 +549,10 @@ const InferenceSessionDialog: React.FC<{
   const alignError = status?.align_error ?? null;
   const attempts = status?.attempts ?? 0;
   const awaitingAttempt = status?.awaiting_attempt === true;
+  // Null until the operator marks the recovery/correction boundary for the
+  // takeover in progress. See handleCoachRecovered.
+  const recoveryMarkedAt = status?.recovery_marked_at ?? null;
+  const correctionsLabelled = status?.corrections_labelled ?? 0;
   // Only meaningful once the session is actually driving. `coachPhase` is null
   // until the runner reports one, which is what the "Starting…" banner covers.
   const coachLive =
@@ -703,6 +728,26 @@ const InferenceSessionDialog: React.FC<{
     );
   }, [sendCoachCommand, t]);
 
+  // RaC: "the arm is back somewhere sane — the correction starts here."
+  //
+  // An intervention is two things wearing one name: first the operator rewinds
+  // the arm to a state the policy has actually seen, then they demonstrate what
+  // should follow. lerobot's HIL guide names RaC (arXiv:2509.07953) as the
+  // protocol its DAgger strategy follows, and RaC's whole data-efficiency claim
+  // rests on that decomposition — but the strategy records both halves as one
+  // undifferentiated intervention, and nobody can recover the boundary from a
+  // finished episode afterwards. So it is marked live, or not at all.
+  //
+  // Optional. Never pressing it records the correction as unlabelled, which the
+  // sidecar keeps distinct from "recovery took zero frames".
+  const handleCoachRecovered = useCallback(() => {
+    sendCoachCommand(
+      coachingRecovered,
+      t("inference.coach.cmd.recovered"),
+      t("inference.coach.cmd.marking"),
+    );
+  }, [sendCoachCommand, t]);
+
   // "The cube is in the tray" — end this attempt and put the arm back so the
   // next one starts from the same place. Corrections-only DAgger has no
   // task-episode of its own, so without this the policy just keeps driving at a
@@ -783,6 +828,14 @@ const InferenceSessionDialog: React.FC<{
         else handleCoachToggle();
         return;
       }
+      if (e.key.toLowerCase() === "g" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // "Good state reached." Only meaningful mid-correction; the backend
+        // ignores it everywhere else and ignores a second press within one
+        // correction, so no phase gating is needed here either.
+        e.preventDefault();
+        if (!coachBusy) handleCoachRecovered();
+        return;
+      }
       if (e.key.toLowerCase() === "r" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         // "This attempt is over." Ignored mid-correction by the runner, which
         // won't decide the fate of a part-recorded takeover on the operator's
@@ -844,6 +897,7 @@ const InferenceSessionDialog: React.FC<{
     handleCoachHoldToggle,
     handleCoachDiscard,
     handleCoachReset,
+    handleCoachRecovered,
     toast,
   ]);
 
@@ -1025,11 +1079,22 @@ const InferenceSessionDialog: React.FC<{
                 // No phase yet ⇒ say so. Never fall back to a control-state
                 // claim; "the arm is frozen" shown while the policy is starting
                 // is the worst default this banner could have.
+                // A takeover is two jobs, and the banner names whichever one
+                // the operator is on. Before the boundary is marked the
+                // instruction is "get the arm back somewhere the policy has
+                // seen"; after it, "now show it the right thing". Same phase,
+                // same recording, different task — and per RaC the operator
+                // working in those terms IS the mechanism, which they will not
+                // do while the screen calls the whole thing "you're driving".
                 const banner = !coachPhase
                   ? COACH_BANNER_STARTING
                   : awaitingAttempt && coachPhase === "paused"
                     ? COACH_BANNER_PARKED
-                    : COACH_BANNER[coachPhase];
+                    : coachPhase === "correcting"
+                      ? recoveryMarkedAt == null
+                        ? COACH_BANNER_RECOVERING
+                        : COACH_BANNER_CORRECTING
+                      : COACH_BANNER[coachPhase];
                 return (
                   <div
                     className={`mb-4 rounded-lg border-2 p-6 text-center ${banner.bg} ${banner.accent} ${
@@ -1085,6 +1150,24 @@ const InferenceSessionDialog: React.FC<{
                     })}
                   </span>
                 </div>
+                {/* How many corrections carry a recovery boundary. Shown live
+                    rather than only in the summary because the habit is worth
+                    forming DURING the session — by the end it is too late to
+                    mark the ones that went unmarked, and nobody can recover the
+                    boundary from a finished episode. */}
+                {correctionsSaved > 0 && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {correctionsLabelled} of {correctionsSaved} split into recovery +
+                    correction
+                    {correctionsLabelled < correctionsSaved && (
+                      <span className="opacity-75">
+                        {" "}
+                        — press <span className="font-mono">g</span> mid-takeover to mark
+                        where the rescue ends
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
                   <div
                     className="h-full rounded-full bg-ok transition-[width] duration-500"
@@ -1460,6 +1543,20 @@ const InferenceSessionDialog: React.FC<{
                     space
                   </kbd>
                 </Button>
+                {coachPhase === "correcting" && recoveryMarkedAt == null && (
+                  <Button
+                    onClick={handleCoachRecovered}
+                    disabled={coachBusy}
+                    variant="outline"
+                    className="w-full font-semibold disabled:opacity-50"
+                  >
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                    {t("inference.coach.recovered")}
+                    <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                      g
+                    </kbd>
+                  </Button>
+                )}
                 {coachPhase === "correcting" ? (
                   <Button
                     onClick={handleCoachDiscard}
@@ -1470,7 +1567,7 @@ const InferenceSessionDialog: React.FC<{
                     <Trash2 className="w-4 h-4 mr-2" />
                     {t("inference.coach.discard")}
                     <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
-                      esc
+                      ⌫
                     </kbd>
                   </Button>
                 ) : (
