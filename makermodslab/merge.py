@@ -68,6 +68,7 @@ from huggingface_hub.utils import (
 )
 from pydantic import BaseModel
 
+from lerobot.configs import VIDEO_ENCODER_INFO_KEYS
 from lerobot.datasets.aggregate import aggregate_datasets
 
 # The column name lives with the sampler that consumes it, so the writer here
@@ -313,6 +314,31 @@ def merge_droppable_features(repo_ids: list[str]) -> list[str]:
     return sorted(not_in_all & DROPPABLE_FEATURES)
 
 
+def _comparable_video_info(feature: Any) -> dict[str, Any]:
+    """The stream properties lerobot actually COMPARES for a video feature, or
+    ``{}`` when they cannot be read.
+
+    `features_equal_for_merge` ignores the six encoder-TUNING keys in
+    `VIDEO_ENCODER_INFO_KEYS` (crf, preset, g, fast_decode, extra_options,
+    video_backend) — those legitimately differ between two recordings of the
+    same thing — and compares every other key in the block. The constant is
+    imported rather than restated so this tracks the lerobot pin instead of
+    drifting away from it.
+
+    Returns ``{}`` when there is no `video.codec`, which means either a dataset
+    old enough to predate the stream block or one that has never encoded a frame
+    (a 0-episode coaching dataset carries only `is_depth_map`). Neither can be
+    compared, so they take the same route as a Hub-only source: silence here,
+    and the subprocess backstop covers it.
+    """
+    if not isinstance(feature, dict):
+        return {}
+    info = feature.get("info")
+    if not isinstance(info, dict) or "video.codec" not in info:
+        return {}
+    return {key: value for key, value in info.items() if key not in VIDEO_ENCODER_INFO_KEYS}
+
+
 def _merge_incompatibility(repo_ids: list[str], drop_features: Sequence[str] = ()) -> str | None:
     """Return a friendly one-line message describing the first incompatibility
     between the source datasets, or None if they're compatible (or can't be
@@ -320,7 +346,8 @@ def _merge_incompatibility(repo_ids: list[str], drop_features: Sequence[str] = (
 
     Hub-only sources with no local ``info.json`` are skipped — the subprocess
     backstop covers those. Compares every readable source against the first
-    readable one on fps, camera set, and feature keys/shapes.
+    readable one on fps, camera set, video stream format, and feature
+    keys/shapes.
 
     ``drop_features`` names features the caller has agreed to strip before
     aggregating (see :data:`DROPPABLE_FEATURES`); they are excluded from the
@@ -369,6 +396,56 @@ def _merge_incompatibility(repo_ids: list[str], drop_features: Sequence[str] = (
                 f"[{base_list}], `{other_id}` has [{other_list}]. "
                 f"{'; '.join(diff_parts)}. "
                 "All datasets must share the same cameras to merge."
+            )
+
+        # video stream format — compared by lerobot, invisible to the checks above
+        #
+        # Placed BEFORE the feature-key comparison on purpose. A coaching
+        # dataset differs from the demonstrations twice over: it carries an
+        # `intervention` column (droppable, prompted for) and it is encoded with
+        # a different codec (not droppable, not fixable here). Reporting the
+        # column first would walk the operator through agreeing to drop a column
+        # permanently and only THEN fail — `start()` withholds the drop prompt
+        # unless dropping actually makes the sources mergeable, so surfacing the
+        # codec here is what makes that guard fire.
+        #
+        # `video.codec` is derived from the encoded stream, not from the
+        # requested setting (video_utils stamps `codec.canonical_name`), so the
+        # two flows disagree by construction: record.py asks for `vcodec="auto"`
+        # and gets hardware H.264, while rollout.py deliberately takes the
+        # software default and gets AV1 (see its comment — "auto" resolves to
+        # h264_nvenc on the station and PyAV then fails to open it). Without
+        # this, merging corrections into the demos they were collected against
+        # — the entire point of a coaching session — dies inside
+        # `validate_all_metadata` as a subprocess crash whose message is both
+        # features dicts dumped as JSON.
+        for cam in sorted(base_cams):
+            base_stream = _comparable_video_info(base_features.get(cam))
+            other_stream = _comparable_video_info(other_features.get(cam))
+            if not base_stream or not other_stream:
+                continue  # unencoded or too old to say; the subprocess still backstops it
+            differing_props = sorted(
+                key
+                for key in set(base_stream) | set(other_stream)
+                if base_stream.get(key) != other_stream.get(key)
+            )
+            if not differing_props:
+                continue
+            if "video.codec" in differing_props:
+                return (
+                    f"Datasets were encoded with different video codecs: `{base_id}` is "
+                    f"{base_stream['video.codec']}, `{other_id}` is "
+                    f"{other_stream['video.codec']} (camera {_short_cam(cam)}). lerobot "
+                    "refuses to merge video streams whose codecs differ. Coaching "
+                    "sessions encode with the software AV1 encoder while recordings use "
+                    "hardware H.264, so one side has to be re-encoded before these can "
+                    "be merged — dropping a column will not help."
+                )
+            pretty = ", ".join(key.removeprefix("video.") for key in differing_props)
+            return (
+                f"Datasets have different video formats: `{base_id}` and `{other_id}` "
+                f"differ in {pretty} (camera {_short_cam(cam)}). All datasets must share "
+                "the same video format to merge."
             )
 
         # non-camera feature keys or per-feature shape mismatch

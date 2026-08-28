@@ -29,12 +29,21 @@ def _write_info(
     cameras: tuple[str, ...] = ("front", "wrist"),
     action_shape: tuple[int, ...] = (6,),
     extra_features: tuple[str, ...] = (),
+    codec: str | None = None,
+    crf: int = 30,
+    width: int = 640,
 ) -> None:
     """Write a minimal ``<cache>/<repo_id>/meta/info.json`` for the helper to read.
 
     ``extra_features`` adds scalar columns beyond the common set — used to model
     a coaching dataset, which carries an ``intervention`` bool that a recorded
-    dataset does not."""
+    dataset does not.
+
+    ``codec`` populates the per-camera ``info`` block the way a real v3.0
+    dataset carries it. Left None the block is absent entirely, which models
+    both a pre-3.0 dataset and a 0-episode one — and is what every test written
+    before the video-format check used, so they keep exercising the paths they
+    were written for."""
     features: dict = {
         "action": {"dtype": "float32", "shape": list(action_shape)},
         "observation.state": {"dtype": "float32", "shape": list(action_shape)},
@@ -42,10 +51,26 @@ def _write_info(
     for name in extra_features:
         features[name] = {"dtype": "bool", "shape": [1]}
     for cam in cameras:
-        features[f"observation.images.{cam}"] = {
-            "dtype": "video",
-            "shape": [480, 640, 3],
-        }
+        spec: dict = {"dtype": "video", "shape": [480, width, 3]}
+        if codec is not None:
+            spec["info"] = {
+                "is_depth_map": False,
+                "video.height": 480,
+                "video.width": width,
+                "video.codec": codec,
+                "video.pix_fmt": "yuv420p",
+                "video.fps": fps,
+                "video.channels": 3,
+                "has_audio": False,
+                # Encoder TUNING — lerobot ignores these when merging.
+                "video.g": 2,
+                "video.crf": crf,
+                "video.preset": None,
+                "video.fast_decode": 0,
+                "video.video_backend": "pyav",
+                "video.extra_options": {},
+            }
+        features[f"observation.images.{cam}"] = spec
     meta_dir = cache / repo_id / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     (meta_dir / "info.json").write_text(
@@ -803,3 +828,100 @@ def test_a_bare_rollout_name_still_counts_as_ours() -> None:
     assert _looks_like_our_coaching_dataset("rollout_fixes_20260819_120000") is True
     assert _looks_like_our_coaching_dataset("user/rollout_fixes_20260819_120000") is True
     assert _looks_like_our_coaching_dataset("user/my_demos") is False
+
+
+# -- video stream format ---------------------------------------------------
+#
+# The real pairing these model: `makermods/200ep_blue_cube_orange_box` (h264,
+# recorded) against `rollout_correction_smolvla_200ep_..._194018` (av1, coached).
+# On the operator's own machine those two are compatible on fps, cameras, shapes
+# and — once `intervention` is dropped — feature keys, and lerobot still refuses
+# them solely on `video.codec`.
+
+
+def test_merge_incompatibility_flags_a_codec_mismatch(tmp_lerobot_home: Path) -> None:
+    """The failure that made coaching corrections unmergeable in practice.
+
+    Recording pins `vcodec="auto"` and gets hardware H.264; coaching takes
+    lerobot's software default and gets AV1. `video.codec` is NOT one of the
+    encoder keys `features_equal_for_merge` forgives, so the merge dies — and
+    before this check it died in the subprocess, after the drop prompt."""
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/demos", codec="h264")
+    _write_info(tmp_lerobot_home, "a/corrections", codec="av1")
+    message = _merge_incompatibility(["a/demos", "a/corrections"])
+    assert message is not None
+    assert "h264" in message and "av1" in message
+    assert "re-encoded" in message
+
+
+def test_merge_incompatibility_ignores_encoder_tuning_differences(
+    tmp_lerobot_home: Path,
+) -> None:
+    """The other half of the check, and the half that would make it a nuisance.
+
+    crf/preset/g and friends differ freely between two honest recordings, and
+    lerobot strips exactly those before comparing. If this check ever starts
+    reporting them it will block merges that lerobot would have accepted."""
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/one", codec="h264", crf=30)
+    _write_info(tmp_lerobot_home, "a/two", codec="h264", crf=23)
+    assert _merge_incompatibility(["a/one", "a/two"]) is None
+
+
+def test_merge_incompatibility_flags_a_resolution_mismatch(tmp_lerobot_home: Path) -> None:
+    """Same block, non-codec key: `video.width` is compared too, and the message
+    names the property rather than claiming a codec problem."""
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/one", codec="h264", width=640)
+    _write_info(tmp_lerobot_home, "a/two", codec="h264", width=1280)
+    message = _merge_incompatibility(["a/one", "a/two"])
+    assert message is not None
+    assert "width" in message
+    assert "codec" not in message
+
+
+def test_merge_incompatibility_skips_video_check_when_a_stream_is_unreadable(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A dataset that has never encoded a frame carries no `video.codec`.
+
+    Guessing at a mismatch from an absent block would refuse a merge on no
+    evidence, so this stays silent and lets the subprocess be the authority —
+    the same treatment a Hub-only source already gets."""
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/encoded", codec="av1")
+    _write_info(tmp_lerobot_home, "a/empty")  # no info block at all
+    assert _merge_incompatibility(["a/encoded", "a/empty"]) is None
+
+
+def test_a_codec_mismatch_is_reported_instead_of_a_pointless_drop_prompt(
+    tmp_lerobot_home: Path,
+) -> None:
+    """THE point of checking the codec here rather than in the subprocess.
+
+    A coaching dataset differs from its demos twice: the `intervention` column
+    (droppable) and the codec (not). `start()` only offers the drop when
+    dropping actually makes the sources mergeable, so with the codec checked the
+    operator is told the real reason — instead of being walked through
+    permanently dropping a column and only then hitting a subprocess crash."""
+    from makermodslab.merge import _merge_incompatibility, merge_droppable_features
+
+    _write_info(tmp_lerobot_home, "a/demos", codec="h264")
+    _write_info(tmp_lerobot_home, "a/corrections", codec="av1", extra_features=("intervention",))
+    sources = ["a/demos", "a/corrections"]
+
+    # The column is still droppable in principle...
+    assert merge_droppable_features(sources) == ["intervention"]
+    # ...but dropping it does NOT clear the way, which is the condition
+    # `start()` requires before it will prompt.
+    assert _merge_incompatibility(sources, ["intervention"]) is not None
+    # And the message the operator sees names the codec, not the column.
+    message = _merge_incompatibility(sources)
+    assert message is not None
+    assert "codecs" in message
+    assert "intervention" not in message
