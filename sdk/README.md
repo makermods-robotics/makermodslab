@@ -10,9 +10,9 @@ to be in context when it's needed.
 from makermodslab_sdk import Client
 
 client = Client("http://localhost:8000")
-print(client.describe().summary())   # one-call orientation: server, session, jobs, nodes
+print(client.describe().summary())  # one-call orientation: server, session, jobs, nodes
 
-with client.sessions.teleoperate("bench") as s:   # lease heartbeats + stop, automatic
+with client.sessions.teleoperate("bench") as s:  # lease heartbeats + stop, automatic
     print(s.id, s.warnings)
 ```
 

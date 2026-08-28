@@ -85,3 +85,47 @@ def test_client_exposes_every_registered_namespace():
     with Client("http://mock", http_client=http, check_compatibility=False) as client:
         for tag, cls in RESOURCE_CLASSES.items():
             assert isinstance(getattr(client, tag), cls), tag
+
+
+# --- provisional (untagged) namespaces ---------------------------------------
+
+# Surfaces over v1 routes the server hasn't tagged/typed yet (they predate the
+# schema migration). Equality-pinned like everything else; when the server
+# tags them, the namespace joins the tagged flow above and its entry here is
+# DELETED in the same commit.
+UNTAGGED_NAMESPACES: dict[str, frozenset[str]] = {
+    "robots": frozenset(
+        {
+            "delete_robot",
+            "get_robot",
+            "get_robots",
+            "rename_robot",
+            "upsert_robot",
+        }
+    ),
+}
+
+
+def all_v1_operation_ids() -> set[str]:
+    ops: set[str] = set()
+    for path, methods in SNAPSHOT["paths"].items():
+        if not path.startswith("/api/v1"):
+            continue
+        for method, op in methods.items():
+            if method in HTTP_METHODS:
+                ops.add(op["operationId"])
+    return ops
+
+
+def test_untagged_namespaces_are_registered_and_real():
+    tags = set(tagged_operations())
+    untagged_registered = set(RESOURCE_CLASSES) - tags
+    assert untagged_registered == set(UNTAGGED_NAMESPACES), (
+        "every RESOURCE_CLASSES key must be a snapshot tag or a registered untagged namespace"
+    )
+    v1_ops = all_v1_operation_ids()
+    for namespace, expected in UNTAGGED_NAMESPACES.items():
+        implemented = implemented_operations(RESOURCE_CLASSES[namespace])
+        assert implemented == set(expected), namespace
+        ghosts = expected - v1_ops
+        assert ghosts == set(), f"{namespace}: ops not present anywhere in the snapshot: {sorted(ghosts)}"

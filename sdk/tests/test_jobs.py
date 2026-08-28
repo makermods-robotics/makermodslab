@@ -244,7 +244,7 @@ def test_create_training_sends_config_target_envelope():
     )
     assert seen["path"] == "/api/v1/jobs/training"
     assert seen["body"]["config"]["dataset_repo_id"] == "user/so101-pick"
-    assert seen["body"]["config"]["policy_type"] == "act"
+    assert "policy_type" not in seen["body"]["config"]  # unset knobs stay unsent
     assert seen["body"]["config"]["steps"] == 20000
     assert seen["body"]["config"]["save_freq"] == 2000  # extra config merged in
     assert seen["body"]["target"] == {"runner": "local"}
@@ -483,3 +483,91 @@ def test_get_missing_job_end_to_end_is_uncoded_404(sdk_client):
     assert err.status == 404
     assert err.code is None
     assert "__sdk_test_missing__" in (err.detail or "")
+
+
+# --- the full training knob surface ------------------------------------------
+
+
+def test_training_options_parity_with_server_training_request():
+    """The SDK's knob catalog can never silently fall behind the backend:
+    TrainingOptions + the positional dataset_repo_id must equal the server's
+    TrainingRequest minus the registry-managed internals excluded here, each
+    with its reason. A new server field lands in this test first."""
+    from makermodslab_sdk.resources.jobs import TrainingOptions
+
+    from makermodslab.train import TrainingRequest
+
+    excluded = {
+        "resume_from_hub_repo": "set by JobRegistry.start when the resume source is a cloud run",
+        "resume_from_hub_step": "set by JobRegistry.start alongside resume_from_hub_repo",
+        "resume_from_uploaded_checkpoint": "set by the registry, never by a client (train.py comment)",
+        "policy_push_to_hub": "set by HfCloudJobRunner; not a client field",
+        "policy_repo_id": "set by HfCloudJobRunner; not a client field",
+    }
+    server_fields = set(TrainingRequest.model_fields)
+    sdk_fields = set(TrainingOptions.model_fields) | {"dataset_repo_id"}
+    assert set(excluded) <= server_fields, "stale excluded entries"
+    missing = server_fields - set(excluded) - sdk_fields
+    extra = sdk_fields - server_fields
+    assert missing == set(), f"server knobs the SDK doesn't expose yet: {sorted(missing)}"
+    assert extra == set(), f"SDK knobs the server doesn't have: {sorted(extra)}"
+
+
+def test_create_training_sends_only_set_knobs():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(201, json=job_body())
+
+    with mock_client(handler) as client:
+        client.jobs.create_training(
+            "user/so101-pick",
+            steps=20000,
+            save_freq=5000,
+            optimizer_lr=1e-5,
+            resume_from_checkpoint_job_id="trunk-1",
+            wandb_enable=True,
+        )
+    cfg = seen["body"]["config"]
+    assert cfg["dataset_repo_id"] == "user/so101-pick"
+    assert cfg["steps"] == 20000
+    assert cfg["save_freq"] == 5000
+    assert cfg["optimizer_lr"] == 1e-5
+    assert cfg["resume_from_checkpoint_job_id"] == "trunk-1"
+    assert cfg["wandb_enable"] is True
+    # Unset knobs are NOT sent — the server's defaults rule.
+    assert "policy_type" not in cfg
+    assert "batch_size" not in cfg
+
+
+def test_create_training_typo_fails_client_side_with_suggestion():
+    from makermodslab_sdk import InvalidRequestError
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(201, json=job_body())
+
+    with mock_client(handler) as client, pytest.raises(InvalidRequestError) as excinfo:
+        client.jobs.create_training("user/d", stes=20000)
+    err = excinfo.value
+    assert calls["n"] == 0, "a request was sent despite the bad knob"
+    assert err.status == 0  # rejected client-side, nothing sent
+    assert "stes" in str(err) and "'steps'" in str(err)
+    assert "TrainingOptions" in str(err)
+
+
+def test_create_training_config_passthrough_skips_validation_and_wins():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(201, json=job_body())
+
+    with mock_client(handler) as client:
+        client.jobs.create_training("user/d", steps=5, config={"steps": 99, "field_newer_than_sdk": True})
+    cfg = seen["body"]["config"]
+    assert cfg["steps"] == 99
+    assert cfg["field_newer_than_sdk"] is True

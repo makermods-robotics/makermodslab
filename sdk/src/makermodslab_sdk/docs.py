@@ -42,6 +42,12 @@ teleoperation, dataset recording, training, inference, replay, calibration).
 - NEVER WRITE POLLING LOOPS. Long-running work has blocking waiters:
   client.jobs.wait(job_id), client.datasets.wait_for_download(repo_id), ...
   All take timeout=; on timeout the error says how to keep waiting.
+- FULL BACKEND POWER, wider than the web UI. create_training(...) accepts
+  EVERY server training knob as a kwarg (help(makermodslab_sdk.TrainingOptions)
+  is the catalog: wandb_*, optimizer_*, resume/fine-tune lineage, eval,
+  device/AMP, hf_job_timeout, ...); a typo'd knob fails client-side with the
+  fix named. client.robots manages the saved robot records sessions start
+  from (create/update/rename/delete; mode is fixed at creation).
 - REALTIME (optional extra `makermodslab-sdk[realtime]`):
   client.sample_joints(duration_s=2.0) -> bounded LIST of frames (empty =
   nothing moving, that's an answer). client.events() streams typed events;

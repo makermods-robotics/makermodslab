@@ -9,13 +9,17 @@ must keep decoding values a newer server adds.
 
 from __future__ import annotations
 
+import difflib
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import quote
 
+import pydantic
+from pydantic import ConfigDict
+
 from makermodslab_sdk._operations import operation
-from makermodslab_sdk.errors import MakerModsError
+from makermodslab_sdk.errors import InvalidRequestError, MakerModsError
 from makermodslab_sdk.resources._base import Resource, SdkModel
 
 # The server's job lifecycle (makermodslab/jobs.py):
@@ -59,6 +63,116 @@ class TrainingConfig(SdkModel):
     policy_type: str = "act"
     steps: int = 10000
     batch_size: int = 8
+
+
+class TrainingOptions(SdkModel):
+    """EVERY user-settable training knob the server accepts — the SDK exposes
+    the backend's full power, deliberately wider than the web UI's form.
+
+    All fields default to unset (None) and only set fields are sent, so the
+    server's own defaults always rule. ``create_training`` takes these as
+    keyword arguments and validates them CLIENT-SIDE (``extra="forbid"``): a
+    typo'd knob fails immediately with the close matches named, before any
+    request is sent. tests/test_jobs.py parity-asserts this field set against
+    the server's TrainingRequest, so a new server knob breaks the build here
+    until it is typed (or excluded with a reason) — the surface cannot
+    silently fall behind the backend.
+
+    Field semantics are the server's (makermodslab/train.py TrainingRequest);
+    the groups below mirror its layout. Registry-managed internals
+    (``resume_from_hub_repo``, ``policy_repo_id``, …) are deliberately not
+    here — the server sets those itself.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Dataset
+    dataset_revision: str | None = None
+    dataset_root: str | None = None
+    dataset_episodes: list[int] | None = None
+    # Policy
+    policy_type: str | None = None
+    # Core
+    steps: int | None = None
+    batch_size: int | None = None
+    seed: int | None = None
+    num_workers: int | None = None
+    # Logging / checkpointing
+    log_freq: int | None = None
+    save_freq: int | None = None
+    env_eval_freq: int | None = None
+    save_checkpoint: bool | None = None
+    # Output / naming
+    output_dir: str | None = None
+    job_name: str | None = None
+    # Resume ("Continue training") — the API is deliberately wider than the
+    # UI here: an arbitrary chain rewind (resume_from_checkpoint_job_id) is
+    # reachable only through this surface; the server validates lineage.
+    resume: bool | None = None
+    resume_from_job_id: str | None = None
+    resume_from_step: int | None = None
+    resume_from_checkpoint_job_id: str | None = None
+    upload_resume_checkpoint: bool | None = None
+    # Fine-tune (fresh run, weights initialized from a checkpoint)
+    finetune_from_job_id: str | None = None
+    finetune_from_step: int | None = None
+    policy_pretrained_path: str | None = None
+    upload_finetune_checkpoint: bool | None = None
+    # Weights & Biases
+    wandb_enable: bool | None = None
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
+    wandb_notes: str | None = None
+    wandb_run_id: str | None = None
+    wandb_mode: str | None = None
+    wandb_disable_artifact: bool | None = None
+    # Environment / evaluation
+    env_type: str | None = None
+    env_task: str | None = None
+    eval_n_episodes: int | None = None
+    eval_batch_size: int | None = None
+    eval_use_async_envs: bool | None = None
+    # Policy runtime
+    policy_device: str | None = None
+    policy_use_amp: bool | None = None
+    # Optimizer
+    optimizer_type: str | None = None
+    optimizer_lr: float | None = None
+    optimizer_weight_decay: float | None = None
+    optimizer_grad_clip_norm: float | None = None
+    # Advanced
+    use_policy_training_preset: bool | None = None
+    config_path: str | None = None
+    # Cloud (hf_cloud runner) only — HF-Jobs duration string ("2h", "3h30m")
+    hf_job_timeout: str | None = None
+
+
+def _validate_training_knobs(knobs: dict[str, Any]) -> dict[str, Any]:
+    """Client-side knob validation: unknown or mistyped knobs fail HERE, with
+    the fix named, instead of as a server 422 (or worse, a silently ignored
+    key on an older server). Returns only the set fields."""
+    try:
+        options = TrainingOptions.model_validate(knobs)
+    except pydantic.ValidationError as exc:
+        problems = []
+        for error in exc.errors():
+            field = ".".join(str(loc) for loc in error["loc"])
+            if error["type"] == "extra_forbidden":
+                close = difflib.get_close_matches(field, TrainingOptions.model_fields, n=2)
+                hint = f" — did you mean {' or '.join(repr(c) for c in close)}?" if close else ""
+                problems.append(f"unknown knob {field!r}{hint}")
+            else:
+                problems.append(f"{field}: {error['msg']}")
+        raise InvalidRequestError(
+            "create_training rejected client-side (no request was sent): "
+            + "; ".join(problems)
+            + "\nNext step: help(makermodslab_sdk.TrainingOptions) lists every knob; for a field "
+            "newer than this SDK, pass it via config={...} which skips this validation.",
+            status=0,
+            detail="; ".join(problems),
+            suggestion="help(makermodslab_sdk.TrainingOptions) lists every valid training knob.",
+        ) from None
+    return options.model_dump(exclude_none=True)
 
 
 class Job(SdkModel):
@@ -421,43 +535,43 @@ class JobsResource(Resource):
         self,
         dataset_repo_id: str,
         *,
-        policy_type: str = "act",
-        steps: int = 10000,
-        batch_size: int = 8,
-        job_name: str | None = None,
         runner: str = "local",
         flavor: str | None = None,
         node_instance_id: str | None = None,
         config: Mapping[str, Any] | None = None,
+        **knobs: Any,
     ) -> Job:
         """Start a training run; returns its record immediately (state
         "running") — follow with ``wait``, ``logs`` or ``metrics_history``.
 
+        ``**knobs`` accepts EVERY training knob the server has —
+        :class:`TrainingOptions` is the full typed catalog (steps,
+        batch_size, seed, log/save freq, wandb_*, optimizer_*, resume and
+        fine-tune lineage, eval, device/AMP, hf_job_timeout, …). Knobs are
+        validated client-side: a typo fails instantly with the close matches
+        named, before any request is sent. Unset knobs are not sent, so the
+        server's defaults rule.
+
         ``runner`` picks where it runs: "local" (this machine), "hf_cloud"
         (HF Jobs GPU — requires ``flavor``, see ``runners_hardware``), or
         "lan_node" (a registered peer — requires ``node_instance_id``, see
-        ``client.nodes``). ``config`` passes any further server-side
-        TrainingRequest field (``save_freq``, ``optimizer_lr``,
-        ``wandb_enable``, resume/fine-tune fields, …) and overrides the
-        keyword arguments on key collisions.
+        ``client.nodes``). ``config`` passes raw fields WITHOUT client-side
+        validation (for a server newer than this SDK) and overrides knobs on
+        key collisions.
 
         Example:
             >>> job = client.jobs.create_training(
             ...     "user/so101-pick",
             ...     steps=20000,
-            ...     config={"save_freq": 5000, "wandb_enable": True},
+            ...     save_freq=5000,
+            ...     optimizer_lr=1e-5,
+            ...     wandb_enable=True,
             ... )
             >>> client.jobs.wait(job.id, timeout=4 * 3600).state
             'done'
         """
-        cfg: dict[str, Any] = {
-            "dataset_repo_id": dataset_repo_id,
-            "policy_type": policy_type,
-            "steps": steps,
-            "batch_size": batch_size,
-        }
-        if job_name is not None:
-            cfg["job_name"] = job_name
+        cfg: dict[str, Any] = _validate_training_knobs(knobs)
+        cfg["dataset_repo_id"] = dataset_repo_id
         if config:
             cfg.update(config)
         target: dict[str, Any] = {"runner": runner}

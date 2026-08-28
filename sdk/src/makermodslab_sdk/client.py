@@ -12,6 +12,7 @@ from makermodslab_sdk.resources import (
     ModelsResource,
     NodesResource,
     Resource,
+    RobotsResource,
     SessionsResource,
     SystemResource,
 )
@@ -27,6 +28,9 @@ RESOURCE_CLASSES: dict[str, type[Resource]] = {
     "jobs": JobsResource,
     "models": ModelsResource,
     "nodes": NodesResource,
+    # robots is PROVISIONAL: its routes are untagged/untyped server-side at
+    # this snapshot — see resources/robots.py and the ratchet's UNTAGGED set.
+    "robots": RobotsResource,
     "sessions": SessionsResource,
     "system": SystemResource,
 }
@@ -88,6 +92,7 @@ class Client:
         self.jobs = JobsResource(self._transport)
         self.models = ModelsResource(self._transport)
         self.nodes = NodesResource(self._transport)
+        self.robots = RobotsResource(self._transport)
         self.sessions = SessionsResource(self._transport)
         self.system = SystemResource(self._transport)
 
