@@ -30,7 +30,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-import { getModels, ModelItem } from "@/lib/modelsApi";
+import { ModelItem } from "@/lib/modelsApi";
+import { useModels } from "@/hooks/useModels";
 import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import {
@@ -197,7 +198,12 @@ const TrainPanel: React.FC = () => {
   const [actionsEl, setActionsEl] = useState<HTMLDivElement | null>(null);
 
   // ── Starting point (fine-tune base) ───────────────────────────────────────
-  const [models, setModels] = useState<ModelItem[]>([]);
+  // Shared with the Deploy picker and the launchpad slider (ModelsDataContext),
+  // so the three cannot drift apart. Note this list is a WIDER population than
+  // the Deploy picker's: a foundation checkpoint is a legitimate fine-tune base
+  // and not a deployable skill. They read one endpoint today; if that ever
+  // splits, this is the call site that keeps `/models`.
+  const { models } = useModels();
   const [baseModelId, setBaseModelId] = useState<string>(NONE);
   const [finetuneSeed, setFinetuneSeed] = useState<FinetuneSeed | null>(null);
   const [resolvingBase, setResolvingBase] = useState(false);
@@ -220,20 +226,6 @@ const TrainPanel: React.FC = () => {
     // way).
     if (!open) setResumeSeed(null);
   };
-
-  useEffect(() => {
-    let cancelled = false;
-    getModels(baseUrl, fetchWithHeaders)
-      .then((m) => {
-        if (!cancelled) setModels(m);
-      })
-      .catch(() => {
-        /* the starting point is optional — leave the list empty */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [baseUrl, fetchWithHeaders]);
 
   // ── Policy ────────────────────────────────────────────────────────────────
   // Chosen inside Run configuration (EssentialsCard's select); a base-skill or

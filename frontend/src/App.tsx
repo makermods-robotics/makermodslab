@@ -20,6 +20,7 @@ import MockHubBanner from "@/components/MockHubBanner";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
 import { HfAuthProvider } from "./contexts/HfAuthContext";
+import { ModelsDataProvider } from "@/contexts/ModelsDataContext";
 
 const queryClient = new QueryClient();
 
@@ -31,6 +32,10 @@ function App() {
           <LanguageProvider>
           <ApiProvider>
             <HfAuthProvider>
+             {/* Above the router: the launchpad's skill slider and library
+                 sheet read this listing, and so does the studio overlay's
+                 Deploy/Train panel, so its one owner has to outrank both. */}
+             <ModelsDataProvider>
               <UrdfProvider>
                 <DragAndDropProvider>
                   <BrowserRouter>
@@ -73,6 +78,7 @@ function App() {
                   </BrowserRouter>
                 </DragAndDropProvider>
               </UrdfProvider>
+             </ModelsDataProvider>
             </HfAuthProvider>
           </ApiProvider>
           </LanguageProvider>
