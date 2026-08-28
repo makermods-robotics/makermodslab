@@ -862,10 +862,19 @@ calibration_manager = CalibrationManager()
 
 
 def calibration_is_active() -> bool:
-    """True while a manual calibration session owns the serial bus.
+    """True while ANY calibration session owns a bus.
 
-    Reads the singleton's real state (no separately-tracked boolean) so other
+    Reads the singletons' real state (no separately-tracked boolean) so other
     feature modules' reciprocal mutex checks (see CLAUDE.md) can't drift from
-    the manager's own status.
+    the managers' own status.
+
+    Covers both calibration flows: the SO-101's step-by-step range sweep in
+    this module, and the Maker arm's zero-pose flow in ``zero_calibrate``.
+    They are separate managers because the procedures share nothing, but from
+    the mutual-exclusion standpoint they are one fact — "a calibration owns
+    this bus" — so every existing reciprocal check gets the Maker flow for
+    free, with no new ``robot.busy.*`` discriminant to register.
     """
-    return calibration_manager.status.calibration_active
+    from .zero_calibrate import zero_calibration_is_active
+
+    return calibration_manager.status.calibration_active or zero_calibration_is_active()

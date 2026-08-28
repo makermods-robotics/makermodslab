@@ -6,9 +6,24 @@ import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
 export type RobotMode = "single" | "bimanual";
 
+/**
+ * Which hardware family a robot is.
+ *
+ * - "so101" — SO-101 leader/follower, Feetech servos on USB serial. 6 joints
+ *   per arm, range-sweep calibration (manual or automatic).
+ * - "maker" — Maker Arm v1: a 7-DOF RobStride CAN follower driven by a Star
+ *   Arm 102 leader on UART servos. Zero-pose calibration only, no automatic
+ *   calibration, and no 3D viewer (no Maker URDF ships yet).
+ *
+ * Records created before the Maker arm existed have no arm_type on disk; the
+ * backend reads those back as "so101", so this is never undefined in practice.
+ */
+export type ArmType = "so101" | "maker";
+
 export interface RobotRecord {
   name: string;
   mode: RobotMode;
+  arm_type: ArmType;
   // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;
@@ -161,7 +176,11 @@ export const useRobots = () => {
   }, []);
 
   const createRobot = useCallback(
-    async (rawName: string, mode: RobotMode = "single"): Promise<boolean> => {
+    async (
+      rawName: string,
+      mode: RobotMode = "single",
+      armType: ArmType = "so101"
+    ): Promise<boolean> => {
       const name = rawName.trim();
       if (!name) {
         toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
@@ -175,7 +194,7 @@ export const useRobots = () => {
         const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ mode, arm_type: armType }),
         });
         if (res.status === 409) {
           toast({

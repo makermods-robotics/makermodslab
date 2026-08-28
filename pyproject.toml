@@ -19,7 +19,16 @@ dependencies = [
     "websockets>=15.0.1",
     "uvicorn>=0.24.0",
     "psutil>=5.9.0",
-    "lerobot[core_scripts,feetech,training] @ git+https://github.com/huggingface/lerobot.git@v0.6.0",
+    # Pinned to Maker-Mods/lerobot @ robot/makermods-maker-arm, a clean fast-forward from
+    # upstream v0.6.0 (merge-base IS v0.6.0) carrying upstream v0.6.2 plus six Maker-arm
+    # commits: MakerFollower/BiMakerFollower (7-DOF RobStride CAN) and the Star Arm 102
+    # leader's Maker joint-mapping preset. Pinned by SHA, not branch name — the branch is
+    # force-pushable and was already renamed once (arm/ -> robot/), and a moving pin makes
+    # every unrelated failure a bisect.
+    # Extras beyond the SO-101 set: `maker` = RobStride over CAN (python-can + pyserial for
+    # the slcan transport, the only one that works on macOS); `rebot` = motorbridge, the
+    # FashionStar UART servo stack the Star Arm 102 leader speaks.
+    "lerobot[core_scripts,feetech,training,maker,rebot] @ git+https://github.com/Maker-Mods/lerobot.git@af9072a8ca4b1767ef25b98eed1149d1bbf89f46",
     # Windows-only: real DirectShow camera names for /available-cameras so the
     # frontend can match a camera to its browser deviceId (issues #12, #16).
     # Guarded by try/except at the call site, so its absence degrades gracefully.

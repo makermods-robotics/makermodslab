@@ -21,6 +21,7 @@ import {
 import { useApi } from "@/contexts/ApiContext";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useToast } from "@/hooks/use-toast";
+import type { ArmType } from "@/hooks/useRobots";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import ImportCalibrationButton from "./ImportCalibrationButton";
@@ -32,6 +33,13 @@ interface ConfigEntry {
 interface CalibrationLibraryProps {
   /** API device vocabulary: "teleop" (leader) or "robot" (follower). */
   device: "teleop" | "robot";
+  /**
+   * Which calibration library to list and act on. The SO-101 pair and the
+   * Maker pair keep entirely SEPARATE directories on disk, so a name that
+   * exists in one is a different file (or no file) in the other — listing,
+   * deleting and renaming all have to be told which one they mean.
+   */
+  armType: ArmType;
   /** Config name currently assigned to the selected robot (marked "in use"). */
   assignedConfig?: string;
   /** Robot record to reassign when "Use for this robot" is clicked. */
@@ -82,6 +90,7 @@ interface CalibrationLibraryProps {
  */
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
+  armType,
   assignedConfig,
   robotName,
   configField,
@@ -111,7 +120,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   const refresh = useCallback(async () => {
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}?arm_type=${armType}`,
       );
       const data = await res.json();
       if (data.success) {
@@ -122,7 +131,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     } catch {
       // Non-fatal; leave the list as-is.
     }
-  }, [baseUrl, fetchWithHeaders, device]);
+  }, [baseUrl, fetchWithHeaders, device, armType]);
 
   useEffect(() => {
     refresh();
@@ -161,7 +170,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setPendingDelete(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(name)}`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(name)}?arm_type=${armType}`,
         { method: "DELETE" },
       );
       const data = await res.json().catch(() => ({}));
@@ -207,7 +216,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         variant: "destructive",
       });
     }
-  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, t, onAssigned, onLibraryChanged]);
+  }, [baseUrl, fetchWithHeaders, device, armType, pendingDelete, toast, t, onAssigned, onLibraryChanged]);
 
   // Assign a config to this robot's slot. Called straight from the dropdown's
   // onValueChange — picking a config IS choosing it for this robot; there is
@@ -315,7 +324,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     setRenameError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(selected)}/rename`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/${encodeURIComponent(selected)}/rename?arm_type=${armType}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -352,6 +361,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       setRenaming(false);
     }
   }, [
+    armType,
     selected,
     renameValue,
     device,
@@ -453,6 +463,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           <Trash2 className="h-4 w-4" />
         </Button>
         <ImportCalibrationButton
+              armType={armType}
           device={device}
           onImported={async (name) => {
             await refresh();

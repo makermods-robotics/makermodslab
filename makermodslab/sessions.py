@@ -470,6 +470,7 @@ def _build_teleoperation_request(record: dict, opts: TeleoperationOptions):
         right_leader_config=record["right_leader_config"],
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
+        arm_type=record["arm_type"],
         skip_identity_check=opts.skip_identity_check,
     )
 
@@ -490,6 +491,7 @@ def _build_recording_request(record: dict, opts: RecordingOptions):
         right_leader_config=record["right_leader_config"],
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
+        arm_type=record["arm_type"],
         dataset_repo_id=opts.dataset_repo_id,
         single_task=opts.single_task,
         num_episodes=opts.num_episodes,
@@ -518,6 +520,7 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
         right_follower_port=record["right_follower_port"],
         right_follower_config=record["right_follower_config"],
         robot_name=record["name"],
+        arm_type=record["arm_type"],
         policy_ref=opts.policy_ref,
         task=opts.task,
         camera_bindings=opts.camera_bindings,
@@ -540,6 +543,7 @@ def _build_replay_request(record: dict, opts: ReplayOptions):
         follower_port=record["follower_port"],
         follower_config=record["follower_config"],
         robot_name=record["name"],
+        arm_type=record["arm_type"],
         skip_identity_check=opts.skip_identity_check,
     )
 
@@ -588,10 +592,18 @@ def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, co
 
 
 def _build_calibration_request(record: dict, opts: CalibrationOptions):
+    """Build the calibration request matching this robot's arm type.
+
+    The two request models are field-for-field identical on purpose — only the
+    class differs, and _dispatch_start reads that class to pick the manager.
+    """
+    from .arm_capabilities import uses_zero_calibration
     from .calibrate import CalibrationRequest
+    from .zero_calibrate import ZeroCalibrationRequest
 
     port, config_file = _resolve_slot(record, opts.device_type, opts.arm, opts.port, opts.config_file)
-    return CalibrationRequest(
+    model = ZeroCalibrationRequest if uses_zero_calibration(record["arm_type"]) else CalibrationRequest
+    return model(
         device_type=opts.device_type,
         port=port,
         config_file=config_file,
@@ -602,11 +614,27 @@ def _build_calibration_request(record: dict, opts: CalibrationOptions):
 
 
 def _build_auto_calibration_request(record: dict, opts: AutoCalibrationOptions):
+    """(see below) — refuses outright on an arm type that has no auto-calibration."""
     """Always the BATCH request, even for one arm — the batch of one is
     exactly how the UI runs a single arm, and the aggregate auto_calibration
     session-event kind makes the whole batch one session (see
     AutoCalibrationOptions)."""
+    from .arm_capabilities import supports_auto_calibration
     from .auto_calibrate import AutoCalibrationBatchArm, AutoCalibrationBatchRequest
+
+    if not supports_auto_calibration(record["arm_type"]):
+        # The vendored autocal drives the arm under torque against its stops
+        # and writes Feetech EEPROM — there is no equivalent for a RobStride
+        # CAN arm, and none is needed: the Maker arm's limits are fixed
+        # constants, so calibrating it means setting zero (kind "calibration").
+        raise ApiError(
+            status_code=400,
+            detail=(
+                "The Maker arm has no automatic calibration — its joint limits are fixed. "
+                "Run a zero-pose calibration instead."
+            ),
+            code=ErrorCode.ROBOT_NOT_READY,
+        )
 
     arms = []
     for arm_opt in opts.arms:
@@ -639,7 +667,7 @@ _REQUEST_BUILDERS = {
 
 
 def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate
+    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
 
     if kind == "teleoperation":
         return teleoperate.handle_start_teleoperation(request, websocket_manager)
@@ -648,6 +676,12 @@ def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
     if kind == "inference":
         return rollout.handle_start_inference(request)
     if kind == "calibration":
+        # One session kind, two procedures. The SO-101 sweeps each joint's
+        # range; the Maker arm only has to be told where zero is (its limits
+        # are fixed constants). _build_calibration_request has already built
+        # the matching request type, so this only picks the manager.
+        if isinstance(request, zero_calibrate.ZeroCalibrationRequest):
+            return zero_calibrate.zero_calibration_manager.start(request)
         return calibrate.calibration_manager.start_calibration(request)
     if kind == "auto_calibration":
         return auto_calibrate.auto_calibration_batch_manager.start(request)
@@ -842,7 +876,7 @@ def handle_heartbeat_session(session_id: str, owner: str) -> dict[str, Any]:
 
 
 def _dispatch_stop(kind: str) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate
+    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
 
     if kind == "teleoperation":
         return teleoperate.handle_stop_teleoperation()
@@ -853,6 +887,11 @@ def _dispatch_stop(kind: str) -> dict[str, Any]:
     if kind == "replay":
         return replay.handle_stop_replay()
     if kind == "calibration":
+        # Stopping is never owner-gated and the tracker only knows the KIND,
+        # not which manager is live — so stop whichever one actually is
+        # (mirroring the auto_calibration arm just below).
+        if zero_calibrate.zero_calibration_is_active():
+            return zero_calibrate.zero_calibration_manager.stop()
         return calibrate.calibration_manager.stop_calibration_process()
     if kind == "auto_calibration":
         # The aggregate spans the single-arm manager and the batch manager —

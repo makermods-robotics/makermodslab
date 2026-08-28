@@ -82,6 +82,21 @@ export default {
     duplicate: "A robot with this name already exists.",
     // Label AND aria-label of the layout radiogroup — identical text, one key.
     armLayout: "Arm layout",
+    // Same, for the hardware-family radiogroup.
+    armTypeLabel: "Arm type",
+    // The DISPLAY half of ARM_TYPE_OPTIONS. The submitted value ("so101" /
+    // "maker") is logic and stays in the component, untranslated — it is
+    // persisted verbatim into the robot record on disk.
+    armTypes: {
+      so101: {
+        label: "SO-101",
+        description: "6-DOF leader/follower on serial",
+      },
+      maker: {
+        label: "Maker arm",
+        description: "7-DOF CAN arm, Star 102 leader",
+      },
+    },
     // The DISPLAY half of MODE_OPTIONS. The submitted value ("single" /
     // "bimanual") is logic and stays in the component, untranslated.
     modes: {

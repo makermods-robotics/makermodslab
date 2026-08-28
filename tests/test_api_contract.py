@@ -225,6 +225,12 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "DELETE /api/v1/nodes/{instance_id}",
         "GET /api/v1/nodes",
         "POST /api/v1/nodes",
+        # Maker arm port detection (maker_ports.py). No flat mirror: the flat
+        # surface only ever shrinks, and the SO-101's /identify-arm cannot
+        # serve these — a Maker rig answers RobStride over CAN and FashionStar
+        # over UART, neither of which a Feetech bus can open.
+        "POST /api/v1/maker/identify-arm",
+        "POST /api/v1/maker/probe-ports",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",

@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RobotMode } from "@/hooks/useRobots";
+import { ArmType, RobotMode } from "@/hooks/useRobots";
 import { cn } from "@/lib/utils";
 
 interface CreateRobotDialogProps {
@@ -25,7 +25,11 @@ interface CreateRobotDialogProps {
   /** Optional name to seed the input with (e.g. a fresh name typed in the
    * selector's search box). */
   seedName?: string;
-  onCreateNew: (name: string, mode: RobotMode) => Promise<boolean>;
+  onCreateNew: (
+    name: string,
+    mode: RobotMode,
+    armType: ArmType
+  ) => Promise<boolean>;
 }
 
 /**
@@ -53,6 +57,35 @@ const MODE_OPTIONS: {
 ];
 
 /**
+ * The hardware-family options. Same logic/display split as MODE_OPTIONS above:
+ * `value` is what the form submits and the backend stores, so it stays the
+ * literal "so101"/"maker"; the label/description halves hold catalog KEYS.
+ *
+ * `icon` is deliberately empty for now — the slot is wired through to the
+ * option button so a mark can be dropped in later without touching layout.
+ * Rendering is skipped entirely while it is null, so nothing reserves space.
+ */
+const ARM_TYPE_OPTIONS: {
+  value: ArmType;
+  labelKey: string;
+  descriptionKey: string;
+  icon: React.ReactNode | null;
+}[] = [
+  {
+    value: "so101",
+    labelKey: "landing.createRobot.armTypes.so101.label",
+    descriptionKey: "landing.createRobot.armTypes.so101.description",
+    icon: null,
+  },
+  {
+    value: "maker",
+    labelKey: "landing.createRobot.armTypes.maker.label",
+    descriptionKey: "landing.createRobot.armTypes.maker.description",
+    icon: null,
+  },
+];
+
+/**
  * Name + arm-layout form for creating a new robot. Extracted from RobotSelector
  * so the same validated flow can be opened from either the selector's in-menu
  * row or a visible "New robot" button on the Landing card. useRobots owns
@@ -69,6 +102,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
   const { t } = useTranslation();
   const [newName, setNewName] = useState("");
   const [newMode, setNewMode] = useState<RobotMode>(defaultMode);
+  const [newArmType, setNewArmType] = useState<ArmType>("so101");
   const [creating, setCreating] = useState(false);
 
   const nameExists = (name: string) =>
@@ -81,6 +115,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
       const seed = (seedName ?? "").trim();
       setNewName(seed !== "" && !nameExists(seed) ? seed : "");
       setNewMode(defaultMode);
+      setNewArmType("so101");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -95,11 +130,12 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
     try {
       // useRobots handles validation, API errors, and toasts; on success it
       // also selects the new robot. We only manage the dialog here.
-      const ok = await onCreateNew(trimmedNewName, newMode);
+      const ok = await onCreateNew(trimmedNewName, newMode, newArmType);
       if (ok) {
         onOpenChange(false);
         setNewName("");
         setNewMode(defaultMode);
+        setNewArmType("so101");
       }
     } finally {
       setCreating(false);
@@ -114,6 +150,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         if (!o) {
           setNewName("");
           setNewMode(defaultMode);
+          setNewArmType("so101");
         }
       }}
     >
@@ -149,6 +186,52 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                 {t("landing.createRobot.duplicate")}
               </p>
             )}
+          </div>
+          <div>
+            <Label className="text-foreground">
+              {t("landing.createRobot.armTypeLabel")}
+            </Label>
+            <div
+              role="radiogroup"
+              aria-label={t("landing.createRobot.armTypeLabel")}
+              className="mt-1 grid grid-cols-2 gap-2"
+            >
+              {ARM_TYPE_OPTIONS.map((opt) => {
+                const selected = newArmType === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setNewArmType(opt.value)}
+                    className={cn(
+                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      selected
+                        ? "border-primary bg-accent"
+                        : "border-border bg-card hover:bg-accent"
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex min-w-0 items-center gap-2">
+                        {/* Icon slot — empty for now; nothing is rendered (and
+                            so nothing is reserved) until one is supplied. */}
+                        {opt.icon}
+                        <span className="truncate text-sm font-medium text-foreground">
+                          {t(opt.labelKey as never)}
+                        </span>
+                      </span>
+                      {selected && (
+                        <Check className="h-4 w-4 shrink-0 text-primary" />
+                      )}
+                    </div>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {t(opt.descriptionKey as never)}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
           </div>
           <div>
             <Label className="text-foreground">

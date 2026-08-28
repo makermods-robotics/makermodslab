@@ -32,6 +32,7 @@ from lerobot.motors.motors_bus import MotorsBus
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .api_errors import ErrorCode
+from .arm_capabilities import arm_type_of_robot_config, uses_feetech_bus
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
 from .datasets import (
@@ -49,6 +50,7 @@ from .teleoperate import (
     force_disable_torque,
     force_disconnect_partial,
 )
+from .torque import release_maker_torque
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
@@ -390,6 +392,12 @@ class RecordingRequest(BaseModel):
     # read-only now); pydantic ignores unknown fields, so an older frontend's
     # payload still parses and its stale camera set is correctly ignored.
     robot_name: str = ""
+    # Hardware family: "so101" (Feetech serial) or "maker" (RobStride CAN
+    # follower + Star Arm 102 leader). Decides which lerobot config classes the
+    # robot factory builds, which calibration library the names resolve in, and
+    # which of the Feetech-only safety helpers apply. Defaults to so101 so a
+    # request from a client that predates the Maker arm is unchanged.
+    arm_type: str = "so101"
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -1670,6 +1678,11 @@ def record_with_web_events(
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
+    # Read the arm type back off the assembled config rather than taking it as
+    # a parameter, so it can never disagree with the devices actually built.
+    # Everything below that touches a Feetech register by name is gated on it.
+    feetech = uses_feetech_bus(arm_type_of_robot_config(cfg.robot))
+
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
@@ -1847,7 +1860,11 @@ def record_with_web_events(
     try:
         identity_warnings = verify_devices(
             ((robot, "follower"), (teleop, "leader")),
-            skip=skip_identity_check,
+            # A Maker arm has no EEPROM fingerprint to compare — its zero lives
+            # inside the RobStride motors and its calibration writes
+            # homing_offset=0 for every joint — so the guard is skipped whole
+            # rather than left to fail open per arm.
+            skip=skip_identity_check or not feetech,
             config_names=identity_config_names,
         )
     except ArmIdentityError:
@@ -1886,18 +1903,27 @@ def record_with_web_events(
                 f"{label.capitalize()} bus or calibration not available - calibration may not be applied"
             )
 
-    _write_calibration(robot, "robot")
-    _write_calibration(teleop, "teleop")
+    if feetech:
+        _write_calibration(robot, "robot")
+        _write_calibration(teleop, "teleop")
+    else:
+        # The Maker devices' own connect() already registered their calibration
+        # on the bus. Re-writing it here would also hit the Star 102 leader,
+        # whose bus is a FashionStar handle with no write_calibration at all —
+        # its zero is set by set_origin_point during calibration and lives in
+        # the servos, not in a file the bus reloads.
+        logger.info("Maker arm: calibration registered by connect(); skipping the explicit write")
 
     # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
     # follower only, never the human-held leader. Clears any torque cap a
     # previous auto-calibration left in RAM; a failed write degrades to the
     # previous limit (logged inside) and must not abort the session.
-    reset_torque_limit(robot, "follower arm")
-    # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
-    # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
-    # follower only, never the human-held leader. See makermodslab/motor_power.py.
-    clear_goal_velocity(robot, "follower arm")
+    if feetech:
+        reset_torque_limit(robot, "follower arm")
+        # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
+        # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
+        # follower only, never the human-held leader. See makermodslab/motor_power.py.
+        clear_goal_velocity(robot, "follower arm")
 
     # Capture the follower's rest pose now — after connect/configure/identity
     # guard, before the recording loop moves anything — so a normal stop can
@@ -1906,10 +1932,14 @@ def record_with_web_events(
     # follower buses), NEVER the human-held leader. The gripper is excluded: at
     # stop time it may be holding an object, and returning it to its (likely
     # open) starting width would drop the object mid-return.
-    follower_rest_poses = [
-        (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-        for bus in _device_buses(robot)
-    ]
+    follower_rest_poses = (
+        [
+            (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
+            for bus in _device_buses(robot)
+        ]
+        if feetech
+        else []
+    )
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -2167,8 +2197,11 @@ def record_with_web_events(
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.
-            force_disable_torque(robot, "robot")
-            force_disable_torque(teleop, "teleop")
+            if feetech:
+                force_disable_torque(robot, "robot")
+                force_disable_torque(teleop, "teleop")
+            else:
+                release_maker_torque(robot, "Maker follower arm")
             robot.disconnect()
             if teleop:
                 teleop.disconnect()

@@ -39,12 +39,14 @@ from pydantic import BaseModel
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .api_errors import ErrorCode
+from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
 from .datasets import get_episode_action_series
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .session_events import notify_session_changed
 from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
+from .torque import release_maker_torque
 from .utils.config import get_robot_record, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,36 @@ EASE_ARRIVE_TOLERANCE = 2.0
 # docstring). Keeps the same 0.5x-of-arrival-tolerance ratio as the raw-ticks
 # defaults (RETURN_STALL_MIN_PROGRESS=10 is half of RETURN_ARRIVE_TOLERANCE=20).
 EASE_STALL_MIN_PROGRESS = 1.0
+
+# Maker-arm ease-in (see _ease_in_maker). All three thresholds are in DEGREES —
+# a Maker follower reports and accepts degrees natively, so neither the raw-tick
+# RETURN_ARRIVE_TOLERANCE nor the normalized EASE_ARRIVE_TOLERANCE above is in
+# the right unit for it.
+#
+# The arm is position-controlled with MIT gains, not servo-homed, so it settles
+# with a STANDING error proportional to the load a joint is holding: measured on
+# a real arm, wrist_flex (kp=30) converged to ~3 deg of its target and stayed
+# there. Waiting for that to reach zero waits forever, which is why arrival is
+# judged by convergence and not by this tolerance alone.
+_MAKER_EASE_TOLERANCE_DEG = 2.0
+
+# Close enough to start the episode from, once the arm has stopped improving.
+# Wider than the tolerance above by about the standing error observed on the
+# stiffest-loaded joint, with margin.
+_MAKER_EASE_SETTLE_DEG = 6.0
+
+# Convergence detection: less than this much improvement in the worst joint,
+# for this many consecutive polls, means the arm has gone as far as its gains
+# will take it. ~0.5s at the loop's 30 Hz — long enough not to trip on a single
+# noisy read, short enough not to stall the start.
+_MAKER_EASE_STALL_PROGRESS_DEG = 0.25
+_MAKER_EASE_STALL_POLLS = 15
+
+# Ceiling on the Maker ease-in. `startup_sync_speed_deg` caps the approach at
+# 1 deg per control step; at this loop's ~30 Hz that is ~30 deg/s, so the
+# widest joint travel (elbow_flex, ~233 deg) needs ~8s. Budget generously and
+# let the stall/stop checks end it early in every normal case.
+_MAKER_EASE_CEILING_S = 20.0
 
 # How far behind real time a frame may be before it is dropped rather than
 # fired late. Below this, ordinary jitter is absorbed by the pacing wait; above
@@ -110,6 +142,9 @@ class ReplayRequest(BaseModel):
     # bimanual-rejection guard — the port/config above are what actually
     # drive the connection.
     robot_name: str = ""
+    # Hardware family: "so101" or "maker" — selects the follower config class
+    # and the calibration library the follower_config name resolves in.
+    arm_type: str = "so101"
     skip_identity_check: bool = False
 
 
@@ -215,7 +250,6 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "status_code": 400,
                 "message": "Bimanual replay isn't supported yet — select a single-arm robot.",
             }
-
         action_series = get_episode_action_series(request.repo_id, request.episode_index)
         if action_series is None:
             return {
@@ -274,7 +308,7 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
 
     worker = threading.Thread(
         target=_replay_worker,
-        args=(robot, action_series, websocket_manager),
+        args=(robot, action_series, websocket_manager, request.arm_type),
         name="replay-worker",
         daemon=True,
     )
@@ -287,13 +321,50 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
     return response
 
 
-def _connect_follower(request: ReplayRequest) -> tuple[SO101Follower, list[str]]:
+def _connect_maker_follower(request: ReplayRequest):
+    """Connect a Maker follower for replay.
+
+    Much shorter than the SO-101 path below because MakerFollower.connect()
+    already does everything that path hand-rolls — bus open, calibration load
+    and registration, MIT gain write, torque enable — with its own cleanup on
+    failure. `calibrate=False` for the same reason teleoperate._connect_maker
+    passes it: the default would drop an uncalibrated device into an
+    `input()`-blocked calibrate() and hang this thread forever.
+
+    Connecting also RE-ARMS the arm's slow initial sync (`_synced = False`),
+    which is what makes _ease_in_maker's gentle approach to frame 0 work.
+    """
+    from lerobot.robots import make_robot_from_config
+
+    from .utils.robot_factory import maker_follower_config
+
+    follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
+    robot = make_robot_from_config(maker_follower_config(request.follower_port, follower_id))
+    try:
+        robot.connect(calibrate=False)
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not connect to the Maker follower arm on {request.follower_port}. "
+            "Check that the CAN adapter is plugged in, the arm is powered, and the "
+            "motors are in MIT mode, then try again."
+        ) from e
+    # No identity fingerprint, torque-limit reset or speed-cap clear: all three
+    # are Feetech register operations (see arm_capabilities.uses_feetech_bus),
+    # and a RobStride arm's drive effort comes from the MIT gains connect()
+    # just wrote instead.
+    return robot, []
+
+
+def _connect_follower(request: ReplayRequest):
     """Connect and configure the follower for replay — mirrors
     teleoperate.py's single-arm connect sequence (write_calibration →
     configure → reset_torque_limit → clear_goal_velocity), follower-only.
     Raises on a connection or hard identity-mismatch failure; the caller
     (handle_start_replay) is responsible for cleanup on that path."""
-    follower_id = setup_follower_calibration_file(request.follower_config)
+    if not uses_feetech_bus(request.arm_type):
+        return _connect_maker_follower(request)
+
+    follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
     robot = SO101Follower(SO101FollowerConfig(port=request.follower_port, id=follower_id))
     try:
         robot.bus.connect()
@@ -384,12 +455,118 @@ def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
         pass
 
 
-def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocket_manager) -> None:
+def _maker_joint_degrees(robot) -> dict[str, float]:
+    """Current joint angles in degrees, keyed by BARE motor name.
+
+    `get_observation()` keys them "<motor>.pos" (and prefixes them per arm on a
+    bimanual robot, which replay refuses anyway), so strip the suffix to match
+    the action-name keying _ease_in_maker compares against.
+    """
+    out: dict[str, float] = {}
+    for key, value in robot.get_observation().items():
+        if key.endswith(".pos") and isinstance(value, (int, float)):
+            out[key[: -len(".pos")]] = float(value)
+    return out
+
+
+def _ease_in_maker(robot, frame0: dict[str, float], stop_check) -> tuple[bool, str]:
+    """Walk a Maker follower to the episode's first frame before playback.
+
+    The ease-in is NOT optional on this arm, even though MakerFollower has its
+    own slow initial sync. Playback is paced against a wall clock and drops
+    frames it has fallen behind on, so if the loop starts while the arm is
+    still slewing toward frame 0 it will already be sending frame 50 by the
+    time the arm gets near frame 0 — the episode effectively starts partway
+    through, at whatever pose the arm happened to reach. Arriving first is what
+    makes the recorded trajectory the trajectory that gets played.
+
+    What IS delegated to the arm is the SPEED. Rather than writing a profile
+    velocity the way the Feetech path does, this just resends frame 0 and lets
+    `startup_sync_speed_deg` (re-armed by the connect above) cap each step to a
+    degree. So the approach is gentle by construction, and the same code that
+    governs a teleop session's first seconds governs this one.
+
+    Arrival is judged by CONVERGENCE, not by an absolute tolerance alone: the
+    arm settles with a standing error its MIT gains cannot close (measured:
+    ~3 deg on wrist_flex), so a bare tolerance check would run the ceiling and
+    fail every time on a perfectly healthy arm. Once the worst joint stops
+    improving, being within _MAKER_EASE_SETTLE_DEG counts as arrived; still
+    being outside it means something is genuinely in the way.
+
+    Returns the same (arrived, reason) contract as return_to_rest_pose so the
+    caller's branches are identical for both arm types.
+    """
+    targets = {(k.removesuffix(".pos")): v for k, v in frame0.items()}
+    if not targets:
+        return False, "no-pose"
+
+    deadline = time.monotonic() + _MAKER_EASE_CEILING_S
+    best = float("inf")
+    stalled_polls = 0
+    described = ""
+    while time.monotonic() < deadline:
+        if stop_check():
+            return False, "cut-short"
+        robot.send_action(frame0)
+        time.sleep(1.0 / 30.0)
+        try:
+            current = _maker_joint_degrees(robot)
+        except Exception as e:
+            # A dropped CAN reply is transient; keep driving and re-read.
+            logger.debug("Maker ease-in position read failed: %s", e)
+            continue
+        deltas = {
+            motor: abs(current[motor] - target) for motor, target in targets.items() if motor in current
+        }
+        if not deltas:
+            return False, "no-pose"
+        motor, delta = max(deltas.items(), key=lambda kv: kv[1])
+        described = f"{motor} still {delta:.1f} deg away"
+
+        if delta <= _MAKER_EASE_TOLERANCE_DEG:
+            return True, ""
+
+        # Convergence: has the worst joint stopped getting better?
+        if best - delta >= _MAKER_EASE_STALL_PROGRESS_DEG:
+            best = delta
+            stalled_polls = 0
+            continue
+        best = min(best, delta)
+        stalled_polls += 1
+        if stalled_polls < _MAKER_EASE_STALL_POLLS:
+            continue
+
+        # It has converged. Close enough is a fine place to start the episode
+        # from — the arm holds a standing error its gains cannot close, and the
+        # trajectory itself starts here. Still far means something is actually
+        # in the way (a joint against a limit, an obstruction, a wrong pose),
+        # and that must fail loudly rather than lurch into playback.
+        if delta <= _MAKER_EASE_SETTLE_DEG:
+            logger.info("Maker ease-in settled with %s (within %.1f deg)", described, _MAKER_EASE_SETTLE_DEG)
+            return True, "settled"
+        return False, described
+
+    return False, described or "timed out"
+
+
+def _replay_worker(
+    robot,
+    action_series: dict[str, Any],
+    websocket_manager,
+    arm_type: str = "so101",
+) -> None:
     """Ease the arm to the episode's first frame, then stream send_action()
     calls at the episode's recorded pace, broadcasting live joint feedback
     over the existing joint-data websocket every frame. On stop or
     completion, gently return to the pose captured at the start and release
-    torque — mirrors teleoperation_worker's graceful-stop shape exactly."""
+    torque — mirrors teleoperation_worker's graceful-stop shape exactly.
+
+    `arm_type` selects the ease-in and teardown machinery: an SO-101 gets the
+    Feetech profile-velocity return and an explicit torque release, a Maker arm
+    gets the degrees-based approach in _ease_in_maker and a torque-off settle.
+    The PLAYBACK loop between them is identical for both — it is plain
+    `send_action` on the dataset's action column, exactly as lerobot's own
+    arm-agnostic `lerobot-replay` does it."""
     global replay_active
 
     action_names = action_series["action_names"]
@@ -399,20 +576,30 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
     def _stop_check() -> bool:
         return not replay_active or _stop_event.is_set()
 
-    start_pose = capture_rest_pose(robot.bus, normalize=False)
+    # Feetech only: capture_rest_pose reads raw Present_Position ticks, and the
+    # return that consumes it writes Goal_Position/Goal_Velocity. A Maker arm
+    # has neither register; it settles under gravity when torque drops, which
+    # its vendor documents as the safe state (and is why
+    # disable_torque_on_disconnect defaults to True). Same choice teleoperate
+    # makes for a Maker session.
+    feetech = uses_feetech_bus(arm_type)
+    start_pose = capture_rest_pose(robot.bus, normalize=False) if feetech else {}
 
     try:
         if frames:
             frame0 = dict(zip(action_names, frames[0], strict=True))
-            arrived, reason = return_to_rest_pose(
-                robot.bus,
-                _bus_keyed(frame0, robot.bus),
-                abort_event=_stop_event,
-                label="follower arm",
-                normalize=True,
-                tolerance=EASE_ARRIVE_TOLERANCE,
-                stall_min_progress=EASE_STALL_MIN_PROGRESS,
-            )
+            if feetech:
+                arrived, reason = return_to_rest_pose(
+                    robot.bus,
+                    _bus_keyed(frame0, robot.bus),
+                    abort_event=_stop_event,
+                    label="follower arm",
+                    normalize=True,
+                    tolerance=EASE_ARRIVE_TOLERANCE,
+                    stall_min_progress=EASE_STALL_MIN_PROGRESS,
+                )
+            else:
+                arrived, reason = _ease_in_maker(robot, frame0, _stop_check)
             if not arrived and reason != "cut-short":
                 with _state_lock:
                     _replay_meta["phase"] = "error"
@@ -444,7 +631,12 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
                 # 400 profile cap throttling the ENTIRE playback (slow but
                 # accurate-looking, with nothing in the UI to say why). Re-clear and
                 # verify here so playback can never inherit the ease-in's cap.
-                _ensure_uncapped(robot, "follower arm")
+                # Feetech only: the ease-in above stamps a RAM Goal_Velocity
+                # profile cap that must not survive into playback. The Maker
+                # ease-in writes no such register — it borrows the arm's own
+                # startup sync — so there is nothing to clear.
+                if feetech:
+                    _ensure_uncapped(robot, "follower arm")
 
                 with _state_lock:
                     _replay_meta["phase"] = "playing"
@@ -525,18 +717,29 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
         # Playback is over but the arm is still energized for the return —
         # a phase of this session, not idle yet.
         notify_session_changed("replay", True, phase=_replay_meta.get("phase"))
-        return_to_rest_pose(robot.bus, start_pose, label="follower arm")
+        if feetech:
+            return_to_rest_pose(robot.bus, start_pose, label="follower arm")
     except Exception as e:
         logger.error(f"Replay worker error: {e}")
         with _state_lock:
             _replay_meta["phase"] = "error"
             _replay_meta["error"] = str(e)
     finally:
-        force_disable_torque(robot, "follower arm")
-        try:
-            robot.bus.disconnect(disable_torque=False)
-        except Exception as e:
-            logger.warning(f"Could not disconnect the follower after replay: {e}")
+        if feetech:
+            force_disable_torque(robot, "follower arm")
+            try:
+                robot.bus.disconnect(disable_torque=False)
+            except Exception as e:
+                logger.warning(f"Could not disconnect the follower after replay: {e}")
+        else:
+            release_maker_torque(robot, "Maker follower arm")
+            try:
+                # disconnect() (not bus.disconnect(disable_torque=False)):
+                # MakerFollower.disconnect honours disable_torque_on_disconnect,
+                # and a torque-off settle is this arm's documented safe state.
+                robot.disconnect()
+            except Exception as e:
+                logger.warning(f"Could not disconnect the Maker follower after replay: {e}")
         with _state_lock:
             replay_active = False
             if _replay_meta.get("phase") not in ("error",):

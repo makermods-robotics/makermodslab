@@ -54,3 +54,55 @@ def force_disable_bus_torque(bus, label: str = "device") -> list[str]:
     )
     logger.error(message)
     return [message]
+
+
+def release_maker_torque(device, label: str = "device") -> list[str]:
+    """Disable torque on a Maker device before disconnect, loudly on failure.
+
+    The Feetech path above cannot be reused: it walks each bus motor-by-motor
+    through Feetech register writes and a Dynamixel-style ``port_handler``,
+    neither of which a RobStride CAN bus has. RobStride exposes one
+    whole-bus ``disable_torque()`` instead, so that is what this calls.
+
+    The Star Arm 102 leader is skipped, and that is not an oversight: its
+    joints contain encoders and no motors, so it has no torque to disable and
+    its FashionStar bus handle has no ``disable_torque`` to call. That same
+    fact is why a Maker arm can never run a DAgger handover — see
+    ``arm_capabilities.supports_dagger``.
+
+    Returns a list of problem descriptions — empty when every bus released.
+    """
+    problems: list[str] = []
+    for bus in _maker_device_buses(device):
+        disable = getattr(bus, "disable_torque", None)
+        if disable is None:
+            continue  # the leader's FashionStar bus — nothing to release
+        try:
+            disable()
+        except Exception as e:
+            port = getattr(bus, "port", None) or "unknown port"
+            message = (
+                f"Failed to disable torque on the {label} ({port}): {e}. "
+                "TORQUE MAY STILL BE ENABLED — the arm can stay rigid; unplug its power to release it."
+            )
+            logger.error(message)
+            problems.append(message)
+    return problems
+
+
+def _maker_device_buses(device) -> list:
+    """The motor bus(es) of a device: ``.bus``, or both sub-arms' when bimanual.
+
+    A local copy of ``teleoperate._device_buses`` for the same reason the loop
+    above is a local copy of ``force_disable_torque`` — this module is imported
+    by teleoperate, so reaching back into it would close an import cycle.
+    """
+    if device is None:
+        return []
+    arms = [
+        arm
+        for arm in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
+        if arm is not None
+    ]
+    targets = arms if arms else [device]
+    return [target.bus for target in targets if getattr(target, "bus", None) is not None]

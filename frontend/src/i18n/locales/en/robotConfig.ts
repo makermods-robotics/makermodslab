@@ -109,6 +109,14 @@ export default {
       "Identify by hand — swing the arm's base wide to the left AND the right (10–15° past where it started, each way); the port that moves is assigned. Small wiggles won't register.",
     detectLive:
       "Swing the base of the arm wide — clearly past its starting point both left and right. A small or one-sided wiggle is ignored (that's how bumps are filtered out). The port that sees the motion will be assigned to this arm.",
+    // The Maker variants: its follower and leader answer different protocols
+    // (CAN vs UART), so detection asks each port what it is instead of asking
+    // the user to move something. Only a bimanual rig — two identical arms per
+    // side — still needs the gesture to tell left from right.
+    detectHelpMaker:
+      "Detected automatically — the Maker arm's follower and leader answer different protocols, so no gesture is needed. On a bimanual rig, swing one arm's base left AND right to say which side it is.",
+    detectLiveMaker:
+      "Checking each port for the Maker arm… If two arms answer for this side, swing the base of the one you're assigning wide — clearly past its starting point both left and right.",
     wiggle: "Wiggle",
     wiggling: "Wiggling…",
     wiggleTitle: "Move the gripper on this port to see which arm it is",
@@ -197,10 +205,24 @@ export default {
       idle: "Idle",
       connecting: "Connecting",
       recording: "Recording ranges",
+      // Zero-pose flow (Maker arm) only.
+      awaitingZero: "Waiting for zero pose",
+      saving: "Saving calibration",
       completed: "Completed",
       error: "Error",
       stopping: "Stopping",
       unknown: "Unknown",
+    },
+    // The Maker arm's zero-pose calibration. It has no range sweep — the arm's
+    // joint limits are fixed constants — so the whole flow is: torque off,
+    // pose the arm by hand, confirm.
+    zeroPose: {
+      instructions:
+        "Move the arm by hand to its zero pose — folded against the base, gripper fully open — then confirm below. Torque is off, so the arm moves freely.",
+      liveAngles: "Live joint angles",
+      start: "Set zero pose",
+      confirm: "Set zero and save",
+      saving: "Setting zero and saving the calibration…",
     },
     cancel: "Cancel calibration",
     auto: "Auto-calibrate",

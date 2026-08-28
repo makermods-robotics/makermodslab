@@ -223,7 +223,7 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("platform.system", lambda: "Windows")
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     request = record.RecordingRequest(
@@ -253,7 +253,7 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
 
     staged: dict = {}
 
-    def _fake_stage(base, leader_left, leader_right, follower_left, follower_right):
+    def _fake_stage(base, leader_left, leader_right, follower_left, follower_right, arm_type="so101"):
         staged.update(
             base=base,
             leader=(leader_left, leader_right),
@@ -1457,7 +1457,7 @@ def test_reset_phase_globals_reset_on_both_call_sites(
     monkeypatch.setattr(record, "_reset_loop_with_pause", _spy_reset_loop)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     call_count = [0]
@@ -1512,7 +1512,7 @@ def test_reset_phase_preamble_preserves_pause_armed_during_recording(
     monkeypatch.setattr(record, "_reset_loop_with_pause", _spy_reset_loop)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     monkeypatch.setattr(record.time, "time", lambda: 42.0)
 
@@ -1541,7 +1541,7 @@ def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobo
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
@@ -1557,7 +1557,7 @@ def test_record_refuses_eval_prefixed_repo_id(monkeypatch: pytest.MonkeyPatch, t
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     for repo_id in ("eval_ds", "tester/eval_ds"):
         bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
@@ -1574,7 +1574,7 @@ def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
@@ -1595,7 +1595,7 @@ def test_record_captures_pose_per_follower_excluding_gripper(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     positions = {
         "shoulder_pan": 1111,
@@ -1624,7 +1624,7 @@ def test_record_double_stop_skips_the_return(monkeypatch: pytest.MonkeyPatch, tm
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -1645,7 +1645,7 @@ def test_record_error_path_skips_return_and_releases(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -1667,7 +1667,7 @@ def test_stop_during_recording_phase_discards_episode_no_reset(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -1694,7 +1694,7 @@ def test_stop_wins_over_skip_when_both_set_in_same_episode(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -2445,7 +2445,7 @@ def test_create_record_config_resolves_cameras_from_the_robot_record(
     )
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     config = record.create_record_config(
@@ -2838,7 +2838,7 @@ def test_transient_connect_failure_retries_inside_the_reconnecting_phase(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 
@@ -2872,7 +2872,7 @@ def test_transient_connect_failure_gives_up_after_max_attempts(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 
@@ -2905,7 +2905,7 @@ def test_non_transient_connect_failure_tears_down_without_retrying(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 
@@ -2930,7 +2930,7 @@ def test_teleop_connect_failure_releases_both_devices(
     open for the rest of the process and the next session dies on the leak."""
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 

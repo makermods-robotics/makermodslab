@@ -48,7 +48,7 @@ import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { useRobots, RobotRecord, RobotMode } from "@/hooks/useRobots";
+import { useRobots, RobotRecord, RobotMode, ArmType } from "@/hooks/useRobots";
 import { ApiError } from "@/lib/apiClient";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
@@ -155,8 +155,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
 
   // Create → select (useRobots does this on success) → straight into the Robot
   // settings window so ports/calibration/cameras get configured (wireframe J1).
-  const handleCreate = async (name: string, mode: RobotMode) => {
-    const ok = await createRobot(name, mode);
+  const handleCreate = async (
+    name: string,
+    mode: RobotMode,
+    armType: ArmType,
+  ) => {
+    const ok = await createRobot(name, mode, armType);
     if (ok) {
       setCreateOpen(false);
       openSettings(name);

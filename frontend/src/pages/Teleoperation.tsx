@@ -16,6 +16,10 @@ const TeleoperationPage = () => {
   // it's bimanual.
   const { selectedRecord } = useRobots();
   const bimanual = selectedRecord?.mode === "bimanual";
+  // No Maker URDF ships yet, so a Maker session shows the live numeric joint
+  // readout in the viewer's place rather than animating the SO-101 model with
+  // a different arm's angles. See JointAngleReadout.
+  const readoutOnly = selectedRecord?.arm_type === "maker";
 
   // Stop teleoperation exactly once, however the user leaves, so the back
   // button, an in-app link, and the unmount safety net can't double-stop or
@@ -197,6 +201,7 @@ const TeleoperationPage = () => {
           onGoBack={handleGoBack}
           className="lg:w-full"
           bimanual={bimanual}
+          readoutOnly={readoutOnly}
           rightSlot={<TeleopCameraPanel />}
         />
       </div>

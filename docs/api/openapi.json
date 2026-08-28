@@ -1542,6 +1542,11 @@
       },
       "InferenceRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "camera_bindings": {
             "additionalProperties": {
               "type": "string"
@@ -2062,6 +2067,134 @@
           "message"
         ],
         "title": "LogLine",
+        "type": "object"
+      },
+      "MakerIdentifyArmRequest": {
+        "properties": {
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "required": [
+          "device_type"
+        ],
+        "title": "MakerIdentifyArmRequest",
+        "type": "object"
+      },
+      "MakerIdentifyArmResponse": {
+        "description": "maker_ports.identify_maker_arm_by_motion — which port saw the gesture.\n\n`port` is absent on failure rather than null, so the route excludes None.\n`skipped` lists ports that could not be opened (usually the other half of\nthe rig, which speaks a different protocol).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "skipped": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "MakerIdentifyArmResponse",
+        "type": "object"
+      },
+      "MakerProbePortsRequest": {
+        "properties": {
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "title": "MakerProbePortsRequest",
+        "type": "object"
+      },
+      "MakerProbePortsResponse": {
+        "description": "maker_ports.probe_maker_ports — which ports answered which protocol.\n\nEvery list is always present (empty rather than absent) so a client can\nread them unconditionally; `message` is always a human-readable summary,\nincluding on the nothing-found path.",
+        "properties": {
+          "follower_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Follower Ports",
+            "type": "array"
+          },
+          "leader_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Leader Ports",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "unknown_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Ports",
+            "type": "array"
+          }
+        },
+        "required": [
+          "success",
+          "follower_ports",
+          "leader_ports",
+          "unknown_ports",
+          "message"
+        ],
+        "title": "MakerProbePortsResponse",
         "type": "object"
       },
       "MergeLogEntry": {
@@ -2789,6 +2922,11 @@
       },
       "OpenCalibrationFolderRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "device_type": {
             "title": "Device Type",
             "type": "string"
@@ -2921,6 +3059,11 @@
       },
       "RecordingRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "dataset_repo_id": {
             "title": "Dataset Repo Id",
             "type": "string"
@@ -3065,6 +3208,11 @@
       },
       "ReplayRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "episode_index": {
             "title": "Episode Index",
             "type": "integer"
@@ -3526,6 +3674,11 @@
       },
       "TeleoperateRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "follower_config": {
             "title": "Follower Config",
             "type": "string"
@@ -4445,6 +4598,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4481,6 +4644,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -4542,6 +4715,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4587,6 +4770,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -4636,6 +4829,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -4675,7 +4878,7 @@
     },
     "/api/v1/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status",
         "responses": {
           "200": {
@@ -4746,7 +4949,7 @@
     },
     "/api/v1/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step",
         "responses": {
           "200": {
@@ -6439,6 +6642,90 @@
         ]
       }
     },
+    "/api/v1/maker/identify-arm": {
+      "post": {
+        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes.",
+        "operationId": "identify_maker_arm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerIdentifyArmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerIdentifyArmResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Identify Maker Arm",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/maker/probe-ports": {
+      "post": {
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nThe Maker rig's two halves speak different protocols on different adapters\n(RobStride over CAN vs FashionStar over UART), so unlike the SO-101 this\nneeds NO gesture from the user — asking each port which protocol answers is\nenough. Strictly read-only: no torque, no register writes, no zero set.",
+        "operationId": "probe_maker_arm_ports",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerProbePortsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerProbePortsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Probe Maker Arm Ports",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/models": {
       "get": {
         "description": "List trained models available to the user — local runs + Hub repos.\n\nEach entry carries a `source` field: \"local\", \"hub\", or \"both\" (a local run\nthat was also pushed to the Hub). Mirrors GET /datasets.",
@@ -7663,7 +7950,7 @@
     },
     "/api/v1/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration",
         "requestBody": {
           "content": {
@@ -7843,7 +8130,7 @@
     },
     "/api/v1/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration",
         "responses": {
           "200": {
@@ -8505,6 +8792,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8541,6 +8838,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -8602,6 +8909,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8647,6 +8964,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -8696,6 +9023,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -8735,7 +9072,7 @@
     },
     "/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status_calibration_status_get",
         "responses": {
           "200": {
@@ -8806,7 +9143,7 @@
     },
     "/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step_complete_calibration_step_post",
         "responses": {
           "200": {
@@ -11458,7 +11795,7 @@
     },
     "/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration_start_calibration_post",
         "requestBody": {
           "content": {
@@ -11638,7 +11975,7 @@
     },
     "/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration_stop_calibration_post",
         "responses": {
           "200": {

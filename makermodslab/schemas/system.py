@@ -42,6 +42,8 @@ __all__ = [
     "HfLoginResponse",
     "InstallStartResponse",
     "InstallStatusResponse",
+    "MakerIdentifyArmResponse",
+    "MakerProbePortsResponse",
     "PolicyExtraStatus",
     "PolicyOptimizerDefaultsResponse",
     "PolicyOptimizerPreset",
@@ -175,3 +177,32 @@ class PolicyOptimizerDefaultsResponse(BaseModel):
 
     defaults: dict[str, PolicyOptimizerPreset | None]
     available: dict[str, bool]
+
+
+class MakerProbePortsResponse(BaseModel):
+    """maker_ports.probe_maker_ports — which ports answered which protocol.
+
+    Every list is always present (empty rather than absent) so a client can
+    read them unconditionally; `message` is always a human-readable summary,
+    including on the nothing-found path.
+    """
+
+    success: bool
+    follower_ports: list[str]
+    leader_ports: list[str]
+    unknown_ports: list[str]
+    message: str
+
+
+class MakerIdentifyArmResponse(BaseModel):
+    """maker_ports.identify_maker_arm_by_motion — which port saw the gesture.
+
+    `port` is absent on failure rather than null, so the route excludes None.
+    `skipped` lists ports that could not be opened (usually the other half of
+    the rig, which speaks a different protocol).
+    """
+
+    success: bool
+    message: str
+    port: str | None = None
+    skipped: list[str] = []

@@ -63,6 +63,10 @@ export default {
     done: "Done",
     leftArm: "Left arm",
     rightArm: "Right arm",
+    // Shown in the 3D viewer's place on a Maker arm, which has no URDF yet.
+    jointAngles: "Live joint angles",
+    waitingForJoints: "Waiting for joint data…",
+    noMakerModel: "No 3D model is available for the Maker arm yet.",
   },
   urdf: {
     switchedDefaultTitle: "Switched to default model",
