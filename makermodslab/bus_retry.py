@@ -45,7 +45,19 @@ from lerobot.motors.motors_bus import MotorsBus
 # glitches without masking a genuinely disconnected arm, which fails all three.
 BUS_SYNC_READ_RETRIES = 2
 
-_original_sync_read = MotorsBus.sync_read
+# The true original, recovered rather than assumed.
+#
+# This line runs again on every re-import — uvicorn --reload does it, and so
+# does `importlib.reload`. If it simply read `MotorsBus.sync_read`, the second
+# run would capture OUR OWN patch as "the original" and every motor read would
+# recurse until the stack blew. The guard below used to be the only defence,
+# and it does not help: it prevents re-assignment, not re-capture, so the
+# damage was already done by the time it was evaluated.
+#
+# So the patch carries a reference to what it wrapped, and we prefer that over
+# whatever is currently installed.
+_installed = MotorsBus.sync_read
+_original_sync_read = getattr(_installed, "_bus_retry_original", _installed)
 
 
 def _sync_read_with_default_retries(
@@ -58,8 +70,11 @@ def _sync_read_with_default_retries(
     return _original_sync_read(self, data_name, motors, normalize=normalize, num_retry=num_retry)
 
 
-# Idempotent: the server re-imports its modules under uvicorn --reload, and
-# re-patching an already-patched method would make `_original_sync_read` point
-# at the patch and recurse.
-if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":
-    MotorsBus.sync_read = _sync_read_with_default_retries
+# Stashed so a later re-import can find its way back to lerobot's own method
+# instead of wrapping this one.
+_sync_read_with_default_retries._bus_retry_original = _original_sync_read
+
+# Safe to assign unconditionally now that `_original_sync_read` is guaranteed to
+# be lerobot's method and never a previous copy of this patch. Re-importing
+# swaps one equivalent wrapper for another.
+MotorsBus.sync_read = _sync_read_with_default_retries

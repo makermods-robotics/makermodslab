@@ -44,7 +44,23 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   datasets: DatasetItem[];
-  onMerged: () => void;
+  /** Called when a merge finishes, with the repo id it produced. The argument
+   * lets a caller chain onward — a coaching handoff goes straight from here
+   * into the training panel with the merged dataset selected. */
+  onMerged: (outputRepoId?: string) => void;
+  /** Datasets to tick on open. The coaching handoff arrives with both halves
+   * already known — the corrections it just recorded, and the dataset the
+   * coached checkpoint was last trained on — and asking the operator to find
+   * two names in a list they were just shown is busywork with a wrong answer
+   * available (merging against the ORIGINAL demos rather than the fine-tuning
+   * set is easy to do and hard to notice). */
+  initialSources?: string[];
+  /** Output name to prefill alongside them. */
+  initialOutput?: string;
+  /** Mirrors the running merge's state to the caller, so a parent holding a
+   * coaching handoff can tell "the operator closed this" from "the operator
+   * closed this while a merge they started is still running". */
+  onStatusChange?: (status: MergeStatus | null) => void;
 }
 
 const POLL_MS = 1500;
@@ -66,6 +82,9 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   onOpenChange,
   datasets,
   onMerged,
+  initialSources,
+  initialOutput,
+  onStatusChange,
 }) => {
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -88,22 +107,32 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   } | null>(null);
   const logBoxRef = useRef<HTMLDivElement>(null);
   const notifiedDone = useRef(false);
+  // The name the running merge is writing to, captured at start. Read when it
+  // completes: `output` is still editable while the merge runs, so reading the
+  // live state then could report a name that was never created.
+  const mergedOutputRef = useRef<string | null>(null);
 
   // Reset on open, and re-attach to an already-running merge (survives closing
   // the dialog / reloading the page) by seeding from the backend.
   useEffect(() => {
     if (!open) return;
-    setSelected(new Set());
+    // A prefill only seeds the form — everything stays editable, and reopening
+    // without one clears back to empty rather than resurrecting a stale pick.
+    setSelected(new Set(initialSources ?? []));
     setWeights({});
     // Dropped rather than kept across opens: recording or deleting episodes
     // between opens would leave a stale mix preview on screen.
     setInfos({});
-    setOutput("");
+    setOutput(initialOutput ?? "");
     setStartError(null);
     notifiedDone.current = false;
     getDatasetMergeStatus(baseUrl, fetchWithHeaders)
       .then((s) => setStatus(s.state === "running" ? s : null))
       .catch(() => setStatus(null));
+    // Seeding is an ON-OPEN action. Re-running it whenever the caller
+    // re-creates the prefill array would wipe edits the operator has already
+    // made to the selection, which is why the deps stay narrow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, baseUrl, fetchWithHeaders]);
 
   // Fetch dataset info: for the mix preview's episode counts, and — once an
@@ -162,7 +191,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         );
         if (s.state === "done" && !notifiedDone.current) {
           notifiedDone.current = true;
-          onMerged();
+          onMerged(mergedOutputRef.current ?? undefined);
         }
       } catch {
         // transient — retry next tick
@@ -170,6 +199,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     }, POLL_MS);
     return () => clearInterval(id);
   }, [open, status?.state, baseUrl, fetchWithHeaders, onMerged]);
+
+  const statusChangeRef = useRef(onStatusChange);
+  statusChangeRef.current = onStatusChange;
+  useEffect(() => {
+    statusChangeRef.current?.(status);
+  }, [status]);
 
   useEffect(() => {
     if (logBoxRef.current)
@@ -349,6 +384,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     setStartError(null);
     setDropPrompt(null);
     try {
+      mergedOutputRef.current = effectiveOutput;
       const res = await startDatasetMerge(
         baseUrl,
         fetchWithHeaders,

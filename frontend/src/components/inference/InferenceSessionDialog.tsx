@@ -6,6 +6,7 @@ import {
   Loader2,
   Pause,
   Play,
+  GitMerge,
   GraduationCap,
   RotateCcw,
   Square,
@@ -19,6 +20,8 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   CoachingPhase,
   CoachingState,
+  coachStateIsNewer,
+  pickCoachingState,
   EpisodeResult,
   InferenceStatus,
   InferenceLogOwner,
@@ -44,6 +47,7 @@ import { useUnloadWarning } from "@/hooks/useUnloadWarning";
 import { ApiError } from "@/lib/apiClient";
 import { stopSession } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
+import type { CoachingLineage } from "@/contexts/InferenceSessionContext";
 import { useCoachingStateSignal } from "@/hooks/useCoachingStateSignal";
 import { useCoachingCues } from "@/hooks/useCoachingCues";
 
@@ -149,19 +153,13 @@ const COACH_BANNER_PARKED = {
   bg: "bg-ok/10",
 };
 
-// The two halves of a takeover. Both are `correcting` to lerobot — human on the
-// leader, every frame recording — and both are the LOUDEST thing on the display
-// for that reason. They differ only in the instruction, which is the point:
-// RaC (arXiv:2509.07953) gets its data efficiency from the operator treating
-// recovery and correction as separate jobs, and they will not do that if the
-// screen calls both of them the same thing.
-const COACH_BANNER_RECOVERING = {
-  titleKey: "inference.coachBanner.recovering.title",
-  hintKey: "inference.coachBanner.recovering.hint",
-  accent: "text-destructive-foreground border-destructive",
-  bg: "bg-destructive",
-};
-
+// Shown ONLY once the operator has marked the recovery boundary, i.e. only when
+// they have told us this takeover had a rescue in it. It used to be the other
+// way round — RECOVERING was the default and this was reachable only after
+// pressing G — which meant every operator who had not adopted the gesture was
+// told, on the largest element on screen, to rewind an arm that needed no
+// rewinding. RaC's decomposition is worth surfacing, but it is a claim the
+// OPERATOR makes; the UI must not make it on their behalf.
 const COACH_BANNER_CORRECTING = {
   titleKey: "inference.coachBanner.correcting2.title",
   hintKey: "inference.coachBanner.correcting2.hint",
@@ -240,7 +238,12 @@ const InferenceSessionDialog: React.FC<{
   /** Called for every exit — closes the dialog, landing back where the run
    * was launched from. */
   onExit: () => void;
-}> = ({ sessionId, onExit }) => {
+  /** Coaching only: which skill is being coached and what it was trained on,
+   * so the end-of-session summary can offer the merge + fine-tune rather than
+   * describe it. Null for a plain run or an eval, and null for a coaching
+   * session whose page was reloaded mid-run — see CoachingLineage. */
+  coachingLineage?: CoachingLineage | null;
+}> = ({ sessionId, onExit, coachingLineage }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio, deployPrefill } = useStudio();
   const { toast } = useToast();
@@ -256,10 +259,12 @@ const InferenceSessionDialog: React.FC<{
   // double-click can't fire "succeeded" or "next episode" twice.
   const [endingEpisode, setEndingEpisode] = useState(false);
   const [startingNext, setStartingNext] = useState(false);
-  // Coaching only: one in-flight guard for all five controls. They are mutually
-  // exclusive transitions of a single state machine, so a second command sent
-  // while the first is still crossing the wire can only ever be one the runner
-  // will reject — better to hold the buttons for the ~50ms round trip.
+  // Coaching only: one in-flight guard for every coaching control. Most are
+  // mutually exclusive transitions of a single state machine, so a second
+  // command sent while the first is still crossing the wire can only ever be
+  // one the runner will reject — better to hold the buttons for the ~50ms round
+  // trip. (RECOVERED is an annotation rather than a transition, but shares the
+  // guard: double-marking a boundary is exactly as unwanted.)
   const [coachBusy, setCoachBusy] = useState(false);
   // What the operator just asked for, shown the instant they ask. The banner
   // TITLE stays server-truth — never claim who holds the arm before the runner
@@ -341,6 +346,16 @@ const InferenceSessionDialog: React.FC<{
         // blinking out on the first poll while the arm is still travelling.
         setStatus((prev) => {
           if (prev?.coaching_phase !== next.coaching_phase) setPendingAction(null);
+          // The poll REPLACES, and it carries a snapshot taken when the request
+          // was issued. A push that landed while it was in flight would be
+          // overwritten with older state — reverting the banner to "the policy
+          // is driving" while the leader is already gliding under torque, and
+          // firing the handback cue in the middle of a correction. Coaching
+          // fields therefore keep whichever version is newer, and the poll
+          // stays authoritative for everything else.
+          if (prev && coachStateIsNewer(prev, next)) {
+            return { ...next, ...pickCoachingState(prev) };
+          }
           return next;
         });
         // Surface the server's warn-but-allow arm-identity finding once.
@@ -547,6 +562,7 @@ const InferenceSessionDialog: React.FC<{
   const correctionSeconds = status?.correction_seconds ?? 0;
   const coachDataset = status?.coaching_dataset ?? null;
   const alignError = status?.align_error ?? null;
+  const discardNotice = status?.discard_notice ?? null;
   const attempts = status?.attempts ?? 0;
   const awaitingAttempt = status?.awaiting_attempt === true;
   // Null until the operator marks the recovery/correction boundary for the
@@ -564,7 +580,17 @@ const InferenceSessionDialog: React.FC<{
   // than replacing keeps every non-coaching field (elapsed, log offsets, the
   // hung-run watchdog's inputs) owned solely by the poll.
   const applyCoachingState = useCallback((coaching: CoachingState) => {
-    setStatus((prev) => (prev == null ? prev : { ...prev, ...coaching }));
+    setStatus((prev) => {
+      if (prev == null) return prev;
+      // Clearing the acknowledgement HERE as well as in the poll. It used to
+      // clear only when the poll was first to see a phase change — and once
+      // pushes started arriving first, the poll always found the phases equal
+      // and never cleared it. "Taking over…" then replaced the banner's
+      // instruction for the rest of the session, and the better the push
+      // worked the more reliably it stuck.
+      if (prev.coaching_phase !== coaching.coaching_phase) setPendingAction(null);
+      return { ...prev, ...coaching };
+    });
   }, []);
   useCoachingStateSignal(applyCoachingState, coachLive);
 
@@ -574,6 +600,7 @@ const InferenceSessionDialog: React.FC<{
   const lastCuedPhaseRef = useRef<CoachingPhase | null>(null);
   const lastCuedSavedRef = useRef<number | null>(null);
   const lastCuedAlignRef = useRef<string | null>(null);
+  const lastCuedDiscardRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!coachLive) {
@@ -582,6 +609,7 @@ const InferenceSessionDialog: React.FC<{
       lastCuedPhaseRef.current = null;
       lastCuedSavedRef.current = null;
       lastCuedAlignRef.current = null;
+      lastCuedDiscardRef.current = null;
       return;
     }
     // Control changed hands. These two are the cues that matter most: they say
@@ -610,20 +638,28 @@ const InferenceSessionDialog: React.FC<{
 
   useEffect(() => {
     if (!coachLive) return;
-    const notice = status?.align_error ?? null;
-    if (notice && notice !== lastCuedAlignRef.current) {
-      // Covers both notices that land in this slot: a refused takeover and a
-      // correction binned for being too short. Both mean "your last takeover
-      // produced nothing", which the operator will otherwise not notice at all.
-      playCue(notice.includes("discarded") ? "discarded" : "refused");
+    // Keyed on the FIELD, not on the message text. Choosing the cue by
+    // sniffing for the word "discarded" in backend prose meant a copy edit
+    // would silently downgrade the discard thud to the refusal beeps.
+    if (discardNotice && discardNotice !== lastCuedDiscardRef.current) {
+      playCue("discarded");
     }
-    lastCuedAlignRef.current = notice;
-  }, [coachLive, status?.align_error, playCue]);
+    lastCuedDiscardRef.current = discardNotice;
+  }, [coachLive, discardNotice, playCue]);
 
-  // One helper for all five controls: send, and let the next poll (≤1s) render
-  // the result. Nothing is optimistically applied to `coachPhase` — the runner
+  useEffect(() => {
+    if (!coachLive) return;
+    if (alignError && alignError !== lastCuedAlignRef.current) playCue("refused");
+    lastCuedAlignRef.current = alignError;
+  }, [coachLive, alignError, playCue]);
+
+  // One helper for every coaching control: send, and let the runner's own push
+  // render the result — the backend emits the new coaching state the instant it
+  // changes (see useCoachingStateSignal), with the 1 Hz poll behind it as the
+  // reconciler. Nothing is optimistically applied to `coachPhase`: the runner
   // owns the phase, and a browser that painted "you're driving" a beat before
   // the arm actually handed over would be lying at the one moment it matters.
+  // That is why the push mattered — it makes honesty cheap instead of slow.
   const sendCoachCommand = useCallback(
     async (
       send: (baseUrl: string, fetcher: typeof fetchWithHeaders) => Promise<unknown>,
@@ -728,6 +764,42 @@ const InferenceSessionDialog: React.FC<{
     );
   }, [sendCoachCommand, t]);
 
+  // Both halves of the merge have to be known for the one-click path to mean
+  // anything: the corrections we just recorded, and the dataset the coached
+  // checkpoint was last trained on. Missing either — a run launched outside the
+  // studio, or a page reloaded mid-session — falls back to the written
+  // instructions rather than offering a button that would guess.
+  const canHandOff = Boolean(
+    coachDataset && coachingLineage?.trainingDatasetRepoId && !datasetDeleted,
+  );
+
+  // Close the session, open the merge with both datasets ticked, and remember
+  // to open training on the result. The chaining lives in CollectPanel (which
+  // owns the merge dialog); this only states the intent. See MergePrefill.
+  //
+  // No navigate("/") despite the studio overlay living on Launchpad: lineage is
+  // only ever set by DeployPanel, which IS the studio, so a session that can
+  // reach this button was launched from there and is already on that route.
+  const handleMergeAndFinetune = useCallback(() => {
+    if (!canHandOff || !coachingLineage) return;
+    // Named after the TRAINING dataset, not the corrections. The merged result
+    // is the next training set — demos plus the rescues — so it belongs in that
+    // lineage, and inheriting the corrections' `rollout_` prefix would claim it
+    // came straight off a deployment when it did not. Still editable in the
+    // dialog.
+    const base =
+      coachingLineage.trainingDatasetRepoId!.split("/").pop() ?? "training";
+    onExit();
+    openStudio("collect", {
+      merge: {
+        sources: [coachingLineage.trainingDatasetRepoId!, coachDataset!],
+        suggestedOutput: `${base}_coached`,
+        finetuneBaseJobId: coachingLineage.jobId,
+        finetuneBaseName: coachingLineage.jobName,
+      },
+    });
+  }, [canHandOff, coachingLineage, coachDataset, onExit, openStudio]);
+
   // RaC: "the arm is back somewhere sane — the correction starts here."
   //
   // An intervention is two things wearing one name: first the operator rewinds
@@ -806,7 +878,13 @@ const InferenceSessionDialog: React.FC<{
     // while a command was in flight meant a press in that window was not even
     // seen — no preventDefault, so a bare space scrolled the dialog instead —
     // and the operator got silence from both their press and their retry.
-    if (!coachLive) return;
+    // Mounted for the whole coaching session INCLUDING startup, not just once
+    // the policy is driving. During the 10-30s load the only button on screen
+    // is Stop, and Radix autofocuses it — so an operator who has been taught
+    // that "space is the whole interaction" presses space at the arm and
+    // aborts the run before it begins. The commands themselves stay gated on
+    // `coachLive` below; what matters here is that the key is swallowed.
+    if (!coachMode) return;
     const onKey = (e: KeyboardEvent) => {
       // Never hijack typing. The dialog has no text inputs today, but a future
       // note field must not turn a space into a takeover.
@@ -820,14 +898,20 @@ const InferenceSessionDialog: React.FC<{
       }
       if (e.code === "Space") {
         // Always preventDefault: a bare space would otherwise also "click" the
-        // focused button, firing the command twice.
+        // focused button — during startup that button is Stop.
         e.preventDefault();
-        if (e.repeat) return; // held key must not fire a burst of takeovers
+        if (!coachLive) return; // nothing to take over from yet
         if (coachBusy) return; // one in flight; the ack line is already showing
         if (e.shiftKey) handleCoachHoldToggle();
         else handleCoachToggle();
         return;
       }
+      // `e.repeat` on every command key, not just Space. `coachBusy` is not a
+      // barrier — it clears after each ~50ms round trip — so a held key issues
+      // a continuous stream: repeated resets, each one an ease-home glide and
+      // an attempt increment, or repeated discards.
+      if (e.repeat) return;
+      if (!coachLive) return; // startup: keys are swallowed, not acted on
       if (e.key.toLowerCase() === "g" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         // "Good state reached." Only meaningful mid-correction; the backend
         // ignores it everywhere else and ignores a second press within one
@@ -890,6 +974,7 @@ const InferenceSessionDialog: React.FC<{
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [
+    coachMode,
     coachLive,
     coachBusy,
     coachPhase,
@@ -1089,11 +1174,15 @@ const InferenceSessionDialog: React.FC<{
                 const banner = !coachPhase
                   ? COACH_BANNER_STARTING
                   : awaitingAttempt && coachPhase === "paused"
-                    ? COACH_BANNER_PARKED
-                    : coachPhase === "correcting"
-                      ? recoveryMarkedAt == null
-                        ? COACH_BANNER_RECOVERING
-                        : COACH_BANNER_CORRECTING
+                    ? // An unknown outcome (older runner) takes the cautious
+                      // branch: never promise a limp arm we cannot confirm.
+                      resetHomed === false
+                      ? COACH_BANNER_PARKED_STUCK
+                      : resetLimp === false || resetLimp == null
+                        ? COACH_BANNER_PARKED_RIGID
+                        : COACH_BANNER_PARKED
+                    : coachPhase === "correcting" && recoveryMarkedAt != null
+                      ? COACH_BANNER_CORRECTING
                       : COACH_BANNER[coachPhase];
                 return (
                   <div
@@ -1121,6 +1210,15 @@ const InferenceSessionDialog: React.FC<{
             {/* A refused takeover. Not an error state — the session is fine and
                 the operator just has to move the leaders nearer before trying
                 again — so it sits inline rather than taking over the dialog. */}
+            {/* A correction the operator did NOT ask to lose. Its own slot, and
+                its own colour: a refused takeover is "try again", this is
+                "your work is gone and here is how to avoid it next time". */}
+            {coachLive && discardNotice && (
+              <div className="mb-4 rounded-lg border border-warn/40 bg-warn/10 p-3">
+                <p className="text-sm leading-relaxed text-warn">{discardNotice}</p>
+              </div>
+            )}
+
             {coachLive && alignError && (
               <div className="mb-4 rounded-lg border border-warn/40 bg-warn/10 p-3">
                 <p className="text-sm leading-relaxed text-warn">{alignError}</p>
@@ -1217,14 +1315,53 @@ const InferenceSessionDialog: React.FC<{
                         })
                       )}
                     </p>
-                    <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                      {/* <0> emphasises "last" — the whole point of the
-                          sentence, and the mistake it exists to prevent. */}
-                      <Trans
-                        i18nKey="inference.coach.summaryNextSteps"
-                        components={[<em key="0" />]}
-                      />
-                    </p>
+                    {/* The handoff. Corrections are worth nothing on their
+                        own — they have to be merged with what the checkpoint
+                        was last trained on and the checkpoint fine-tuned on the
+                        result, and TrainPanel takes exactly one dataset, so the
+                        merge is mandatory rather than an optimisation. This
+                        used to be a paragraph of prose with no buttons, which
+                        put the entire payoff of the feature behind a manual
+                        chore the UI didn't help with. */}
+                    {canHandOff ? (
+                      <>
+                        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                          {/* <0> is the dataset name — data, emphasised. */}
+                          <Trans
+                            i18nKey="inference.coach.handoffNext"
+                            values={{
+                              dataset:
+                                coachingLineage?.trainingDatasetRepoId ?? "",
+                            }}
+                            components={[<strong key="0" className="break-all" />]}
+                          />
+                        </p>
+                        <Button
+                          onClick={handleMergeAndFinetune}
+                          className="mt-3 w-full font-semibold"
+                        >
+                          <GitMerge className="mr-2 h-4 w-4" />
+                          {t("inference.coach.handoffAction")}
+                        </Button>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {t("inference.coach.handoffHint")}
+                        </p>
+                      </>
+                    ) : (
+                      /* No lineage: either this wasn't launched from a skill in
+                         this browser session, or the page was reloaded and the
+                         handoff state went with it. The corrections are on disk
+                         and mergeable by hand, so say how rather than offering
+                         a button that can't know both halves. */
+                      <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                        {/* <0> emphasises "last" — the whole point of the
+                            sentence, and the mistake it exists to prevent. */}
+                        <Trans
+                          i18nKey="inference.coach.summaryNextSteps"
+                          components={[<em key="0" />]}
+                        />
+                      </p>
+                    )}
                   </>
                 ) : (
                   <p className="text-sm leading-relaxed text-warn">

@@ -989,7 +989,23 @@ const DeployPanel: React.FC = () => {
       });
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
-      openInferenceSession(session.id);
+      // Coaching only: hand the session what it needs to offer the merge +
+      // fine-tune when it ends. A plain run or an eval produces no dataset and
+      // has nothing to hand on. See CoachingLineage.
+      openInferenceSession(
+        session.id,
+        runMode === "coach" && jobId
+          ? {
+              jobId,
+              jobName: selectedJob?.name ?? undefined,
+              trainingDatasetRepoId:
+                selectedJob?.config?.dataset_repo_id &&
+                selectedJob.config.dataset_repo_id !== "(imported)"
+                  ? selectedJob.config.dataset_repo_id
+                  : undefined,
+            }
+          : null,
+      );
       if (!hasSeenDeployMilestone) {
         setDeployMilestonePending(true);
         markDeployMilestoneSeen();

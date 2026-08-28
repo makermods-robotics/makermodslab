@@ -156,6 +156,20 @@ export interface InferenceStatus {
   // follower, with the offending joints named. Cleared on the next successful
   // phase change, so it always describes the LAST attempt, not a history.
   align_error?: string | null;
+  // Why the LAST correction produced nothing, when the operator did not ask for
+  // that. Its own field rather than align_error's: the runner emits a phase
+  // event on the line right after a discard, and every phase clears
+  // align_error, so a message parked there never survived to be rendered.
+  discard_notice?: string | null;
+  // Outcome of the last reset. null = unknown (older runner), which must be
+  // treated as "cannot promise the arm is safe to grab".
+  reset_homed?: boolean | null;
+  reset_limp?: boolean | null;
+  // Monotonic version of the coaching block, stamped by the backend. The same
+  // state reaches the browser twice — pushed the instant it changes, and polled
+  // once a second — and the poll replaces what it finds. Comparing this lets
+  // the newer of the two win instead of the later-arriving one.
+  coach_seq?: number | null;
   // RaC: frames into the CURRENT correction at which the operator marked
   // recovery complete, or null while unmarked. Live only — it describes the
   // takeover in progress and clears when the next one starts.
@@ -170,6 +184,41 @@ export interface InferenceStatus {
 // changes (see useCoachingStateSignal). Deliberately a subset of
 // InferenceStatus rather than a parallel type: the backend builds both from the
 // same `_coach_fields`, so a divergence here would be a bug in one of them.
+// The coaching fields, lifted off a status payload. Used to carry a newer
+// pushed block across a stale poll response — see coachStateIsNewer.
+export const COACHING_STATE_KEYS = [
+  "coaching",
+  "coaching_phase",
+  "corrections_saved",
+  "attempts",
+  "awaiting_attempt",
+  "corrections_target",
+  "correction_seconds",
+  "coaching_dataset",
+  "align_error",
+  "discard_notice",
+  "reset_homed",
+  "reset_limp",
+  "recovery_marked_at",
+  "corrections_labelled",
+  "coach_seq",
+] as const;
+
+/** True when `mine` holds a strictly newer coaching block than `incoming`. */
+export function coachStateIsNewer(
+  mine: { coach_seq?: number | null },
+  incoming: { coach_seq?: number | null },
+): boolean {
+  return (mine.coach_seq ?? 0) > (incoming.coach_seq ?? 0);
+}
+
+/** The coaching fields of a status payload, and nothing else. */
+export function pickCoachingState(from: InferenceStatus): Partial<InferenceStatus> {
+  const out: Record<string, unknown> = {};
+  for (const key of COACHING_STATE_KEYS) out[key] = from[key];
+  return out as Partial<InferenceStatus>;
+}
+
 export type CoachingState = Pick<
   InferenceStatus,
   | "coaching"
@@ -181,7 +230,11 @@ export type CoachingState = Pick<
   | "correction_seconds"
   | "coaching_dataset"
   | "align_error"
+  | "discard_notice"
+  | "reset_homed"
+  | "reset_limp"
   | "recovery_marked_at"
+  | "coach_seq"
   | "corrections_labelled"
 >;
 

@@ -141,6 +141,7 @@ from .dagger_protocol import (
     PHASE_SAVING,
     format_event,
 )
+from .torque import force_disable_bus_torque
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,19 @@ _EV_CORRECTION = "correction"
 # takeover is refused on a NON-ACTUATED teleop. See `_alignment_error` for why
 # only that case is gated, and why the number is what it is.
 _ALIGN_TOLERANCE_DEG = 15.0
+
+# How near the start pose the follower must actually BE before we cut its
+# torque. Same key space and same units as `_ALIGN_TOLERANCE_DEG` (the robot's
+# normalized action space), deliberately looser: this only has to establish
+# "the arm came home and is therefore in a pose it can hold unpowered", not
+# "the arm is precisely positioned".
+#
+# It exists because upstream's `_return_to_initial_position` CANNOT report
+# failure — it wraps its whole body in `except Exception: logger.warning(...)`
+# and performs no arrival check — so the reset's `homed` flag was previously
+# always True and the guard around going limp was unreachable code. A dropped
+# serial reply mid-glide left the arm extended, and torque was cut anyway.
+_HOME_TOLERANCE = 8.0
 
 # Shortest correction worth keeping, in recorded frames (~0.33s at 30fps).
 #
@@ -447,22 +461,39 @@ class WebDAggerStrategy(DAggerStrategy):
     def _go_limp(self, ctx) -> bool:
         """Unpower the follower so it can be repositioned by hand. True if it went.
 
-        Callers MUST have driven the arm somewhere safe first. An SO-101 that
-        loses torque mid-reach falls under its own weight, so this is only ever
-        called after a successful ease-home — the same order `rest_pose` states
-        as its contract ("torque must still be enabled; call BEFORE
-        force_disable_torque")."""
+        Callers MUST have driven the arm somewhere safe first, and must have
+        VERIFIED it got there — see `_ease_home`. An SO-101 that loses torque
+        mid-reach falls under its own weight.
+
+        Routed through `torque.force_disable_bus_torque` rather than the bus's
+        own `disable_torque`, because that method walks its motors with no
+        exception handling: the first failed write raises with the earlier
+        motors ALREADY released, which is a half-collapsed arm. The shared
+        helper goes motor by motor and reports which ones failed instead — it
+        exists in this repo for exactly this hazard.
+
+        `self._limp` is set whenever a release was ATTEMPTED, not only when it
+        fully succeeded. It gates `_restore_torque`, and an arm with some
+        motors released must still be re-powered later; the old code returned
+        early on failure without setting it, which left those motors dead for
+        the rest of the session."""
         buses = self._follower_buses(ctx.hardware.robot_wrapper)
         if not buses:
             logger.warning("No follower bus found; leaving the arm powered")
             return False
-        for bus in buses:
-            try:
-                bus.disable_torque()
-            except Exception:
-                logger.exception("Could not release torque; the arm stays powered")
-                return False
         self._limp = True
+        problems: list[str] = []
+        for index, bus in enumerate(buses):
+            label = f"follower[{index}]" if len(buses) > 1 else "follower"
+            problems.extend(force_disable_bus_torque(bus, label))
+        if problems:
+            # Not "the arm stays powered" — part of it very likely does not.
+            logger.error(
+                "Follower only partly released (%d motor(s) failed): %s",
+                len(problems),
+                "; ".join(problems),
+            )
+            return False
         logger.info("Follower is limp — reposition by hand")
         return True
 
@@ -485,12 +516,88 @@ class WebDAggerStrategy(DAggerStrategy):
                 robot.send_action(hold)
         except Exception:
             logger.exception("Could not read the arm's pose before re-powering")
+
+        if not hold:
+            # REFUSE to energize. Without a fresh goal write the servos come
+            # back on whatever Goal_Position they still hold — the pre-limp
+            # target — and the arm snaps from where the operator's hands left
+            # it to where the policy last wanted it. That is precisely the jerk
+            # this method exists to prevent, so failing to read the pose must
+            # not fall through to enabling torque anyway.
+            #
+            # `_limp` stays True: the arm is already unpowered, so leaving it
+            # unpowered changes nothing physically, and the next transition
+            # retries the whole sequence.
+            logger.error("Refusing to re-power the follower: its pose could not be read")
+            _emit(EVENT_ERROR, "Could not read the arm's pose, so it was left unpowered")
+            return None
+
+        failures = 0
         for bus in self._follower_buses(robot):
-            with contextlib.suppress(Exception):
+            try:
                 bus.enable_torque()
+            except Exception:
+                failures += 1
+                logger.exception("Could not re-enable torque on a follower bus")
+        if failures:
+            # Some motors may be live and some not; say so rather than
+            # reporting a clean re-power. `_limp` stays True so the next
+            # attempt tries again.
+            logger.error("Follower only partly re-powered (%d bus failure(s))", failures)
+            return None
         self._limp = False
         logger.info("Follower re-powered at its current pose")
         return hold
+
+    def _ease_home(self, ctx) -> bool:
+        """Drive the follower to its start pose and REPORT WHETHER IT ARRIVED.
+
+        Upstream's `_return_to_initial_position` cannot fail: every exception
+        inside it is caught and logged, and it never checks that the arm
+        followed the interpolation it sent. So calling it and testing for a
+        raised exception — which is what this code used to do — is a guard that
+        can never fire. Everything downstream of the reset trusts this answer,
+        including whether it is safe to cut torque, so it has to be measured.
+
+        Measured in the robot's own observation space rather than per-bus tick
+        space: `hardware.initial_position` is captured from an observation at
+        connect, so comparing a fresh observation against it needs no motor-name
+        mapping and no unit conversion."""
+        target = getattr(ctx.hardware, "initial_position", None)
+        if not target:
+            # Nothing to return to. Upstream would happily interpolate toward
+            # an empty dict for 3s and report nothing; that must not read as
+            # "the arm is home and safe to unpower".
+            logger.warning("No start pose was captured; treating the ease-home as failed")
+            return False
+
+        with contextlib.suppress(Exception):
+            self._return_to_initial_position(ctx.hardware)
+
+        try:
+            obs = ctx.hardware.robot_wrapper.get_observation()
+        except Exception:
+            logger.exception("Could not read the arm's pose after the ease-home")
+            return False
+
+        worst = 0.0
+        offenders = []
+        for key, want in target.items():
+            have = obs.get(key)
+            if have is None or not isinstance(want, (int, float)) or not isinstance(have, (int, float)):
+                # An unreadable joint is NOT an arrived joint. Skipping it here
+                # would let a fully unknown arm pass the check.
+                offenders.append(f"{key}:unreadable")
+                continue
+            delta = abs(float(want) - float(have))
+            worst = max(worst, delta)
+            if delta > _HOME_TOLERANCE:
+                offenders.append(f"{key.removesuffix('.pos')}:{delta:.0f}")
+        if offenders:
+            logger.warning("Ease-home did not arrive (worst %.0f): %s", worst, ", ".join(offenders))
+            return False
+        logger.info("Follower is home (worst joint %.0f from target)", worst)
+        return True
 
     # -- the alignment gate --------------------------------------------------
 
@@ -680,7 +787,11 @@ class WebDAggerStrategy(DAggerStrategy):
                             # the operator has already handed back — leaving the
                             # banner on "you're driving" for the duration is the
                             # same class of lie as the handover window.
-                            if not self._cancel_correction:
+                            # Only for a correction that is actually going to
+                            # be written. It used to fire before the length
+                            # check below too, so a nudge about to be binned
+                            # was announced as "Saving…" first.
+                            if not self._cancel_correction and correction_frames >= _MIN_CORRECTION_FRAMES:
                                 _emit(EVENT_PHASE, f"phase={PHASE_SAVING}")
                             seconds = time.perf_counter() - correction_started_at
                             if self._cancel_correction:
@@ -745,6 +856,18 @@ class WebDAggerStrategy(DAggerStrategy):
                                     f"labelled={'true' if marked else 'false'}",
                                 )
 
+                        # The correction is resolved — saved or binned — so the
+                        # counter that describes it must not survive into the
+                        # shutdown block, which branches on it to decide whether
+                        # there is an in-flight correction worth saving. Leaving
+                        # it set meant every session that ended after a normal
+                        # correction tried to save an already-flushed buffer and
+                        # logged a ValueError traceback as its last words.
+                        if old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
+                            correction_frames = 0
+                            self._recovery_frames = None
+                            self._recovery_mark_requested = False
+
                         _emit(EVENT_PHASE, f"phase={new_phase.value}")
 
                     # MakerMods Lab: an attempt at the TASK is over. Corrections-only
@@ -765,25 +888,34 @@ class WebDAggerStrategy(DAggerStrategy):
                         events.phase = DAggerPhase.PAUSED
                         _emit(EVENT_PHASE, f"phase={PHASE_RESETTING}")
                         logger.info("Attempt %d ended — easing the follower home", self._attempts)
-                        homed = True
-                        try:
-                            self._return_to_initial_position(ctx.hardware)
-                        except Exception:
-                            # A failed ease-home must not end the session: the
-                            # arm simply stays where it is and the operator can
-                            # reposition the scene around it.
-                            homed = False
-                            logger.exception("Return-to-initial-position failed; leaving the arm in place")
+                        # A failed ease-home must not end the session: the arm
+                        # stays where it is and the operator repositions the
+                        # scene around it. But it MUST be detected — see
+                        # `_ease_home`, which measures arrival instead of
+                        # relying on an exception upstream never raises.
+                        homed = self._ease_home(ctx)
                         # Limp ONLY from a pose we know is safe. If the ease-home
                         # did not arrive, the arm is somewhere arbitrary — quite
                         # possibly extended — and cutting torque there drops it.
+                        limp = False
                         if homed:
-                            self._go_limp(ctx)
+                            limp = self._go_limp(ctx)
                         else:
                             logger.warning("Skipping limp: the arm is not at its home pose")
                         last_action = None
                         self._needs_leader_align = True
-                        _emit(EVENT_ATTEMPT_RESET, f"n={self._attempts}")
+                        # Carry the OUTCOME, not just the count. Both failure
+                        # modes above leave an arm the operator must not be
+                        # told to grab: a failed ease-home leaves it mid-task
+                        # and rigid, a failed release leaves it rigid at home.
+                        # Emitting the same event for all three states is how
+                        # the UI came to say "limp, reposition freely" over an
+                        # arm holding six torqued servos.
+                        _emit(
+                            EVENT_ATTEMPT_RESET,
+                            f"n={self._attempts} homed={'true' if homed else 'false'} "
+                            f"limp={'true' if limp else 'false'}",
+                        )
                         _emit(EVENT_PHASE, f"phase={DAggerPhase.PAUSED.value}")
 
                     phase = events.phase
@@ -874,8 +1006,14 @@ class WebDAggerStrategy(DAggerStrategy):
                 # Deliberately no `return` in either branch: returning from a
                 # `finally` swallows the exception that brought us here, which
                 # is exactly the crash the operator needs reported.
-                if correction_frames < _MIN_CORRECTION_FRAMES:
-                    if correction_frames:
+                # An armed CANCEL outranks the frame count. The operator
+                # pressed discard and then stopped the session before the
+                # control loop reached the edge that consumes it; saving here
+                # would put the take they explicitly binned into the dataset.
+                if self._cancel_correction or correction_frames < _MIN_CORRECTION_FRAMES:
+                    if self._cancel_correction:
+                        logger.info("Dropping a discarded correction on shutdown, as asked")
+                    elif correction_frames:
                         logger.info(
                             "Dropping a %d-frame in-flight correction on shutdown (too short)",
                             correction_frames,
@@ -938,7 +1076,16 @@ def run(cfg: RolloutConfig) -> None:
     # The orchestrator has no other way to learn it (issue #3722 closed without
     # an opt-out) and must not reconstruct it by guessing the wall clock.
     if cfg.dataset is not None:
-        _emit(EVENT_DATASET, f"repo_id={cfg.dataset.repo_id} root={cfg.dataset.root}")
+        # `cfg.dataset.root` is the root the ORCHESTRATOR asked for, and it
+        # deliberately asks for none (so lerobot places the dataset under
+        # HF_LEROBOT_HOME/<stamped id>). lerobot never writes the resolved path
+        # back onto the config, so this used to put the literal string "None"
+        # on the wire — which the orchestrator then treated as a directory and
+        # created, filing the recovery sidecar under ./None/ beside the server.
+        # Read it off the dataset object, which is the only side that knows.
+        created = getattr(ctx.data, "dataset", None)
+        root = getattr(created, "root", None) if created is not None else None
+        _emit(EVENT_DATASET, f"repo_id={cfg.dataset.repo_id} root={root if root else ''}")
 
     logger.info(
         "Robot: %s | Teleop: %s | FPS: %.0f | Target corrections: %s",

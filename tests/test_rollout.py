@@ -3706,16 +3706,34 @@ def test_on_correction_saved_trusts_the_runner_count(monkeypatch) -> None:
     assert session.correction_seconds == pytest.approx(4.5)
 
 
-def test_on_dagger_dataset_records_the_stamped_name(monkeypatch) -> None:
+def test_on_dagger_dataset_records_the_stamped_name(monkeypatch, tmp_path) -> None:
     """The only place the app learns the real dataset name — it cannot be
     derived from what the operator typed."""
     from makermodslab import rollout
 
     session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
     monkeypatch.setattr(rollout, "_coach_session", session)
-    rollout._on_dagger_dataset({"repo_id": "rollout_shirt_fixes_20260818_120000", "root": "/cache/x"})
+    rollout._on_dagger_dataset(
+        {"repo_id": "rollout_shirt_fixes_20260818_120000", "root": str(tmp_path)}
+    )
     assert session.dataset_repo_id == "rollout_shirt_fixes_20260818_120000"
-    assert session.dataset_root == "/cache/x"
+    assert session.dataset_root == str(tmp_path)
+
+
+@pytest.mark.parametrize("raw", ["None", "none", "null", "", "/definitely/not/here"])
+def test_an_unusable_dataset_root_is_dropped_rather_than_believed(monkeypatch, raw) -> None:
+    """THE bug this guards. Coaching passes no `--dataset.root`, and lerobot
+    never writes the resolved path back to the config — so the runner used to
+    put the literal string "None" on the wire. It is non-empty and therefore
+    truthy, so it was stored, and `_atomic_write_text` CREATED a directory
+    called "None" beside the server rather than failing. Every recovery
+    boundary the operator marked went there instead of to the dataset."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_dagger_dataset({"repo_id": "rollout_x_20260819_120000", "root": raw})
+    assert session.dataset_root is None
 
 
 def test_coaching_terminal_payload_keeps_the_dataset_and_tally(monkeypatch) -> None:
@@ -4115,12 +4133,15 @@ def test_too_short_discard_tells_the_operator_their_work_was_binned(monkeypatch)
     rollout._on_correction_cancelled(
         {"reason": "too_short", "frames": "7", "seconds": "0.2", "minimum": "10"}
     )
-    assert session.align_error is not None
+    assert session.discard_notice is not None
     # Names the numbers, not just "discarded" — the operator has to be able to
     # work out how much longer to hold it.
-    assert "7 frames" in session.align_error
-    assert "10-frame" in session.align_error
-    assert "longer" in session.align_error
+    assert "7 frames" in session.discard_notice
+    assert "10-frame" in session.discard_notice
+    assert "longer" in session.discard_notice
+    # And it must NOT live in align_error, which the very next phase event
+    # clears — see test_the_discard_notice_survives_the_runners_own_event_order.
+    assert session.align_error is None
 
 
 def test_a_cancel_without_a_reason_is_treated_as_the_operator(monkeypatch) -> None:
@@ -4135,17 +4156,20 @@ def test_a_cancel_without_a_reason_is_treated_as_the_operator(monkeypatch) -> No
     assert session.align_error is None
 
 
-def test_the_too_short_notice_clears_on_the_next_phase_change(monkeypatch) -> None:
-    """It reads as "your last takeover", not as session history — same contract
-    as the alignment refusal it shares the slot with."""
+def test_the_too_short_notice_clears_only_when_the_next_takeover_begins(monkeypatch) -> None:
+    """It reads as "your last takeover", not as session history — but it must
+    outlive the `paused` event the runner emits immediately after the discard,
+    which is why it does not share `align_error`'s slot."""
     from makermodslab import rollout
 
     session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
     monkeypatch.setattr(rollout, "_coach_session", session)
     rollout._on_correction_cancelled({"reason": "too_short", "frames": "3", "minimum": "10"})
-    assert session.align_error is not None
+    assert session.discard_notice is not None
+    rollout._on_dagger_phase("paused")
+    assert session.discard_notice is not None, "wiped by the event that always follows it"
     rollout._on_dagger_phase("correcting")
-    assert session.align_error is None
+    assert session.discard_notice is None
 
 
 # --- The push channel --------------------------------------------------------
@@ -4191,7 +4215,7 @@ def test_every_coaching_handler_pushes(monkeypatch) -> None:
     rollout._on_attempt_reset({"n": "2"})
     assert len(pushes) == 4
     assert pushes[0]["corrections_saved"] == 1
-    assert pushes[1]["align_error"] is not None
+    assert pushes[1]["discard_notice"] is not None
     assert pushes[3]["attempts"] == 2
 
 
@@ -4384,3 +4408,106 @@ def test_an_unwritable_sidecar_never_fails_the_session(monkeypatch) -> None:
     session.dataset_root = "/definitely/not/a/directory/anywhere"
     session.rac_episodes = {0: {"recovery_frames": 1, "correction_frames": 2, "labelled": True}}
     rollout._write_rac_sidecar(session)  # must not raise
+
+
+# --- Real event ORDER, not handlers in isolation -----------------------------
+#
+# THE gap that let two features ship broken. Every other coaching test calls an
+# `_on_*` handler directly, which cannot see what the runner emits NEXT — and
+# what it emits next is a PHASE event, on the very same tick, after every
+# transition. A notice parked in a field that any phase clears is therefore
+# destroyed about a millisecond after it is written, with every unit test green.
+#
+# These drive `_handle_dagger_line` with the exact lines `dagger_runner` writes,
+# in the order it writes them. Pure string -> state, so squarely within the
+# tests/ policy.
+
+
+def _drive(lines: list[str]) -> None:
+    """Feed real protocol lines through the real dispatcher."""
+    from makermodslab import rollout
+    from makermodslab.dagger_protocol import EVENT_PREFIX
+
+    for payload in lines:
+        rollout._handle_dagger_line(f"{EVENT_PREFIX} {payload}")
+
+
+def test_the_discard_notice_survives_the_runners_own_event_order(monkeypatch) -> None:
+    """A too-short discard is followed immediately by `PHASE phase=paused`.
+
+    Before the notice had a field of its own, that one line wiped it and the
+    operator saw nothing at all — the exact bug the reason code was added to
+    fix, still unfixed, now with an invisible message."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_CORRECTING})
+
+    _drive(
+        [
+            "CORRECTION_CANCELLED reason=too_short frames=7 seconds=0.2 minimum=10",
+            "PHASE phase=paused",
+        ]
+    )
+    assert session.discard_notice is not None, "destroyed by the phase event that always follows"
+    assert "7 frames" in session.discard_notice
+
+
+def test_an_alignment_refusal_still_survives_its_own_sequence(monkeypatch) -> None:
+    """The refusal keeps `align_error` because that path sets `transition =
+    None` and emits no phase — the property the discard notice does NOT have,
+    which is why copying the pattern across was wrong."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    _drive(["ALIGN_REQUIRED max_delta=40 joints=shoulder_pan:40"])
+    assert session.align_error is not None
+
+
+def test_a_full_correction_cycle_leaves_a_consistent_tally(monkeypatch) -> None:
+    """Takeover, mark recovery, hand back, save — as the runner emits it."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    _drive(
+        [
+            "PHASE phase=correcting",
+            "RECOVERY_MARK frames=40",
+            "PHASE phase=saving",
+            "CORRECTION_SAVED n=1 frames=120 seconds=4.0 recovery=40 labelled=true",
+            "PHASE phase=paused",
+        ]
+    )
+    assert session.corrections_saved == 1
+    assert session.rac_episodes[0] == {
+        "recovery_frames": 40,
+        "correction_frames": 80,
+        "labelled": True,
+    }
+    # The live marker describes the correction in progress; a new takeover
+    # clears it, and there isn't one yet.
+    assert session.recovery_marked_at == 40
+
+
+def test_the_reset_outcome_reaches_the_session(monkeypatch) -> None:
+    """A failed ease-home and a failed release must be distinguishable from a
+    good reset — the UI tells the operator to grab the arm based on this."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    _drive(["ATTEMPT_RESET n=1 homed=false limp=false", "PHASE phase=paused"])
+    assert session.attempts == 1
+    assert session.reset_homed is False
+    assert session.reset_limp is False
+
+    _drive(["ATTEMPT_RESET n=2 homed=true limp=true", "PHASE phase=paused"])
+    assert session.reset_homed is True
+    assert session.reset_limp is True

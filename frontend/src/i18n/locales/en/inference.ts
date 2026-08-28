@@ -69,7 +69,7 @@ export default {
     },
     correcting: {
       title: "YOU'RE DRIVING",
-      hint: "Recovering and correcting — every frame is being recorded.",
+      hint: "Every frame is being recorded. If you had to rewind the arm first, press G when you reach a state the policy has seen — that splits the rescue from the correction.",
     },
     // Parked straight after a reset. Distinct from HELD because the
     // INSTRUCTION differs — "space to take over" here is what produced the
@@ -111,6 +111,12 @@ export default {
     offerWithGap: "Coach it — fix the {{percent}}% it got wrong",
     reset: "Task done — reset for next attempt",
     recovered: "Recovered — the correction starts here",
+    // The end-of-session handoff. <0> is the training dataset's name.
+    handoffNext:
+      "Next: merge these corrections with <0>{{dataset}}</0> — what this checkpoint was last trained on — then fine-tune it on the result. Training takes one dataset, so the merge isn't optional.",
+    handoffAction: "Merge & fine-tune",
+    handoffHint:
+      "Opens the merge with both datasets already chosen, then the training panel with this skill as the base.",
     startAttempt: "Start attempt {{attempt}}",
     takeOverInstead: "Take over instead",
     // Trailing separator included: it prefixes the recorded-time span.

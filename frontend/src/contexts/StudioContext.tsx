@@ -84,17 +84,38 @@ export interface TrainPrefill {
   resume?: ResumeSeed;
 }
 
+/** Opens the Collect panel's merge dialog with both halves already chosen,
+ * and remembers what to do once the merge finishes.
+ *
+ * Exists for the coaching handoff. A coaching session produces corrections that
+ * are worthless alone: they have to be merged with the dataset the coached
+ * checkpoint was last trained on, and the checkpoint fine-tuned on the result.
+ * `TrainPanel` takes exactly one dataset, so the merge is mandatory rather than
+ * an optimisation — which left the whole payoff of coaching behind a manual
+ * chore, described in prose, with no buttons.
+ *
+ * `finetuneBaseJobId` is what makes this a loop rather than a shortcut: when
+ * the merge completes, the Train panel opens with that skill as the fine-tune
+ * base and the merged dataset selected. Omitted ⇒ the merge stands alone. */
+export interface MergePrefill {
+  sources: string[];
+  suggestedOutput?: string;
+  finetuneBaseJobId?: string;
+  finetuneBaseName?: string;
+}
+
 interface StudioContextValue {
   open: boolean;
   activePanel: StudioPanel;
   deployPrefill: DeployPrefill | null;
   trainPrefill: TrainPrefill | null;
+  mergePrefill: MergePrefill | null;
   /** Open the studio overlay, optionally focusing a panel and seeding
    * prefills. The overlay lives on the Launchpad route — callers on other
    * routes must also navigate("/") after calling this. */
   openStudio: (
     panel?: StudioPanel,
-    opts?: { deploy?: DeployPrefill; train?: TrainPrefill },
+    opts?: { deploy?: DeployPrefill; train?: TrainPrefill; merge?: MergePrefill },
   ) => void;
   closeStudio: () => void;
   /** Training job whose monitor dialog is open over the studio (null = none).
@@ -108,6 +129,7 @@ interface StudioContextValue {
   setActivePanel: (panel: StudioPanel) => void;
   clearDeployPrefill: () => void;
   clearTrainPrefill: () => void;
+  clearMergePrefill: () => void;
   /** Collect's recording-form draft — see CollectFormState. */
   collectForm: CollectFormState;
   updateCollectForm: (patch: Partial<CollectFormState>) => void;
@@ -124,6 +146,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
     null,
   );
   const [trainPrefill, setTrainPrefill] = useState<TrainPrefill | null>(null);
+  const [mergePrefill, setMergePrefill] = useState<MergePrefill | null>(null);
   const [collectForm, setCollectForm] =
     useState<CollectFormState>(DEFAULT_COLLECT_FORM);
 
@@ -136,10 +159,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
   const openStudio = useCallback(
     (
       panel: StudioPanel = "collect",
-      opts?: { deploy?: DeployPrefill; train?: TrainPrefill },
+      opts?: { deploy?: DeployPrefill; train?: TrainPrefill; merge?: MergePrefill },
     ) => {
       if (opts?.deploy) setDeployPrefill(opts.deploy);
       if (opts?.train) setTrainPrefill(opts.train);
+      if (opts?.merge) setMergePrefill(opts.merge);
       setActivePanel(panel);
       setOpen(true);
     },
@@ -158,6 +182,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const clearDeployPrefill = useCallback(() => setDeployPrefill(null), []);
   const clearTrainPrefill = useCallback(() => setTrainPrefill(null), []);
+  const clearMergePrefill = useCallback(() => setMergePrefill(null), []);
 
   const value = useMemo(
     () => ({
@@ -165,6 +190,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
       activePanel,
       deployPrefill,
       trainPrefill,
+      mergePrefill,
       openStudio,
       closeStudio,
       monitorJobId,
@@ -173,6 +199,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
       setActivePanel,
       clearDeployPrefill,
       clearTrainPrefill,
+      clearMergePrefill,
       collectForm,
       updateCollectForm,
     }),
@@ -181,6 +208,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
       activePanel,
       deployPrefill,
       trainPrefill,
+      mergePrefill,
       openStudio,
       closeStudio,
       monitorJobId,
@@ -188,6 +216,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
       closeJobMonitor,
       clearDeployPrefill,
       clearTrainPrefill,
+      clearMergePrefill,
       collectForm,
       updateCollectForm,
     ],

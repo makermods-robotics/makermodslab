@@ -575,6 +575,28 @@ class _CoachSession:
     # follower; carries the joint deltas for the UI. Cleared on the next
     # successful phase change, so it reads as "your last attempt", not history.
     align_error: str | None = None
+    # Why the LAST correction produced nothing, when the operator did not ask
+    # for that. Deliberately NOT `align_error`: the runner emits a PHASE event
+    # on the very next line after a discard, and every phase clears
+    # `align_error`, so a message parked there was destroyed about a
+    # millisecond after it was written and never reached the operator at all.
+    # This one survives until the next takeover actually begins.
+    discard_notice: str | None = None
+    # Outcome of the LAST reset. None before any reset. These decide whether the
+    # UI may tell the operator to grab the arm: a failed ease-home leaves it
+    # mid-task and rigid, and a failed release leaves it rigid at home. Both
+    # used to emit the same event as a good reset, so the banner said "limp,
+    # reposition freely" over six torqued servos.
+    reset_homed: bool | None = None
+    reset_limp: bool | None = None
+    # Monotonic version of this session's coaching state, bumped every time a
+    # change is pushed. The browser gets the same block by two routes — a push
+    # the instant something changes, and a 1 Hz poll — and the poll REPLACES
+    # what it finds. A poll answered after a push, but built before it, would
+    # otherwise revert the banner to a stale phase in the one window where that
+    # is a lie about who is holding the arm. With a version on the block the
+    # browser can simply keep whichever it saw last.
+    seq: int = 0
     # A QUIT has been written and the runner is winding down. Suppresses crash
     # containment so an expected exit isn't reported as a failure.
     quitting: bool = False
@@ -620,10 +642,16 @@ def _push_coaching_state() -> None:
     queues, and a failure here must never take the pump down — the poll would
     still carry the state, just a second later."""
     callback = _on_coaching_state
+    with _state_lock:
+        cs = _coach_session
+        if cs is not None:
+            # Bumped even when nothing is wired to receive the push: the poll
+            # reports this number too, and it has to advance with the state
+            # rather than with the delivery mechanism.
+            cs.seq += 1
+        fields = _coach_fields(cs)
     if callback is None:
         return
-    with _state_lock:
-        fields = _coach_fields(_coach_session)
     with contextlib.suppress(Exception):
         callback(fields)
 
@@ -659,6 +687,10 @@ def _coach_fields(cs: _CoachSession | None) -> dict[str, Any]:
             "correction_seconds": None,
             "coaching_dataset": None,
             "align_error": None,
+            "discard_notice": None,
+            "reset_homed": None,
+            "reset_limp": None,
+            "coach_seq": 0,
             "recovery_marked_at": None,
             "corrections_labelled": None,
         }
@@ -672,6 +704,10 @@ def _coach_fields(cs: _CoachSession | None) -> dict[str, Any]:
         "correction_seconds": round(cs.correction_seconds, 1),
         "coaching_dataset": cs.dataset_repo_id,
         "align_error": cs.align_error,
+        "discard_notice": cs.discard_notice,
+        "reset_homed": cs.reset_homed,
+        "reset_limp": cs.reset_limp,
+        "coach_seq": cs.seq,
         "recovery_marked_at": cs.recovery_marked_at,
         # How many saved corrections carry an operator-marked recovery boundary.
         # Surfaced live so the habit is visible while it is still formable,
@@ -824,9 +860,7 @@ def _pump_runner_stdout(proc: subprocess.Popen, log_handle) -> None:
     finally:
         with contextlib.suppress(Exception):
             log_handle.close()
-        rc: int | None = None
-        with contextlib.suppress(Exception):
-            rc = proc.wait(timeout=_RUNNER_REAP_TIMEOUT_S)
+        rc = _reap_or_kill(proc, "eval")
         _handle_runner_exit(proc, rc)
 
 
@@ -959,7 +993,18 @@ def _pump_dagger_stdout(proc: subprocess.Popen, log_handle) -> None:
             except Exception:
                 pass
             try:
-                _handle_dagger_line(line)
+                # STALE-PUMP GUARD. `_handle_dagger_exit` refuses when it is no
+                # longer the live runner; the per-line handlers had no such
+                # check, and they mutate `_coach_session` by identity-free
+                # lookup. A pump still draining a stopped session's buffered
+                # teardown output would write its phases and tallies into the
+                # NEXT session — and now push them to the browser — telling the
+                # operator the arm had been handed over while the new session
+                # was still loading a checkpoint.
+                with _state_lock:
+                    live = _inference_proc is proc
+                if live:
+                    _handle_dagger_line(line)
             except Exception:
                 # One malformed event must not take the pump — and with it every
                 # remaining phase change — down with it. A frozen phase display
@@ -970,10 +1015,36 @@ def _pump_dagger_stdout(proc: subprocess.Popen, log_handle) -> None:
     finally:
         with contextlib.suppress(Exception):
             log_handle.close()
-        rc: int | None = None
-        with contextlib.suppress(Exception):
-            rc = proc.wait(timeout=_RUNNER_REAP_TIMEOUT_S)
+        rc = _reap_or_kill(proc, "coaching")
         _handle_dagger_exit(proc, rc)
+
+
+def _reap_or_kill(proc: subprocess.Popen, what: str) -> int | None:
+    """Wait for a runner that has closed its stdout, and reap the tree if it
+    will not go. Returns its exit code, or None only when it genuinely has none.
+
+    Stdout EOF is not the same event as process exit. A runner can close the
+    pipe and then sit in a slow `save_episode()`, a video encode, or a wedged
+    serial read — and the plain `suppress(Exception)` this replaces turned that
+    `TimeoutExpired` into `rc = None`, which every consumer downstream reads as
+    a clean exit (`not rc` is True). The session was then reported finished, the
+    mutex slot released and the `Popen` handle dropped, while the runner and the
+    image writers it forked kept holding /dev/video*. Nothing could reap them
+    afterwards, because nothing still had the handle — which is the orphan bug
+    `_terminate_tree` exists to prevent, reached by a path that bypassed it.
+
+    So: wait, and if it does not exit, kill the whole group and say so."""
+    with contextlib.suppress(Exception):
+        return proc.wait(timeout=_RUNNER_REAP_TIMEOUT_S)
+    logger.error(
+        "%s runner closed stdout but did not exit in %.0fs — reaping its process tree",
+        what,
+        _RUNNER_REAP_TIMEOUT_S,
+    )
+    _terminate_tree(proc)
+    with contextlib.suppress(Exception):
+        return proc.wait(timeout=_RUNNER_REAP_TIMEOUT_S)
+    return None
 
 
 def _handle_dagger_line(line: str) -> None:
@@ -1029,6 +1100,23 @@ def _on_dagger_ready() -> None:
     logger.info("Coaching session live after %.1fs of setup", setup_s)
 
 
+def _usable_dataset_root(raw: str | None) -> str | None:
+    """A dataset root we can actually write beside, or None.
+
+    Rejects the empty string, the literal "None"/"null" a stringified `None`
+    produces, and any path that is not an existing directory. The sidecar
+    writer is the only consumer and it must never invent a directory: a wrong
+    root does not fail loudly, it files the operator's recovery boundaries
+    somewhere nobody will look."""
+    if not raw or raw.strip().lower() in {"none", "null"}:
+        return None
+    with contextlib.suppress(OSError, ValueError):
+        if Path(raw).is_dir():
+            return raw
+    logger.warning("Ignoring an unusable dataset root from the runner: %r", raw)
+    return None
+
+
 def _on_dagger_dataset(fields: dict[str, str]) -> None:
     """Record the dataset name lerobot actually created.
 
@@ -1041,7 +1129,13 @@ def _on_dagger_dataset(fields: dict[str, str]) -> None:
         if cs is None:
             return
         cs.dataset_repo_id = fields.get("repo_id") or None
-        cs.dataset_root = fields.get("root") or None
+        # Defensive on BOTH ends. An older runner (or a lerobot that stops
+        # exposing `root`) puts the literal string "None" here, and every
+        # consumer of this field builds a path from it — `_atomic_write_text`
+        # would then CREATE a directory called "None" rather than fail. A root
+        # that is not an existing directory is worth nothing to us, so it is
+        # dropped rather than carried.
+        cs.dataset_root = _usable_dataset_root(fields.get("root"))
     logger.info("Coaching dataset: %s", fields.get("repo_id"))
 
 
@@ -1074,6 +1168,11 @@ def _on_dagger_phase(phase: str) -> None:
         # is most likely to glance at it.
         if phase == DAGGER_PHASE_CORRECTING:
             cs.recovery_marked_at = None
+            # The only phase that clears the discard notice. It has to outlive
+            # the `paused` event the runner emits immediately after a discard —
+            # that is the whole reason it does not share `align_error`'s slot —
+            # and the operator is done with it once they are driving again.
+            cs.discard_notice = None
         # Leaving the parked-after-reset state: any phase other than the two
         # the reset itself passes through means the operator has moved on.
         if phase not in (DAGGER_PHASE_PAUSED, DAGGER_PHASE_RESETTING):
@@ -1167,7 +1266,7 @@ def _on_correction_cancelled(fields: dict[str, str]) -> None:
     with _state_lock:
         cs = _coach_session
         if cs is not None:
-            cs.align_error = message
+            cs.discard_notice = message
     logger.warning("Correction discarded as too short (%s frames)", frames)
     _push_coaching_state()
 
@@ -1216,6 +1315,10 @@ def _on_attempt_reset(fields: dict[str, str]) -> None:
         with contextlib.suppress(ValueError, TypeError):
             cs.attempts = int(fields.get("n", cs.attempts + 1))
         cs.awaiting_attempt = True
+        # Absent from an older runner: treat unknown as "we cannot promise the
+        # arm is safe to grab" rather than defaulting to the reassuring answer.
+        cs.reset_homed = fields.get("homed") == "true" if "homed" in fields else None
+        cs.reset_limp = fields.get("limp") == "true" if "limp" in fields else None
         n = cs.attempts
     logger.info("Attempt %d reset — arm is home", n)
     _push_coaching_state()
@@ -2380,7 +2483,15 @@ def _launch_dagger_runner(
 # lerobot's teardown: the 3 s ease-home interpolation plus the bus and camera
 # disconnects. Escalating early would kill the arm mid-motion — the exact thing
 # the clean-shutdown command exists to avoid.
-_RUNNER_QUIT_TIMEOUT_S = 10.0
+#
+# It must also outlast the coaching runner's OWN save watchdog
+# (`dagger_runner._SAVE_WATCHDOG_S`, 30 s), because a Stop pressed during a
+# correction lands while `save_episode()` may still be encoding video. At 10 s
+# this budget expired first and SIGKILLed the runner mid-`finalize()`, leaving
+# the parquet footers unwritten — while the summary card cheerfully offered to
+# merge and fine-tune on a dataset that would not load. The two numbers are
+# cross-referenced deliberately: raise one and look at the other.
+_RUNNER_QUIT_TIMEOUT_S = 45.0
 
 
 def _send_runner_command(proc: subprocess.Popen | None, command: str) -> bool:
@@ -3629,7 +3740,14 @@ def handle_inference_status() -> dict[str, Any]:
                 # notices EOF first); `_finalise_coaching_locked` clears
                 # `_inference_proc`, so whichever path arrives second finds
                 # nothing left to finalise.
-                _finalise_coaching_locked(rc, _coach_session)
+                # `aborted=` matters as much here as on the pump's path: a
+                # poll that wins the race would otherwise report a session the
+                # operator stopped as having run to completion, and
+                # `_go_idle_locked` then clears the session so the stop handler
+                # can no longer correct the verdict.
+                _finalise_coaching_locked(
+                    rc, _coach_session, aborted=_coach_session.quitting and not rc
+                )
                 return {**_last_result, "shutting_down": shutting_down}
             if _eval_session is not None:
                 # Eval mode: episode boundaries arrive on the RUNNER's stdout,

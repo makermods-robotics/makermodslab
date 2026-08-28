@@ -270,11 +270,27 @@ def test_edges_with_no_motion_are_not_announced(strategy) -> None:
 
 
 class _FakeBus:
-    def __init__(self) -> None:
-        self.torque = True
+    """Shaped like a real `MotorsBus` for the parts the torque paths touch.
 
-    def disable_torque(self) -> None:
-        self.torque = False
+    `motors` and the per-motor `disable_torque(motor, num_retry=…)` signature
+    matter: `_go_limp` goes through `torque.force_disable_bus_torque`, which
+    walks motors one at a time precisely so one bad write cannot leave the rest
+    of the arm locked. A fake with a single all-or-nothing `disable_torque()`
+    could not express the partial failure that is the whole point."""
+
+    def __init__(self, fail_motors: set[str] | None = None) -> None:
+        self.torque = True
+        self.motors = {"shoulder_pan": None, "elbow_flex": None}
+        self.port = "/dev/fake"
+        self.released: list[str] = []
+        self._fail = fail_motors or set()
+
+    def disable_torque(self, motor=None, num_retry: int = 0) -> None:
+        if motor in self._fail:
+            raise RuntimeError(f"write failed on {motor}")
+        self.released.append(motor)
+        if set(self.released) >= set(self.motors):
+            self.torque = False
 
     def enable_torque(self) -> None:
         self.torque = True
@@ -318,6 +334,50 @@ def test_go_limp_releases_torque_and_restore_re_enables_it(strategy) -> None:
     assert robot.bus.torque is False
     strategy._restore_torque(ctx)
     assert robot.bus.torque is True
+
+
+def test_go_limp_goes_motor_by_motor(strategy) -> None:
+    """Routed through `force_disable_bus_torque` rather than the bus's own
+    `disable_torque`, whose loop aborts on the first failed write and leaves the
+    earlier motors already released — a half-collapsed arm."""
+    robot = _FakeRobot()
+    strategy._go_limp(_ctx_with(robot))
+    assert robot.bus.released == ["shoulder_pan", "elbow_flex"]
+
+
+def test_a_partial_release_reports_failure_but_still_arms_the_restore(strategy) -> None:
+    """The regression this exists for. One motor failing used to log "the arm
+    stays powered" — false, the others are already limp — return False, and
+    leave `_limp` False, so `_restore_torque` short-circuited for the rest of
+    the session and those motors were never re-energised."""
+    robot = _FakeRobot()
+    robot.bus._fail = {"elbow_flex"}
+    ctx = _ctx_with(robot)
+
+    assert strategy._go_limp(ctx) is False, "a partial release is not a success"
+    assert strategy._limp is True, "the restore must still run — some motors ARE released"
+    assert strategy._restore_torque(ctx) is not None
+    assert robot.bus.torque is True
+
+
+def test_restore_refuses_to_energize_when_the_pose_cannot_be_read(strategy) -> None:
+    """Without a fresh Goal_Position write the servos come back on their
+    pre-limp target, snapping the arm from where the operator's hands left it to
+    where the policy last wanted it. Failing the read must not fall through to
+    enabling torque anyway."""
+
+    class _BlindRobot(_FakeRobot):
+        def get_observation(self):
+            raise RuntimeError("bus read failed")
+
+    robot = _BlindRobot()
+    ctx = _ctx_with(robot)
+    strategy._go_limp(ctx)
+    robot.bus.torque = False
+
+    assert strategy._restore_torque(ctx) is None
+    assert robot.bus.torque is False, "torque was enabled with a stale goal"
+    assert strategy._limp is True, "still limp, so the next transition retries"
 
 
 def test_restore_writes_the_goal_before_re_enabling_torque(strategy) -> None:
@@ -387,15 +447,52 @@ def test_the_runner_applies_the_bus_read_retry_patch() -> None:
 
 def test_the_retry_patch_is_idempotent() -> None:
     """Re-importing must not make the saved original point at the patch and
-    recurse — the server re-imports its modules under uvicorn --reload."""
+    recurse — the server re-imports its modules under uvicorn --reload.
+
+    Asserts the WRAPPED FUNCTION, not the installed method's `__name__`. The
+    name is `_sync_read_with_default_retries` in the healthy case AND in the
+    recursive one, so the check this replaces passed while the module was
+    broken: the reload re-ran `_original_sync_read = MotorsBus.sync_read`, by
+    then already the patch, so every motor read would have recursed until the
+    stack blew — and the test left it that way for the rest of the session."""
     import importlib
 
     from lerobot.motors.motors_bus import MotorsBus
     from makermodslab import bus_retry
 
+    pristine = bus_retry._original_sync_read
+    assert pristine.__name__ == "sync_read", "the captured original is not lerobot's method"
+
     importlib.reload(bus_retry)
+
+    assert bus_retry._original_sync_read is pristine, (
+        "the reload re-captured the patch as its own original — calling sync_read "
+        "would now recurse forever"
+    )
+    assert bus_retry._original_sync_read.__name__ == "sync_read"
     assert MotorsBus.sync_read.__name__ == "_sync_read_with_default_retries"
     assert bus_retry.BUS_SYNC_READ_RETRIES >= 1
+
+
+def test_the_retry_patch_actually_forwards_to_lerobots_method() -> None:
+    """The wrapper must call through, and an explicit `num_retry` must win."""
+    from makermodslab import bus_retry
+
+    seen: list[dict] = []
+
+    def _fake_original(self, data_name, motors=None, *, normalize=True, num_retry=0):
+        seen.append({"data_name": data_name, "num_retry": num_retry})
+        return {"ok": True}
+
+    original = bus_retry._original_sync_read
+    bus_retry._original_sync_read = _fake_original
+    try:
+        assert bus_retry._sync_read_with_default_retries(object(), "Present_Position") == {"ok": True}
+        assert seen[-1]["num_retry"] == bus_retry.BUS_SYNC_READ_RETRIES
+        bus_retry._sync_read_with_default_retries(object(), "Present_Position", num_retry=0)
+        assert seen[-1]["num_retry"] == 0, "an explicit num_retry must not be overridden"
+    finally:
+        bus_retry._original_sync_read = original
 
 
 # --- RECOVERED: an annotation, not a transition ------------------------------

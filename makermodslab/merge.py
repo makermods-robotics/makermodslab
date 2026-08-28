@@ -255,6 +255,49 @@ def _merge_source_problem(repo_ids: list[str]) -> str | None:
 DROPPABLE_FEATURES = frozenset({"intervention"})
 
 
+def _looks_like_our_coaching_dataset(repo_id: str) -> bool:
+    """True when the `rollout_` prefix says WE produced this dataset.
+
+    That prefix is the only evidence available at this point, and it is the only
+    thing that makes the losslessness argument hold: our coaching runner refuses
+    `record_autonomous=true` (`dagger_runner.WebDAggerStrategy.run`) and writes
+    `intervention=True` on every frame it records, so the column really is
+    constant. It says nothing about a dataset from anywhere else."""
+    return repo_id.split("/", 1)[-1].startswith("rollout_")
+
+
+def _droppable_prompt(features: list[str], sources: list[str]) -> str:
+    """Ask to drop a column, claiming only what we can actually support.
+
+    The losslessness claim is TRUE for datasets this app produced and unfounded
+    for anything else. Upstream lerobot's DAgger has a `record_autonomous=true`
+    mode we refuse but do not own — a dataset recorded that way, or pulled from
+    the Hub, carries real provenance in `intervention`, and dropping it
+    relabels every autonomous frame as a human demonstration. Nothing here
+    opens a parquet, so the column's values are genuinely unknown; the honest
+    move is to say which case we are in rather than assert the reassuring one.
+    """
+    names = ", ".join(f"`{f}`" for f in features)
+    base = f"These datasets are identical apart from the {names} column, which only one of them has."
+    # Which source the column came from is not knowable here — nothing opens a
+    # parquet — so attribute it to the coaching dataset among the sources and
+    # NAME that attribution, so an operator merging something else can see the
+    # guess and catch it.
+    ours = [s for s in sources if _looks_like_our_coaching_dataset(s)]
+    if ours:
+        return (
+            f"{base} It comes from {', '.join(ours)}, a coaching session, where every frame "
+            "is a human correction — so the column is the same on all of them and drops "
+            "losslessly. Drop it and merge?"
+        )
+    return (
+        f"{base} None of these came from a coaching session here, so the column's values "
+        "have not been checked. If those frames are a mix of autonomous and human control, "
+        "dropping it makes them indistinguishable in the merged dataset. Your originals are "
+        "not modified. Drop it and merge?"
+    )
+
+
 def merge_droppable_features(repo_ids: list[str]) -> list[str]:
     """Allowlisted features present in SOME but not all sources.
 
@@ -601,13 +644,7 @@ class MergeManager:
                     return {
                         "started": False,
                         "droppable_features": unacknowledged,
-                        "message": (
-                            f"These datasets are identical apart from the "
-                            f"`{', '.join(unacknowledged)}` column, which only the coaching "
-                            "dataset has. Every frame in a coaching dataset is a human "
-                            "correction, so the column is the same on all of them and drops "
-                            "losslessly. Drop it and merge?"
-                        ),
+                        "message": _droppable_prompt(unacknowledged, sources),
                     }
                 logger.warning("Rejected merge: incompatible sources %s (%s)", sources, incompat)
                 return {"started": False, "message": incompat}

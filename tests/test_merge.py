@@ -773,3 +773,33 @@ def test_merge_start_ignores_an_unacknowledgeable_drop_request(tmp_lerobot_home:
     drop = [n for n in droppable if n in {"observation.images.wrist"}]
     assert drop == []
     assert _merge_incompatibility(["a/one", "a/two"], drop) is not None
+
+
+# --- The droppable-column prompt claims only what it can support --------------
+
+
+def test_the_prompt_claims_losslessness_only_for_our_own_coaching_datasets() -> None:
+    """`intervention` is constant only because OUR runner refuses
+    `record_autonomous=true`. A dataset from anywhere else can carry real
+    provenance in that column, and dropping it relabels every autonomous frame
+    as a human demonstration."""
+    from makermodslab.merge import _droppable_prompt
+
+    ours = _droppable_prompt(["intervention"], ["user/demos", "user/rollout_fixes_20260819"])
+    assert "losslessly" in ours
+
+    # The attribution is named, so a wrong guess is visible to the operator.
+    assert "user/rollout_fixes_20260819" in ours
+
+    foreign = _droppable_prompt(["intervention"], ["user/demos", "someone/hil_dataset"])
+    assert "losslessly" not in foreign
+    assert "indistinguishable" in foreign
+
+
+def test_a_bare_rollout_name_still_counts_as_ours() -> None:
+    """Coaching datasets are created without a namespace — see rollout.py."""
+    from makermodslab.merge import _looks_like_our_coaching_dataset
+
+    assert _looks_like_our_coaching_dataset("rollout_fixes_20260819_120000") is True
+    assert _looks_like_our_coaching_dataset("user/rollout_fixes_20260819_120000") is True
+    assert _looks_like_our_coaching_dataset("user/my_demos") is False
