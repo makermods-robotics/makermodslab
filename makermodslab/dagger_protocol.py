@@ -36,7 +36,12 @@ Commands — orchestrator → runner stdin, one bare word per line:
     RESUME    unfreeze, returning control to the policy
     RECOVERED mid-correction: "the arm is back somewhere sane, the correction
               starts here" — records a boundary, changes no phase (see below)
-    RESET     end this attempt: ease the follower home and park for a scene reset
+    RESET     end this attempt: ease the follower home and park for a scene reset.
+              Mid-correction it SAVES the correction in flight first — the
+              operator finishing the task while still driving has already
+              decided those frames are the correction.
+    RECOVER   as RESET, but valid mid-correction too: discards the correction in
+              flight first. The way out of a stuck takeover.
     QUIT      finalize the dataset, ease the arm home, disconnect, exit
 
 TAKEOVER and HANDBACK are COMPOSITE: each drives two of lerobot's phase
@@ -121,6 +126,14 @@ CMD_RESET = "RESET"
 # "I have the arm back somewhere sane; the correction starts here." Valid only
 # mid-correction, records a boundary, changes no phase. See the module docstring.
 CMD_RECOVERED = "RECOVERED"
+# The escape hatch. RESET refuses to act mid-correction on purpose — it will not
+# decide the fate of a part-recorded takeover — but that leaves no way out when a
+# correction is stuck: the leader is rigid, the follower holds, and every command
+# that could help is either phase-gated or would silently keep bad frames.
+# RECOVER is the operator saying "I don't care about these frames, get me out":
+# it discards the correction in flight, then runs the ordinary reset. Valid from
+# EVERY phase, which is the whole point of it.
+CMD_RECOVER = "RECOVER"
 CMD_QUIT = "QUIT"
 
 # Every command the runner accepts. The orchestrator validates against this
@@ -136,6 +149,7 @@ COMMANDS = frozenset(
         CMD_RESUME,
         CMD_RESET,
         CMD_RECOVERED,
+        CMD_RECOVER,
         CMD_QUIT,
     }
 )

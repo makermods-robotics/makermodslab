@@ -5625,6 +5625,28 @@
         ]
       }
     },
+    "/api/v1/coaching-recover": {
+      "post": {
+        "description": "Coaching mode only: get me out of here.\n\nThe same ease-home-and-park as /coaching-reset, but valid from EVERY phase\nincluding mid-correction, where it discards the correction in flight first.\n\nThat difference is the entire reason it exists. RESET refuses mid-correction\non purpose — it will not decide on the operator's behalf whether a\npart-recorded takeover is kept — but a correction can wedge (the leader is\nheld rigid, the follower holds its last commanded pose), and then every\ncommand that could help is either phase-gated or would silently keep frames\nthe operator has already given up on. This is the operator saying the frames\ndo not matter, put the arm somewhere safe.\n\nNot a substitute for discard: this one ALWAYS throws the correction away and\nALWAYS ends the attempt.",
+        "operationId": "coaching_recover",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Recover",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
     "/api/v1/coaching-recovered": {
       "post": {
         "description": "Coaching mode only: mark the end of RECOVERY inside the correction.\n\nAn intervention is two things wearing one name — first the operator rewinds\nthe arm back to a state the policy has actually seen, then they demonstrate\nthe behaviour that should follow. lerobot's own HIL guide names RaC\n(arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's\nentire claim rests on that decomposition; the strategy nonetheless records\nboth halves as one undifferentiated `intervention=True`.\n\nThis records the boundary out of band (a sidecar beside the dataset — see\ndagger_protocol) because the dataset's feature dict is assembled inside\nlerobot with no hook to add a column. It requests no phase change: recovery\nand correction are the same control mode.\n\nIgnored outside a correction, and ignored a second time within one — the\nfirst mark is the one the operator meant.",
@@ -5649,7 +5671,7 @@
     },
     "/api/v1/coaching-reset": {
       "post": {
-        "description": "Coaching mode only: end this ATTEMPT at the task and reset for the next.\n\nCorrections-only DAgger has no task-episode concept — an \"episode\" there is\none takeover — so this is what tells the session that the cube is finally in\nthe tray. The policy stops, the follower eases back to the pose captured at\nconnect, and the session parks so the scene can be rearranged. Nothing is\nwritten to the dataset: corrections are the only thing ever recorded.\n\nRefused mid-correction; hand back or discard first.",
+        "description": "Coaching mode only: end this ATTEMPT at the task and reset for the next.\n\nCorrections-only DAgger has no task-episode concept — an \"episode\" there is\none takeover — so this is what tells the session that the cube is finally in\nthe tray. The policy stops, the follower eases back to the pose captured at\nconnect, and the session parks so the scene can be rearranged. Nothing is\nwritten to the dataset: corrections are the only thing ever recorded.\n\nValid mid-correction, where it SAVES the correction in flight before\nresetting: an operator who finishes the task while still driving has\nalready decided those frames are the correction, and making them hand back\nand then reset as two presses let the policy briefly regain a finished\nscene in between. Use /coaching-recover for the opposite — discard, then\nreset.",
         "operationId": "coaching_reset",
         "responses": {
           "200": {

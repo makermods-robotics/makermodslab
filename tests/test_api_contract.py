@@ -231,6 +231,7 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/coaching-resume",
         "POST /api/v1/coaching-reset",
         "POST /api/v1/coaching-recovered",
+        "POST /api/v1/coaching-recover",
         # Node registry (multi-node): static/manual peer source.
         "GET /api/v1/nodes/{instance_id}/jobs/queue",
         "DELETE /api/v1/nodes/{instance_id}",

@@ -204,11 +204,20 @@ export const COACHING_STATE_KEYS = [
   "coach_seq",
 ] as const;
 
-/** True when `mine` holds a strictly newer coaching block than `incoming`. */
+/** True when `mine` holds a strictly newer coaching block than `incoming`.
+ *
+ * A payload that says coaching is OVER always wins, whatever the sequence
+ * numbers say. `_coach_fields(None)` reports `coaching: false` with
+ * `coach_seq: 0`, so once a session goes idle every later poll looks *older*
+ * than the live block the browser was holding — and a plain "keep the higher
+ * seq" rule would pin a running-session banner over a finished one for the rest
+ * of the page's life. The sequence exists to order two views of the SAME live
+ * session, not to argue about whether one is still running. */
 export function coachStateIsNewer(
-  mine: { coach_seq?: number | null },
-  incoming: { coach_seq?: number | null },
+  mine: { coach_seq?: number | null; coaching?: boolean },
+  incoming: { coach_seq?: number | null; coaching?: boolean },
 ): boolean {
+  if (incoming.coaching !== true) return false;
   return (mine.coach_seq ?? 0) > (incoming.coach_seq ?? 0);
 }
 
@@ -368,6 +377,23 @@ export async function coachingReset(
   return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-reset", {
     method: "POST",
     action: "Reset for next attempt",
+  });
+}
+
+// The escape hatch from a wedged correction: discard whatever is in flight and
+// run the ordinary reset. Unlike `coachingReset` this is accepted mid-correction
+// — that is the whole point, since a stuck correction is exactly when RESET's
+// deliberate refusal leaves the operator with nowhere to go.
+//
+// ALWAYS destructive: it throws the correction away and ends the attempt. Not a
+// gentler discard; the loud one.
+export async function coachingRecover(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-recover", {
+    method: "POST",
+    action: "Recover",
   });
 }
 

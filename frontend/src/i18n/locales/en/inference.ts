@@ -53,15 +53,15 @@ export default {
     },
     held: {
       title: "HELD",
-      hint: "The arm is holding its pose. Nothing is being recorded. Space to take over, R to reset for another attempt.",
+      hint: "The arm is holding its pose. Nothing is being recorded. Space to take over, Enter if the task is done.",
     },
     handingOver: {
       title: "HANDING OVER",
       hint: "The arm is moving into position — don't fight it. Wait for it to settle.",
     },
     resetting: {
-      title: "RESETTING…",
-      hint: "Easing back to the start pose, then going limp so you can reposition it by hand. Nothing is being recorded.",
+      title: "RETURNING HOME…",
+      hint: "The arm is moving back to the start pose — don't grab it yet. It goes limp and stays put once it arrives. Nothing is being recorded.",
     },
     saving: {
       title: "SAVING…",
@@ -69,14 +69,25 @@ export default {
     },
     correcting: {
       title: "YOU'RE DRIVING",
-      hint: "Every frame is being recorded. If you had to rewind the arm first, press G when you reach a state the policy has seen — that splits the rescue from the correction.",
+      hint: "Every frame is being recorded. Space hands back. Enter saves this correction AND ends the attempt, if the task is finished. If you had to rewind the arm first, press G when you reach a state the policy has seen — that splits the rescue from the correction.",
     },
     // Parked straight after a reset. Distinct from HELD because the
     // INSTRUCTION differs — "space to take over" here is what produced the
     // unwanted correction this state exists to prevent.
     parked: {
-      title: "READY",
-      hint: "Arm is home and limp — reposition it and the scene freely. Space starts the next attempt.",
+      title: "RESET",
+      hint: "The arm is home and will not move — it is limp and safe to grab. Reposition it and the scene freely, then press Enter for the next one.",
+    },
+    // The reset did not finish cleanly: the follower never reached home.
+    parkedStuck: {
+      title: "CHECK THE ARM",
+      hint: "The arm has stopped and will not move, but it never reached the home pose — something may be obstructing it. Move it back by hand, then press Enter for the next one.",
+    },
+    // Homed, but a limp arm could not be confirmed — never promise one we
+    // cannot confirm, because the operator acts on that promise by grabbing it.
+    parkedRigid: {
+      title: "RESET — ARM MAY BE STIFF",
+      hint: "The arm is home and will not move on its own, but it may still be holding torque. Don't force it — reposition the scene, then press Enter for the next one.",
     },
     // The two halves of a takeover. Both are `correcting` to lerobot; they
     // differ only in the INSTRUCTION, which is the point — RaC's data
@@ -98,8 +109,8 @@ export default {
   coach: {
     // In-session controls. Each button also renders its key, which is never
     // translated — "space" and "esc" are the physical keys.
-    takeOver: "Take over",
-    handBack: "Hand back to the policy",
+    takeOver: "Take control",
+    handBack: "Give back control",
     discard: "Discard this correction",
     hold: "Hold — freeze the arm",
     resume: "Let the policy continue",
@@ -111,6 +122,12 @@ export default {
     offerWithGap: "Coach it — fix the {{percent}}% it got wrong",
     reset: "Task done — reset for next attempt",
     recovered: "Recovered — the correction starts here",
+    nothingToDelete: "No corrections to delete",
+    // A command that lands after the runner finalized. Not a failure.
+    sessionEnded: {
+      title: "Session already ended",
+      body: "That command arrived after the session finished — nothing was changed. Your corrections are safe.",
+    },
     // The end-of-session handoff. <0> is the training dataset's name.
     handoffNext:
       "Next: merge these corrections with <0>{{dataset}}</0> — what this checkpoint was last trained on — then fine-tune it on the result. Training takes one dataset, so the merge isn't optional.",
@@ -166,6 +183,8 @@ export default {
       startNextAttempt: "Start next attempt",
       recovered: "Recovery marked",
       marking: "Marking…",
+      recover: "Recover",
+      recovering: "Recovering…",
       starting: "Starting…",
     },
   },

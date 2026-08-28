@@ -105,7 +105,7 @@ from .models import (
     _hub_cache_has_repo,
     _resolve_pretrained_dir,
 )
-from .motor_power import clear_goal_velocity, reset_torque_limit
+from .motor_power import FOLLOWER, LEADER, clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .session_events import notify_session_changed
 from .utils.config import (
@@ -546,6 +546,12 @@ class _CoachSession:
     # episode count — corrections are the episodes — but the thing they are
     # actually counting while they work through a task.
     attempts: int = 0
+    # How many corrections have been saved during the CURRENT attempt. Reset to
+    # zero by `_on_attempt_reset`, so it is the correction's position within its
+    # scene rather than a session-wide count. Paired with `attempts` it is what
+    # makes "keep only the last correction of each scene" a filter that can be
+    # applied — or reversed — at training time.
+    corrections_this_attempt: int = 0
     # True while the session is parked straight after a reset. The operator's
     # next move there is to START THE NEXT ATTEMPT, not to take over — and the
     # UI promotes the matching control, because pressing the usual primary
@@ -1211,17 +1217,40 @@ def _on_correction_saved(fields: dict[str, str]) -> None:
             recovery = int(fields.get("recovery", -1))
         except ValueError:
             recovery = -1
+        # Which SCENE this correction belongs to, and where it sits inside it.
+        #
+        # A scene routinely takes several corrections: the operator takes over,
+        # hands back, the policy fails at the same place, and they take over
+        # again with more help until it succeeds. Training is IID over shuffled
+        # (observation, action) pairs, so nothing downstream can reconstruct
+        # that grouping from the finished episodes — and without it, "the
+        # earlier corrections at this state demonstrated an action we already
+        # know was insufficient" is a filter nobody can express.
+        #
+        # Recorded rather than acted on. Dropping the early corrections at write
+        # time is irreversible and the right filter is still an open question
+        # (a late correction that succeeded may simply be over-assisted), so
+        # this keeps every episode on disk and makes the choice a training-time
+        # one: `index_in_attempt == corrections_in_attempt - 1` selects the
+        # last-per-scene set, and the full set is still there if it loses.
+        attempt_index = cs.attempts
+        index_in_attempt = cs.corrections_this_attempt
+        cs.corrections_this_attempt += 1
         if labelled and 0 <= recovery <= frames:
             cs.rac_episodes[cs.corrections_saved - 1] = {
                 "recovery_frames": recovery,
                 "correction_frames": frames - recovery,
                 "labelled": True,
+                "attempt_index": attempt_index,
+                "index_in_attempt": index_in_attempt,
             }
         else:
             cs.rac_episodes[cs.corrections_saved - 1] = {
                 "recovery_frames": None,
                 "correction_frames": frames,
                 "labelled": False,
+                "attempt_index": attempt_index,
+                "index_in_attempt": index_in_attempt,
             }
         saved = cs.corrections_saved
         target = cs.corrections_target
@@ -1314,6 +1343,11 @@ def _on_attempt_reset(fields: dict[str, str]) -> None:
             return
         with contextlib.suppress(ValueError, TypeError):
             cs.attempts = int(fields.get("n", cs.attempts + 1))
+        # A new scene starts here, so corrections start counting from zero
+        # again. Done unconditionally: even if the attempt number above failed
+        # to parse, the scene DID end, and carrying the old within-scene
+        # position into it would mislabel every correction that follows.
+        cs.corrections_this_attempt = 0
         cs.awaiting_attempt = True
         # Absent from an older runner: treat unknown as "we cannot promise the
         # arm is safe to grab" rather than defaulting to the reassuring answer.
@@ -1692,11 +1726,49 @@ def _preflight_motor_registers(port: str, follower_id: str) -> list[str]:
     and returns warning messages instead of aborting the start."""
     try:
         with _open_follower(port, follower_id) as robot:
-            return reset_torque_limit(robot, "follower arm") + clear_goal_velocity(robot, "follower arm")
+            return reset_torque_limit(robot, FOLLOWER) + clear_goal_velocity(robot, FOLLOWER)
     except Exception as exc:
         message = (
             f"Could not reset the motor registers on {port}: {exc}. "
             "The arm runs at its previous torque/speed limits for this rollout."
+        )
+        logger.warning(message)
+        return [message]
+
+
+def _preflight_leader_registers(port: str, leader_id: str) -> list[str]:
+    """Restore the LEADER's stock torque before a coaching session.
+
+    The follower has had this since autocal existed; the leader was excluded on
+    the reasoning that "leaders are back-driven by hand and a cap there is
+    harmless". That is true for teleoperation, recording and replay — and FALSE
+    for coaching, which is the one flow that drives the leader under its own
+    torque: every takeover glides it to the follower's pose
+    (`teleop_smooth_move_to`). A leader left capped by an earlier auto-calibration
+    — or by any bench tool that writes `Torque_Limit` — is then too weak to
+    carry its own arm, so the glide stalls short of the follower and the
+    operator meets an arm that "doesn't get to the position it needs to be in".
+
+    `Torque_Limit` is RAM: nothing in a normal session ever restores it, and it
+    survives app restarts, so without this the only cure is a power cycle.
+    Restores from `Max_Torque_Limit`, the servo's own power-on source; never
+    writes EEPROM and never enables torque.
+
+    Torque_Limit and NOTHING ELSE. The follower twin also clears Goal_Velocity;
+    this one must not, and did once — see `clear_goal_velocity`, which now
+    refuses a leader outright. The registers are not symmetric just because the
+    two preflights look it.
+
+    Never raises: a failure degrades to the previous value and is reported as a
+    warning rather than blocking the session."""
+    try:
+        with _open_leader(port, leader_id) as teleop:
+            return reset_torque_limit(teleop, LEADER)
+    except Exception as exc:
+        message = (
+            f"Could not reset the leader's motor registers on {port}: {exc}. "
+            "The leader runs at its previous torque limit, which can leave a takeover "
+            "too weak to reach the follower's pose."
         )
         logger.warning(message)
         return [message]
@@ -2206,11 +2278,17 @@ def _prepare_coaching_robot(request: InferenceRequest) -> tuple[list[str], list[
                 request.right_follower_config,
                 config_name=request.right_leader_config,
             )
-        # Register reset on the FOLLOWER buses only. `reset_torque_limit` exists
-        # to undo an autocal's torque cap on the arm that will be driven under
-        # load; the leaders are back-driven by hand and a cap there is harmless.
+        # `reset_torque_limit` undoes an autocal's torque cap on an arm that will
+        # be driven under load. For the FOLLOWERS that is every flow; for the
+        # LEADERS it is coaching alone, which drives them under their own torque
+        # through the handover glide (the leaders are back-driven by hand
+        # everywhere else, where a cap is harmless). Goal_Velocity stays
+        # follower-only in both cases.
         identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
         identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
+        # Both leaders are driven under torque during a coaching handover.
+        identity_warnings += _preflight_leader_registers(request.leader_port, left_id)
+        identity_warnings += _preflight_leader_registers(request.right_leader_port, right_id)
 
         robot_args = _bimanual_robot_args(request, base, follower_staging)
         return robot_args + _teleop_args(request, base, leader_staging), identity_warnings
@@ -2228,6 +2306,8 @@ def _prepare_coaching_robot(request: InferenceRequest) -> tuple[list[str], list[
         identity_warnings += _preflight_leader_identity(request.leader_port, leader_id, follower_id)
 
     identity_warnings += _preflight_motor_registers(request.follower_port, follower_id)
+    # Coaching drives the leader under torque; the other flows do not.
+    identity_warnings += _preflight_leader_registers(request.leader_port, leader_id)
 
     robot_args = _single_robot_args(request, follower_id)
     return robot_args + _teleop_args(request, leader_id, None), identity_warnings
@@ -3088,12 +3168,18 @@ def _write_rac_sidecar(cs: _CoachSession) -> None:
     payload = {
         # Versioned from the start: this is a private format with no reader yet,
         # which is exactly the kind of file that gets a breaking change later.
-        "version": 1,
+        # 2 adds attempt_index/index_in_attempt to every episode entry. Additive
+        # — a v1 reader still finds the fields it knows — but bumped anyway
+        # because the file now answers a question it previously could not.
+        "version": 2,
         "dataset_repo_id": cs.dataset_repo_id,
         "note": (
             "Recovery/correction split per correction episode, recorded live by "
             "MakerMods Lab coaching. labelled=false means the operator never marked "
-            "the boundary — NOT that recovery took zero frames."
+            "the boundary — NOT that recovery took zero frames. attempt_index groups "
+            "episodes by SCENE (one attempt at the task); index_in_attempt is the "
+            "0-based position within that scene, so the highest index_in_attempt of "
+            "each attempt_index is the correction that ended the scene."
         ),
         "episodes": {str(index): entry for index, entry in sorted(cs.rac_episodes.items())},
     }
@@ -3745,9 +3831,7 @@ def handle_inference_status() -> dict[str, Any]:
                 # operator stopped as having run to completion, and
                 # `_go_idle_locked` then clears the session so the stop handler
                 # can no longer correct the verdict.
-                _finalise_coaching_locked(
-                    rc, _coach_session, aborted=_coach_session.quitting and not rc
-                )
+                _finalise_coaching_locked(rc, _coach_session, aborted=_coach_session.quitting and not rc)
                 return {**_last_result, "shutting_down": shutting_down}
             if _eval_session is not None:
                 # Eval mode: episode boundaries arrive on the RUNNER's stdout,

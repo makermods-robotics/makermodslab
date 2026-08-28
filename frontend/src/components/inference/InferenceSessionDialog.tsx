@@ -5,11 +5,11 @@ import {
   CheckCircle2,
   Hand,
   Loader2,
+  RotateCcw,
   Pause,
   Play,
   GitMerge,
   GraduationCap,
-  RotateCcw,
   Square,
   Trash2,
 } from "lucide-react";
@@ -18,6 +18,8 @@ import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { decideCoachKey, targetHandlesKey } from "./coachKeys";
+import { phaseCue } from "./coachCues";
 import {
   CoachingPhase,
   CoachingState,
@@ -33,6 +35,7 @@ import {
   coachingHandback,
   coachingRecovered,
   coachingHold,
+  coachingRecover,
   coachingReset,
   coachingResume,
   coachingTakeover,
@@ -150,8 +153,34 @@ const COACH_BANNER: Record<
 const COACH_BANNER_PARKED = {
   titleKey: "inference.coachBanner.parked.title",
   hintKey: "inference.coachBanner.parked.hint",
-  accent: "text-ok border-ok/40",
-  bg: "bg-ok/10",
+  // Warn/amber, matching the eval reset screen below (border-warn/40 bg-warn/10)
+  // and the recording dialog's reset phase. Green read as "all good, nothing to
+  // do" — the opposite of the truth here, where the session is waiting on the
+  // operator to physically rearrange the scene before anything else happens.
+  accent: "text-warn border-warn/40",
+  bg: "bg-warn/10",
+};
+
+// Same parked moment, but the reset did NOT finish cleanly: the follower never
+// reached home. The scene is safe to rearrange, the arm is not where the next
+// attempt expects it, and saying "RESET" there would be a lie the operator
+// only discovers when the next attempt starts from the wrong pose.
+const COACH_BANNER_PARKED_STUCK = {
+  titleKey: "inference.coachBanner.parkedStuck.title",
+  hintKey: "inference.coachBanner.parkedStuck.hint",
+  accent: "text-warn border-warn",
+  bg: "bg-warn/20",
+};
+
+// Parked and homed, but we cannot confirm the follower went limp — either the
+// runner said so outright, or it's an older runner that reports nothing (null).
+// Both take this branch: never promise a limp arm we cannot confirm, because
+// the operator acts on that promise by grabbing it.
+const COACH_BANNER_PARKED_RIGID = {
+  titleKey: "inference.coachBanner.parkedRigid.title",
+  hintKey: "inference.coachBanner.parkedRigid.hint",
+  accent: "text-warn border-warn",
+  bg: "bg-warn/20",
 };
 
 // Shown ONLY once the operator has marked the recovery boundary, i.e. only when
@@ -347,7 +376,8 @@ const InferenceSessionDialog: React.FC<{
         // moves — so "Taking over…" stays up for the whole handover rather than
         // blinking out on the first poll while the arm is still travelling.
         setStatus((prev) => {
-          if (prev?.coaching_phase !== next.coaching_phase) setPendingAction(null);
+          if (prev?.coaching_phase !== next.coaching_phase)
+            setPendingAction(null);
           // The poll REPLACES, and it carries a snapshot taken when the request
           // was issued. A push that landed while it was in flight would be
           // overwritten with older state — reverting the banner to "the policy
@@ -565,8 +595,12 @@ const InferenceSessionDialog: React.FC<{
   const coachDataset = status?.coaching_dataset ?? null;
   const alignError = status?.align_error ?? null;
   const discardNotice = status?.discard_notice ?? null;
-  const attempts = status?.attempts ?? 0;
   const awaitingAttempt = status?.awaiting_attempt === true;
+  // Outcome of the last reset, used ONLY to pick the parked banner. Both stay
+  // null on an older runner, which the banner treats as "cannot promise" —
+  // see COACH_BANNER_PARKED_RIGID.
+  const resetHomed = status?.reset_homed ?? null;
+  const resetLimp = status?.reset_limp ?? null;
   // Null until the operator marks the recovery/correction boundary for the
   // takeover in progress. See handleCoachRecovered.
   const recoveryMarkedAt = status?.recovery_marked_at ?? null;
@@ -574,7 +608,9 @@ const InferenceSessionDialog: React.FC<{
   // Only meaningful once the session is actually driving. `coachPhase` is null
   // until the runner reports one, which is what the "Starting…" banner covers.
   const coachLive =
-    coachMode && status?.inference_active === true && status?.rollout_started_at != null;
+    coachMode &&
+    status?.inference_active === true &&
+    status?.rollout_started_at != null;
 
   // Coaching state arrives by PUSH as well as by poll. The poll below stays
   // exactly as it was and remains the reconciler — this only removes latency
@@ -590,7 +626,8 @@ const InferenceSessionDialog: React.FC<{
       // and never cleared it. "Taking over…" then replaced the banner's
       // instruction for the rest of the session, and the better the push
       // worked the more reliably it stuck.
-      if (prev.coaching_phase !== coaching.coaching_phase) setPendingAction(null);
+      if (prev.coaching_phase !== coaching.coaching_phase)
+        setPendingAction(null);
       return { ...prev, ...coaching };
     });
   }, []);
@@ -601,8 +638,8 @@ const InferenceSessionDialog: React.FC<{
   const playCue = useCoachingCues(coachLive);
   const lastCuedPhaseRef = useRef<CoachingPhase | null>(null);
   const lastCuedSavedRef = useRef<number | null>(null);
-  const lastCuedAlignRef = useRef<string | null>(null);
-  const lastCuedDiscardRef = useRef<string | null>(null);
+  const lastCuedAlignRef = useRef<string | null | undefined>(undefined);
+  const lastCuedDiscardRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     if (!coachLive) {
@@ -610,8 +647,8 @@ const InferenceSessionDialog: React.FC<{
       // than being swallowed as "no change".
       lastCuedPhaseRef.current = null;
       lastCuedSavedRef.current = null;
-      lastCuedAlignRef.current = null;
-      lastCuedDiscardRef.current = null;
+      lastCuedAlignRef.current = undefined;
+      lastCuedDiscardRef.current = undefined;
       return;
     }
     // Control changed hands. These two are the cues that matter most: they say
@@ -620,10 +657,20 @@ const InferenceSessionDialog: React.FC<{
     if (coachPhase !== lastCuedPhaseRef.current) {
       const previous = lastCuedPhaseRef.current;
       lastCuedPhaseRef.current = coachPhase;
-      if (coachPhase === "correcting") playCue("granted");
-      else if (previous === "correcting" && coachPhase != null) playCue("handback");
+      // This effect runs BEFORE the discard effect below, so the ref still
+      // holds the previously-cued notice: a difference here means a discard
+      // landed on this same update and this transition is not a hand-back.
+      const cue = phaseCue({
+        previous,
+        next: coachPhase,
+        discardPending:
+          lastCuedDiscardRef.current !== undefined &&
+          !!discardNotice &&
+          discardNotice !== lastCuedDiscardRef.current,
+      });
+      if (cue) playCue(cue);
     }
-  }, [coachLive, coachPhase, playCue]);
+  }, [coachLive, coachPhase, discardNotice, playCue]);
 
   useEffect(() => {
     if (!coachLive) return;
@@ -643,6 +690,13 @@ const InferenceSessionDialog: React.FC<{
     // Keyed on the FIELD, not on the message text. Choosing the cue by
     // sniffing for the word "discarded" in backend prose meant a copy edit
     // would silently downgrade the discard thud to the refusal beeps.
+    // First observation establishes a baseline rather than firing, matching the
+    // corrections tally above: a dialog opened onto a session that already has
+    // a standing notice must not replay an event the operator never saw.
+    if (lastCuedDiscardRef.current === undefined) {
+      lastCuedDiscardRef.current = discardNotice;
+      return;
+    }
     if (discardNotice && discardNotice !== lastCuedDiscardRef.current) {
       playCue("discarded");
     }
@@ -651,7 +705,16 @@ const InferenceSessionDialog: React.FC<{
 
   useEffect(() => {
     if (!coachLive) return;
-    if (alignError && alignError !== lastCuedAlignRef.current) playCue("refused");
+    // Baseline on first observation, as with the discard notice and the tally:
+    // a refusal already standing on the payload when the dialog mounts happened
+    // before the operator was looking, and replaying it sends them to re-align
+    // a leader arm that is already fine.
+    if (lastCuedAlignRef.current === undefined) {
+      lastCuedAlignRef.current = alignError;
+      return;
+    }
+    if (alignError && alignError !== lastCuedAlignRef.current)
+      playCue("refused");
     lastCuedAlignRef.current = alignError;
   }, [coachLive, alignError, playCue]);
 
@@ -664,7 +727,10 @@ const InferenceSessionDialog: React.FC<{
   // That is why the push mattered — it makes honesty cheap instead of slow.
   const sendCoachCommand = useCallback(
     async (
-      send: (baseUrl: string, fetcher: typeof fetchWithHeaders) => Promise<unknown>,
+      send: (
+        baseUrl: string,
+        fetcher: typeof fetchWithHeaders,
+      ) => Promise<unknown>,
       label: string,
       pending: string,
     ) => {
@@ -674,12 +740,34 @@ const InferenceSessionDialog: React.FC<{
         await send(baseUrl, fetchWithHeaders);
       } catch (e) {
         setPendingAction(null);
-        toast({
-          // `label` arrives already translated from the call site.
-          title: t("inference.coach.cmd.failed", { action: label }),
-          description: e instanceof Error ? e.message : String(e),
-          variant: "destructive",
-        });
+        // A session that has already ended is not a failure the operator did.
+        //
+        // `coachLive` is derived from the STATUS, which lags the runner by up
+        // to a poll, so there is an unavoidable window where the keys are still
+        // armed and the session behind them is gone — most often right after a
+        // reset, because that is when the last correction lands and the runner
+        // finalizes. Reporting that as a red "Reset failed" made a normal end
+        // of session look like a crash.
+        //
+        // Kept narrow on purpose: only the two 409s that mean "there is nothing
+        // to command any more". Every other failure still shouts.
+        const benign =
+          e instanceof ApiError &&
+          e.status === 409 &&
+          /no coaching session is active|shutting down/i.test(e.detail ?? "");
+        if (benign) {
+          toast({
+            title: t("inference.coach.sessionEnded.title"),
+            description: t("inference.coach.sessionEnded.body"),
+          });
+        } else {
+          toast({
+            // `label` arrives already translated from the call site.
+            title: t("inference.coach.cmd.failed", { action: label }),
+            description: e instanceof Error ? e.message : String(e),
+            variant: "destructive",
+          });
+        }
       } finally {
         setCoachBusy(false);
       }
@@ -692,6 +780,20 @@ const InferenceSessionDialog: React.FC<{
   // operator to track a three-state machine while an arm is about to knock
   // something over. Here one key toggles control, and the state machine stays
   // the runner's problem.
+  // Control may only change hands when the policy is ACTUALLY DRIVING, or held
+  // mid-attempt. Not during a reset, a handover, a save, or while parked
+  // waiting for the next attempt.
+  //
+  // Taking over in those phases produces no correction — the policy is not
+  // driving, so there is no failure being corrected. It records a plain
+  // teleoperated demonstration into the corrections dataset, and at training
+  // time those frames are indistinguishable from real corrections. A stray
+  // space during a reset was enough to do it.
+  const controlToggleAllowed =
+    coachPhase === "correcting" ||
+    ((coachPhase === "autonomous" || coachPhase === "paused") &&
+      !awaitingAttempt);
+
   const handleCoachToggle = useCallback(() => {
     if (coachPhase === "correcting") {
       sendCoachCommand(
@@ -699,24 +801,18 @@ const InferenceSessionDialog: React.FC<{
         t("inference.coach.cmd.handBack"),
         t("inference.coach.cmd.handingBack"),
       );
-    } else if (awaitingAttempt) {
-      // Parked after a reset: the scene has just been rearranged and what the
-      // operator wants is the NEXT ATTEMPT. Taking over here is what silently
-      // opened an unwanted correction — the arm was limp, the leader wasn't
-      // aligned, and the recording started anyway.
-      sendCoachCommand(
-        coachingResume,
-        t("inference.coach.cmd.startNextAttempt"),
-        t("inference.coach.cmd.starting"),
-      );
-    } else {
-      sendCoachCommand(
-        coachingTakeover,
-        t("inference.coach.cmd.takeOver"),
-        t("inference.coach.cmd.takingOver"),
-      );
+      return;
     }
-  }, [coachPhase, awaitingAttempt, sendCoachCommand, t]);
+    // Guarded here as well as on the key and the button: three callers, one
+    // rule, and the cost of getting it wrong is a demonstration silently filed
+    // as a correction.
+    if (!controlToggleAllowed) return;
+    sendCoachCommand(
+      coachingTakeover,
+      t("inference.coach.cmd.takeOver"),
+      t("inference.coach.cmd.takingOver"),
+    );
+  }, [coachPhase, controlToggleAllowed, sendCoachCommand, t]);
 
   // Shift+Space: freeze without committing to a correction — "wait, let me
   // think" — and unfreeze again. Maps to lerobot's bare pause.
@@ -726,15 +822,7 @@ const InferenceSessionDialog: React.FC<{
   // the policy); from anywhere else it holds or resumes. It always does
   // something, so it is worth learning.
   const handleCoachHoldToggle = useCallback(() => {
-    if (awaitingAttempt) {
-      // The two swap while parked, so the operator can still take over
-      // deliberately — just not by reflex.
-      sendCoachCommand(
-        coachingTakeover,
-        t("inference.coach.cmd.takeOver"),
-        t("inference.coach.cmd.takingOver"),
-      );
-    } else if (coachPhase === "paused") {
+    if (coachPhase === "paused") {
       sendCoachCommand(
         coachingResume,
         t("inference.coach.cmd.resume"),
@@ -753,7 +841,7 @@ const InferenceSessionDialog: React.FC<{
         t("inference.coach.cmd.holding"),
       );
     }
-  }, [coachPhase, awaitingAttempt, sendCoachCommand, t]);
+  }, [coachPhase, sendCoachCommand, t]);
 
   // Escape discards the correction in progress. THE feature that makes coaching
   // usable: a fumbled takeover is poison training data, and upstream lerobot
@@ -855,21 +943,61 @@ const InferenceSessionDialog: React.FC<{
   // next one starts from the same place. Corrections-only DAgger has no
   // task-episode of its own, so without this the policy just keeps driving at a
   // finished scene.
-  const handleCoachReset = useCallback(() => {
+  // The way out of a wedged correction. Always destructive — it discards
+  // whatever is in flight AND ends the attempt — so it is deliberately the
+  // quietest control on the screen and names its cost in the label. It exists
+  // because the alternative, when a correction sticks, is killing the session.
+  const handleCoachRecover = useCallback(() => {
     sendCoachCommand(
-      coachingReset,
-      t("inference.coach.cmd.reset"),
-      t("inference.coach.cmd.resetting"),
+      coachingRecover,
+      t("inference.coach.cmd.recover"),
+      t("inference.coach.cmd.recovering"),
     );
   }, [sendCoachCommand, t]);
+
+  const handleCoachReset = useCallback(() => {
+    sendCoachCommand(coachingReset, "Task done", "Returning home…");
+  }, [sendCoachCommand]);
+
+  // ENTER is the whole between-attempts loop, pressed twice per iteration:
+  //
+  //   Enter (task finished)  -> arm eases home and goes limp   [RESET]
+  //   ...operator rearranges the scene by hand, no time limit...
+  //   Enter (scene is set)   -> the next attempt starts        [WATCHING]
+  //
+  // and round again until `corrections_target` corrections are recorded, at
+  // which point the runner ends the session on its own.
+  //
+  // Deliberately ONE key for both halves. The operator is looking at the robot
+  // with both hands on it, not at the screen — asking them to remember that
+  // finishing is one key and continuing is a different one is how you get the
+  // wrong key pressed mid-scene. The phase decides which half Enter means, and
+  // the banner always names the next press.
+  const handleCoachAdvance = useCallback(() => {
+    if (awaitingAttempt) {
+      sendCoachCommand(coachingResume, "Next attempt", "Starting…");
+    } else {
+      handleCoachReset();
+    }
+  }, [awaitingAttempt, sendCoachCommand, handleCoachReset]);
 
   // Delete the whole corrections dataset from the summary. Reuses the same
   // /delete-dataset the library uses, which refuses while anything is reading
   // or writing the directory — by this point the session has ended and the
   // runner has finalized, so that guard should pass.
+  // Nothing was recorded, so there is nothing to throw away. Kept as its own
+  // named flag because it gates BOTH the button and the handler below — the
+  // disabled attribute stops the click, and the handler refuses anyway rather
+  // than trusting the UI to be the only caller.
+  const nothingToDelete = correctionsSaved === 0;
+
   const handleDeleteCoachDataset = useCallback(async () => {
     const repoId = status?.coaching_dataset;
     if (!repoId) return;
+    // Belt and braces with the button's `disabled`. A session that saved
+    // nothing still HAS a dataset directory, so `repoId` above is truthy and
+    // would have carried a delete through to the server on an empty session.
+    if (nothingToDelete) return;
     if (!confirmDelete) {
       setConfirmDelete(true);
       return;
@@ -898,6 +1026,7 @@ const InferenceSessionDialog: React.FC<{
   }, [
     status?.coaching_dataset,
     confirmDelete,
+    nothingToDelete,
     baseUrl,
     fetchWithHeaders,
     toast,
@@ -917,89 +1046,56 @@ const InferenceSessionDialog: React.FC<{
     // `coachLive` below; what matters here is that the key is swallowed.
     if (!coachMode) return;
     const onKey = (e: KeyboardEvent) => {
-      // Never hijack typing. The dialog has no text inputs today, but a future
-      // note field must not turn a space into a takeover.
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.isContentEditable ||
-          ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
-      ) {
-        return;
-      }
-      if (e.code === "Space") {
-        // Always preventDefault: a bare space would otherwise also "click" the
-        // focused button — during startup that button is Stop.
-        e.preventDefault();
-        if (!coachLive) return; // nothing to take over from yet
-        if (coachBusy) return; // one in flight; the ack line is already showing
-        if (e.shiftKey) handleCoachHoldToggle();
-        else handleCoachToggle();
-        return;
-      }
-      // `e.repeat` on every command key, not just Space. `coachBusy` is not a
-      // barrier — it clears after each ~50ms round trip — so a held key issues
-      // a continuous stream: repeated resets, each one an ease-home glide and
-      // an attempt increment, or repeated discards.
-      if (e.repeat) return;
-      if (!coachLive) return; // startup: keys are swallowed, not acted on
-      if (e.key.toLowerCase() === "g" && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        // "Good state reached." Only meaningful mid-correction; the backend
-        // ignores it everywhere else and ignores a second press within one
-        // correction, so no phase gating is needed here either.
-        e.preventDefault();
-        if (!coachBusy) handleCoachRecovered();
-        return;
-      }
-      if (e.key.toLowerCase() === "r" && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        // "This attempt is over." Ignored mid-correction by the runner, which
-        // won't decide the fate of a part-recorded takeover on the operator's
-        // behalf.
-        e.preventDefault();
-        if (!coachBusy) handleCoachReset();
-        return;
-      }
-      if (e.key === "Backspace" || e.key === "Delete") {
-        // The destructive verb, on the destructive key — the SAME gesture
-        // RecordingSessionDialog uses for re-record, which is the same
-        // semantic ("throw away what I just recorded"). It used to live on
-        // Escape, where it meant the exact opposite of Escape next door
-        // (finish and KEEP). Same app, same modal shape, same operator, same
-        // hands: that inconsistency was going to cost somebody a good
-        // correction eventually.
-        //
-        // Always sent, never gated on `coachPhase`. The phase here is up to a
-        // poll stale and during a handover the runner is genuinely PAUSED for
-        // ~2s, so gating on "correcting" left discard dead for 1-3s after a
-        // takeover — precisely the window in which a takeover goes wrong. The
-        // runner's `_translate` no-ops a CANCEL that doesn't apply, which is
-        // the policy every other coaching command already follows.
-        //
-        // preventDefault also stops Backspace acting as browser back-nav.
-        e.preventDefault();
-        e.stopPropagation();
-        if (!coachBusy) handleCoachDiscard();
-        return;
-      }
-      if (e.key === "Escape") {
-        // Swallowed and INERT while a session is live.
-        //
-        // Swallowed because an Escape reaching StudioOverlay would close the
-        // studio out from under a running policy. Inert because it used to
-        // discard, and an operator carrying that muscle memory has to be told
-        // it moved rather than silently discovering it did nothing — so the
-        // first Escape of a session explains itself once and then stays quiet.
-        e.preventDefault();
-        e.stopPropagation();
-        if (!escapeHintShownRef.current) {
-          escapeHintShownRef.current = true;
-          toast({
-            title: "Escape no longer discards",
-            description:
-              "Backspace or Delete discards the correction in progress, matching the recording dialog. Escape is held back so it can't close the studio mid-session.",
-            duration: 8000,
-          });
-        }
+      // The decision is a pure function (coachKeys.ts) so it can be tested:
+      // this logic guards a physical arm, and none of it was reachable by a
+      // test while it lived in a closure over component state.
+      const { preventDefault, stopPropagation, action } = decideCoachKey(e, {
+        coachLive,
+        coachBusy,
+        // Leave the browser alone when the keystroke is aimed at a control it
+        // will activate itself. Without this, Space and Enter were swallowed
+        // for every <button> in the dialog and NONE of them — including
+        // "Discard this correction" and "End session" — could be operated by
+        // keyboard. The dialog focuses its own container rather than a button
+        // on open (see DialogContent's onOpenAutoFocus), so the hands-on
+        // operator's keystrokes still land here, not on a control.
+        targetHandlesKey: targetHandlesKey(e.target),
+        controlToggleAllowed,
+      });
+      if (preventDefault) e.preventDefault();
+      if (stopPropagation) e.stopPropagation();
+      switch (action) {
+        case "takeover-toggle":
+          handleCoachToggle();
+          break;
+        case "hold-toggle":
+          handleCoachHoldToggle();
+          break;
+        case "recovered":
+          handleCoachRecovered();
+          break;
+        case "advance":
+          handleCoachAdvance();
+          break;
+        case "discard":
+          handleCoachDiscard();
+          break;
+        case "escape-hint":
+          // Explains itself once per session, then stays quiet. Escape used to
+          // discard, and an operator carrying that muscle memory has to be told
+          // it moved rather than silently discovering it did nothing.
+          if (!escapeHintShownRef.current) {
+            escapeHintShownRef.current = true;
+            toast({
+              title: "Escape no longer discards",
+              description:
+                "Backspace or Delete discards the correction in progress, matching the recording dialog. Escape is held back so it can't close the studio mid-session.",
+              duration: 8000,
+            });
+          }
+          break;
+        default:
+          break;
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -1008,11 +1104,11 @@ const InferenceSessionDialog: React.FC<{
     coachMode,
     coachLive,
     coachBusy,
-    coachPhase,
+    controlToggleAllowed,
     handleCoachToggle,
     handleCoachHoldToggle,
     handleCoachDiscard,
-    handleCoachReset,
+    handleCoachAdvance,
     handleCoachRecovered,
     toast,
   ]);
@@ -1050,7 +1146,9 @@ const InferenceSessionDialog: React.FC<{
     !isResetting &&
     status.rollout_started_at == null;
   const isRunning =
-    status != null && status.inference_active && status.rollout_started_at != null;
+    status != null &&
+    status.inference_active &&
+    status.rollout_started_at != null;
 
   // A finished run we're staying on to surface (see the tick): a real failure
   // (red) or a cleanup-only warning (amber). `ran_with_warning` must NOT read
@@ -1068,7 +1166,8 @@ const InferenceSessionDialog: React.FC<{
   // showed a three-day-old run's output and the user concluded the wrong policy
   // had executed.
   const logIsThisRun =
-    logOwner === "active" || (logOwner === "last_run" && !status?.inference_active);
+    logOwner === "active" ||
+    (logOwner === "last_run" && !status?.inference_active);
   const logPlaceholder = finishedFailed
     ? t("inference.log.failedPlaceholder")
     : t("inference.log.emptyPlaceholder");
@@ -1089,16 +1188,16 @@ const InferenceSessionDialog: React.FC<{
   const pillTone: "amber" | "green" | "red" = finishedFailed
     ? "red"
     : finishedWarn
-    ? "amber"
-    : evalAborted
-    ? "amber"
-    : evalFinished
-    ? "green"
-    : isResetting
-    ? "amber"
-    : isSettingUp
-    ? "amber"
-    : "green";
+      ? "amber"
+      : evalAborted
+        ? "amber"
+        : evalFinished
+          ? "green"
+          : isResetting
+            ? "amber"
+            : isSettingUp
+              ? "amber"
+              : "green";
   const pillLabel = finishedFailed
     ? t("inference.pill.failed")
     : finishedWarn
@@ -1127,7 +1226,7 @@ const InferenceSessionDialog: React.FC<{
   // Null before any session has seeded a phase, or for an unrecognised value —
   // then we show nothing and let the timer/pill carry the state.
   const phaseMeta =
-    !showOutcome && status?.phase ? PHASE_META[status.phase] ?? null : null;
+    !showOutcome && status?.phase ? (PHASE_META[status.phase] ?? null) : null;
 
   // Hub model download: show a real byte-progress bar during the
   // downloading_model phase. Indeterminate (pulsing) until the total is known —
@@ -1150,6 +1249,20 @@ const InferenceSessionDialog: React.FC<{
     >
       <DialogContent
         hideClose
+        // Focus the dialog itself on open, not the first button in it.
+        //
+        // Radix's default lands focus on a control — during startup that is
+        // Stop. Two things then went wrong at once: the coaching keydown
+        // handler had to swallow Space unconditionally to stop an operator's
+        // reflex press from aborting the run, and swallowing it that broadly
+        // left every button in the dialog keyboard-inoperable. Focusing the
+        // container decouples them — the hands-on operator's keys reach the
+        // handler (the container is not a control), and a keyboard operator
+        // who tabs to a button gets normal Space/Enter activation.
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          (e.currentTarget as HTMLElement | null)?.focus();
+        }}
         onEscapeKeyDown={(e) => {
           if (live) e.preventDefault();
         }}
@@ -1248,13 +1361,17 @@ const InferenceSessionDialog: React.FC<{
                 "your work is gone and here is how to avoid it next time". */}
             {coachLive && discardNotice && (
               <div className="mb-4 rounded-lg border border-warn/40 bg-warn/10 p-3">
-                <p className="text-sm leading-relaxed text-warn">{discardNotice}</p>
+                <p className="text-sm leading-relaxed text-warn">
+                  {discardNotice}
+                </p>
               </div>
             )}
 
             {coachLive && alignError && (
               <div className="mb-4 rounded-lg border border-warn/40 bg-warn/10 p-3">
-                <p className="text-sm leading-relaxed text-warn">{alignError}</p>
+                <p className="text-sm leading-relaxed text-warn">
+                  {alignError}
+                </p>
               </div>
             )}
 
@@ -1270,12 +1387,12 @@ const InferenceSessionDialog: React.FC<{
                       target: correctionsTarget || "?",
                     })}
                   </span>
+                  {/* Attempts deliberately NOT shown. It sat next to the
+                      corrections count and read as a second progress number,
+                      so "attempt 3" was taken to mean three corrections were
+                      recorded when none had been. The only count that matters
+                      here is the one the session ends on. */}
                   <span className="text-xs text-muted-foreground tabular-nums">
-                    {attempts > 0
-                      ? t("inference.coach.attemptPrefix", {
-                          attempt: attempts + 1,
-                        })
-                      : ""}
                     {t("inference.coach.recorded", {
                       duration: formatTime(correctionSeconds),
                     })}
@@ -1288,13 +1405,13 @@ const InferenceSessionDialog: React.FC<{
                     boundary from a finished episode. */}
                 {correctionsSaved > 0 && (
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {correctionsLabelled} of {correctionsSaved} split into recovery +
-                    correction
+                    {correctionsLabelled} of {correctionsSaved} split into
+                    recovery + correction
                     {correctionsLabelled < correctionsSaved && (
                       <span className="opacity-75">
                         {" "}
-                        — press <span className="font-mono">g</span> mid-takeover to mark
-                        where the rescue ends
+                        — press <span className="font-mono">g</span>{" "}
+                        mid-takeover to mark where the rescue ends
                       </span>
                     )}
                   </div>
@@ -1305,7 +1422,10 @@ const InferenceSessionDialog: React.FC<{
                     style={{
                       width: `${
                         correctionsTarget > 0
-                          ? Math.min(100, (correctionsSaved / correctionsTarget) * 100)
+                          ? Math.min(
+                              100,
+                              (correctionsSaved / correctionsTarget) * 100,
+                            )
                           : 0
                       }%`,
                     }}
@@ -1643,7 +1763,9 @@ const InferenceSessionDialog: React.FC<{
                       // No markHandled(): the exit guard it notified was
                       // retired with the move to a server-side lease.
                       onExit();
-                      openStudio("deploy", { deploy: { ...deployPrefill, mode: "coach" } });
+                      openStudio("deploy", {
+                        deploy: { ...deployPrefill, mode: "coach" },
+                      });
                     }}
                     className="w-full font-semibold py-6 text-lg"
                   >
@@ -1655,9 +1777,20 @@ const InferenceSessionDialog: React.FC<{
                       : t("inference.coach.offer")}
                   </Button>
                 )}
+                {/* exitWithHandoff, NOT onExit. It is the only caller that
+                    navigates with the `coached` payload, which is what carries
+                    the merge + fine-tune offer to the Launchpad. Wired into
+                    onOpenChange but not here, this button — the one the UI
+                    invites you to press — silently dropped the handoff, while
+                    Escape and outside-click kept it. It fired on the most
+                    common path: the operator who declines the inline merge and
+                    then closes. exitWithHandoff calls onExit unconditionally,
+                    so nothing else changes. */}
                 <Button
-                  onClick={onExit}
-                  variant={!coachMode && deployPrefill ? "outline" : "secondary"}
+                  onClick={exitWithHandoff}
+                  variant={
+                    !coachMode && deployPrefill ? "outline" : "secondary"
+                  }
                   className="w-full font-semibold py-6 text-lg"
                 >
                   {t("inference.button.close")}
@@ -1668,20 +1801,32 @@ const InferenceSessionDialog: React.FC<{
                     for a timestamped name in the dataset library afterwards.
                     Only offered once a dataset actually exists. */}
                 {coachDone && coachDataset && (
+                  // Shown-but-dead when the session saved nothing. The dataset
+                  // directory is created when the session STARTS, so it exists
+                  // (and `coachDataset` is set) even after a session that
+                  // recorded zero corrections — which is how a destructive
+                  // button ended up live with nothing behind it to destroy.
+                  // Disabled rather than hidden: the row vanishing between one
+                  // session and the next reads as a bug, and the disabled label
+                  // says plainly why there is nothing to do here.
                   <Button
                     onClick={handleDeleteCoachDataset}
-                    disabled={deletingDataset || datasetDeleted}
+                    disabled={
+                      deletingDataset || datasetDeleted || nothingToDelete
+                    }
                     variant="outline"
-                    className="w-full font-semibold text-destructive hover:text-destructive disabled:opacity-50"
+                    className="w-full font-semibold text-destructive hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Trash2 className="w-4 h-4 mr-2" />
                     {datasetDeleted
                       ? t("inference.coach.deleted")
                       : deletingDataset
                         ? t("inference.coach.deleting")
-                        : confirmDelete
-                          ? t("inference.coach.deleteConfirm")
-                          : t("inference.coach.delete")}
+                        : nothingToDelete
+                          ? t("inference.coach.nothingToDelete")
+                          : confirmDelete
+                            ? t("inference.coach.deleteConfirm")
+                            : t("inference.coach.delete")}
                   </Button>
                 )}
               </div>
@@ -1692,24 +1837,18 @@ const InferenceSessionDialog: React.FC<{
               <div className="space-y-2">
                 <Button
                   onClick={handleCoachToggle}
-                  disabled={coachBusy}
+                  disabled={coachBusy || !controlToggleAllowed}
                   className="w-full font-semibold py-6 text-lg disabled:opacity-50"
-                  variant={coachPhase === "correcting" ? "secondary" : "default"}
+                  variant={
+                    coachPhase === "correcting" ? "secondary" : "default"
+                  }
                 >
-                  {awaitingAttempt && coachPhase !== "correcting" ? (
-                    <Play className="w-5 h-5 mr-2" />
-                  ) : (
-                    <Hand className="w-5 h-5 mr-2" />
-                  )}
+                  <Hand className="w-5 h-5 mr-2" />
                   {coachPhase === "correcting"
                     ? t("inference.coach.handBack")
-                    : awaitingAttempt
-                      ? t("inference.coach.startAttempt", {
-                          attempt: attempts + 1,
-                        })
-                      : t("inference.coach.takeOver")}
+                    : t("inference.coach.takeOver")}
                   {/* Key names are the physical keys — never translated. */}
-                  <kbd className="ml-2 rounded bg-black/20 px-1.5 py-0.5 text-xs font-mono">
+                  <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
                     space
                   </kbd>
                 </Button>
@@ -1722,12 +1861,16 @@ const InferenceSessionDialog: React.FC<{
                   >
                     <CheckCircle2 className="w-4 h-4 mr-2" />
                     {t("inference.coach.recovered")}
-                    <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                    <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
                       g
                     </kbd>
                   </Button>
                 )}
-                {coachPhase === "correcting" ? (
+                {/* Only ONE button carries a space chord now: the primary
+                    take/give-back control above. The freeze (shift+space) kept
+                    its keybinding but lost its button — two space-labelled
+                    buttons side by side read as two ways to do the same thing. */}
+                {coachPhase === "correcting" && (
                   <Button
                     onClick={handleCoachDiscard}
                     disabled={coachBusy}
@@ -1736,48 +1879,48 @@ const InferenceSessionDialog: React.FC<{
                   >
                     <Trash2 className="w-4 h-4 mr-2" />
                     {t("inference.coach.discard")}
-                    <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                    <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
                       ⌫
                     </kbd>
                   </Button>
-                ) : (
-                  <Button
-                    onClick={handleCoachHoldToggle}
-                    disabled={coachBusy}
-                    variant="outline"
-                    className="w-full font-semibold disabled:opacity-50"
-                  >
-                    {awaitingAttempt ? (
-                      <Hand className="w-4 h-4 mr-2" />
-                    ) : coachPhase === "paused" ? (
-                      <Play className="w-4 h-4 mr-2" />
-                    ) : (
-                      <Pause className="w-4 h-4 mr-2" />
-                    )}
-                    {awaitingAttempt
-                      ? t("inference.coach.takeOverInstead")
-                      : coachPhase === "paused"
-                        ? t("inference.coach.resume")
-                        : t("inference.coach.hold")}
-                    <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
-                      ⇧ space
-                    </kbd>
-                  </Button>
                 )}
-                {coachPhase !== "correcting" && (
-                  <Button
-                    onClick={handleCoachReset}
-                    disabled={coachBusy}
-                    variant="outline"
-                    className="w-full font-semibold disabled:opacity-50"
-                  >
-                    <RotateCcw className="w-4 h-4 mr-2" />
-                    {t("inference.coach.reset")}
-                    <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
-                      r
-                    </kbd>
-                  </Button>
-                )}
+                {/* Shown mid-correction too, now that Enter SAVES the
+                    correction in flight before resetting. Hiding it there
+                    predated that, and left the operator who finished the task
+                    while still driving with no visible way to say so. */}
+                <Button
+                  onClick={handleCoachAdvance}
+                  disabled={coachBusy}
+                  variant={awaitingAttempt ? "default" : "outline"}
+                  className="w-full font-semibold disabled:opacity-50"
+                >
+                  {awaitingAttempt ? (
+                    <Play className="w-4 h-4 mr-2" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                  )}
+
+                  {awaitingAttempt
+                    ? "Scene is set — start the next one"
+                    : coachPhase === "correcting"
+                      ? "Task done — save this correction and reset"
+                      : "Is the task done? Press Enter to say so"}
+                  <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
+                    enter
+                  </kbd>
+                </Button>
+                {/* Sits directly above End session because they are the two
+                    "something is wrong" exits, and this is the one that does
+                    NOT cost the operator their whole session. */}
+                <Button
+                  onClick={handleCoachRecover}
+                  disabled={coachBusy}
+                  variant="ghost"
+                  className="w-full text-xs text-muted-foreground disabled:opacity-50"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 mr-2" />
+                  Arm stuck? Recover — discards this correction and resets
+                </Button>
                 <Button
                   onClick={handleStop}
                   disabled={stopping}
@@ -1911,7 +2054,6 @@ const InferenceSessionDialog: React.FC<{
             </div>
           </div>
         )}
-
       </DialogContent>
     </Dialog>
   );

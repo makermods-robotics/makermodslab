@@ -3713,9 +3713,7 @@ def test_on_dagger_dataset_records_the_stamped_name(monkeypatch, tmp_path) -> No
 
     session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
     monkeypatch.setattr(rollout, "_coach_session", session)
-    rollout._on_dagger_dataset(
-        {"repo_id": "rollout_shirt_fixes_20260818_120000", "root": str(tmp_path)}
-    )
+    rollout._on_dagger_dataset({"repo_id": "rollout_shirt_fixes_20260818_120000", "root": str(tmp_path)})
     assert session.dataset_repo_id == "rollout_shirt_fixes_20260818_120000"
     assert session.dataset_root == str(tmp_path)
 
@@ -4037,29 +4035,72 @@ def test_terminate_tree_escalates_to_sigkill_when_sigterm_is_ignored() -> None:
             proc.stdout.close()
 
 
-def test_reset_is_ignored_mid_correction_but_arms_from_the_other_phases() -> None:
-    """RESET must not silently decide the fate of frames already in the buffer.
+def test_reset_saves_the_correction_in_flight_then_resets() -> None:
+    """Finishing the task while still driving means those frames ARE the
+    correction.
 
-    Mid-correction the operator is holding the leader with a part-recorded
-    takeover; saving or discarding it on their behalf is not this command's
-    call. From AUTONOMOUS the policy has to stop first, so it expands to the
-    pause transition; from PAUSED the engine is already stopped and the loop
-    performs the ease-home on that same tick."""
+    RESET used to be refused mid-correction so it could not decide the fate of a
+    part-recorded takeover. In practice the operator had already decided, and
+    the refusal cost them two presses — hand back, then reset — with the policy
+    briefly regaining a finished scene in between.
+
+    It now takes the same edge as RECOVER, minus the discard: one correction
+    event (which drives CORRECTING->PAUSED, where the episode is written because
+    no cancel is armed) with the reset armed for the following tick."""
+    from lerobot.rollout.configs import DAggerStrategyConfig
+    from lerobot.rollout.strategies.dagger import DAggerPhase
+    from makermodslab.dagger_protocol import CMD_RESET
+    from makermodslab.dagger_runner import _EV_CORRECTION, WebDAggerStrategy
+
+    s = WebDAggerStrategy(DAggerStrategyConfig(num_episodes=5))
+    assert s._translate(CMD_RESET, DAggerPhase.CORRECTING) == [_EV_CORRECTION]
+    assert s._reset_requested is True
+    # The distinction from RECOVER: no cancel is armed, so the correction is
+    # SAVED rather than binned.
+    assert s._cancel_correction is False
+
+
+def test_recover_discards_the_correction_in_flight_then_resets() -> None:
+    """RECOVER is RESET's twin for a takeover the operator has given up on: the
+    same edge and the same reset, but with the discard armed. The pair must stay
+    distinguishable — one keeps the frames, one throws them away."""
+    from lerobot.rollout.configs import DAggerStrategyConfig
+    from lerobot.rollout.strategies.dagger import DAggerPhase
+    from makermodslab.dagger_protocol import CMD_RECOVER
+    from makermodslab.dagger_runner import _EV_CORRECTION, WebDAggerStrategy
+
+    s = WebDAggerStrategy(DAggerStrategyConfig(num_episodes=5))
+    assert s._translate(CMD_RECOVER, DAggerPhase.CORRECTING) == [_EV_CORRECTION]
+    assert s._reset_requested is True
+    assert s._cancel_correction is True
+
+
+def test_recover_resets_from_every_other_phase_too() -> None:
+    """Its whole purpose is being reachable when nothing else is."""
+    from lerobot.rollout.configs import DAggerStrategyConfig
+    from lerobot.rollout.strategies.dagger import DAggerPhase
+    from makermodslab.dagger_protocol import CMD_RECOVER
+    from makermodslab.dagger_runner import WebDAggerStrategy
+
+    for phase in (DAggerPhase.AUTONOMOUS, DAggerPhase.PAUSED):
+        s = WebDAggerStrategy(DAggerStrategyConfig(num_episodes=5))
+        assert s._translate(CMD_RECOVER, phase) == []
+        assert s._reset_requested is True
+
+
+def test_reset_requests_no_transition_from_the_non_correcting_phases() -> None:
+    """From every phase that is not mid-correction it arms the flag and requests
+    NO transition. Routing it through `pause_resume` made `_apply_transition`
+    treat the reset as a handover: it drove the LEADER up to the follower's pose
+    under torque, and released it again when the policy resumed, so the leader
+    fell out of the air. A reset is not a handover — the loop pauses the engine
+    itself, with none of the transition's side effects."""
     from lerobot.rollout.configs import DAggerStrategyConfig
     from lerobot.rollout.strategies.dagger import DAggerPhase
     from makermodslab.dagger_protocol import CMD_RESET
     from makermodslab.dagger_runner import WebDAggerStrategy
 
     s = WebDAggerStrategy(DAggerStrategyConfig(num_episodes=5))
-    assert s._translate(CMD_RESET, DAggerPhase.CORRECTING) == []
-    assert s._reset_requested is False
-
-    # From every other phase it arms the flag and requests NO transition.
-    # Routing it through `pause_resume` made `_apply_transition` treat the
-    # reset as a handover: it drove the LEADER up to the follower's pose under
-    # torque, and released it again when the policy resumed, so the leader fell
-    # out of the air. A reset is not a handover — the loop pauses the engine
-    # itself, with none of the transition's side effects.
     for phase in (DAggerPhase.AUTONOMOUS, DAggerPhase.PAUSED):
         s._reset_requested = False
         assert s._translate(CMD_RESET, phase) == []
@@ -4285,7 +4326,57 @@ def test_a_marked_correction_records_both_halves(monkeypatch) -> None:
         "recovery_frames": 40,
         "correction_frames": 80,
         "labelled": True,
+        # First correction of the first scene.
+        "attempt_index": 0,
+        "index_in_attempt": 0,
     }
+
+
+def test_corrections_are_grouped_by_scene(monkeypatch) -> None:
+    """THE grouping. A scene routinely takes several corrections — take over,
+    hand back, the policy fails at the same place, take over again with more
+    help — and training is IID over shuffled frames, so nothing downstream can
+    reconstruct which correction belonged to which attempt unless it is written
+    down live. Without it, "keep only the correction that ended each scene" is
+    not a filter anyone can express."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=9)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+
+    # Scene 0 took three goes.
+    for n in (1, 2, 3):
+        rollout._on_correction_saved({"n": str(n), "frames": "90", "seconds": "3.0"})
+    rollout._on_attempt_reset({"n": "1"})
+    # Scene 1 took two.
+    for n in (4, 5):
+        rollout._on_correction_saved({"n": str(n), "frames": "90", "seconds": "3.0"})
+
+    grouped = [(e["attempt_index"], e["index_in_attempt"]) for _, e in sorted(session.rac_episodes.items())]
+    assert grouped == [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)]
+
+    # The point of the pair: the last correction of each scene is selectable.
+    last_per_scene = {e["attempt_index"]: i for i, e in sorted(session.rac_episodes.items())}
+    assert last_per_scene == {0: 2, 1: 4}
+
+
+def test_a_scene_reset_restarts_the_within_scene_count_even_if_its_number_is_junk(
+    monkeypatch,
+) -> None:
+    """The attempt NUMBER is parsed defensively; the scene boundary is not
+    conditional on it. A reset whose `n` fails to parse still ended the scene,
+    and carrying the old within-scene position into the next one would mislabel
+    every correction that follows it."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+
+    rollout._on_correction_saved({"n": "1", "frames": "90", "seconds": "3.0"})
+    rollout._on_attempt_reset({"n": "not-a-number"})
+    rollout._on_correction_saved({"n": "2", "frames": "90", "seconds": "3.0"})
+
+    assert session.rac_episodes[1]["index_in_attempt"] == 0
 
 
 def test_an_unmarked_correction_is_recorded_as_unlabelled_not_as_zero_recovery(monkeypatch) -> None:
@@ -4379,7 +4470,7 @@ def test_the_sidecar_is_written_next_to_the_dataset(monkeypatch, tmp_path) -> No
     rollout._write_rac_sidecar(session)
 
     written = json.loads((tmp_path / RAC_SIDECAR_NAME).read_text())
-    assert written["version"] == 1
+    assert written["version"] == 2
     assert written["dataset_repo_id"] == "user/rollout_fixes_20260819_120000"
     # JSON has no integer keys; the reader has to know they are indices.
     assert written["episodes"]["0"]["recovery_frames"] == 40
@@ -4488,6 +4579,9 @@ def test_a_full_correction_cycle_leaves_a_consistent_tally(monkeypatch) -> None:
         "recovery_frames": 40,
         "correction_frames": 80,
         "labelled": True,
+        # First correction of the first scene.
+        "attempt_index": 0,
+        "index_in_attempt": 0,
     }
     # The live marker describes the correction in progress; a new takeover
     # clears it, and there isn't one yet.

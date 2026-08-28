@@ -71,7 +71,7 @@ ALL_EVENTS = [
 def test_commands_set_contains_every_verb() -> None:
     """The orchestrator validates against COMMANDS before writing to the pipe,
     so a verb missing from it is a 400 on a control that should work."""
-    from makermodslab.dagger_protocol import CMD_RECOVERED, CMD_RESET
+    from makermodslab.dagger_protocol import CMD_RECOVER, CMD_RECOVERED, CMD_RESET
 
     assert {
         CMD_TAKEOVER,
@@ -81,6 +81,9 @@ def test_commands_set_contains_every_verb() -> None:
         CMD_RESUME,
         CMD_RESET,
         CMD_RECOVERED,
+        # The escape hatch from a stuck correction. Unlike RESET it is valid
+        # from every phase, including CORRECTING.
+        CMD_RECOVER,
         CMD_QUIT,
     } == COMMANDS
 
@@ -239,3 +242,15 @@ def test_handing_over_is_a_phase_but_not_one_of_lerobots() -> None:
         EVENT_PHASE,
         f"phase={PHASE_HANDING_OVER}",
     )
+
+
+def test_recover_is_distinct_from_recovered() -> None:
+    """RECOVER and RECOVERED differ by two letters and mean opposite things:
+    one throws the correction away and resets, the other marks a boundary
+    inside a correction it intends to keep. The runner matches on the whole
+    bare word, so this pins that they can never collide."""
+    from makermodslab.dagger_protocol import CMD_RECOVER, CMD_RECOVERED
+
+    assert CMD_RECOVER != CMD_RECOVERED
+    assert not CMD_RECOVERED.startswith(CMD_RECOVER + " ")
+    assert {CMD_RECOVER, CMD_RECOVERED} <= COMMANDS

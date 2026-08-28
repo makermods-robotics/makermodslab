@@ -74,6 +74,7 @@ from .dagger_protocol import (
     CMD_CANCEL,
     CMD_HANDBACK,
     CMD_HOLD,
+    CMD_RECOVER,
     CMD_RECOVERED,
     CMD_RESET,
     CMD_RESUME,
@@ -910,8 +911,35 @@ def coaching_reset():
     connect, and the session parks so the scene can be rearranged. Nothing is
     written to the dataset: corrections are the only thing ever recorded.
 
-    Refused mid-correction; hand back or discard first."""
+    Valid mid-correction, where it SAVES the correction in flight before
+    resetting: an operator who finishes the task while still driving has
+    already decided those frames are the correction, and making them hand back
+    and then reset as two presses let the policy briefly regain a finished
+    scene in between. Use /coaching-recover for the opposite — discard, then
+    reset."""
     return _coaching_route(CMD_RESET)
+
+
+@v1_router.post(
+    "/coaching-recover", response_model=CoachingCommandResponse, tags=["inference"]
+)
+def coaching_recover():
+    """Coaching mode only: get me out of here.
+
+    The same ease-home-and-park as /coaching-reset, but valid from EVERY phase
+    including mid-correction, where it discards the correction in flight first.
+
+    That difference is the entire reason it exists. RESET refuses mid-correction
+    on purpose — it will not decide on the operator's behalf whether a
+    part-recorded takeover is kept — but a correction can wedge (the leader is
+    held rigid, the follower holds its last commanded pose), and then every
+    command that could help is either phase-gated or would silently keep frames
+    the operator has already given up on. This is the operator saying the frames
+    do not matter, put the arm somewhere safe.
+
+    Not a substitute for discard: this one ALWAYS throws the correction away and
+    ALWAYS ends the attempt."""
+    return _coaching_route(CMD_RECOVER)
 
 
 @v1_router.post(

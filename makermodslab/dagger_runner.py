@@ -122,6 +122,7 @@ from .dagger_protocol import (
     CMD_HANDBACK,
     CMD_HOLD,
     CMD_QUIT,
+    CMD_RECOVER,
     CMD_RECOVERED,
     CMD_RESET,
     CMD_RESUME,
@@ -387,15 +388,40 @@ class WebDAggerStrategy(DAggerStrategy):
             else:
                 logger.info("Ignoring RECOVERED — no unmarked correction in progress")
             return []
-        elif command == CMD_RESET:
-            # Deliberately ignored mid-correction: the operator is holding the
-            # leader and has frames in the buffer, and silently discarding or
-            # saving those on their behalf is not a call this should make. Hand
-            # back or discard first, then reset.
-            if phase == DAggerPhase.CORRECTING:
-                logger.info("Ignoring RESET during a correction — hand back or discard first")
-                return []
+        elif command == CMD_RECOVER:
+            # Deliberately NOT phase-gated — that gating is what strands the
+            # operator. Mid-correction it arms the same discard CANCEL uses and
+            # returns the same event, so the phase leaves CORRECTING this tick;
+            # `_reset_requested` is then honoured on the next one, once the
+            # guard at the reset site sees a non-CORRECTING phase. Everything
+            # after that is the ordinary, already-tested reset path.
             self._reset_requested = True
+            if phase == DAggerPhase.CORRECTING:
+                logger.info("RECOVER: discarding the correction in flight, then resetting")
+                self._cancel_correction = True
+                return [_EV_CORRECTION]
+            logger.info("RECOVER: resetting from phase %s", phase.value)
+            return []
+        elif command == CMD_RESET:
+            self._reset_requested = True
+            if phase == DAggerPhase.CORRECTING:
+                # SAVES the correction, then resets.
+                #
+                # This used to be refused outright, on the reasoning that
+                # deciding the fate of a part-recorded takeover was not this
+                # code's call. In practice the operator finishing the task while
+                # still driving has already made that call — the frames up to
+                # here ARE the correction — and refusing left them to hand back
+                # and then reset as two presses, with the policy briefly
+                # regaining a finished scene in between.
+                #
+                # Exactly RECOVER's edge without the discard: the same event
+                # drives CORRECTING->PAUSED, where `_cancel_correction` is False
+                # so the episode is written, and `_reset_requested` is honoured
+                # on the next tick. A correction too short to be deliberate is
+                # still binned by the existing length check.
+                logger.info("RESET during a correction: saving it, then resetting")
+                return [_EV_CORRECTION]
             # Deliberately requests NO transition. Routing a reset through
             # `pause_resume` made `_apply_transition` treat it as "the operator
             # is about to grab the leader" and drive the LEADER up to the
@@ -806,6 +832,30 @@ class WebDAggerStrategy(DAggerStrategy):
                                     f"reason={CANCEL_REASON_OPERATOR} frames={correction_frames} "
                                     f"seconds={seconds:.1f}",
                                 )
+                                # Release the leader, or a discard strands it.
+                                #
+                                # Upstream's CORRECTING->PAUSED enables teleop
+                                # torque to hold the leader's pose, and the only
+                                # thing that ever releases it again is the
+                                # ->AUTONOMOUS transition. A HANDBACK reaches
+                                # that; a CANCEL deliberately STOPS at PAUSED
+                                # (see `_translate`), so after a discard the
+                                # leader stayed rigid with no scheduled
+                                # transition that would ever free it — the arm
+                                # "stuck there" with nothing on screen to
+                                # explain it.
+                                #
+                                # Releasing also creates alignment debt: the
+                                # next takeover would otherwise send the
+                                # follower straight to wherever the operator
+                                # has since moved the leader. Flag it so the
+                                # takeover glides the leader across first,
+                                # exactly as it does after a reset.
+                                if teleop_supports_feedback(ctx.hardware.teleop):
+                                    with contextlib.suppress(Exception):
+                                        ctx.hardware.teleop.disable_torque()
+                                        logger.info("Leader released after a discarded correction")
+                                    self._needs_leader_align = True
                             elif correction_frames < _MIN_CORRECTION_FRAMES:
                                 # Too short to be a demonstration — a
                                 # double-press, or a hand-back inside a tick or
