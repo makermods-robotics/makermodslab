@@ -103,7 +103,23 @@ marked *(reference)* name where the Python implementation lives.
 - Streams handed to agents are bounded by default (`sample_joints(duration)`
   returning a list); unbounded iterators are the explicitly-named variant.
 
-## 8. Coverage discipline
+## 8. Full-power principle
+
+- The SDK exposes the BACKEND's full surface, not the web UI's subset — the
+  UI narrows deliberately; the SDK must not. Where a request model is wider
+  than the UI's form (training's ~45 knobs, chain-rewind lineage fields),
+  every user-settable field is first-class, typed SDK surface.
+- Client-side knob validation is strict (unknown field → immediate error
+  naming close matches, nothing sent), with an explicitly-named unvalidated
+  escape hatch for fields newer than the SDK.
+- Request parity is RATCHETED: a test equality-asserts the SDK's field set
+  against the server's request model minus a reasoned exclusion list
+  (server-managed internals), so a new backend knob fails the build until
+  typed. *(reference: test_jobs.py training-options parity test)*
+- Server-managed fields (set by the registry/runners, never by clients) are
+  excluded ON PURPOSE and each exclusion carries its reason.
+
+## 9. Coverage discipline
 
 - Every tagged v1 operation in the snapshot is either implemented (tied to
   its `operationId`) or listed as planned; the check is equality-asserted in
