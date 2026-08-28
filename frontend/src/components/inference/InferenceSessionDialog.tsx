@@ -6,6 +6,7 @@ import {
   Loader2,
   Pause,
   Play,
+  RotateCcw,
   Square,
   Trash2,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import {
   coachingCancel,
   coachingHandback,
   coachingHold,
+  coachingReset,
   coachingResume,
   coachingTakeover,
   startNextInferenceEpisode,
@@ -69,6 +71,7 @@ const PHASE_META: Record<
   correcting: { labelKey: "inference.phase.correcting", tone: "amber", pulse: true },
   handing_over: { labelKey: "inference.phase.handingOver", tone: "amber", pulse: true },
   saving: { labelKey: "inference.phase.saving", tone: "amber", pulse: true },
+  attempt_reset: { labelKey: "inference.phase.attemptReset", tone: "amber", pulse: false },
 };
 
 // The big banner shown during a coaching session, keyed by lerobot's own phase.
@@ -102,6 +105,12 @@ const COACH_BANNER: Record<
     accent: "text-warn border-warn",
     bg: "bg-warn/20",
   },
+  resetting: {
+    titleKey: "inference.coachBanner.resetting.title",
+    hintKey: "inference.coachBanner.resetting.hint",
+    accent: "text-muted-foreground border-border",
+    bg: "bg-muted/50",
+  },
   saving: {
     titleKey: "inference.coachBanner.saving.title",
     hintKey: "inference.coachBanner.saving.hint",
@@ -123,6 +132,17 @@ const COACH_BANNER: Record<
 // Shown before the runner has reported any phase at all. Not a control-state
 // claim, because at that point we do not have one: `coaching_phase` is null
 // between the session going live and the control loop's first PHASE event.
+// Parked straight after a reset: the arm is home and limp, the scene is being
+// rearranged, and the next move is the NEXT ATTEMPT. Distinct from plain HELD
+// because the instruction is different — telling the operator "space to take
+// over" here is what produced the unwanted correction.
+const COACH_BANNER_PARKED = {
+  titleKey: "inference.coachBanner.parked.title",
+  hintKey: "inference.coachBanner.parked.hint",
+  accent: "text-ok border-ok/40",
+  bg: "bg-ok/10",
+};
+
 const COACH_BANNER_STARTING = {
   titleKey: "inference.coachBanner.starting.title",
   hintKey: "inference.coachBanner.starting.hint",
@@ -496,6 +516,8 @@ const InferenceSessionDialog: React.FC<{
   const correctionSeconds = status?.correction_seconds ?? 0;
   const coachDataset = status?.coaching_dataset ?? null;
   const alignError = status?.align_error ?? null;
+  const attempts = status?.attempts ?? 0;
+  const awaitingAttempt = status?.awaiting_attempt === true;
   // Only meaningful once the session is actually driving. `coachPhase` is null
   // until the runner reports one, which is what the "Starting…" banner covers.
   const coachLive =
@@ -542,6 +564,16 @@ const InferenceSessionDialog: React.FC<{
         t("inference.coach.cmd.handBack"),
         t("inference.coach.cmd.handingBack"),
       );
+    } else if (awaitingAttempt) {
+      // Parked after a reset: the scene has just been rearranged and what the
+      // operator wants is the NEXT ATTEMPT. Taking over here is what silently
+      // opened an unwanted correction — the arm was limp, the leader wasn't
+      // aligned, and the recording started anyway.
+      sendCoachCommand(
+        coachingResume,
+        t("inference.coach.cmd.startNextAttempt"),
+        t("inference.coach.cmd.starting"),
+      );
     } else {
       sendCoachCommand(
         coachingTakeover,
@@ -549,7 +581,7 @@ const InferenceSessionDialog: React.FC<{
         t("inference.coach.cmd.takingOver"),
       );
     }
-  }, [coachPhase, sendCoachCommand, t]);
+  }, [coachPhase, awaitingAttempt, sendCoachCommand, t]);
 
   // Shift+Space: freeze without committing to a correction — "wait, let me
   // think" — and unfreeze again. Maps to lerobot's bare pause.
@@ -559,7 +591,15 @@ const InferenceSessionDialog: React.FC<{
   // the policy); from anywhere else it holds or resumes. It always does
   // something, so it is worth learning.
   const handleCoachHoldToggle = useCallback(() => {
-    if (coachPhase === "paused") {
+    if (awaitingAttempt) {
+      // The two swap while parked, so the operator can still take over
+      // deliberately — just not by reflex.
+      sendCoachCommand(
+        coachingTakeover,
+        t("inference.coach.cmd.takeOver"),
+        t("inference.coach.cmd.takingOver"),
+      );
+    } else if (coachPhase === "paused") {
       sendCoachCommand(
         coachingResume,
         t("inference.coach.cmd.resume"),
@@ -578,7 +618,7 @@ const InferenceSessionDialog: React.FC<{
         t("inference.coach.cmd.holding"),
       );
     }
-  }, [coachPhase, sendCoachCommand, t]);
+  }, [coachPhase, awaitingAttempt, sendCoachCommand, t]);
 
   // Escape discards the correction in progress. THE feature that makes coaching
   // usable: a fumbled takeover is poison training data, and upstream lerobot
@@ -588,6 +628,18 @@ const InferenceSessionDialog: React.FC<{
       coachingCancel,
       t("inference.coach.cmd.discard"),
       t("inference.coach.cmd.discarding"),
+    );
+  }, [sendCoachCommand, t]);
+
+  // "The cube is in the tray" — end this attempt and put the arm back so the
+  // next one starts from the same place. Corrections-only DAgger has no
+  // task-episode of its own, so without this the policy just keeps driving at a
+  // finished scene.
+  const handleCoachReset = useCallback(() => {
+    sendCoachCommand(
+      coachingReset,
+      t("inference.coach.cmd.reset"),
+      t("inference.coach.cmd.resetting"),
     );
   }, [sendCoachCommand, t]);
 
@@ -659,6 +711,14 @@ const InferenceSessionDialog: React.FC<{
         else handleCoachToggle();
         return;
       }
+      if (e.key.toLowerCase() === "r" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // "This attempt is over." Ignored mid-correction by the runner, which
+        // won't decide the fate of a part-recorded takeover on the operator's
+        // behalf.
+        e.preventDefault();
+        if (!coachBusy) handleCoachReset();
+        return;
+      }
       if (e.key === "Escape") {
         // Always swallowed, and always sent — never gated on `coachPhase`.
         //
@@ -686,6 +746,7 @@ const InferenceSessionDialog: React.FC<{
     handleCoachToggle,
     handleCoachHoldToggle,
     handleCoachDiscard,
+    handleCoachReset,
   ]);
 
   // Dismissal is blocked while the run is (or may still be) live — before the
@@ -866,9 +927,11 @@ const InferenceSessionDialog: React.FC<{
                 // No phase yet ⇒ say so. Never fall back to a control-state
                 // claim; "the arm is frozen" shown while the policy is starting
                 // is the worst default this banner could have.
-                const banner = coachPhase
-                  ? COACH_BANNER[coachPhase]
-                  : COACH_BANNER_STARTING;
+                const banner = !coachPhase
+                  ? COACH_BANNER_STARTING
+                  : awaitingAttempt && coachPhase === "paused"
+                    ? COACH_BANNER_PARKED
+                    : COACH_BANNER[coachPhase];
                 return (
                   <div
                     className={`mb-4 rounded-lg border-2 p-6 text-center ${banner.bg} ${banner.accent} ${
@@ -914,6 +977,11 @@ const InferenceSessionDialog: React.FC<{
                     })}
                   </span>
                   <span className="text-xs text-muted-foreground tabular-nums">
+                    {attempts > 0
+                      ? t("inference.coach.attemptPrefix", {
+                          attempt: attempts + 1,
+                        })
+                      : ""}
                     {t("inference.coach.recorded", {
                       duration: formatTime(correctionSeconds),
                     })}
@@ -1253,10 +1321,18 @@ const InferenceSessionDialog: React.FC<{
                   className="w-full font-semibold py-6 text-lg disabled:opacity-50"
                   variant={coachPhase === "correcting" ? "secondary" : "default"}
                 >
-                  <Hand className="w-5 h-5 mr-2" />
+                  {awaitingAttempt && coachPhase !== "correcting" ? (
+                    <Play className="w-5 h-5 mr-2" />
+                  ) : (
+                    <Hand className="w-5 h-5 mr-2" />
+                  )}
                   {coachPhase === "correcting"
                     ? t("inference.coach.handBack")
-                    : t("inference.coach.takeOver")}
+                    : awaitingAttempt
+                      ? t("inference.coach.startAttempt", {
+                          attempt: attempts + 1,
+                        })
+                      : t("inference.coach.takeOver")}
                   {/* Key names are the physical keys — never translated. */}
                   <kbd className="ml-2 rounded bg-black/20 px-1.5 py-0.5 text-xs font-mono">
                     space
@@ -1282,16 +1358,34 @@ const InferenceSessionDialog: React.FC<{
                     variant="outline"
                     className="w-full font-semibold disabled:opacity-50"
                   >
-                    {coachPhase === "paused" ? (
+                    {awaitingAttempt ? (
+                      <Hand className="w-4 h-4 mr-2" />
+                    ) : coachPhase === "paused" ? (
                       <Play className="w-4 h-4 mr-2" />
                     ) : (
                       <Pause className="w-4 h-4 mr-2" />
                     )}
-                    {coachPhase === "paused"
-                      ? t("inference.coach.resume")
-                      : t("inference.coach.hold")}
+                    {awaitingAttempt
+                      ? t("inference.coach.takeOverInstead")
+                      : coachPhase === "paused"
+                        ? t("inference.coach.resume")
+                        : t("inference.coach.hold")}
                     <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
                       ⇧ space
+                    </kbd>
+                  </Button>
+                )}
+                {coachPhase !== "correcting" && (
+                  <Button
+                    onClick={handleCoachReset}
+                    disabled={coachBusy}
+                    variant="outline"
+                    className="w-full font-semibold disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-4 h-4 mr-2" />
+                    {t("inference.coach.reset")}
+                    <kbd className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                      r
                     </kbd>
                   </Button>
                 )}

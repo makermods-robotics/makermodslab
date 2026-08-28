@@ -65,6 +65,7 @@ from .dagger_protocol import (
     CMD_QUIT as DAGGER_CMD_QUIT,
     COMMANDS as DAGGER_COMMANDS,
     EVENT_ALIGN_REQUIRED,
+    EVENT_ATTEMPT_RESET,
     EVENT_CORRECTION_CANCELLED,
     EVENT_CORRECTION_SAVED,
     EVENT_DATASET,
@@ -74,6 +75,7 @@ from .dagger_protocol import (
     PHASE_CORRECTING as DAGGER_PHASE_CORRECTING,
     PHASE_HANDING_OVER as DAGGER_PHASE_HANDING_OVER,
     PHASE_PAUSED as DAGGER_PHASE_PAUSED,
+    PHASE_RESETTING as DAGGER_PHASE_RESETTING,
     PHASE_SAVING as DAGGER_PHASE_SAVING,
     PHASES as DAGGER_PHASES,
     parse_event as parse_dagger_event,
@@ -102,6 +104,7 @@ from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .session_events import notify_session_changed
 from .utils.config import (
+    LEADER_CONFIG_PATH,
     CameraResolutionError,
     bimanual_base_id,
     bind_robot_cameras,
@@ -361,6 +364,11 @@ PHASE_HANDING_OVER = "handing_over"
 # on the runner's control loop, so the arm is frozen and the policy has not
 # resumed — the operator is waiting, and needs to be told why.
 PHASE_SAVING = "saving"
+# The operator declared this attempt at the task over; the follower is easing
+# back to its start pose so the next attempt begins where the first did.
+# Distinct from eval's `resetting`, which is a whole-episode boundary — here the
+# dataset is untouched, only the scene and the arm are being put back.
+PHASE_ATTEMPT_RESET = "attempt_reset"
 PHASE_WATCHING = "watching"
 PHASE_HOLDING = "holding"
 PHASE_CORRECTING = "correcting"
@@ -528,6 +536,16 @@ class _CoachSession:
     # None renders as "Starting…", which is the only honest answer there.
     phase: str | None = None
     corrections_saved: int = 0
+    # How many attempts at the TASK the operator has declared finished. Not an
+    # episode count — corrections are the episodes — but the thing they are
+    # actually counting while they work through a task.
+    attempts: int = 0
+    # True while the session is parked straight after a reset. The operator's
+    # next move there is to START THE NEXT ATTEMPT, not to take over — and the
+    # UI promotes the matching control, because pressing the usual primary
+    # (take over) opened a correction nobody wanted. Cleared as soon as the
+    # session moves on.
+    awaiting_attempt: bool = False
     # Wall-clock seconds of recorded correction, summed across the session.
     # Reported alongside the count because ten one-second twitches and ten
     # ten-second recoveries are very different datasets.
@@ -578,6 +596,8 @@ def _coach_fields(cs: _CoachSession | None) -> dict[str, Any]:
             "coaching": False,
             "coaching_phase": None,
             "corrections_saved": None,
+            "attempts": None,
+            "awaiting_attempt": None,
             "corrections_target": None,
             "correction_seconds": None,
             "coaching_dataset": None,
@@ -587,6 +607,8 @@ def _coach_fields(cs: _CoachSession | None) -> dict[str, Any]:
         "coaching": True,
         "coaching_phase": cs.phase,
         "corrections_saved": cs.corrections_saved,
+        "attempts": cs.attempts,
+        "awaiting_attempt": cs.awaiting_attempt,
         "corrections_target": cs.corrections_target,
         "correction_seconds": round(cs.correction_seconds, 1),
         "coaching_dataset": cs.dataset_repo_id,
@@ -920,6 +942,8 @@ def _handle_dagger_line(line: str) -> None:
         _on_correction_cancelled()
     elif event == EVENT_ALIGN_REQUIRED:
         _on_align_required(parse_dagger_fields(payload))
+    elif event == EVENT_ATTEMPT_RESET:
+        _on_attempt_reset(parse_dagger_fields(payload))
     elif event == DAGGER_EVENT_ERROR:
         _on_dagger_error(payload)
 
@@ -970,6 +994,7 @@ def _on_dagger_phase(phase: str) -> None:
         DAGGER_PHASE_PAUSED: PHASE_HOLDING,
         DAGGER_PHASE_HANDING_OVER: PHASE_HANDING_OVER,
         DAGGER_PHASE_SAVING: PHASE_SAVING,
+        DAGGER_PHASE_RESETTING: PHASE_ATTEMPT_RESET,
     }.get(phase, PHASE_WATCHING)
     with _state_lock:
         cs = _coach_session
@@ -978,6 +1003,10 @@ def _on_dagger_phase(phase: str) -> None:
         cs.phase = phase
         # A phase actually changed, so the last refused takeover is history.
         cs.align_error = None
+        # Leaving the parked-after-reset state: any phase other than the two
+        # the reset itself passes through means the operator has moved on.
+        if phase not in (DAGGER_PHASE_PAUSED, DAGGER_PHASE_RESETTING):
+            cs.awaiting_attempt = False
         if _inference_meta:
             _inference_meta["phase"] = app_phase
 
@@ -1028,6 +1057,19 @@ def _on_align_required(fields: dict[str, str]) -> None:
         if cs is not None:
             cs.align_error = message
     logger.warning(message)
+
+
+def _on_attempt_reset(fields: dict[str, str]) -> None:
+    """One attempt at the task ended and the arm is back at its start pose."""
+    with _state_lock:
+        cs = _coach_session
+        if cs is None:
+            return
+        with contextlib.suppress(ValueError, TypeError):
+            cs.attempts = int(fields.get("n", cs.attempts + 1))
+        cs.awaiting_attempt = True
+        n = cs.attempts
+    logger.info("Attempt %d reset — arm is home", n)
 
 
 def _on_dagger_error(message: str) -> None:
@@ -2596,6 +2638,27 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                     f"Coaching needs a leader arm to take over with — missing: {', '.join(missing)}."
                 ),
             }
+        # The name being non-empty is not the same as the calibration existing.
+        # A robot record can name a leader calibration that was since deleted or
+        # renamed (and a name like "None" is a perfectly legal file stem, so it
+        # cannot be treated as unset). Checking the file here turns what would
+        # be a failure deep inside the runner — after the model download and the
+        # arm preflight — into a 400 in the launch panel.
+        for label, name in (
+            ("leader", request.leader_config),
+            *((("right leader", request.right_leader_config),) if request.mode == "bimanual" else ()),
+        ):
+            stem = os.path.splitext(name)[0]
+            if not os.path.isfile(os.path.join(LEADER_CONFIG_PATH, f"{stem}.json")):
+                _release_slot()
+                return {
+                    "success": False,
+                    "status_code": 400,
+                    "message": (
+                        f'The {label} arm\'s calibration "{stem}" no longer exists. '
+                        "Re-assign or re-calibrate it in Robot settings."
+                    ),
+                }
         name_ok, name_reason = validate_dataset_repo_id(_coaching_dataset_repo_id(request))
         if not name_ok:
             _release_slot()

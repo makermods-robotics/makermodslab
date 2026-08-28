@@ -21,6 +21,7 @@ export default {
     correcting: "You're driving — recording",
     handingOver: "Handing over — the arm is moving",
     saving: "Saving the correction…",
+    attemptReset: "Home — arm is limp, reposition freely",
   },
   result: {
     success: "Success",
@@ -52,11 +53,15 @@ export default {
     },
     held: {
       title: "HELD",
-      hint: "The arm is holding its pose. Nothing is being recorded.",
+      hint: "The arm is holding its pose. Nothing is being recorded. Space to take over, R to reset for another attempt.",
     },
     handingOver: {
       title: "HANDING OVER",
       hint: "The arm is moving into position — don't fight it. Wait for it to settle.",
+    },
+    resetting: {
+      title: "RESETTING…",
+      hint: "Easing back to the start pose, then going limp so you can reposition it by hand. Nothing is being recorded.",
     },
     saving: {
       title: "SAVING…",
@@ -65,6 +70,13 @@ export default {
     correcting: {
       title: "YOU'RE DRIVING",
       hint: "Recovering and correcting — every frame is being recorded.",
+    },
+    // Parked straight after a reset. Distinct from HELD because the
+    // INSTRUCTION differs — "space to take over" here is what produced the
+    // unwanted correction this state exists to prevent.
+    parked: {
+      title: "READY",
+      hint: "Arm is home and limp — reposition it and the scene freely. Space starts the next attempt.",
     },
     starting: {
       title: "STARTING…",
@@ -82,6 +94,11 @@ export default {
     resume: "Let the policy continue",
     ending: "Ending…",
     endSession: "End session & keep corrections",
+    reset: "Task done — reset for next attempt",
+    startAttempt: "Start attempt {{attempt}}",
+    takeOverInstead: "Take over instead",
+    // Trailing separator included: it prefixes the recorded-time span.
+    attemptPrefix: "attempt {{attempt}} · ",
     // Live tally. {{saved}} and {{target}} are raw counts; {{target}} is "?"
     // until the runner reports one, so this is not a plural form.
     tally: "{{saved}} of {{target}} corrections",
@@ -122,6 +139,10 @@ export default {
       resuming: "Resuming…",
       discard: "Discard correction",
       discarding: "Discarding…",
+      reset: "Reset",
+      resetting: "Returning home…",
+      startNextAttempt: "Start next attempt",
+      starting: "Starting…",
     },
   },
   toast: {

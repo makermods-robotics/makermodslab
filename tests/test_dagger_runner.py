@@ -259,3 +259,105 @@ def test_edges_with_no_motion_are_not_announced(strategy) -> None:
         ctx = _FakeCtx(actuated=actuated)
         assert strategy._transition_moves_the_arm(PAUSED, AUTONOMOUS, ctx) is False
         assert strategy._transition_moves_the_arm(CORRECTING, PAUSED, ctx) is False
+
+
+# --- Limp / torque during the reset window ----------------------------------
+
+
+class _FakeBus:
+    def __init__(self) -> None:
+        self.torque = True
+
+    def disable_torque(self) -> None:
+        self.torque = False
+
+    def enable_torque(self) -> None:
+        self.torque = True
+
+
+class _FakeRobot:
+    """Single-arm shape: one bus hanging off the device."""
+
+    def __init__(self) -> None:
+        self.bus = _FakeBus()
+        self.sent: list[dict] = []
+
+    def get_observation(self) -> dict:
+        return {"shoulder_pan.pos": 11.0, "elbow_flex.pos": 22.0, "not_a_motor": 1}
+
+    def send_action(self, action: dict) -> None:
+        self.sent.append(action)
+
+
+class _FakeBiRobot:
+    """Bimanual BiSO shape: a bus per sub-arm, none on the device itself."""
+
+    def __init__(self) -> None:
+        self.left_arm = _FakeRobot()
+        self.right_arm = _FakeRobot()
+
+
+def _ctx_with(robot):
+    return type("Ctx", (), {"hardware": type("HW", (), {"robot_wrapper": robot})()})()
+
+
+def test_follower_buses_finds_both_arms_on_a_bimanual_robot(strategy) -> None:
+    assert len(strategy._follower_buses(_FakeBiRobot())) == 2
+    assert len(strategy._follower_buses(_FakeRobot())) == 1
+
+
+def test_go_limp_releases_torque_and_restore_re_enables_it(strategy) -> None:
+    robot = _FakeRobot()
+    ctx = _ctx_with(robot)
+    assert strategy._go_limp(ctx) is True
+    assert robot.bus.torque is False
+    strategy._restore_torque(ctx)
+    assert robot.bus.torque is True
+
+
+def test_restore_writes_the_goal_before_re_enabling_torque(strategy) -> None:
+    """The ordering that stops the arm snapping when it comes back.
+
+    A Feetech servo holds its Goal_Position the instant torque returns, and
+    that register still holds the pre-limp target. Writing the operator's new
+    pose first is what makes re-powering a no-op instead of a lurch."""
+    robot = _FakeRobot()
+    ctx = _ctx_with(robot)
+    strategy._go_limp(ctx)
+    order: list[str] = []
+    robot.send_action = lambda a: order.append("goal")  # noqa: ARG005
+    robot.bus.enable_torque = lambda: order.append("torque")
+    strategy._restore_torque(ctx)
+    assert order == ["goal", "torque"]
+
+
+def test_restore_sends_only_motor_positions(strategy) -> None:
+    """Observations carry more than joint positions; only `.pos` keys are a
+    valid action, and passing the rest through would be rejected downstream."""
+    robot = _FakeRobot()
+    ctx = _ctx_with(robot)
+    strategy._go_limp(ctx)
+    strategy._restore_torque(ctx)
+    assert robot.sent == [{"shoulder_pan.pos": 11.0, "elbow_flex.pos": 22.0}]
+
+
+def test_restore_is_a_noop_when_the_arm_was_never_limp(strategy) -> None:
+    robot = _FakeRobot()
+    assert strategy._restore_torque(_ctx_with(robot)) is None
+    assert robot.sent == []
+
+
+def test_minimum_correction_length_is_above_the_one_frame_crash() -> None:
+    """Guards the two failures that made this threshold necessary.
+
+    A crash mid-correction left ONE frame in the buffer. Teardown saved it, so
+    the operator was credited a correction they never made — and the resulting
+    one-frame episode then broke lerobot's stats aggregation outright
+    ("ArrowInvalid ... expected length 2 but got length 1"), killing the
+    session. The bound must therefore sit above 1, and above anything a
+    double-press can produce, while staying well under a deliberate
+    demonstration (which is at least a second, i.e. ~30 frames)."""
+    from makermodslab.dagger_runner import _MIN_CORRECTION_FRAMES
+
+    assert _MIN_CORRECTION_FRAMES > 1
+    assert _MIN_CORRECTION_FRAMES < 30

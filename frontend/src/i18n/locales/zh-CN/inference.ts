@@ -19,6 +19,7 @@ export default {
     correcting: "你在驾驶 — 正在录制",
     handingOver: "正在交接 — 机械臂正在移动",
     saving: "正在保存这次纠正…",
+    attemptReset: "已归位 — 机械臂已松力，可自由摆放",
   },
   result: {
     success: "成功",
@@ -48,11 +49,15 @@ export default {
     },
     held: {
       title: "已保持",
-      hint: "机械臂正维持当前姿态。此时不会录制任何内容。",
+      hint: "机械臂正维持当前姿态。此时不会录制任何内容。按空格键接管，按 R 键复位以开始下一次尝试。",
     },
     handingOver: {
       title: "正在交接",
       hint: "机械臂正在移动到位 — 不要与它较劲，等它停稳。",
+    },
+    resetting: {
+      title: "正在复位…",
+      hint: "正缓缓退回起始姿态，然后松力，方便你用手重新摆放。此时不会录制任何内容。",
     },
     saving: {
       title: "正在保存…",
@@ -61,6 +66,12 @@ export default {
     correcting: {
       title: "你在驾驶",
       hint: "正在挽回并纠正 — 每一帧都在录制。",
+    },
+    // 复位之后的停驻状态。与 “已保持” 区分开，是因为给操作者的指示不同 ——
+    // 在这里提示 “按空格接管” 正是它要避免的那次误录。
+    parked: {
+      title: "就绪",
+      hint: "机械臂已归位并松力 — 可自由挪动它和现场。按空格键开始下一次尝试。",
     },
     starting: {
       title: "正在启动…",
@@ -78,6 +89,11 @@ export default {
     resume: "让策略继续",
     ending: "正在结束…",
     endSession: "结束会话并保留纠正数据",
+    reset: "任务完成 — 复位以开始下一次尝试",
+    startAttempt: "开始第 {{attempt}} 次尝试",
+    takeOverInstead: "改为接管",
+    // 末尾的分隔符是特意保留的：它作为已录制时长的前缀。
+    attemptPrefix: "第 {{attempt}} 次尝试 · ",
     // 实时计数。{{saved}} 与 {{target}} 都是原始数字；在运行器报告目标数之前
     // {{target}} 是 “?”，因此这里不是复数形式。
     tally: "已完成 {{saved}} / {{target}} 次纠正",
@@ -115,6 +131,10 @@ export default {
       resuming: "正在恢复…",
       discard: "丢弃纠正",
       discarding: "正在丢弃…",
+      reset: "复位",
+      resetting: "正在归位…",
+      startNextAttempt: "开始下一次尝试",
+      starting: "正在启动…",
     },
   },
   toast: {

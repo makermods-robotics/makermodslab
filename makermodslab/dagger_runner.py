@@ -88,7 +88,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401  (registers --robot.cameras type)
-from lerobot.common.control_utils import teleop_supports_feedback
+from lerobot.common.control_utils import teleop_smooth_move_to, teleop_supports_feedback
 from lerobot.configs import parser
 from lerobot.datasets import VideoEncodingManager
 from lerobot.robots import (  # noqa: F401  (registers --robot.type=so101_follower / bi_so_follower)
@@ -115,9 +115,11 @@ from .dagger_protocol import (
     CMD_HANDBACK,
     CMD_HOLD,
     CMD_QUIT,
+    CMD_RESET,
     CMD_RESUME,
     CMD_TAKEOVER,
     EVENT_ALIGN_REQUIRED,
+    EVENT_ATTEMPT_RESET,
     EVENT_BYE,
     EVENT_CORRECTION_CANCELLED,
     EVENT_CORRECTION_SAVED,
@@ -126,6 +128,7 @@ from .dagger_protocol import (
     EVENT_PHASE,
     EVENT_READY,
     PHASE_HANDING_OVER,
+    PHASE_RESETTING,
     PHASE_SAVING,
     format_event,
 )
@@ -141,6 +144,22 @@ _EV_CORRECTION = "correction"
 # takeover is refused on a NON-ACTUATED teleop. See `_alignment_error` for why
 # only that case is gated, and why the number is what it is.
 _ALIGN_TOLERANCE_DEG = 15.0
+
+# Shortest correction worth keeping, in recorded frames (~0.33s at 30fps).
+#
+# Below this a "correction" is never a deliberate demonstration — it is a
+# double-press, or the buffer that happened to exist when the session died. Two
+# observed failures make discarding them mandatory rather than tidy:
+#
+#   * a crash mid-correction left 1 frame, which the teardown saved and counted,
+#     so the operator was credited a correction they never made;
+#   * a ONE-FRAME episode then breaks lerobot's stats aggregation outright —
+#     "ArrowInvalid: Column 95 named stats/observation.images.front/min expected
+#     length 2 but got length 1" — which killed the session and left the dataset
+#     with a malformed episode.
+#
+# Anything a human actually meant to demonstrate is at least a second long.
+_MIN_CORRECTION_FRAMES = 10
 
 # Logged (not emitted) once setup is behind us, purely so the familiar lerobot
 # landmark still appears in the inference log a human — or a future grep — goes
@@ -240,6 +259,19 @@ class WebDAggerStrategy(DAggerStrategy):
         # Armed by CANCEL, consumed at the CORRECTING→PAUSED edge.
         self._cancel_correction = False
         self._corrections_saved = 0
+        # Armed by RESET, consumed once the loop reaches PAUSED. The ease-home
+        # can only run with the engine stopped, and getting to PAUSED is itself
+        # a transition, so the request has to outlive the tick that made it.
+        self._reset_requested = False
+        self._attempts = 0
+        # True while the follower is deliberately unpowered so the operator can
+        # reposition it by hand during a reset. Everything that could move the
+        # arm has to restore torque first — see `_restore_torque`.
+        self._limp = False
+        # Set by a reset: the leader was never driven to the follower (a reset
+        # is not a handover), so the next takeover must align it first or the
+        # follower would snap to wherever the leader happens to be.
+        self._needs_leader_align = False
 
     # -- setup: everything upstream does, minus the input listener -----------
 
@@ -311,6 +343,22 @@ class WebDAggerStrategy(DAggerStrategy):
         elif command == CMD_RESUME:
             if phase == DAggerPhase.PAUSED:
                 return [_EV_PAUSE_RESUME]
+        elif command == CMD_RESET:
+            # Deliberately ignored mid-correction: the operator is holding the
+            # leader and has frames in the buffer, and silently discarding or
+            # saving those on their behalf is not a call this should make. Hand
+            # back or discard first, then reset.
+            if phase == DAggerPhase.CORRECTING:
+                logger.info("Ignoring RESET during a correction — hand back or discard first")
+                return []
+            self._reset_requested = True
+            # Deliberately requests NO transition. Routing a reset through
+            # `pause_resume` made `_apply_transition` treat it as "the operator
+            # is about to grab the leader" and drive the LEADER up to the
+            # follower's pose under torque — then, when the policy resumed, that
+            # same function released the leader and it fell from mid-air.
+            # A reset is not a handover. The loop pauses the engine itself.
+            return []
         else:
             logger.warning("Ignoring unrecognised coaching command %r", command)
             return []
@@ -349,6 +397,70 @@ class WebDAggerStrategy(DAggerStrategy):
         if actuated:
             return old_phase == DAggerPhase.AUTONOMOUS and new_phase == DAggerPhase.PAUSED
         return old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING
+
+    # -- limp / torque for the reset window ----------------------------------
+
+    @staticmethod
+    def _follower_buses(robot_wrapper):
+        """Every serial bus behind the follower — two for a bimanual BiSO.
+
+        Mirrors `arm_identity._device_arms`: a BiSO robot exposes `left_arm` /
+        `right_arm` sub-devices that each own a bus, a single-arm robot owns one
+        directly. Reaches through `ThreadSafeRobot.inner` because torque lives
+        on the raw device, not the wrapper."""
+        robot = getattr(robot_wrapper, "inner", robot_wrapper)
+        arms = [
+            a for a in (getattr(robot, "left_arm", None), getattr(robot, "right_arm", None)) if a is not None
+        ]
+        return [bus for d in (arms or [robot]) if (bus := getattr(d, "bus", None)) is not None]
+
+    def _go_limp(self, ctx) -> bool:
+        """Unpower the follower so it can be repositioned by hand. True if it went.
+
+        Callers MUST have driven the arm somewhere safe first. An SO-101 that
+        loses torque mid-reach falls under its own weight, so this is only ever
+        called after a successful ease-home — the same order `rest_pose` states
+        as its contract ("torque must still be enabled; call BEFORE
+        force_disable_torque")."""
+        buses = self._follower_buses(ctx.hardware.robot_wrapper)
+        if not buses:
+            logger.warning("No follower bus found; leaving the arm powered")
+            return False
+        for bus in buses:
+            try:
+                bus.disable_torque()
+            except Exception:
+                logger.exception("Could not release torque; the arm stays powered")
+                return False
+        self._limp = True
+        logger.info("Follower is limp — reposition by hand")
+        return True
+
+    def _restore_torque(self, ctx):
+        """Re-power the follower where the operator left it. Returns that pose.
+
+        The goal position is written FIRST, while the motors are still limp.
+        A Feetech servo holds its Goal_Position register the instant torque
+        comes back, and that register still contains the pre-limp target — so
+        enabling torque without this would snap the arm from wherever the
+        operator moved it to wherever the policy last wanted it."""
+        if not self._limp:
+            return None
+        robot = ctx.hardware.robot_wrapper
+        hold = None
+        try:
+            obs = robot.get_observation()
+            hold = {k: v for k, v in obs.items() if k.endswith(".pos")}
+            if hold:
+                robot.send_action(hold)
+        except Exception:
+            logger.exception("Could not read the arm's pose before re-powering")
+        for bus in self._follower_buses(robot):
+            with contextlib.suppress(Exception):
+                bus.enable_torque()
+        self._limp = False
+        logger.info("Follower re-powered at its current pose")
+        return hold
 
     # -- the alignment gate --------------------------------------------------
 
@@ -489,6 +601,12 @@ class WebDAggerStrategy(DAggerStrategy):
                                 transition = None
 
                     if transition is not None:
+                        # Anything past here can move the arm, so it must be
+                        # powered again first — including the handover glide,
+                        # which would otherwise drive a limp follower.
+                        restored = self._restore_torque(ctx)
+                        if restored:
+                            last_action = restored
                         old_phase, new_phase = transition
                         # Announce the travel BEFORE the blocking call. Both
                         # smooth-handover paths inside `_apply_transition` drive
@@ -497,11 +615,30 @@ class WebDAggerStrategy(DAggerStrategy):
                         # of what the hardware was doing (see PHASE_HANDING_OVER).
                         # stdout is flushed per event, so the orchestrator reads
                         # this while the control-loop thread is still blocked.
-                        if self._transition_moves_the_arm(old_phase, new_phase, ctx):
+                        # After a reset the leader was never brought to the
+                        # follower, so do it now — otherwise the first
+                        # CORRECTING tick sends the follower straight to
+                        # wherever the operator left the leader.
+                        aligning = (
+                            self._needs_leader_align
+                            and new_phase == DAggerPhase.CORRECTING
+                            and teleop_supports_feedback(ctx.hardware.teleop)
+                        )
+                        if self._transition_moves_the_arm(old_phase, new_phase, ctx) or aligning:
                             _emit(EVENT_PHASE, f"phase={PHASE_HANDING_OVER}")
+                        if aligning:
+                            self._needs_leader_align = False
+                            obs = ctx.hardware.robot_wrapper.get_observation()
+                            here = {k: v for k, v in obs.items() if k.endswith(".pos")}
+                            logger.info("Aligning the leader to the follower after a reset")
+                            with contextlib.suppress(Exception):
+                                teleop_smooth_move_to(ctx.hardware.teleop, here)
                         self._apply_transition(old_phase, new_phase, engine, interpolator, ctx, last_action)
                         if new_phase == DAggerPhase.AUTONOMOUS:
                             last_action = None
+                            # Back under policy control: the leader is released
+                            # and free, so there is no alignment debt to carry.
+                            self._needs_leader_align = False
 
                         if old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING:
                             correction_frames = 0
@@ -526,16 +663,19 @@ class WebDAggerStrategy(DAggerStrategy):
                                     "Correction discarded (%.1fs, %d frames)", seconds, correction_frames
                                 )
                                 _emit(EVENT_CORRECTION_CANCELLED)
-                            elif correction_frames == 0:
-                                # A takeover ended before a single frame landed
-                                # (a double-press, or a hand-back inside one
-                                # tick). save_episode on an empty buffer raises
-                                # in lerobot; discard it and say nothing louder
-                                # than a log — the operator did not ask for an
-                                # episode here.
+                            elif correction_frames < _MIN_CORRECTION_FRAMES:
+                                # Too short to be a demonstration — a
+                                # double-press, or a hand-back inside a tick or
+                                # two. Discarding is not just tidiness: a
+                                # one-frame episode breaks lerobot's stats
+                                # aggregation and takes the session with it
+                                # (see _MIN_CORRECTION_FRAMES).
                                 with self._episode_lock:
                                     dataset.clear_episode_buffer()
-                                logger.info("Empty correction discarded")
+                                logger.info(
+                                    "Discarded a %d-frame correction (too short to be deliberate)",
+                                    correction_frames,
+                                )
                                 _emit(EVENT_CORRECTION_CANCELLED)
                             else:
                                 with self._episode_lock, _watchdog(_SAVE_WATCHDOG_S, "save_episode"):
@@ -556,6 +696,45 @@ class WebDAggerStrategy(DAggerStrategy):
                                 )
 
                         _emit(EVENT_PHASE, f"phase={new_phase.value}")
+
+                    # MakerMods Lab: an attempt at the TASK is over. Corrections-only
+                    # DAgger has no task-episode of its own, so without this the
+                    # policy just kept driving at a finished scene. Runs only
+                    # from PAUSED — the engine must be stopped before the arm
+                    # moves — and blocks the loop for the duration of the glide,
+                    # which is why it announces itself first.
+                    if self._reset_requested and events.phase != DAggerPhase.CORRECTING:
+                        self._reset_requested = False
+                        self._attempts += 1
+                        # Stop the policy WITHOUT going through
+                        # `_apply_transition` — see the note in `_translate`.
+                        # Setting the phase directly is safe here precisely
+                        # because none of the transition side-effects apply: no
+                        # handover, no torque flip on the leader.
+                        engine.pause()
+                        events.phase = DAggerPhase.PAUSED
+                        _emit(EVENT_PHASE, f"phase={PHASE_RESETTING}")
+                        logger.info("Attempt %d ended — easing the follower home", self._attempts)
+                        homed = True
+                        try:
+                            self._return_to_initial_position(ctx.hardware)
+                        except Exception:
+                            # A failed ease-home must not end the session: the
+                            # arm simply stays where it is and the operator can
+                            # reposition the scene around it.
+                            homed = False
+                            logger.exception("Return-to-initial-position failed; leaving the arm in place")
+                        # Limp ONLY from a pose we know is safe. If the ease-home
+                        # did not arrive, the arm is somewhere arbitrary — quite
+                        # possibly extended — and cutting torque there drops it.
+                        if homed:
+                            self._go_limp(ctx)
+                        else:
+                            logger.warning("Skipping limp: the arm is not at its home pose")
+                        last_action = None
+                        self._needs_leader_align = True
+                        _emit(EVENT_ATTEMPT_RESET, f"n={self._attempts}")
+                        _emit(EVENT_PHASE, f"phase={DAggerPhase.PAUSED.value}")
 
                     phase = events.phase
                     obs = robot.get_observation()
@@ -615,28 +794,56 @@ class WebDAggerStrategy(DAggerStrategy):
             finally:
                 logger.info("Coaching control loop ended — pausing engine")
                 engine.pause()
-                # A session stopped mid-correction still has frames in the
-                # buffer. Upstream saves them; so do we — the operator was
-                # demonstrating something real right up to the stop, and
-                # discarding it would silently lose the work. An empty buffer
-                # (the common case: stopped while watching) raises, which is
-                # what the suppression is for.
+                # Teardown eases the arm home and that needs torque; a session
+                # stopped during a reset would otherwise disconnect limp,
+                # leaving the arm wherever the operator's hand left it.
                 with contextlib.suppress(Exception):
-                    with self._episode_lock:
-                        dataset.save_episode()
-                    self._corrections_saved += 1
-                    self._needs_push.set()
-                    logger.info("Final in-progress correction saved")
-                    # MUST be emitted, not just logged. The orchestrator's tally
-                    # comes only from these events, so a save that happens here
-                    # and nowhere else left the summary reporting one fewer
-                    # correction than the dataset actually contains — which is
-                    # the ordinary outcome of pressing Stop while driving.
-                    _emit(
-                        EVENT_CORRECTION_SAVED,
-                        f"n={self._corrections_saved} frames={correction_frames} "
-                        f"seconds={time.perf_counter() - correction_started_at:.1f}",
-                    )
+                    self._restore_torque(ctx)
+
+                # A session stopped mid-correction still has frames in the
+                # buffer, and those are real work: the operator was
+                # demonstrating right up to the stop, so the correction is
+                # saved and counted.
+                #
+                # UNLESS it is too short to be one. A session that DIES
+                # mid-take — a serial dropout, say — leaves a frame or two
+                # behind, and saving that both credited a correction nobody
+                # made and wrote the one-frame episode that broke lerobot's
+                # stats aggregation, taking the session down with it.
+                #
+                # Deliberately no `return` in either branch: returning from a
+                # `finally` swallows the exception that brought us here, which
+                # is exactly the crash the operator needs reported.
+                if correction_frames < _MIN_CORRECTION_FRAMES:
+                    if correction_frames:
+                        logger.info(
+                            "Dropping a %d-frame in-flight correction on shutdown (too short)",
+                            correction_frames,
+                        )
+                    with contextlib.suppress(Exception):
+                        dataset.clear_episode_buffer()
+                else:
+                    saved = False
+                    try:
+                        with self._episode_lock:
+                            dataset.save_episode()
+                        self._corrections_saved += 1
+                        self._needs_push.set()
+                        saved = True
+                        logger.info("Final in-progress correction saved")
+                    except Exception:
+                        logger.exception("Could not save the in-flight correction")
+                    # Emitted only on a save that actually happened. The
+                    # orchestrator's tally comes solely from these events, so a
+                    # save that occurs here and nowhere else would otherwise
+                    # leave the summary one short — the ordinary outcome of
+                    # pressing Stop while driving.
+                    if saved:
+                        _emit(
+                            EVENT_CORRECTION_SAVED,
+                            f"n={self._corrections_saved} frames={correction_frames} "
+                            f"seconds={time.perf_counter() - correction_started_at:.1f}",
+                        )
 
 
 @parser.wrap()

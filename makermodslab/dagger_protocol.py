@@ -34,6 +34,7 @@ Commands — orchestrator → runner stdin, one bare word per line:
     CANCEL    end the correction and DISCARD it (the fumbled-takeover escape)
     HOLD      freeze the policy without taking over
     RESUME    unfreeze, returning control to the policy
+    RESET     end this attempt: ease the follower home and park for a scene reset
     QUIT      finalize the dataset, ease the arm home, disconnect, exit
 
 TAKEOVER and HANDBACK are COMPOSITE: each drives two of lerobot's phase
@@ -73,13 +74,14 @@ CMD_HANDBACK = "HANDBACK"
 CMD_CANCEL = "CANCEL"
 CMD_HOLD = "HOLD"
 CMD_RESUME = "RESUME"
+CMD_RESET = "RESET"
 CMD_QUIT = "QUIT"
 
 # Every command the runner accepts. The orchestrator validates against this
 # before writing to the pipe so a typo'd endpoint fails at the HTTP layer with a
 # 400 rather than silently reaching a runner that logs "unrecognised" and
 # carries on driving the arm.
-COMMANDS = frozenset({CMD_TAKEOVER, CMD_HANDBACK, CMD_CANCEL, CMD_HOLD, CMD_RESUME, CMD_QUIT})
+COMMANDS = frozenset({CMD_TAKEOVER, CMD_HANDBACK, CMD_CANCEL, CMD_HOLD, CMD_RESUME, CMD_RESET, CMD_QUIT})
 
 # --- Events (stdout) --------------------------------------------------------
 # Distinct from eval_protocol's prefix on purpose: both runners tee into
@@ -93,6 +95,10 @@ EVENT_PHASE = "PHASE"
 EVENT_CORRECTION_SAVED = "CORRECTION_SAVED"
 EVENT_CORRECTION_CANCELLED = "CORRECTION_CANCELLED"
 EVENT_ALIGN_REQUIRED = "ALIGN_REQUIRED"
+# One attempt at the task ended and the arm is back at its start pose. Carries
+# the running attempt count so the UI can show "attempt 4" without keeping its
+# own tally that a dropped event would desynchronise.
+EVENT_ATTEMPT_RESET = "ATTEMPT_RESET"
 EVENT_ERROR = "ERROR"
 EVENT_BYE = "BYE"
 
@@ -129,7 +135,27 @@ PHASE_HANDING_OVER = "handing_over"
 # recording long after they had let go.
 PHASE_SAVING = "saving"
 
-PHASES = frozenset({PHASE_AUTONOMOUS, PHASE_PAUSED, PHASE_CORRECTING, PHASE_HANDING_OVER, PHASE_SAVING})
+# Also ours. The operator has declared the current ATTEMPT at the task over
+# (the cube is in the tray, or it went unrecoverably wrong) and the follower is
+# easing back to the pose captured at connect, so the next attempt starts from
+# the same place the first one did.
+#
+# Corrections-only DAgger has no task-episode concept of its own — an "episode"
+# there is one takeover — so without this the policy simply kept driving at a
+# finished scene, and the only way to reset was to freeze the arm mid-pose and
+# work around it.
+PHASE_RESETTING = "resetting"
+
+PHASES = frozenset(
+    {
+        PHASE_AUTONOMOUS,
+        PHASE_PAUSED,
+        PHASE_CORRECTING,
+        PHASE_HANDING_OVER,
+        PHASE_SAVING,
+        PHASE_RESETTING,
+    }
+)
 
 
 def format_event(event: str, payload: str = "") -> str:

@@ -43,7 +43,10 @@ export type InferencePhase =
   | "handing_over"
   // Coaching only: the correction is being written to disk. Synchronous on the
   // runner's control loop, so the arm is frozen and the policy hasn't resumed.
-  | "saving";
+  | "saving"
+  // Coaching only: this attempt at the task is over and the arm is easing back
+  // to its start pose so the next attempt begins where the first one did.
+  | "attempt_reset";
 
 // lerobot's own DAggerPhase, passed through unrenamed so a status payload and a
 // lerobot log line agree. The operator-facing wording is a rendering concern —
@@ -61,7 +64,10 @@ export type CoachingPhase =
   // Also ours: `save_episode()` is writing the parquet and encoding video, on
   // the control loop, with the arm held. Without this the banner inherited
   // "correcting" and kept claiming the operator was driving after they let go.
-  | "saving";
+  | "saving"
+  // Also ours: the operator declared the attempt over and the follower is
+  // easing home. Corrections-only DAgger has no task-episode of its own.
+  | "resetting";
 
 // One episode's verdict. `error` (a crash: serial glitch, camera drop, policy
 // blow-up) is deliberately NEITHER success nor failure — it's excluded from the
@@ -130,6 +136,13 @@ export interface InferenceStatus {
   // known to be true, and the UI must say "Starting…" rather than guess.
   coaching_phase?: CoachingPhase | null;
   corrections_saved?: number | null;
+  // Attempts at the TASK the operator has declared finished. Not an episode
+  // count — corrections are the episodes — but the thing they're counting.
+  attempts?: number | null;
+  // True while parked straight after a reset. There the operator's next move
+  // is to START THE NEXT ATTEMPT, not to take over — pressing the usual
+  // primary (space = take over) there opened a correction nobody wanted.
+  awaiting_attempt?: boolean | null;
   corrections_target?: number | null;
   // Recorded correction time across the session, in seconds. Reported next to
   // the count because ten one-second twitches and ten ten-second recoveries are
@@ -260,6 +273,21 @@ export async function coachingResume(
   return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-resume", {
     method: "POST",
     action: "Resume policy",
+  });
+}
+
+// End this ATTEMPT at the task and reset for the next one: the policy stops,
+// the follower eases back to the pose captured at connect, and the session
+// parks so the scene can be rearranged. Nothing is written to the dataset —
+// only correction windows are ever recorded — so resetting is free.
+// 409 mid-correction; hand back or discard first.
+export async function coachingReset(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-reset", {
+    method: "POST",
+    action: "Reset for next attempt",
   });
 }
 

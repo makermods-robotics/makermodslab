@@ -251,15 +251,24 @@ export default {
     // Which shape the run takes. Option VALUES ("single"/"eval"/"coach") are
     // identifiers the frontend switches on — only these labels are translated.
     runMode: {
-      label: "Run mode",
-      single: "Single run",
-      eval: "Evaluate — scored episodes",
-      coach: "Coach — take over when it fails",
-      singleHint: "Runs the policy once.",
-      evalHint:
-        "Runs the policy repeatedly with a reset between each, scoring every episode into an accuracy.",
-      coachHint:
-        "Watch the policy run and take over with the leader arm the moment it's about to fail. Each takeover is saved as training data — merge it with your original demos and fine-tune to fix exactly what went wrong.",
+      label: "What do you want to do with this skill?",
+      // Each row states its COMMITMENT before it is chosen: these three are not
+      // interchangeable menu items, and picking wrong is discovered at the arm.
+      single: {
+        title: "Just run it",
+        what: "One attempt, then stop.",
+        commitment: "hands off",
+      },
+      eval: {
+        title: "Score it",
+        what: "Repeat the task and score every attempt into a success rate.",
+        commitment: "hands off · minutes per episode",
+      },
+      coach: {
+        title: "Coach it",
+        what: "Take over when it's about to fail. Each rescue is saved as training data you can fine-tune on.",
+        commitment: "hands on — you hold the leader arm the whole session",
+      },
     },
     // Coaching-only parameters, shown when run mode is "coach".
     coaching: {

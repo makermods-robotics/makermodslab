@@ -3877,3 +3877,73 @@ def test_signal_group_declines_a_process_without_a_pid() -> None:
     from makermodslab import rollout
 
     assert rollout._signal_group(object(), 15) is False
+
+
+def test_reset_is_ignored_mid_correction_but_arms_from_the_other_phases() -> None:
+    """RESET must not silently decide the fate of frames already in the buffer.
+
+    Mid-correction the operator is holding the leader with a part-recorded
+    takeover; saving or discarding it on their behalf is not this command's
+    call. From AUTONOMOUS the policy has to stop first, so it expands to the
+    pause transition; from PAUSED the engine is already stopped and the loop
+    performs the ease-home on that same tick."""
+    from lerobot.rollout.configs import DAggerStrategyConfig
+    from lerobot.rollout.strategies.dagger import DAggerPhase
+    from makermodslab.dagger_protocol import CMD_RESET
+    from makermodslab.dagger_runner import WebDAggerStrategy
+
+    s = WebDAggerStrategy(DAggerStrategyConfig(num_episodes=5))
+    assert s._translate(CMD_RESET, DAggerPhase.CORRECTING) == []
+    assert s._reset_requested is False
+
+    # From every other phase it arms the flag and requests NO transition.
+    # Routing it through `pause_resume` made `_apply_transition` treat the
+    # reset as a handover: it drove the LEADER up to the follower's pose under
+    # torque, and released it again when the policy resumed, so the leader fell
+    # out of the air. A reset is not a handover — the loop pauses the engine
+    # itself, with none of the transition's side effects.
+    for phase in (DAggerPhase.AUTONOMOUS, DAggerPhase.PAUSED):
+        s._reset_requested = False
+        assert s._translate(CMD_RESET, phase) == []
+        assert s._reset_requested is True
+
+
+def test_attempt_reset_event_updates_the_tally(monkeypatch) -> None:
+    """The count comes from the runner, not a local increment, so a dropped
+    event cannot leave the two permanently out of step."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_attempt_reset({"n": "3"})
+    assert session.attempts == 3
+
+
+def test_coaching_start_refuses_a_leader_calibration_that_no_longer_exists(monkeypatch, tmp_path) -> None:
+    """A name being non-empty is not the same as the calibration existing.
+
+    A record can point at a calibration that was deleted or renamed since, and
+    a stem like "None" is perfectly legal so it cannot be treated as unset.
+    Without this the failure surfaced deep inside the runner, after the model
+    download and the arm preflight."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "LEADER_CONFIG_PATH", str(tmp_path))
+    result = rollout.handle_start_inference(_coaching_request(leader_config="ghost"))
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "ghost" in result["message"]
+    assert rollout.inference_active is False
+
+
+def test_coaching_start_accepts_a_leader_calibration_that_does_exist(monkeypatch, tmp_path) -> None:
+    """Control: an odd-but-real stem (the station's is literally "None") must
+    pass. Treating that string as "unset" would break a working rig."""
+    from makermodslab import rollout
+
+    (tmp_path / "None.json").write_text("{}")
+    monkeypatch.setattr(rollout, "LEADER_CONFIG_PATH", str(tmp_path))
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: False)
+    result = rollout.handle_start_inference(_coaching_request(leader_config="None"))
+    # Gets PAST the calibration gate and fails on the next check instead.
+    assert "calibration" not in result["message"]

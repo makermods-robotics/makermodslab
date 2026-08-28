@@ -74,6 +74,7 @@ from .dagger_protocol import (
     CMD_CANCEL,
     CMD_HANDBACK,
     CMD_HOLD,
+    CMD_RESET,
     CMD_RESUME,
     CMD_TAKEOVER,
 )
@@ -861,6 +862,20 @@ def coaching_hold():
 def coaching_resume():
     """Coaching mode only: hand control back to the policy from a hold."""
     return _coaching_route(CMD_RESUME)
+
+
+@router.post("/coaching-reset")
+def coaching_reset():
+    """Coaching mode only: end this ATTEMPT at the task and reset for the next.
+
+    Corrections-only DAgger has no task-episode concept — an "episode" there is
+    one takeover — so this is what tells the session that the cube is finally in
+    the tray. The policy stops, the follower eases back to the pose captured at
+    connect, and the session parks so the scene can be rearranged. Nothing is
+    written to the dataset: corrections are the only thing ever recorded.
+
+    Refused mid-correction; hand back or discard first."""
+    return _coaching_route(CMD_RESET)
 
 
 @router.get("/inference-status")

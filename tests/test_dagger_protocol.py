@@ -71,12 +71,15 @@ ALL_EVENTS = [
 def test_commands_set_contains_every_verb() -> None:
     """The orchestrator validates against COMMANDS before writing to the pipe,
     so a verb missing from it is a 400 on a control that should work."""
+    from makermodslab.dagger_protocol import CMD_RESET
+
     assert {
         CMD_TAKEOVER,
         CMD_HANDBACK,
         CMD_CANCEL,
         CMD_HOLD,
         CMD_RESUME,
+        CMD_RESET,
         CMD_QUIT,
     } == COMMANDS
 
@@ -101,9 +104,13 @@ def test_phases_match_lerobot_dagger_phase_values() -> None:
     of the line it belongs on. Both of ours describe windows where the runner
     is BLOCKED and no lerobot phase is true: driving an arm into position, and
     writing an episode to disk."""
-    from makermodslab.dagger_protocol import PHASE_HANDING_OVER, PHASE_SAVING
+    from makermodslab.dagger_protocol import (
+        PHASE_HANDING_OVER,
+        PHASE_RESETTING,
+        PHASE_SAVING,
+    )
 
-    ours = {PHASE_HANDING_OVER, PHASE_SAVING}
+    ours = {PHASE_HANDING_OVER, PHASE_SAVING, PHASE_RESETTING}
     assert {"autonomous", "paused", "correcting"} == PHASES - ours
     assert (PHASE_AUTONOMOUS, PHASE_PAUSED, PHASE_CORRECTING) == (
         "autonomous",

@@ -194,6 +194,95 @@ function cameraMappings(
   });
 }
 
+/**
+ * The three things you can do with a trained skill, as selectable rows.
+ *
+ * Replaces a dropdown. A dropdown renders these as interchangeable list items
+ * of equal weight, which they are not: one is a minute-long hands-off run, one
+ * is an unattended twenty-minute evaluation, and one requires the operator to
+ * stand at the robot holding a leader arm for the entire session and produces a
+ * dataset. Picking the wrong one from a menu is discovered mid-session, at the
+ * arm — so each row states its commitment BEFORE it is chosen, and the row that
+ * demands your hands says so in its own line rather than in help text below.
+ *
+ * Rows rather than a fourth studio panel (deploy owns the checkpoint picker,
+ * the camera binding and the arm preflight — all three modes need them) and
+ * rather than side-by-side cards (this panel is a third of the overlay wide).
+ */
+const RUN_MODES: {
+  value: RunMode;
+  // Key stem under `studio.deploy.runMode`; the component resolves
+  // `${stem}.title` / `.what` / `.commitment`.
+  stem: string;
+  handsOn?: boolean;
+}[] = [
+  { value: "single", stem: "single" },
+  { value: "eval", stem: "eval" },
+  { value: "coach", stem: "coach", handsOn: true },
+];
+
+const RunModeChooser: React.FC<{
+  value: RunMode;
+  onChange: (v: RunMode) => void;
+}> = ({ value, onChange }) => {
+  const { t } = useTranslation();
+  return (
+  <div className="space-y-2">
+    <Label id="deploy-run-mode-label">
+      {t("studio.deploy.runMode.label")}
+    </Label>
+    <div
+      role="radiogroup"
+      aria-labelledby="deploy-run-mode-label"
+      className="overflow-hidden rounded-lg border border-border"
+    >
+      {RUN_MODES.map((m, i) => {
+        const selected = value === m.value;
+        return (
+          <button
+            key={m.value}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChange(m.value)}
+            className={cn(
+              "flex w-full gap-3 p-3 text-left transition-colors",
+              i > 0 && "border-t border-border",
+              selected ? "bg-primary/10" : "hover:bg-muted/50",
+            )}
+          >
+            {/* Radio dot: the selected state must not rest on background
+                colour alone. */}
+            <span
+              className={cn(
+                "mt-0.5 h-4 w-4 shrink-0 rounded-full border-2",
+                selected ? "border-primary bg-primary" : "border-muted-foreground",
+              )}
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold">
+                {t(`studio.deploy.runMode.${m.stem}.title` as never)}
+              </span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                {t(`studio.deploy.runMode.${m.stem}.what` as never)}
+              </span>
+              <span
+                className={cn(
+                  "mt-1 block text-xs font-medium",
+                  m.handsOn ? "text-warn" : "text-muted-foreground",
+                )}
+              >
+                {t(`studio.deploy.runMode.${m.stem}.commitment` as never)}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  </div>
+  );
+};
+
 const DeployPanel: React.FC = () => {
   const { t } = useTranslation();
   const { language } = useLanguage();
@@ -1162,39 +1251,7 @@ const DeployPanel: React.FC = () => {
                   </p>
                 </div>
               ) : null}
-              <div className="space-y-2">
-                <Label htmlFor="deploy-run-mode">
-                  {t("studio.deploy.runMode.label")}
-                </Label>
-                <Select
-                  value={runMode}
-                  onValueChange={(v) => setRunMode(v as RunMode)}
-                >
-                  <SelectTrigger id="deploy-run-mode">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {/* Option VALUES ("single" / "eval" / "coach") are what the
-                        backend parses — only the labels are translated. */}
-                    <SelectItem value="single">
-                      {t("studio.deploy.runMode.single")}
-                    </SelectItem>
-                    <SelectItem value="eval">
-                      {t("studio.deploy.runMode.eval")}
-                    </SelectItem>
-                    <SelectItem value="coach">
-                      {t("studio.deploy.runMode.coach")}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {runMode === "coach"
-                    ? t("studio.deploy.runMode.coachHint")
-                    : runMode === "eval"
-                      ? t("studio.deploy.runMode.evalHint")
-                      : t("studio.deploy.runMode.singleHint")}
-                </p>
-              </div>
+              <RunModeChooser value={runMode} onChange={setRunMode} />
               {runMode !== "coach" ? (
                 <div className="space-y-2">
                   <Label htmlFor="deploy-duration">
