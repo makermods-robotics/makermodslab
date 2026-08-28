@@ -91,11 +91,32 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
         })
       : t("training.essentials.resumedFromLatest");
 
+  // On a resume, `steps` is a TOTAL the run trains UP TO — it is not added to
+  // the steps already done. Nothing said so at the field itself (the "from step
+  // N" note sits by the run name), so "20000" read equally well as "20k more".
+  // Spell it out next to the input, with the arithmetic already worked out.
+  const stepsHint = !resumeLocked
+    ? null
+    : resumeStep
+      ? config.steps > resumeStep
+        ? t("training.essentials.stepsTotalHint", {
+            from: resumeStep.toLocaleString(),
+            remaining: (config.steps - resumeStep).toLocaleString(),
+          })
+        : t("training.essentials.stepsTotalTooLow", {
+            from: resumeStep.toLocaleString(),
+          })
+      : t("training.essentials.stepsTotalHintLatest");
+
   return (
     <section className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
-          <Label htmlFor="steps">{t("training.essentials.steps")}</Label>
+          <Label htmlFor="steps">
+            {resumeLocked
+              ? t("training.essentials.stepsTotal")
+              : t("training.essentials.steps")}
+          </Label>
           <NumberInput
             id="steps"
             value={config.steps}
@@ -103,6 +124,17 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
               if (v !== undefined) updateConfig("steps", v);
             }}
           />
+          {stepsHint ? (
+            <p
+              className={
+                resumeStep && config.steps <= resumeStep
+                  ? "text-xs text-destructive"
+                  : "text-xs text-muted-foreground"
+              }
+            >
+              {stepsHint}
+            </p>
+          ) : null}
         </div>
 
         <div className="space-y-2">

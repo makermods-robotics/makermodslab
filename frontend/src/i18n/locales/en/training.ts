@@ -123,6 +123,15 @@ export default {
 
   essentials: {
     steps: "Training steps",
+    // Resume only. The field is a TOTAL the run trains up to, not an increment
+    // added to the steps already done — the label and hint both say so, and the
+    // hint does the subtraction so the user never has to.
+    stepsTotal: "Total training steps",
+    stepsTotalHint:
+      "Resuming from step {{from}}, training {{remaining}} more steps.",
+    stepsTotalHintLatest: "Total step count, not additional steps.",
+    stepsTotalTooLow:
+      "Must be above {{from}} — the run has already trained that far, so this would train nothing.",
     batchSize: "Batch size",
     runName: "Run name",
     // Sits beside the Run name label on a continuation. {{step}} is

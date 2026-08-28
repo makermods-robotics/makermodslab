@@ -92,6 +92,10 @@ export default {
 
   essentials: {
     steps: "训练步数",
+    stepsTotal: "总训练步数",
+    stepsTotalHint: "从第 {{from}} 步恢复，将再训练 {{remaining}} 步。",
+    stepsTotalHintLatest: "这是总步数，而非额外增加的步数。",
+    stepsTotalTooLow: "必须大于 {{from}}——该运行已训练到这一步，否则不会训练任何内容。",
     batchSize: "批大小",
     runName: "运行名称",
     resumedFromStep: "从第 {{step}} 步开始",
