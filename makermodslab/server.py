@@ -31,13 +31,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -338,6 +339,34 @@ class StartTrainingBody(BaseModel):
             return cls.model_validate(raw)
         # Legacy: top-level training fields, no target.
         return cls(config=TrainingRequest.model_validate(raw))
+
+
+def _refuse_repeated_query_keys(request: Request) -> None:
+    """Route dependency: 422 when any query key appears more than once.
+
+    Guards `expect_state` on the stop/cancel routes. FastAPI resolves a
+    repeated scalar key to its LAST value (starlette's multidict keeps the
+    final duplicate), so `?expect_state=queued&expect_state=running` reached
+    `JobRegistry.stop` as `running` — a Cancel-shaped URL with a stray
+    duplicate (a retrying proxy that appends instead of replacing, a mangled
+    copy-paste) walked past the optimistic-concurrency precondition and
+    SIGTERMed a live run while the caller believed it cancelled a queued one.
+    A repeated key is one request making two contradictory claims; refuse it
+    as malformed rather than picking a winner.
+
+    Declared as a plain-`Request` dependency so the parameter's OpenAPI schema
+    stays the scalar it always was — this changes no contract, it just stops
+    resolving an ambiguity that should never have been resolvable.
+    """
+    params = request.query_params
+    repeated = sorted({key for key in params if len(params.getlist(key)) > 1})
+    if repeated:
+        names = ", ".join(repr(k) for k in repeated)
+        raise ApiError(
+            status_code=422,
+            detail=f"Query parameter {names} was given more than once; pass each key at most once.",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
 
 
 # Cache for HF Jobs hardware flavors (5-minute TTL)
@@ -964,7 +993,14 @@ def get_node_job_logs(instance_id: str, job_id: str):
     return handle_get_node_job_logs(instance_id, job_id)
 
 
-@v1_router.post("/nodes/{instance_id}/jobs/{job_id}/stop", response_model=JobRecord, tags=["nodes"])
+@v1_router.post(
+    "/nodes/{instance_id}/jobs/{job_id}/stop",
+    response_model=JobRecord,
+    tags=["nodes"],
+    # A repeated ?expect_state= must not silently resolve to one of its two
+    # contradictory values — see _refuse_repeated_query_keys.
+    dependencies=[Depends(_refuse_repeated_query_keys)],
+)
 def stop_node_job(instance_id: str, job_id: str, expect_state: JobState | None = None):
     """Forward a stop/cancel to the peer, `expect_state` precondition included.
 
@@ -1500,11 +1536,16 @@ class ModelDeleteBody(BaseModel):
 def models_delete(body: ModelDeleteBody):
     """Delete a local model — its training run's output dir (strictly sandboxed
     under outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404
-    unknown; 409 when the run is still training; 502 on a delete failure."""
+    unknown; 409 when the run is still training or queued (job.not_terminal —
+    only a terminal run has artifacts to delete; a queued run is cancelled on
+    the jobs surface, never through here); 502 on a delete failure."""
     try:
         return model_browser.delete_local_model(body.id)
     except model_browser.ModelError as exc:
-        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+        # ApiError so a machine-readable `code` (when the refusal carries one)
+        # rides beside the legacy string detail; the body shape is unchanged
+        # for code-less refusals.
+        raise ApiError(status_code=exc.status, detail=exc.message, code=exc.code) from exc
 
 
 class CustomModelRequest(BaseModel):
@@ -1655,8 +1696,37 @@ def _is_finished_run(job_id: str) -> bool:
 
 @router.post("/jobs/training", status_code=201, response_model=JobRecord, tags=["jobs"])
 async def create_training_job(req: Request):
-    raw = await req.json()
-    body = StartTrainingBody.from_legacy(raw)
+    # The body is parsed BY HAND (from_legacy accepts two shapes, which no
+    # single response-model annotation can express), so the two failures
+    # FastAPI normally absorbs — unparseable JSON, a body that fails pydantic
+    # validation — surfaced here as uncaught exceptions, i.e. 500s that told
+    # the caller nothing. Re-raise both as RequestValidationError so the
+    # app-wide handler answers exactly what a declared body would have: 422,
+    # FastAPI's error-list `detail` shape, `request.validation` beside it.
+    try:
+        raw = await req.json()
+    except json.JSONDecodeError as exc:
+        raise RequestValidationError(
+            [{"type": "json_invalid", "loc": ("body", exc.pos), "msg": "JSON decode error", "input": {}}]
+        ) from exc
+    if not isinstance(raw, dict):
+        # from_legacy assumes a JSON object (it probes raw["config"]); a valid
+        # non-object body ("[]", "5") is the same caller mistake as a failed
+        # field, not a crash.
+        raise RequestValidationError(
+            [
+                {
+                    "type": "model_attributes_type",
+                    "loc": ("body",),
+                    "msg": "Input should be an object",
+                    "input": raw,
+                }
+            ]
+        )
+    try:
+        body = StartTrainingBody.from_legacy(raw)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
     cfg = body.config
     # A lan_node target without a node is unroutable — refuse with the same
     # 422 + code a malformed body would get, before any slower preflight.
@@ -2423,7 +2493,14 @@ def reorder_job_queue(body: ReorderQueueRequest):
         ) from exc
 
 
-@router.post("/jobs/{job_id}/stop", response_model=JobRecord, tags=["jobs"])
+@router.post(
+    "/jobs/{job_id}/stop",
+    response_model=JobRecord,
+    tags=["jobs"],
+    # A repeated ?expect_state= must not silently resolve to one of its two
+    # contradictory values — see _refuse_repeated_query_keys.
+    dependencies=[Depends(_refuse_repeated_query_keys)],
+)
 def stop_job(job_id: str, expect_state: JobState | None = None):
     """Stop a running job, or cancel a queued one.
 

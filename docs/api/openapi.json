@@ -3989,6 +3989,7 @@
           },
           "policy_type": {
             "default": "act",
+            "pattern": "^[a-z0-9_]+$",
             "title": "Policy Type",
             "type": "string"
           },
@@ -6734,7 +6735,7 @@
     },
     "/api/v1/models/delete": {
       "post": {
-        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training; 502 on a delete failure.",
+        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training or queued (job.not_terminal —\nonly a terminal run has artifacts to delete; a queued run is cancelled on\nthe jobs surface, never through here); 502 on a delete failure.",
         "operationId": "models_delete",
         "requestBody": {
           "content": {
@@ -11148,7 +11149,7 @@
     },
     "/models/delete": {
       "post": {
-        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training; 502 on a delete failure.",
+        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training or queued (job.not_terminal —\nonly a terminal run has artifacts to delete; a queued run is cancelled on\nthe jobs surface, never through here); 502 on a delete failure.",
         "operationId": "models_delete_models_delete_post",
         "requestBody": {
           "content": {

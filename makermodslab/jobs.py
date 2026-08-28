@@ -2521,7 +2521,28 @@ def _paths_are_same_dir(a: str, b: str) -> bool:
 
 
 def _job_dir(output_root: Path, job_id: str) -> Path:
-    return output_root / job_id
+    """The job's directory under `output_root` — and never anywhere else.
+
+    Refuses (loudly) any id whose joined path resolves outside the root.
+    `Path.__truediv__` DISCARDS the left side for an absolute right side, so a
+    path-shaped id ("/tmp/x_…", "../evil") silently produced a directory
+    outside the sandbox that every downstream helper (log path, job.json,
+    rmtree on delete) would then read and write. Request validation refuses
+    such ids at the boundary (TrainingRequest.policy_type's pattern); this is
+    the defense-in-depth layer for ids that arrive any other way — a
+    hand-edited job.json, a future caller — because the root is where delete's
+    rmtree is aimed.
+
+    Returns the UNRESOLVED join (callers persist/compare these strings), the
+    containment check runs on the resolved form so symlink and `..` spellings
+    can't dodge it.
+    """
+    path = output_root / job_id
+    resolved = path.resolve()
+    root = Path(output_root).resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ValueError(f"job id {job_id!r} resolves outside the training-output root {str(output_root)!r}")
+    return path
 
 
 def _job_log_path(output_root: Path, job_id: str) -> Path:
@@ -3109,10 +3130,33 @@ class JobRegistry:
         record.child_ids = list(children.get(record.id, ()))
         record.ancestor_ids = ancestor_ids_of(snapshot, record.id)
 
+    @staticmethod
+    def _list_order(record: JobRecord) -> tuple[int, float, float]:
+        """Sort key for `list()`: active work first, then history newest-first.
+
+        `started_at` alone was the key, and it silently dropped the RUNNING run
+        off the page: a queued record carries its SUBMIT time in `started_at`
+        (restamped only at promotion), so every run submitted after the current
+        one started sorted above it — past `limit` queued submits, the page held
+        nothing but the queue and the one actually-running job vanished from
+        GET /jobs (and from the peer-workload panel, which reads this listing).
+
+        Three bands, each internally ordered: running (newest first — cloud
+        runs make several possible), then the queue in the order it will run
+        (`_queue_order`, the same key `_drain_queue` promotes by), then
+        everything terminal, newest first.
+        """
+        if record.state == "running":
+            return (0, -record.started_at, 0.0)
+        if record.state == "queued":
+            seq, started = _queue_order(record)
+            return (1, float(seq), started)
+        return (2, -record.started_at, 0.0)
+
     def list(self, limit: int = 10) -> builtins.list[JobRecord]:
         with self._lock:
             snapshot = dict(self._records)
-        records = sorted(snapshot.values(), key=lambda r: r.started_at, reverse=True)[:limit]
+        records = sorted(snapshot.values(), key=self._list_order)[:limit]
         # Indexed over the whole snapshot, then applied to the page: a run's
         # leaf-ness is a fact about the registry, not about what fits on a page.
         children = build_child_index(snapshot.values())
@@ -4517,9 +4561,14 @@ class JobRegistry:
 
         # Best-effort policy type for the display name; inference reads the
         # real config from the checkpoint, so a wrong guess here is harmless.
+        # Slug-normalized because TrainingRequest.policy_type is constrained to
+        # `^[a-z0-9_]+$` (it is the first segment of generated job ids): an
+        # external checkpoint whose config carries an off-vocabulary "type"
+        # ("PI0-Fast") must degrade to a safe label, not fail the import.
         policy_type = "model"
         with contextlib.suppress(Exception):
-            policy_type = str(_read_checkpoint_config(ckpts[-1]).get("type") or "model")
+            raw_type = str(_read_checkpoint_config(ckpts[-1]).get("type") or "")
+            policy_type = re.sub(r"[^a-z0-9_]+", "_", raw_type.lower()).strip("_") or "model"
 
         with self._lock:
             job_id = self._unique_job_id(policy_type, "imported")

@@ -46,6 +46,7 @@ from huggingface_hub import constants as hf_constants, metadata_update, snapshot
 from huggingface_hub.file_download import repo_folder_name
 from huggingface_hub.utils import filter_repo_objects
 
+from .api_errors import ErrorCode
 from .datasets import (
     DownloadManager,
     _dir_mtime_iso,
@@ -138,13 +139,18 @@ class ModelError(Exception):
     the HTTP status the route should return (400 offline/invalid, 403 no write
     permission, 404 not found, 409 busy, 502 other Hub failure); `message` is
     the user-facing reason; `docs_url` (optional) links auth docs for a login
-    failure."""
+    failure; `code` (optional) is the machine-readable ErrorCode value the
+    route forwards beside the message — additive, exactly as everywhere else
+    in the API (api_errors.py)."""
 
-    def __init__(self, status: int, message: str, docs_url: str | None = None) -> None:
+    def __init__(
+        self, status: int, message: str, docs_url: str | None = None, code: str | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
         self.docs_url = docs_url
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -1357,6 +1363,27 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
         raise ModelError(
             400,
             f"Model {model_id!r} is not a local training run, so there's nothing local to delete.",
+        )
+
+    # Only a TERMINAL run's artifacts are deletable here. `JobRegistry.delete`
+    # refuses `running` on its own, but it deliberately allows `queued` —
+    # cancelling a queued run IS a legitimate jobs-surface operation — so a
+    # queued id reaching it through THIS surface was silently cancelled and
+    # reported as "deleted": a model deletion that removed a pending training
+    # run the user never asked to touch. Refuse both non-terminal states up
+    # front, each naming where the run can actually be stopped.
+    if record.state == "queued":
+        raise ModelError(
+            409,
+            f"Model {model_id!r} is a queued training run — it hasn't produced anything to "
+            "delete. Cancel it from the training queue if you don't want it to run.",
+            code=str(ErrorCode.JOB_NOT_TERMINAL),
+        )
+    if record.state == "running":
+        raise ModelError(
+            409,
+            f"Model {model_id!r} is still training — stop the run before deleting it.",
+            code=str(ErrorCode.JOB_NOT_TERMINAL),
         )
 
     # Resolve the run dir and refuse anything outside outputs/train/. The

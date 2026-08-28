@@ -7108,8 +7108,10 @@ def test_list_queue_is_the_whole_queue_not_a_page(tmp_path) -> None:
     assert len(queue) == 15  # the queue is not
     assert [r.id for r in queue] == [f"q{i:02d}" for i in range(15)]
     assert [r.queue_position for r in queue] == list(range(1, 16))
-    # The head of the line is exactly what the page loses.
-    assert "q00" not in {r.id for r in page}
+    # A deep queue still overflows a page — list() now pages in run order (the
+    # head of the line stays visible; the TAIL is what a page can't show),
+    # which is exactly why the queue widget reads this endpoint instead.
+    assert "q14" not in {r.id for r in page}
 
 
 def _fake_runner_obj():
@@ -8004,3 +8006,165 @@ def test_every_robot_activity_holds_the_queue(
     monkeypatch.setattr(module, attr, idle, raising=False)
     reg._drain_queue()
     assert reg.get("waiting").state == "running", f"the run must start once {label} ends"
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups on the queue machinery (PR #83). Each test below reproduces
+# a reviewed finding; the fix is documented beside the code it changed.
+# ---------------------------------------------------------------------------
+
+
+def test_a_duplicated_expect_state_key_cannot_bypass_the_cancel_precondition(client, monkeypatch) -> None:
+    """`expect_state` is the whole cancel/kill safety line, and starlette
+    resolves a repeated scalar query key to its LAST value (verified: FastAPI
+    hands `?expect_state=queued&expect_state=running` to the handler as
+    `running`). So a Cancel-shaped URL with a stray duplicate — a copy-pasted
+    link, a retrying proxy that appends rather than replaces — walks straight
+    past the precondition and SIGTERMs a live run while reporting a cancel.
+    A repeated key is one request making two contradictory claims: refuse it
+    as malformed (422 request.validation), don't pick a winner."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRecord, JobRegistry, job_registry
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(JobRegistry, "_drain_queue", lambda self: None)
+
+    record = JobRecord(
+        id="live-run",
+        name="live-run",
+        state="running",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir="",
+        started_at=0.0,
+        runner="local",
+    )
+    runner = MagicMock()
+    runner.is_running.return_value = True
+    original = dict(job_registry._records)
+    try:
+        job_registry._records["live-run"] = record
+        job_registry._runners["live-run"] = runner
+
+        resp = client.post("/jobs/live-run/stop?expect_state=queued&expect_state=running")
+
+        assert resp.status_code == 422, resp.json()
+        assert resp.json()["code"] == "request.validation"
+        runner.stop.assert_not_called()
+        assert record.state == "running"
+
+        # A SINGLE expect_state still works exactly as before: the stale
+        # precondition is the 409 race answer, not a validation error.
+        stale = client.post("/jobs/live-run/stop?expect_state=queued")
+        assert stale.status_code == 409
+        assert stale.json()["code"] == "job.state_changed"
+        runner.stop.assert_not_called()
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
+        job_registry._runners.pop("live-run", None)
+        job_registry._stop_requested.discard("live-run")
+
+
+def test_the_node_stop_proxy_refuses_a_duplicated_expect_state(client) -> None:
+    """The same precondition rides the node proxy to a peer, so the same
+    duplicated-key bypass applies there. Refused before the node is even
+    resolved: a malformed request is 422 whoever it was addressed to (an
+    unknown node would otherwise answer 404 and mask the real problem)."""
+    resp = client.post("/api/v1/nodes/nope/jobs/j1/stop?expect_state=queued&expect_state=running")
+    assert resp.status_code == 422, resp.json()
+    assert resp.json()["code"] == "request.validation"
+
+
+def test_list_keeps_active_runs_on_the_page_above_a_deep_queue(tmp_path) -> None:
+    """GET /jobs is a page of newest-first history, but the RUNNING run and the
+    queue's head are not history — they are what the machine is doing and about
+    to do. A queued record carries its submit time in `started_at`, so every
+    submit made after the running run started sorted ABOVE it; past `limit`
+    queued runs, the page dropped the one actually-running job entirely (the
+    peer-workload panel reads this same listing, so a busy peer looked idle).
+    Order by state first — running, then the queue in run order, then history
+    newest-first."""
+    reg = _quiet_registry(tmp_path)
+    running = _inject_running_local(reg, "busy")
+    running.started_at = 100.0
+    # A dozen submits made while the run trains: all newer than started_at=100.
+    for i in range(12):
+        _inject_queued(reg, f"q{i:02d}", seq=10 + i).started_at = 200.0 + i
+
+    page = reg.list(limit=10)
+    ids = [r.id for r in page]
+
+    assert ids[0] == "busy", f"the running job fell off the page: {ids}"
+    assert ids[1:] == [f"q{i:02d}" for i in range(9)], "queued runs must follow in run order"
+
+    # History still reads newest-first after the active block.
+    done_new = _inject_queued(reg, "done-new", seq=99)
+    done_new.state = "done"
+    done_new.started_at = 500.0
+    done_old = _inject_queued(reg, "done-old", seq=98)
+    done_old.state = "done"
+    done_old.started_at = 50.0
+    full = [r.id for r in reg.list(limit=50)]
+    assert full[0] == "busy"
+    assert full[1:13] == [f"q{i:02d}" for i in range(12)]
+    assert full[13:] == ["done-new", "done-old"]
+
+
+def test_a_path_shaped_policy_type_never_reaches_the_filesystem(tmp_path) -> None:
+    """`policy_type` is the first segment of the job id, which becomes the job
+    DIRECTORY: `policy_type="/tmp/x"` made `output_root / job_id` an absolute
+    path outside the root (Path's `/` discards the left side for an absolute
+    right side), so the registry mkdir'd and persisted outside its sandbox,
+    under a job id no route can address (the id itself contains '/').
+
+    Two layers, both asserted: the request refuses a policy_type that isn't a
+    bare lowercase slug, and `_job_dir` refuses any id that resolves outside
+    the output root — defense in depth for ids that reach it some other way."""
+    from pydantic import ValidationError
+
+    from makermodslab.jobs import _job_dir
+    from makermodslab.train import TrainingRequest
+
+    # Layer 1: the request model.
+    for bad in ("/tmp/x", "../evil", "act/../..", "ACT", "a b", ""):
+        with pytest.raises(ValidationError):
+            TrainingRequest(dataset_repo_id="user/ds", policy_type=bad)
+    # The whole known-policy vocabulary still passes.
+    for good in (
+        "act",
+        "diffusion",
+        "pi0",
+        "pi0_fast",
+        "pi05",
+        "smolvla",
+        "tdmpc",
+        "vqbet",
+        "gaussian_actor",
+    ):
+        assert TrainingRequest(dataset_repo_id="user/ds", policy_type=good).policy_type == good
+
+    # Layer 2: the path helper.
+    root = tmp_path / "root"
+    with pytest.raises(ValueError, match="output root"):
+        _job_dir(root, "/tmp/x_user_ds_2026-01-01_00-00-00")
+    with pytest.raises(ValueError, match="output root"):
+        _job_dir(root, "../evil")
+    assert _job_dir(root, "act_user_ds_2026-01-01_00-00-00") == root / "act_user_ds_2026-01-01_00-00-00"
+
+
+def test_the_training_endpoint_answers_a_bad_policy_type_with_422(client) -> None:
+    """The route-level half of the guard above: the manual body parse must
+    surface pydantic's refusal as the app-wide 422 + request.validation (it
+    was an uncaught ValidationError, i.e. a 500 that told the caller nothing).
+    Legacy top-level shape and the {config: ...} wrapper both."""
+    for body in (
+        {"dataset_repo_id": "user/ds", "policy_type": "/tmp/x"},
+        {"config": {"dataset_repo_id": "user/ds", "policy_type": "/tmp/x"}},
+    ):
+        resp = client.post("/jobs/training", json=body)
+        assert resp.status_code == 422, resp.text
+        payload = resp.json()
+        assert payload["code"] == "request.validation"
+        assert isinstance(payload["detail"], list)  # FastAPI's shape, untouched
+        assert any("policy_type" in str(err.get("loc", ())) for err in payload["detail"])

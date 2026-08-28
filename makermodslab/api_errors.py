@@ -94,6 +94,13 @@ class ErrorCode(StrEnum):
     JOB_STATE_CHANGED = "job.state_changed"
     JOB_HAS_QUEUED_DEPENDENTS = "job.has_queued_dependents"
     JOB_REMOVAL_FAILED = "job.removal_failed"
+    # `not_terminal`: a surface that deletes a run's ARTIFACTS (POST
+    # /models/delete) was aimed at a run that hasn't finished — running or
+    # queued. Distinct from `not_running` (a stop aimed at nothing stoppable):
+    # here the run is very much alive or about to be, and the remedy is to
+    # stop/cancel it where it lives (the jobs surface), not to retry the
+    # delete.
+    JOB_NOT_TERMINAL = "job.not_terminal"
 
     # Library resources.
     DATASET_NOT_FOUND = "dataset.not_found"

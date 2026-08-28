@@ -21,7 +21,7 @@ lives in app/jobs.py.
 import re
 
 import torch
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from makermodslab.utils.config import REQUIRED_HUB_TAGS
 
@@ -153,8 +153,17 @@ class TrainingRequest(BaseModel):
     dataset_root: str | None = None
     dataset_episodes: list[int] | None = None
 
-    # Policy configuration
-    policy_type: str = "act"
+    # Policy configuration. Constrained to a bare lowercase slug because the
+    # value is the FIRST SEGMENT of the generated job id, and the job id is the
+    # job DIRECTORY name under outputs/train/: a path-shaped policy_type
+    # ("/tmp/x", "../evil") made `output_root / job_id` resolve outside the
+    # root entirely (Path's `/` discards the left side for an absolute right
+    # side), so the registry created and persisted a job dir outside its
+    # sandbox under an id no /jobs/{job_id} route could ever address. The
+    # pattern admits every lerobot policy type (act, pi0_fast, gaussian_actor,
+    # …) and everything _clean_policy_type can store; jobs._job_dir refuses
+    # escaping ids independently, as defense in depth.
+    policy_type: str = Field(default="act", pattern=r"^[a-z0-9_]+$")
 
     # Core training parameters
     steps: int = 10000
