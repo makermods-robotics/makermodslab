@@ -195,10 +195,16 @@ function describeEntry(entry: JobsEntry, t: Translate): Described {
           color: "text-muted-foreground",
           Icon: HelpCircle,
         };
-    // A Hub-only job is named by its image/space, never by the "{POLICY} · {ds}"
-    // shape, and nothing here knows what policy it trains — so no peel and no
-    // chip.
+    // A Hub-only job never takes the "{POLICY} · {ds}" shape — nothing here
+    // knows what policy it trains — so no peel and no chip.
+    //
+    // `job.name` FIRST, matching HubJobCard. The backend recovers the run's
+    // real name off the job's label (or its --policy.repo_id argv) precisely so
+    // a run launched from another machine isn't nameless here; skipping that
+    // field fell straight through to the image, and since every cloud run uses
+    // the same image, every such job read as "huggingface/lerobot-gpu:latest".
     const hubName =
+      job.name ??
       job.docker_image ??
       job.space_id ??
       t("jobs.hubJob.fallbackTitle", { id: job.id.slice(0, 12) });
