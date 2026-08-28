@@ -56,6 +56,7 @@ from .datasets import (
 from .jobs import (
     JobHasChildrenError,
     JobRecord,
+    JobSourceOfQueuedRunError,
     _list_local_checkpoints,
     _read_checkpoint_config,
     job_registry,
@@ -1427,6 +1428,20 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
             409,
             f"Model {model_id!r} was continued by {continued_by}, which would be left "
             "pointing at a deleted run. Delete the continuation(s) first.",
+        ) from exc
+    except JobSourceOfQueuedRunError as exc:
+        # The queue-era sibling of the refusal above: a QUEUED run froze this
+        # run's checkpoint path at submit time and reads it when the slot
+        # frees. Uncaught it fell into the catch-all below and surfaced as a
+        # 502 "Failed to delete model" — a deliberate guard reported as an
+        # infrastructure failure. Same 409 + code the /jobs delete route
+        # emits, so the refusal reads identically from either library.
+        waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
+        raise ModelError(
+            409,
+            f"Model {model_id!r} holds the checkpoint queued run(s) {waiting} will train "
+            "from. Cancel them first, or wait for them to finish.",
+            code=str(ErrorCode.JOB_HAS_QUEUED_DEPENDENTS),
         ) from exc
     except JobNotFoundError as exc:
         raise ModelError(404, f"Model {model_id!r} not found.") from exc

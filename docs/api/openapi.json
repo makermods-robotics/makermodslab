@@ -3748,6 +3748,7 @@
         "properties": {
           "batch_size": {
             "default": 8,
+            "exclusiveMinimum": 0.0,
             "title": "Batch Size",
             "type": "integer"
           },
@@ -3804,6 +3805,7 @@
           },
           "env_eval_freq": {
             "default": 0,
+            "minimum": 0.0,
             "title": "Env Eval Freq",
             "type": "integer"
           },
@@ -3831,11 +3833,13 @@
           },
           "eval_batch_size": {
             "default": 50,
+            "exclusiveMinimum": 0.0,
             "title": "Eval Batch Size",
             "type": "integer"
           },
           "eval_n_episodes": {
             "default": 10,
+            "exclusiveMinimum": 0.0,
             "title": "Eval N Episodes",
             "type": "integer"
           },
@@ -3890,11 +3894,13 @@
           },
           "log_freq": {
             "default": 50,
+            "exclusiveMinimum": 0.0,
             "title": "Log Freq",
             "type": "integer"
           },
           "num_workers": {
             "default": 4,
+            "minimum": 0.0,
             "title": "Num Workers",
             "type": "integer"
           },
@@ -4070,6 +4076,7 @@
           },
           "save_freq": {
             "default": 1000,
+            "exclusiveMinimum": 0.0,
             "title": "Save Freq",
             "type": "integer"
           },
@@ -4087,6 +4094,7 @@
           },
           "steps": {
             "default": 10000,
+            "exclusiveMinimum": 0.0,
             "title": "Steps",
             "type": "integer"
           },

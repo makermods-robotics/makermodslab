@@ -2359,3 +2359,37 @@ def test_models_delete_route_forwards_the_refusal_code(client, monkeypatch, tmp_
     finally:
         job_registry._records.clear()
         job_registry._records.update(original)
+
+
+def test_delete_local_model_names_the_queued_finetune_instead_of_502ing(registry) -> None:
+    """JobRegistry.delete raises JobSourceOfQueuedRunError when a QUEUED run
+    froze this run's checkpoint path at submit time. models.py didn't catch
+    it, so the refusal fell into the catch-all and surfaced as a 502 'Failed
+    to delete model' — a deliberate guard reported as an infrastructure
+    failure. Same 409 + job.has_queued_dependents the /jobs route emits."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
+
+    _seed_run(registry, "src_run", state="done")
+    registry._records["queued_ft"] = JobRecord(
+        id="queued_ft",
+        name="queued_ft",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/pick", finetune_from_job_id="src_run"),
+        output_dir=str(registry._output_root / "queued_ft" / "run"),
+        started_at=2.0,
+        runner="local",
+        queue_seq=10,
+    )
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("src_run")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.has_queued_dependents"
+    assert "queued_ft" in ei.value.message
+    # The source run — and the checkpoint the queued fine-tune will read — is
+    # untouched.
+    assert "src_run" in registry._records
+    assert (registry._output_root / "src_run").exists()

@@ -3156,7 +3156,15 @@ class JobRegistry:
     def list(self, limit: int = 10) -> builtins.list[JobRecord]:
         with self._lock:
             snapshot = dict(self._records)
-        records = sorted(snapshot.values(), key=self._list_order)[:limit]
+        # ANNOTATE COPIES, never the shared records. These derived stamps used
+        # to land in place on the live objects, outside the lock: two
+        # concurrent reads scribbled over each other mid-serialization, and a
+        # racing `_persist` could freeze a derived value into job.json — the
+        # self-contradicting file reorder_queue/rename go out of their way to
+        # zero fields against. model_copy is shallow (config/metrics stay
+        # shared, they are not annotated) and the page is limit-bounded, so
+        # this costs a handful of small copies per read.
+        records = [r.model_copy() for r in sorted(snapshot.values(), key=self._list_order)[:limit]]
         # Indexed over the whole snapshot, then applied to the page: a run's
         # leaf-ness is a fact about the registry, not about what fits on a page.
         children = build_child_index(snapshot.values())
@@ -3173,6 +3181,7 @@ class JobRegistry:
         record = snapshot.get(job_id)
         if record is None:
             raise JobNotFoundError(job_id)
+        record = record.model_copy()  # see list(): derived stamps go on a copy
         record.checkpoint_count = self._count_checkpoints(record)
         self._annotate_lineage(record, snapshot, build_child_index(snapshot.values()))
         self._annotate_queue(record, self._queue_positions(snapshot))
@@ -3670,7 +3679,21 @@ class JobRegistry:
                 record.queue_seq = self._take_queue_seq()
                 record.queued_hub_ref = deferred_hub_ref
                 record.queued_resume_ref = deferred_resume_ref
-                self._persist(record, force=True)
+                try:
+                    self._persist(record, force=True)
+                except Exception:
+                    # INSERT AND PERSIST ARE ATOMIC, in delete()'s sense: a run
+                    # exists once it is durable, or not at all. The insert above
+                    # came first (same lock, so no reader saw the gap), and a
+                    # persist that throws (ENOSPC, EIO) surfaces as this
+                    # endpoint's 500 — but the in-memory record used to stay
+                    # behind: a QUEUED ghost the caller was told failed, which
+                    # the watchdog then promoted and TRAINED. Roll the insert
+                    # back and let the error propagate; the claimed job dir is
+                    # left behind but holds no job.json, so the loader ignores
+                    # it (rmtree is I/O with no business inside the lock).
+                    self._forget_locked(job_id)
+                    raise
                 # Stamp the derived position before handing the record back.
                 # This response is the ONLY thing the submitting client has
                 # until a refetch lands, and an un-annotated record reports
@@ -3679,7 +3702,16 @@ class JobRegistry:
                 # persist, so the derived value is not what reaches disk.
                 self._annotate_queue(record, self._queue_positions(self._records))
             else:
-                self._persist(record, force=True)
+                try:
+                    self._persist(record, force=True)
+                except Exception:
+                    # Same rollback as the queued branch, sharper failure mode:
+                    # nothing has launched yet, and a `running` record with no
+                    # runner pins the single local slot for the LIFE of the
+                    # process (stop can't see it, delete refuses it, every
+                    # drain early-returns at the slot check).
+                    self._forget_locked(job_id)
+                    raise
                 self._launch_locked(
                     record,
                     target,
@@ -5340,7 +5372,9 @@ class JobRegistry:
         # queue between the two statements above. Returning a `running` record
         # under a heading that says "queued" is the exact confusion the cancel
         # guard in the UI exists to catch, so don't ship it in the first place.
-        ordered = [r for r in ordered if r.state == "queued"]
+        # Copied for the same reason list() copies: the annotations below are
+        # derived, and they belong on the response, not on the shared records.
+        ordered = [r.model_copy() for r in ordered if r.state == "queued"]
         positions = self._queue_positions(snapshot)
         for r in ordered:
             # The same annotations `list()` applies, so a record means the same
@@ -5650,6 +5684,22 @@ class JobRegistry:
             return
         stale = self._queued_launch_refusal(record)
 
+        # Re-asked AFTER the slow phase: for a hub-ref base, the validation
+        # above is a network round-trip plus retries, and a recording/teleop
+        # session that started during it was invisible to the phase-1 check —
+        # the promotion went ahead and a trainer landed on the GPU (and the
+        # arms' USB bus) under a live session. Still OUTSIDE the lock, and it
+        # must stay there: `training_is_active` documents the lock cycle that
+        # moving this inside the critical section would close (feature lock →
+        # registry lock here, registry lock → feature flags there). The
+        # remaining single-read gap is the same one every phase-1-only tick
+        # already had; waiting is free — the run keeps its place and the next
+        # tick re-asks.
+        busy_with = self._robot_busy()
+        if busy_with is not None:
+            logger.debug("Holding the training queue: %s started using the robot", busy_with)
+            return
+
         # -- phase 3: promote and launch ----------------------------------
         notify = False
         try:
@@ -5803,6 +5853,26 @@ class JobRegistry:
 
         progress_snapshots: builtins.list[dict] = []
 
+        # The whole finalisation pass runs under a try so the drain in the
+        # `finally` below happens on EVERY tick. It used to sit after the loop
+        # as a plain statement, which meant one runner whose finalisation
+        # raises — a cloud runner's platform poll, an unreadable log tail —
+        # skipped it on every tick: `_watchdog_loop` caught the exception,
+        # re-ticked, and raised again, so queued runs sat forever against an
+        # idle local slot while the UI looked healthy (finalisation of the
+        # HEALTHY runs kept working, so nothing else visibly broke). The
+        # exception still propagates — the watchdog's handler is the one place
+        # that logs it — but it no longer starves the queue.
+        try:
+            self._tick_finalise(running_ids, progress_snapshots)
+        finally:
+            # After finalisations, so a run that just ended frees its slot
+            # within the same tick that ended it rather than a second later.
+            self._drain_queue()
+
+    def _tick_finalise(
+        self, running_ids: builtins.list[str], progress_snapshots: builtins.list[dict]
+    ) -> None:
         for jid in running_ids:
             with self._lock:
                 runner = self._runners.get(jid)
@@ -5910,9 +5980,6 @@ class JobRegistry:
             self._notify_change()
 
         self._notify_progress(progress_snapshots)
-        # After finalisations, so a run that just ended frees its slot within
-        # the same tick that ended it rather than a second later.
-        self._drain_queue()
 
     def _persist(self, record: JobRecord, force: bool) -> None:
         now = time.time()

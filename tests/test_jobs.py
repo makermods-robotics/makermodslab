@@ -693,7 +693,12 @@ def test_initial_metrics_leaves_a_fresh_run_at_zero() -> None:
 
 
 def test_initial_metrics_needs_a_step_target_to_seed() -> None:
-    """No configured target ⇒ no honest percentage, so don't half-seed."""
+    """No configured target ⇒ no honest percentage, so don't half-seed.
+
+    `steps=0` can no longer arrive through validation (gt=0 since the review
+    pass), but the defensive branch still guards configs that BYPASS it — a
+    legacy job.json read back by tooling, model_construct in tests — so the
+    branch is exercised the same way such data would reach it."""
     from makermodslab.jobs import _initial_metrics
     from makermodslab.train import TrainingRequest
 
@@ -702,8 +707,7 @@ def test_initial_metrics_needs_a_step_target_to_seed() -> None:
         policy_type="act",
         resume=True,
         resume_from_step=10,
-        steps=0,
-    )
+    ).model_copy(update={"steps": 0})
     assert _initial_metrics(cfg).current_step == 0
 
 
@@ -2218,11 +2222,13 @@ def _resume_request_at(steps: int, *, step: int | None = None):
     )
 
 
-@pytest.mark.parametrize("steps", [0, 50, 100])
+@pytest.mark.parametrize("steps", [50, 100])
 def test_start_refuses_a_resume_target_at_or_below_the_checkpoint(tmp_path, steps) -> None:
     """The boundary is strict: equal to the checkpoint step trains nothing, and
-    so does anything below it. `steps=0` is refused with the rest — a request's
-    own target is a required field, so 0 means "train nothing", not "unset"."""
+    so does anything below it. (`steps=0` used to be refused here too; since
+    the review pass it never gets this far — TrainingRequest bounds steps
+    gt=0, covered by test_training_request_refuses_zero_and_negative_core_
+    numbers.)"""
     from unittest.mock import MagicMock, patch
 
     from makermodslab.jobs import JobTarget
@@ -8168,3 +8174,192 @@ def test_the_training_endpoint_answers_a_bad_policy_type_with_422(client) -> Non
         assert payload["code"] == "request.validation"
         assert isinstance(payload["detail"], list)  # FastAPI's shape, untouched
         assert any("policy_type" in str(err.get("loc", ())) for err in payload["detail"])
+
+
+def test_the_training_endpoint_answers_malformed_bodies_with_422_not_500(client) -> None:
+    """POST /jobs/training parses its body BY HAND (two accepted shapes), so
+    unparseable JSON and pydantic refusals used to escape as raw exceptions —
+    500s that told the caller nothing. Both now surface as the app-wide 422:
+    FastAPI's error-list detail shape, request.validation beside it."""
+    # Unparseable JSON.
+    resp = client.post("/jobs/training", content=b"{not json", headers={"Content-Type": "application/json"})
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["code"] == "request.validation"
+    assert isinstance(resp.json()["detail"], list)
+
+    # Valid JSON that isn't an object.
+    resp = client.post("/jobs/training", json=[1, 2, 3])
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["code"] == "request.validation"
+
+    # An object missing its one required field.
+    resp = client.post("/jobs/training", json={"policy_type": "act"})
+    assert resp.status_code == 422, resp.text
+    payload = resp.json()
+    assert payload["code"] == "request.validation"
+    assert any("dataset_repo_id" in str(err.get("loc", ())) for err in payload["detail"])
+
+
+def test_read_paths_annotate_copies_not_the_registry_records(tmp_path) -> None:
+    """list/get/list_queue stamp DERIVED fields (queue_position, lineage,
+    checkpoint_count) onto the records they return — and they did it in place,
+    on the SHARED objects in self._records, after releasing the lock. Two
+    concurrent reads scribbled over each other's annotations mid-serialization,
+    and a `_persist` racing a read could freeze a derived value into job.json
+    (the self-contradicting file reorder_queue/rename zero fields to avoid).
+    Read paths now annotate model_copy()s; the registry's own records never
+    carry derived state."""
+    reg = _quiet_registry(tmp_path)
+    _inject_running_local(reg)
+    _inject_queued(reg, "a", seq=10)
+    _inject_queued(reg, "b", seq=20)
+
+    listed = reg.list(limit=10)
+    got = reg.get("a")
+    queue_view = reg.list_queue()
+
+    for view in ([got], listed, queue_view):
+        for r in view:
+            assert r is not reg._records[r.id], f"{r.id} returned the live registry object"
+
+    # The annotations landed on the copies…
+    assert got.queue_position == 1
+    assert {r.id: r.queue_position for r in queue_view} == {"a": 1, "b": 2}
+    # …and never on the registry's own records.
+    assert reg._records["a"].queue_position == 0
+    assert reg._records["b"].queue_position == 0
+
+
+def test_training_request_refuses_zero_and_negative_core_numbers() -> None:
+    """steps/batch_size accepted 0 and negatives: steps=0 launches a trainer
+    whose range() is empty (a `done` phantom), batch_size=0 crashes the
+    dataloader, log_freq/save_freq=0 divide by zero in lerobot's `step % freq`.
+    Bounded at the model so both the wire (422) and the registry refuse them."""
+    from pydantic import ValidationError
+
+    from makermodslab.train import TrainingRequest
+
+    def _ok(**kw):
+        return TrainingRequest(dataset_repo_id="user/ds", **kw)
+
+    for field, bad_values in (
+        ("steps", (0, -1)),
+        ("batch_size", (0, -8)),
+        ("num_workers", (-1,)),  # 0 is a legitimate torch value: main-process loading
+        ("log_freq", (0, -50)),
+        ("save_freq", (0, -1)),
+        ("env_eval_freq", (-1,)),  # 0 means disabled and stays legal
+        ("eval_n_episodes", (0, -1)),
+        ("eval_batch_size", (0, -1)),
+    ):
+        for bad in bad_values:
+            with pytest.raises(ValidationError):
+                _ok(**{field: bad})
+
+    # The boundary values everything real uses still pass.
+    ok = _ok(num_workers=0, env_eval_freq=0)
+    assert ok.num_workers == 0
+    assert ok.env_eval_freq == 0
+    assert _ok().steps == 10000
+
+
+def test_a_finalisation_error_does_not_starve_the_queue(monkeypatch, tmp_path) -> None:
+    """_tick finalises ended runs and only then drains the queue — but the
+    drain sat AFTER the finalisation loop, so one runner whose hooks raise
+    (a cloud runner's platform poll, say) skipped it on every tick: queued
+    runs sat forever against an idle local slot while the UI looked healthy.
+    The drain now runs in a finally, whatever finalisation does."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+
+    # A CLOUD run whose finalisation blows up: it does not hold the local
+    # slot, so the queue below is runnable the whole time.
+    reg._records["cloudish"] = JobRecord(
+        id="cloudish",
+        name="cloudish",
+        state="running",
+        config=TrainingRequest(dataset_repo_id="user/ds"),
+        output_dir=str(tmp_path / "root" / "cloudish" / "run"),
+        started_at=0.0,
+        runner="hf_cloud",
+    )
+    broken = MagicMock()
+    broken.is_running.return_value = False
+    broken.returncode.side_effect = RuntimeError("platform poll exploded")
+    reg._runners["cloudish"] = broken
+
+    _inject_queued(reg, "waiting", seq=10)
+
+    with pytest.raises(RuntimeError):
+        reg._tick()
+
+    assert reg._records["waiting"].state == "running", "the drain was starved by the finalisation error"
+
+
+def test_a_submit_whose_persist_fails_leaves_no_ghost_record(monkeypatch, tmp_path) -> None:
+    """start() inserts the record into memory and THEN persists. A persist
+    that throws (ENOSPC, EIO) surfaced as a 500 — while the in-memory record
+    stayed behind: a queued ghost the caller was told failed, which the
+    watchdog would happily promote and TRAIN; on the immediate path, a
+    `running` record with no runner that pins the slot for the life of the
+    process. The insert now rolls back when the write fails."""
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+
+    def _persist_boom(record, force):
+        raise OSError(28, "No space left on device")
+
+    # Queued path: the slot is held, so the submit queues.
+    _inject_running_local(reg, "holder")
+    monkeypatch.setattr(reg, "_persist", _persist_boom)
+    with pytest.raises(OSError):
+        reg.start(TrainingRequest(dataset_repo_id="user/ds"), JobTarget(runner="local"))
+    assert [r.id for r in reg._queued_records()] == []
+    assert set(reg._records) == {"holder"}
+
+    # Immediate path: slot free — the record must not stay `running` with no
+    # runner (that pins the slot forever; stop can't see it, delete refuses it).
+    del reg._records["holder"]
+    _fake_local_runner(monkeypatch)
+    with pytest.raises(OSError):
+        reg.start(TrainingRequest(dataset_repo_id="user/ds"), JobTarget(runner="local"))
+    assert reg._records == {}
+
+
+def test_the_robot_mutex_is_rechecked_after_slow_validation(monkeypatch, tmp_path) -> None:
+    """_drain_queue asks _robot_busy once, BEFORE the lock and before phase 2's
+    re-validation — which for a hub-ref base is a network round-trip plus
+    retries. A recording/teleop session that started during that window was
+    invisible: the promotion went ahead and a trainer landed on the GPU (and
+    the arms' USB bus) under a live session. The mutex is re-read after the
+    slow phase — still outside the lock, per the lock-order contract in
+    training_is_active."""
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    _inject_queued(reg, "w", seq=10)
+
+    calls = {"n": 0}
+
+    def _busy_after_validation() -> str | None:
+        calls["n"] += 1
+        # Phase 1: idle. During phase 2 a recording session starts.
+        return None if calls["n"] == 1 else "a recording session"
+
+    monkeypatch.setattr(reg, "_robot_busy", _busy_after_validation)
+
+    reg._drain_queue()
+
+    assert calls["n"] >= 2, "the mutex was only read once — before the slow phase"
+    assert reg.get("w").state == "queued", "a promotion landed under a live robot session"
+
+    # Once the robot is idle again, the run starts normally.
+    monkeypatch.setattr(reg, "_robot_busy", lambda: None)
+    reg._drain_queue()
+    assert reg.get("w").state == "running"
