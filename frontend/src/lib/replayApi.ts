@@ -11,6 +11,10 @@ export interface DatasetItem {
    * their own namespace, no local copy). Such a row is "removed" by unpinning
    * (removeCustomDataset), never a destructive delete. */
   saved_custom?: boolean;
+  /** Carries per-episode sampling weights (a weighted merge). Present for
+   * datasets with a local copy; absent for Hub-only rows, where it is unknown
+   * rather than false — so read it as `weighted === true`, never `!weighted`. */
+  weighted?: boolean;
 }
 
 export async function listDatasets(
@@ -145,6 +149,9 @@ export interface DatasetInfo {
   tasks: DatasetTask[];
   /** On-disk size for a local dataset; null for a Hub summary (not on disk). */
   size_bytes: number | null;
+  /** Carries per-episode sampling weights. Local datasets only; absent means
+   * unknown (Hub-only), not false. */
+  weighted?: boolean;
   /** "local" = full detail from the local cache; "hub" = the meta/info.json
    * summary of a not-yet-downloaded Hub dataset (no tasks/size; rename not
    * applicable). Treat absent as "local". */
@@ -431,16 +438,32 @@ export interface MergeStatus {
   logs: { timestamp: number; message: string }[];
 }
 
+/** Largest per-source weight the backend accepts (mirrors
+ * `MAX_SOURCE_WEIGHT` in makermodslab/merge.py — keep the two in step). */
+export const MAX_SOURCE_WEIGHT = 20;
+
+/** Start a merge. `sourceWeights` is a per-source integer repeat count,
+ * positionally aligned with `sourceRepoIds`; omit it (or pass all 1s) for an
+ * unweighted merge. A source with weight 3 contributes its episodes three
+ * times, so training samples them three times as often. */
 export async function startDatasetMerge(
   baseUrl: string,
   fetcher: Fetcher,
   sourceRepoIds: string[],
   outputRepoId: string,
+  sourceWeights?: number[],
 ): Promise<{ started: boolean; message: string }> {
+  // Only send weights when at least one is non-default, so an ordinary merge
+  // keeps the exact request body it had before weights existed.
+  const weighted = sourceWeights?.some((w) => w !== 1) ?? false;
   // apiRequest JSON.stringifies `body` itself — pass a raw object, not a string.
   return apiRequest(baseUrl, fetcher, "/datasets/merge", {
     method: "POST",
-    body: { source_repo_ids: sourceRepoIds, output_repo_id: outputRepoId },
+    body: {
+      source_repo_ids: sourceRepoIds,
+      output_repo_id: outputRepoId,
+      ...(weighted ? { source_weights: sourceWeights } : {}),
+    },
     action: "Merge datasets",
   });
 }

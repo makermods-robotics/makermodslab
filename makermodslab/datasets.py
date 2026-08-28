@@ -686,6 +686,29 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+def _has_sampling_weight_column(path: Path) -> bool:
+    """Whether ``path``'s episode metadata carries a ``sampling_weight`` column.
+
+    Reads only the parquet FOOTER (``read_schema``), never the rows, so it is
+    cheap enough to run per dataset while building a listing.
+
+    This is an exact proxy for "is weighted", not an approximation: a merge with
+    every weight at 1 writes no column at all, so a present column always means
+    at least one episode is weighted. The authoritative check that gates which
+    trainer launches is still ``dataset_is_weighted`` — this one only decides
+    whether to draw a badge.
+    """
+    episodes_dir = path / "meta" / "episodes"
+    if not episodes_dir.is_dir():
+        return False
+    for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+        try:
+            return SAMPLING_WEIGHT_COLUMN in pq.read_schema(parquet_path).names
+        except Exception:
+            return False
+    return False
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -720,6 +743,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": top.name,
                         "last_modified": _dir_mtime_iso(top),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(top),
                     }
                 )
             continue
@@ -741,6 +765,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": f"{top.name}/{sub.name}",
                         "last_modified": _dir_mtime_iso(sub),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(sub),
                     }
                 )
 
@@ -896,6 +921,9 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         # Hub dataset — see get_hub_dataset_info). The card gates its local-only
         # affordances (rename, size, task counts) on this.
         "source": "local",
+        # Per-episode sampling weights present. Drives the "weighted" badge and
+        # the cloud-target block (weighted datasets are local-only for now).
+        "weighted": _has_sampling_weight_column(path),
     }
 
 
@@ -1806,6 +1834,12 @@ def list_all_datasets() -> list[dict[str, Any]]:
             a = existing.get("last_modified") or ""
             b = item.get("last_modified") or ""
             existing["last_modified"] = max(a, b) or None
+            # Carry the local-only facts the Hub row cannot know. Without this a
+            # dataset that exists in BOTH places lost its `weighted` flag, and
+            # the badge silently disappeared for exactly the datasets most
+            # likely to have been merged and pushed.
+            if "weighted" in item:
+                existing["weighted"] = item["weighted"]
         else:
             merged[rid] = {**item, "source": "local"}
 

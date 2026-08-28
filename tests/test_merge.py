@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _write_info(
     cache: Path,
@@ -338,3 +340,291 @@ def test_merge_source_problem_offline_does_not_block(tmp_lerobot_home: Path, mon
     # Offline / transient error → hub_repo_exists returns None ("no claim"),
     # which must NOT block the merge.
     assert merge._merge_source_problem(["a/one", "a/hub-only"]) is None
+
+
+def test_expand_weighted_repeats_by_weight() -> None:
+    from makermodslab.merge import _expand_weighted
+
+    assert _expand_weighted(["a", "b"], [1, 3]) == ["a", "b", "b", "b"]
+
+
+def test_expand_weighted_none_is_passthrough() -> None:
+    from makermodslab.merge import _expand_weighted
+
+    assert _expand_weighted(["a", "b"], None) == ["a", "b"]
+
+
+def test_weights_problem_none_is_valid() -> None:
+    from makermodslab.merge import _weights_problem
+
+    assert _weights_problem(2, None) is None
+
+
+def test_weights_problem_matching_lengths_is_valid() -> None:
+    from makermodslab.merge import _weights_problem
+
+    assert _weights_problem(2, [1, 1]) is None
+
+
+def test_weights_problem_length_mismatch() -> None:
+    from makermodslab.merge import _weights_problem
+
+    msg = _weights_problem(2, [1, 1, 1])
+    assert msg is not None
+    assert "3" in msg and "2" in msg
+
+
+def test_weights_problem_weight_below_one() -> None:
+    from makermodslab.merge import _weights_problem
+
+    msg = _weights_problem(2, [1, 0])
+    assert msg is not None
+
+
+def test_weights_problem_weight_above_max() -> None:
+    from makermodslab.merge import MAX_SOURCE_WEIGHT, _weights_problem
+
+    msg = _weights_problem(2, [1, MAX_SOURCE_WEIGHT + 1])
+    assert msg is not None
+    assert str(MAX_SOURCE_WEIGHT) in msg
+
+
+def test_describe_weights_includes_repeat_counts() -> None:
+    from makermodslab.merge import _describe_weights
+
+    desc = _describe_weights(["a/one", "a/two"], [1, 3])
+    assert "a/two x3" in desc
+
+
+def test_merge_rejects_mismatched_weights_length() -> None:
+    from makermodslab.merge import MergeManager, MergeRequest
+
+    mgr = MergeManager()
+    res = mgr.start(
+        MergeRequest(
+            source_repo_ids=["a/one", "a/two"],
+            output_repo_id="a/merged",
+            source_weights=[1, 2, 3],
+        )
+    )
+    assert res["started"] is False
+    assert "3" in res["message"] and "2" in res["message"]
+    assert mgr.state == "idle"  # rejected before any subprocess spawned
+
+
+def test_merge_rejects_duplicate_source_uses_weight_instead() -> None:
+    from makermodslab.merge import MergeManager, MergeRequest
+
+    mgr = MergeManager()
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/one"], output_repo_id="a/merged"))
+    assert res["started"] is False
+    assert "weight" in res["message"].lower()
+    assert mgr.state == "idle"  # rejected before any subprocess spawned
+
+
+def test_weights_all_ones_matches_unweighted_at_validation_layer() -> None:
+    from makermodslab.merge import _expand_weighted, _weights_problem
+
+    sources = ["a/one", "a/two"]
+    assert _weights_problem(2, [1, 1]) is None
+    assert _expand_weighted(sources, [1, 1]) == sources
+
+
+# ---------------------------------------------------------------------------
+# Sampling weights written at merge time (step 1.1).
+# ---------------------------------------------------------------------------
+
+
+def _write_source(cache: Path, repo_id: str, n_episodes: int) -> Path:
+    """A source dataset root whose meta/info.json declares `n_episodes`."""
+    _write_info(cache, repo_id)
+    info_path = cache / repo_id / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["total_episodes"] = n_episodes
+    info_path.write_text(json.dumps(info))
+    return cache / repo_id
+
+
+def _write_output_episodes(cache: Path, repo_id: str, chunks: list[list[int]]) -> Path:
+    """An aggregated output whose episode rows are spread over `chunks`."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root = cache / repo_id
+    for i, episode_indices in enumerate(chunks):
+        chunk_dir = root / "meta" / "episodes" / f"chunk-{i:03d}"
+        chunk_dir.mkdir(parents=True)
+        pq.write_table(
+            pa.table({"episode_index": episode_indices, "length": [30] * len(episode_indices)}),
+            chunk_dir / "file-000.parquet",
+        )
+    return root
+
+
+def _read_weights(root: Path) -> list[float]:
+    import pyarrow.parquet as pq
+
+    rows: list[tuple[int, float]] = []
+    for path in sorted((root / "meta" / "episodes").glob("**/*.parquet")):
+        table = pq.read_table(path)
+        rows.extend(
+            zip(
+                table.column("episode_index").to_pylist(),
+                table.column("sampling_weight").to_pylist(),
+                strict=True,
+            )
+        )
+    return [weight for _, weight in sorted(rows)]
+
+
+def _column_names(root: Path) -> list[str]:
+    import pyarrow.parquet as pq
+
+    path = sorted((root / "meta" / "episodes").glob("**/*.parquet"))[0]
+    return list(pq.read_schema(path).names)
+
+
+def test_weight_per_episode_flattens_source_weights() -> None:
+    from makermodslab.merge import _weight_per_episode
+
+    assert _weight_per_episode([2, 3], [1, 3]) == [1.0, 1.0, 3.0, 3.0, 3.0]
+
+
+def test_source_episode_counts_read_each_sources_own_info(tmp_lerobot_home: Path) -> None:
+    """Boundaries are read, not guessed: they decide which source's weight lands
+    on which output episode."""
+    from makermodslab.merge import _source_episode_counts
+
+    roots = [
+        _write_source(tmp_lerobot_home, "a/one", 2),
+        _write_source(tmp_lerobot_home, "a/two", 7),
+    ]
+    assert _source_episode_counts(roots) == [2, 7]
+
+
+def test_stamp_sampling_weights_keys_by_episode_index(tmp_lerobot_home: Path) -> None:
+    from makermodslab.merge import _stamp_sampling_weights
+
+    # Episode rows deliberately split across two chunks, out of file order.
+    root = _write_output_episodes(tmp_lerobot_home, "a/out", [[2, 3, 4], [0, 1]])
+    stamped = _stamp_sampling_weights(root, [1.0, 1.0, 3.0, 3.0, 3.0])
+
+    assert stamped == 5
+    assert _read_weights(root) == [1.0, 1.0, 3.0, 3.0, 3.0]
+
+
+def test_stamp_sampling_weights_replaces_an_existing_column(tmp_lerobot_home: Path) -> None:
+    from makermodslab.merge import _stamp_sampling_weights
+
+    root = _write_output_episodes(tmp_lerobot_home, "a/out", [[0, 1]])
+    _stamp_sampling_weights(root, [2.0, 2.0])
+    _stamp_sampling_weights(root, [1.0, 4.0])
+
+    assert _read_weights(root) == [1.0, 4.0]
+    assert _column_names(root).count("sampling_weight") == 1
+
+
+def test_stamp_sampling_weights_refuses_a_count_mismatch(tmp_lerobot_home: Path) -> None:
+    """Mis-stamped weights would oversample the wrong episodes forever, so a
+    layout that doesn't line up must fail the merge instead."""
+    from makermodslab.merge import _stamp_sampling_weights
+
+    # Sources account for 3 episodes but the merge only produced 2.
+    root = _write_output_episodes(tmp_lerobot_home, "a/out", [[0, 1]])
+    with pytest.raises(RuntimeError, match="episode rows"):
+        _stamp_sampling_weights(root, [1.0, 3.0, 3.0])
+
+    assert "sampling_weight" not in _column_names(root)  # nothing written
+
+
+def test_stamp_sampling_weights_refuses_an_out_of_range_index(tmp_lerobot_home: Path) -> None:
+    from makermodslab.merge import _stamp_sampling_weights
+
+    root = _write_output_episodes(tmp_lerobot_home, "a/out", [[0, 9]])
+    with pytest.raises(RuntimeError, match="outside"):
+        _stamp_sampling_weights(root, [1.0, 3.0])
+
+
+def _fake_aggregate(cache: Path, calls: list[list[str]]):
+    """Stand-in for lerobot's aggregate_datasets: records the repo_ids it was
+    handed and writes one contiguous episodes table for them."""
+
+    def _aggregate(repo_ids, aggr_repo_id, roots):  # noqa: ARG001
+        calls.append(list(repo_ids))
+        total = 0
+        for repo_id in repo_ids:
+            info = json.loads((cache / repo_id / "meta" / "info.json").read_text())
+            total += int(info["total_episodes"])
+        _write_output_episodes(cache, aggr_repo_id, [list(range(total))])
+        (cache / aggr_repo_id / "meta" / "info.json").write_text(json.dumps({"total_episodes": total}))
+
+    return _aggregate
+
+
+def test_run_cli_passes_each_source_once_and_stamps_the_weights(tmp_lerobot_home: Path, monkeypatch) -> None:
+    """The whole point: weight 3 costs one copy on disk, not three."""
+    from makermodslab import merge
+
+    _write_source(tmp_lerobot_home, "a/one", 2)
+    _write_source(tmp_lerobot_home, "a/two", 3)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate(tmp_lerobot_home, calls))
+
+    assert merge._run_cli(["a/out", "a/one", "a/two", "--weights", "1", "3"]) == 0
+
+    assert calls == [["a/one", "a/two"]]
+    assert _read_weights(tmp_lerobot_home / "a/out") == [1.0, 1.0, 3.0, 3.0, 3.0]
+
+
+def test_run_cli_writes_no_weight_column_when_every_weight_is_one(
+    tmp_lerobot_home: Path, monkeypatch
+) -> None:
+    """R2: all-1 weights are indistinguishable from no weights, so the output
+    must be exactly what an unweighted merge has always produced."""
+    from makermodslab import merge
+
+    _write_source(tmp_lerobot_home, "a/one", 2)
+    _write_source(tmp_lerobot_home, "a/two", 2)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate(tmp_lerobot_home, calls))
+
+    assert merge._run_cli(["a/out", "a/one", "a/two", "--weights", "1", "1"]) == 0
+
+    assert calls == [["a/one", "a/two"]]
+    assert "sampling_weight" not in _column_names(tmp_lerobot_home / "a/out")
+
+
+def test_run_cli_duplicate_flag_restores_physical_expansion(tmp_lerobot_home: Path, monkeypatch) -> None:
+    """The escape hatch still duplicates on disk — and writes no weights, since
+    the ratio is baked into the data."""
+    from makermodslab import merge
+
+    _write_source(tmp_lerobot_home, "a/one", 2)
+    _write_source(tmp_lerobot_home, "a/two", 1)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate(tmp_lerobot_home, calls))
+
+    assert merge._run_cli(["a/out", "a/one", "a/two", "--weights", "1", "3", "--duplicate"]) == 0
+
+    assert calls == [["a/one", "a/two", "a/two", "a/two"]]
+    assert "sampling_weight" not in _column_names(tmp_lerobot_home / "a/out")
+
+
+def test_run_cli_removes_the_output_when_weights_cannot_be_stored(
+    tmp_lerobot_home: Path, monkeypatch
+) -> None:
+    """R6: handing back a merged-but-unweighted dataset would let it train on the
+    wrong mix while looking correct, so the merge fails and cleans up instead."""
+    from makermodslab import merge
+
+    _write_source(tmp_lerobot_home, "a/one", 2)
+    _write_source(tmp_lerobot_home, "a/two", 3)
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate(tmp_lerobot_home, []))
+    monkeypatch.setattr(
+        merge,
+        "_stamp_sampling_weights",
+        lambda root, weights: (_ for _ in ()).throw(RuntimeError("disk full")),  # noqa: ARG005
+    )
+
+    assert merge._run_cli(["a/out", "a/one", "a/two", "--weights", "1", "3"]) == 1
+    assert not (tmp_lerobot_home / "a/out").exists()

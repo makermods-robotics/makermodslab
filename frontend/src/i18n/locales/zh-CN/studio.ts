@@ -128,6 +128,8 @@ export default {
       row: {
         episodes: "{{episodes}} 片段",
         hub: "Hub",
+        weighted: "带权重",
+        weightedTitle: "该数据集带有按回合的采样权重，训练时部分回合会被更频繁地采样",
       },
     },
     startingPoint: {
