@@ -1721,7 +1721,7 @@ def _wire_job_record(record: JobRecord) -> JobRecord:
 async def create_training_job(req: Request):
     # The body is parsed BY HAND (from_legacy accepts two shapes, which no
     # single response-model annotation can express), so the two failures
-    # FastAPI normally absorbs — unparseable JSON, a body that fails pydantic
+    # FastAPI normally absorbs — unparsable JSON, a body that fails pydantic
     # validation — surfaced here as uncaught exceptions, i.e. 500s that told
     # the caller nothing. Re-raise both as RequestValidationError so the
     # app-wide handler answers exactly what a declared body would have: 422,

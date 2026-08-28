@@ -8180,10 +8180,10 @@ def test_the_training_endpoint_answers_a_bad_policy_type_with_422(client) -> Non
 
 def test_the_training_endpoint_answers_malformed_bodies_with_422_not_500(client) -> None:
     """POST /jobs/training parses its body BY HAND (two accepted shapes), so
-    unparseable JSON and pydantic refusals used to escape as raw exceptions —
+    unparsable JSON and pydantic refusals used to escape as raw exceptions —
     500s that told the caller nothing. Both now surface as the app-wide 422:
     FastAPI's error-list detail shape, request.validation beside it."""
-    # Unparseable JSON.
+    # Unparsable JSON.
     resp = client.post("/jobs/training", content=b"{not json", headers={"Content-Type": "application/json"})
     assert resp.status_code == 422, resp.text
     assert resp.json()["code"] == "request.validation"

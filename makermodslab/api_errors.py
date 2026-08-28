@@ -175,7 +175,7 @@ def install_error_handlers(app: FastAPI) -> None:
         The body keeps FastAPI's exact `detail` shape (the pydantic error
         list), so clients that parse it keep working; `request.validation`
         rides beside it the way every ApiError's code does — a schema-level
-        refusal (an unparseable body, an out-of-range field, a reorder list
+        refusal (an unparsable body, an out-of-range field, a reorder list
         past its 512-id bound) is the request domain's own condition, and
         an SDK should not have to sniff the 422 status to know that.
         """

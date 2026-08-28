@@ -351,7 +351,7 @@ def _run_prod(lan: bool = False, no_ui: bool = False, host: str | None = None):
             "🚀 Starting MakerMods Lab on http://%s:%d%s ...",
             host,
             BACKEND_PORT,
-            " (LAN)" if host == "0.0.0.0" else "",  # noqa: S104
+            " (LAN)" if host == "0.0.0.0" else "",  # noqa: S104  # nosec B104 — log-label comparison, not a bind; the bind above carries its own justification
         )
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
