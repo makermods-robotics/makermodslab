@@ -25,6 +25,7 @@ evicted), removal, and the url+name persistence round-trip.
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -65,25 +66,34 @@ class FakeNetwork:
     Counts probes per base url so tests can assert the TTL actually gates
     re-verification instead of every list() hitting the network. Peers can
     also carry a jobs listing (base url -> the /api/v1/jobs body) for the
-    workload-proxy tests.
+    workload-proxy tests, per-job records/logs for the drill-in proxies, and
+    programmed (status, body) answers for the forwarded stop/delete calls.
     """
 
     def __init__(self) -> None:
         self.peers: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
         self.queue: dict[str, dict] = {}
+        # Drill-in state, keyed (base url, job id).
+        self.job_docs: dict[tuple[str, str], dict] = {}
+        self.job_logs: dict[tuple[str, str], list[dict]] = {}
+        # Programmed answers for the NON-GET forwards: (status, body); body
+        # None ⇒ an empty response (the peer's own DELETE answers 204).
+        self.stop_results: dict[tuple[str, str], tuple[int, dict | None]] = {}
+        self.delete_results: dict[tuple[str, str], tuple[int, dict | None]] = {}
         self.down: set[str] = set()
         self.probes: dict[str, int] = {}
+        # Every request that reached the transport, for asserting what the
+        # proxy actually forwarded (method + full url, query string included).
+        self.requests: list[tuple[str, str]] = []
 
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             path = request.url.path
-            assert path in {
-                "/api/v1/health",
-                "/api/v1/jobs",
-                "/api/v1/jobs/queue",
-            }, f"unexpected probe path: {request.url}"
-            base = str(request.url).removesuffix(path)
+            # Computed from the url's parts, not removesuffix on the whole
+            # string — the forwarded stop call carries a query string.
+            base = f"{request.url.scheme}://{request.url.netloc.decode()}"
+            self.requests.append((request.method, str(request.url)))
             if base in self.down:
                 raise httpx.ConnectError("connection refused", request=request)
             if path == "/api/v1/jobs/queue":
@@ -94,10 +104,34 @@ class FakeNetwork:
                 if base not in self.jobs:
                     return httpx.Response(404, json={"detail": "Not Found"})
                 return httpx.Response(200, json=self.jobs[base])
-            self.probes[base] = self.probes.get(base, 0) + 1
-            if base not in self.peers:
-                return httpx.Response(404, json={"detail": "Not Found"})
-            return httpx.Response(200, json=self.peers[base])
+            if path == "/api/v1/health":
+                self.probes[base] = self.probes.get(base, 0) + 1
+                if base not in self.peers:
+                    return httpx.Response(404, json={"detail": "Not Found"})
+                return httpx.Response(200, json=self.peers[base])
+            # The peer's own per-job surface: /api/v1/jobs/{id}[/logs|/stop].
+            match = re.fullmatch(r"/api/v1/jobs/([^/]+)(?:/(logs|stop))?", path)
+            assert match, f"unexpected probe path: {request.url}"
+            key = (base, match.group(1))
+            not_found = {"detail": f"Job {match.group(1)!r} not found"}
+            if match.group(2) == "stop":
+                assert request.method == "POST", f"stop must be POSTed, got {request.method}"
+                status, body = self.stop_results.get(key, (404, not_found))
+            elif match.group(2) == "logs":
+                assert request.method == "GET"
+                if key not in self.job_logs:
+                    return httpx.Response(404, json=not_found)
+                return httpx.Response(200, json={"logs": self.job_logs[key]})
+            elif request.method == "DELETE":
+                status, body = self.delete_results.get(key, (404, not_found))
+            else:
+                assert request.method == "GET"
+                if key not in self.job_docs:
+                    return httpx.Response(404, json=not_found)
+                return httpx.Response(200, json=self.job_docs[key])
+            if body is None:
+                return httpx.Response(status)
+            return httpx.Response(status, json=body)
 
         return httpx.MockTransport(handler)
 
@@ -906,6 +940,146 @@ def test_node_jobs_fetch_failure_502(client, api_registry, network):
     client.post("/api/v1/nodes", json={"url": PEER_A_URL})
     network.down.add(PEER_A_URL)  # freshly verified, so no re-probe; the jobs GET hits the outage
     resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+# ---------------------------------------------------------------------------
+# Peer-job drill-in proxies: GET record/logs, forwarded stop/delete
+# ---------------------------------------------------------------------------
+
+
+def test_node_job_proxies_the_peers_record(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.job_docs[(PEER_A_URL, "job-1")] = _remote_job_doc()
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "job-1"
+    assert body["state"] == "running"
+    assert body["name"] == "act_so101_run"
+
+
+def test_node_job_unknown_node_404(client, api_registry):
+    resp = client.get(f"/api/v1/nodes/{PEER_B_ID}/jobs/job-1")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "node.not_found"
+
+
+def test_node_job_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def test_node_job_missing_on_peer_reads_unreachable(client, api_registry, network):
+    """GET proxies keep the workload proxies' stance: ANY HTTP error from the
+    peer — its 404 for an unknown job included — counts as 'could not read the
+    peer', 502 node.unreachable. Only the forwarded mutations below pass a
+    peer's own refusal through."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs/no-such-job")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def test_node_job_logs_proxies_the_drained_tail(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    lines = [{"timestamp": 1_700_000_100.0, "message": "step 100/1000"}]
+    network.job_logs[(PEER_A_URL, "job-1")] = lines
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1/logs")
+    assert resp.status_code == 200
+    assert resp.json() == {"logs": lines}
+
+
+def test_node_job_logs_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1/logs")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def test_node_job_stop_forwards_and_returns_the_peers_record(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.stop_results[(PEER_A_URL, "job-1")] = (200, _remote_job_doc(state="interrupted"))
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1/stop")
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "interrupted"
+    forwarded = [(m, u) for m, u in network.requests if u.endswith("/stop")]
+    assert forwarded == [("POST", f"{PEER_A_URL}/api/v1/jobs/job-1/stop")]
+
+
+def test_node_job_stop_forwards_expect_state(client, api_registry, network):
+    """The optional expect_state precondition rides the forward untouched, so
+    the peer's own 409 job.state_changed guard still protects the click."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.stop_results[(PEER_A_URL, "job-1")] = (200, _remote_job_doc(state="queued"))
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1/stop?expect_state=queued")
+    assert resp.status_code == 200
+    [(method, url)] = [(m, u) for m, u in network.requests if "/stop" in u]
+    assert method == "POST"
+    assert url == f"{PEER_A_URL}/api/v1/jobs/job-1/stop?expect_state=queued"
+
+
+def test_node_job_stop_peer_refusal_passes_through(client, api_registry, network):
+    """The peer ANSWERED — with its own coded refusal. That verdict belongs to
+    the caller with the PEER's status and body, never re-wrapped as 502."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.stop_results[(PEER_A_URL, "job-1")] = (
+        409,
+        {"detail": "Job 'job-1' is 'running', not 'queued'", "code": "job.state_changed"},
+    )
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1/stop?expect_state=queued")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "job.state_changed"
+    assert resp.json()["detail"] == "Job 'job-1' is 'running', not 'queued'"
+
+
+def test_node_job_stop_unknown_node_404(client, api_registry):
+    resp = client.post(f"/api/v1/nodes/{PEER_B_ID}/jobs/job-1/stop")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "node.not_found"
+
+
+def test_node_job_stop_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1/stop")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def test_node_job_delete_forwards_and_answers_204(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.delete_results[(PEER_A_URL, "job-1")] = (204, None)
+    resp = client.delete(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1")
+    assert resp.status_code == 204
+    assert resp.content == b""
+    forwarded = [(m, u) for m, u in network.requests if m == "DELETE"]
+    assert forwarded == [("DELETE", f"{PEER_A_URL}/api/v1/jobs/job-1")]
+
+
+def test_node_job_delete_peer_refusal_passes_through(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.delete_results[(PEER_A_URL, "job-1")] = (
+        409,
+        {
+            "detail": "Job 'job-1' holds the checkpoint queued run(s) 'q-1' will train from.",
+            "code": "job.has_queued_dependents",
+        },
+    )
+    resp = client.delete(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "job.has_queued_dependents"
+
+
+def test_node_job_delete_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.delete(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1")
     assert resp.status_code == 502
     assert resp.json()["code"] == "node.unreachable"
 

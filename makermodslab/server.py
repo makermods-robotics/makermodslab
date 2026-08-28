@@ -90,10 +90,14 @@ from .nodes import (
     NodeNotFoundError,
     NodeUnreachableError,
     handle_add_node,
+    handle_delete_node_job,
+    handle_get_node_job,
+    handle_get_node_job_logs,
     handle_get_node_jobs,
     handle_get_node_queue,
     handle_list_nodes,
     handle_remove_node,
+    handle_stop_node_job,
 )
 
 # Import our custom recording functionality
@@ -926,6 +930,54 @@ def get_node_queue(instance_id: str):
     a queued count reads this instead. Same passthrough/version-skew stance
     and error mapping as the jobs proxy."""
     return handle_get_node_queue(instance_id)
+
+
+# The drill-in proxies below share the {job_id} segment with the queue proxy's
+# literal "queue"; the queue route is declared first, so FastAPI's first-match
+# routing keeps /jobs/queue answering as the queue (same note as the local
+# /jobs/{job_id} family).
+@v1_router.get("/nodes/{instance_id}/jobs/{job_id}", response_model=JobRecord, tags=["nodes"])
+def get_node_job(instance_id: str, job_id: str):
+    """Drill-in proxy: the peer's own GET /api/v1/jobs/{job_id}, passed
+    through verbatim (same passthrough/version-skew stance as the jobs proxy —
+    a newer peer's additive fields are dropped by the model, never an error).
+    404 node.not_found for an unknown instance_id; 502 node.unreachable for
+    ANY failure to read the peer, its own 404 for an unknown job included."""
+    return handle_get_node_job(instance_id, job_id)
+
+
+@v1_router.get("/nodes/{instance_id}/jobs/{job_id}/logs", response_model=JobLogsResponse, tags=["nodes"])
+def get_node_job_logs(instance_id: str, job_id: str):
+    """The peer's own GET /api/v1/jobs/{job_id}/logs, passed through. The peer
+    drains its runner's live queue per call, so this proxy is inherently
+    incremental — each call returns only the lines that arrived since the last
+    one, whoever made it. Same error mapping as the record proxy above."""
+    return handle_get_node_job_logs(instance_id, job_id)
+
+
+@v1_router.post("/nodes/{instance_id}/jobs/{job_id}/stop", response_model=JobRecord, tags=["nodes"])
+def stop_node_job(instance_id: str, job_id: str, expect_state: JobState | None = None):
+    """Forward a stop/cancel to the peer, `expect_state` precondition included.
+
+    Error stance — subtly different from the GET proxies, where any HTTP error
+    counts as unreachable: a stop is a request the peer may REFUSE for its own
+    reasons (409 job.state_changed / job.has_queued_dependents, 404
+    job.not_found, …), and those coded refusals pass through with the PEER's
+    status and body, never re-wrapped as 502. Only transport-level failure is
+    502 node.unreachable; 404 node.not_found still names an unknown NODE."""
+    return handle_stop_node_job(instance_id, job_id, expect_state=expect_state)
+
+
+# 204 No Content, like the peer's own delete — no body to model, so the route
+# sits in RESPONSE_MODEL_EXEMPT (tests/test_api_contract.py).
+@v1_router.delete("/nodes/{instance_id}/jobs/{job_id}", status_code=204, tags=["nodes"])
+def delete_node_job(instance_id: str, job_id: str):
+    """Forward a delete to the peer (terminal runs only — the peer refuses the
+    rest). Same passthrough stance as the stop above: the peer's coded
+    refusals (409 job.has_children / job.has_queued_dependents, 404
+    job.not_found, …) keep THEIR status and body; only transport-level failure
+    is 502 node.unreachable, and 404 node.not_found names an unknown node."""
+    handle_delete_node_job(instance_id, job_id)
 
 
 @v1_router.delete("/nodes/{instance_id}", response_model=NodeRemoveResponse, tags=["nodes"])

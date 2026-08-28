@@ -7267,6 +7267,228 @@
         ]
       }
     },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}": {
+      "delete": {
+        "description": "Forward a delete to the peer (terminal runs only — the peer refuses the\nrest). Same passthrough stance as the stop above: the peer's coded\nrefusals (409 job.has_children / job.has_queued_dependents, 404\njob.not_found, …) keep THEIR status and body; only transport-level failure\nis 502 node.unreachable, and 404 node.not_found names an unknown node.",
+        "operationId": "delete_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Node Job",
+        "tags": [
+          "nodes"
+        ]
+      },
+      "get": {
+        "description": "Drill-in proxy: the peer's own GET /api/v1/jobs/{job_id}, passed\nthrough verbatim (same passthrough/version-skew stance as the jobs proxy —\na newer peer's additive fields are dropped by the model, never an error).\n404 node.not_found for an unknown instance_id; 502 node.unreachable for\nANY failure to read the peer, its own 404 for an unknown job included.",
+        "operationId": "get_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Job",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}/logs": {
+      "get": {
+        "description": "The peer's own GET /api/v1/jobs/{job_id}/logs, passed through. The peer\ndrains its runner's live queue per call, so this proxy is inherently\nincremental — each call returns only the lines that arrived since the last\none, whoever made it. Same error mapping as the record proxy above.",
+        "operationId": "get_node_job_logs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Job Logs",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}/stop": {
+      "post": {
+        "description": "Forward a stop/cancel to the peer, `expect_state` precondition included.\n\nError stance — subtly different from the GET proxies, where any HTTP error\ncounts as unreachable: a stop is a request the peer may REFUSE for its own\nreasons (409 job.state_changed / job.has_queued_dependents, 404\njob.not_found, …), and those coded refusals pass through with the PEER's\nstatus and body, never re-wrapped as 502. Only transport-level failure is\n502 node.unreachable; 404 node.not_found still names an unknown NODE.",
+        "operationId": "stop_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Node Job",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
     "/api/v1/open-calibration-folder": {
       "post": {
         "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",

@@ -54,6 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -135,6 +136,18 @@ class DuplicateNodeError(NodeError):
 
 class NodeNotFoundError(NodeError):
     """No registered peer carries the given instance_id."""
+
+
+class PeerJobRefusalError(NodeError):
+    """The peer ANSWERED a forwarded stop/delete — with an HTTP refusal of its
+    own (409 job.has_queued_dependents, 404 job.not_found, …). Carries the
+    peer's status and parsed body so the proxy can pass the verdict through
+    verbatim; transport-level failure stays NodeUnreachableError."""
+
+    def __init__(self, status_code: int, body: Any) -> None:
+        super().__init__(f"peer refused with HTTP {status_code}")
+        self.status_code = status_code
+        self.body = body
 
 
 @dataclass
@@ -382,6 +395,31 @@ class NodeRegistry:
         where the jobs page is limited and could undercount queued runs."""
         return self._fetch_peer_path(instance_id, QUEUE_PATH)
 
+    @staticmethod
+    def _job_path(job_id: str) -> str:
+        """The peer's own path for one job; the id is data and gets quoted."""
+        return f"{JOBS_PATH}/{quote(job_id, safe='')}"
+
+    def fetch_peer_job(self, instance_id: str, job_id: str) -> Any:
+        """The peer's own GET /api/v1/jobs/{job_id} body (its JobRecord)."""
+        return self._fetch_peer_path(instance_id, self._job_path(job_id))
+
+    def fetch_peer_job_logs(self, instance_id: str, job_id: str) -> Any:
+        """The peer's own GET /api/v1/jobs/{job_id}/logs body. The peer drains
+        its runner's live queue per call, so this is inherently incremental —
+        each read returns only the lines that arrived since the last one."""
+        return self._fetch_peer_path(instance_id, self._job_path(job_id) + "/logs")
+
+    def stop_peer_job(self, instance_id: str, job_id: str, expect_state: str | None = None) -> Any:
+        """Forward POST /api/v1/jobs/{job_id}/stop to the peer, expect_state
+        precondition included, so the peer's own stale-click guard still holds."""
+        params = {"expect_state": expect_state} if expect_state is not None else None
+        return self._send_peer_request(instance_id, "POST", self._job_path(job_id) + "/stop", params=params)
+
+    def delete_peer_job(self, instance_id: str, job_id: str) -> Any:
+        """Forward DELETE /api/v1/jobs/{job_id} to the peer (204, no body)."""
+        return self._send_peer_request(instance_id, "DELETE", self._job_path(job_id))
+
     def _peer_client(self) -> httpx.Client:
         """An httpx client for PEER traffic: trust_env=False, always.
 
@@ -415,6 +453,38 @@ class NodeRegistry:
                 return response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise NodeUnreachableError(f"could not fetch {peer.url}{path}: {exc}") from exc
+
+    def _send_peer_request(self, instance_id: str, method: str, path: str, params: dict | None = None) -> Any:
+        """One MUTATING call to a peer (POST/DELETE), refusals passed through.
+
+        Same pre-flight (resolve) and client discipline as _fetch_peer_path,
+        with one deliberate difference in what counts as "unreachable": a GET
+        proxy reads state the peer serves unconditionally, so ANY failure —
+        transport or HTTP — means the peer couldn't be read and maps to
+        node.unreachable. A mutation is a request the peer may REFUSE for its
+        own reasons (409 job.has_queued_dependents, 404 job.not_found, …), and
+        that verdict belongs to the caller with the peer's status and body:
+        only transport-level failure raises NodeUnreachableError; an HTTP
+        error status raises PeerJobRefusalError carrying both.
+        """
+        peer = self.resolve(instance_id)
+        try:
+            with self._peer_client() as client:
+                response = client.request(method, peer.url + path, params=params)
+        except httpx.HTTPError as exc:
+            raise NodeUnreachableError(f"could not reach {peer.url}{path}: {exc}") from exc
+        if response.is_error:
+            try:
+                body = response.json()
+            except ValueError:
+                body = {"detail": response.text}
+            raise PeerJobRefusalError(response.status_code, body)
+        if not response.content:
+            return None  # the peer's own DELETE answers 204 No Content
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise NodeUnreachableError(f"{peer.url}{path} answered with a non-JSON body: {exc}") from exc
 
     def _probe_and_integrate(self, peer: PeerNode) -> bool:
         """Probe one entry and fold the answer into the table.
@@ -595,6 +665,81 @@ def handle_get_node_queue(instance_id: str) -> Any:
         return node_registry.fetch_peer_queue(instance_id)
     except NodeNotFoundError as exc:
         raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_get_node_job(instance_id: str, job_id: str) -> Any:
+    """Drill-in proxy for GET /api/v1/nodes/{instance_id}/jobs/{job_id}: the
+    peer's own JobRecord, passed through. Same error mapping as the jobs
+    proxy — 404 node.not_found for an unknown instance_id, 502
+    node.unreachable for ANY failure to read the peer (the peer's own 404 for
+    an unknown job included)."""
+    try:
+        return node_registry.fetch_peer_job(instance_id, job_id)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_get_node_job_logs(instance_id: str, job_id: str) -> Any:
+    """Log-tail proxy for GET /api/v1/nodes/{instance_id}/jobs/{job_id}/logs;
+    incremental per call (the peer drains its live queue), same error mapping
+    as the record proxy above."""
+    try:
+        return node_registry.fetch_peer_job_logs(instance_id, job_id)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def _peer_refusal_to_api_error(exc: PeerJobRefusalError) -> ApiError:
+    """The peer's refusal, re-raised with ITS status and body fields. The peer
+    runs this same code, so its error bodies are {detail, code?, details?} —
+    mapped onto ApiError's exact serialization, the body survives verbatim."""
+    body = exc.body if isinstance(exc.body, dict) else {"detail": exc.body}
+    return ApiError(
+        status_code=exc.status_code,
+        detail=body.get("detail"),
+        code=body.get("code"),
+        details=body.get("details"),
+    )
+
+
+def handle_stop_node_job(instance_id: str, job_id: str, expect_state: str | None = None) -> Any:
+    """Forwarded stop for POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop.
+
+    Error stance — subtly DIFFERENT from the GET proxies above: there, any
+    HTTP error from the peer counts as "couldn't read the peer" (502
+    node.unreachable). A stop is a request the peer may refuse for its own
+    reasons (409 job.state_changed / job.has_queued_dependents, 404
+    job.not_found, …), and those coded refusals pass through with the PEER's
+    status and body, never re-wrapped — only transport-level failure is 502
+    node.unreachable. 404 node.not_found still means the NODE is unknown."""
+    try:
+        return node_registry.stop_peer_job(instance_id, job_id, expect_state=expect_state)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except PeerJobRefusalError as exc:
+        raise _peer_refusal_to_api_error(exc) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_delete_node_job(instance_id: str, job_id: str) -> None:
+    """Forwarded delete for DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}
+    (204 on success, like the peer's own delete). Same passthrough stance as
+    the stop above: the peer's coded refusals (409 job.has_queued_dependents
+    etc.) keep THEIR status and body; only transport failure is 502
+    node.unreachable, and 404 node.not_found names an unknown node."""
+    try:
+        node_registry.delete_peer_job(instance_id, job_id)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except PeerJobRefusalError as exc:
+        raise _peer_refusal_to_api_error(exc) from exc
     except NodeUnreachableError as exc:
         raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
 
