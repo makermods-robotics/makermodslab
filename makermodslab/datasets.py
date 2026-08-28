@@ -403,7 +403,7 @@ def hub_copy_has_data(repo_id: str, *, fresh: bool = False) -> bool | None:
     has_data = bool(paths)
     expires_at = None if has_data else time.monotonic() + _HUB_EMPTY_TTL_S
     with _HUB_STATUS_LOCK:
-        if _HUB_HAS_DATA_GEN == generation:
+        if generation == _HUB_HAS_DATA_GEN:
             _HUB_HAS_DATA_CACHE[hub_repo_id] = (has_data, expires_at)
     return has_data
 

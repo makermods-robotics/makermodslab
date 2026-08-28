@@ -3101,7 +3101,7 @@ def test_hub_copy_has_data_fresh_bypasses_the_memo() -> None:
 
 
 def test_hub_copy_has_data_empty_answer_expires() -> None:
-    """"Empty" can be falsified from OUTSIDE the app (huggingface-cli, the Hub
+    """ "Empty" can be falsified from OUTSIDE the app (huggingface-cli, the Hub
     web UI), with no invalidation hook, so a cached False must re-check after
     its TTL instead of warning — or refusing — for the process lifetime."""
     import time as _time

@@ -556,6 +556,11 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       });
     },
     onError: (message, docsUrl) => {
+      // A failed push may still have CREATED the repo (push is create-then-
+      // send), and the backend drops its cached Hub facts on failure — re-read
+      // them so the row can flip to the "Upload didn't finish" warning now
+      // instead of silently returning to "Local only".
+      setRefreshKey((k) => k + 1);
       toast({
         title: t("landing.datasetInfo.hubSync.uploadFailedTitle"),
         // `message` is the backend's own failure text — rendered verbatim;
@@ -619,7 +624,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     return (
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
-          Upload didn't finish — nothing on the Hub yet
+          {t("landing.datasetInfo.hubSync.uploadIncomplete")}
           {hubUrl && (
             <a
               href={hubUrl}
@@ -638,7 +643,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
             className="h-6 gap-1 border-amber-500/50 px-2 text-xs text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
           >
             <UploadIcon className="h-3 w-3" />
-            Upload to Hub
+            {t("landing.datasetInfo.hubSync.upload")}
           </Button>
         </UploadDatasetDialog>
       </div>
