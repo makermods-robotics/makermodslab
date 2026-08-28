@@ -159,6 +159,12 @@ class FakePeer:
                 if parts[1:] == ["stop"] and request.method == "POST":
                     from makermodslab.jobs import STOPPED_BY_REQUEST_MESSAGE
 
+                    if record["state"] == "queued":
+                        # Mirror JobRegistry.stop's cancel path: a queued run
+                        # is removed outright, and the response body is the
+                        # removed record — still saying "queued".
+                        del self.records[remote_id]
+                        return httpx.Response(200, json=record)
                     if record["state"] != "running":
                         return httpx.Response(409, json={"detail": "not running"})
                     self.finish(
@@ -471,6 +477,60 @@ def test_remote_failure_maps_to_error_with_the_peers_message(
     assert runner.terminal_message() == "Subprocess exited with code 1"
 
 
+def test_a_peer_side_queued_run_is_in_flight_not_terminal(
+    peer, clock, tmp_path, local_identity, nodes_file, no_dataset_push
+) -> None:
+    """A busy peer parks the offloaded submit in ITS local training queue
+    (PR #83) and its record says "queued". That is a run on its way, not an
+    outcome: filing it as terminal classified a healthy queued offload as
+    ERROR on the first poll. The runner keeps following it through the
+    promotion to the real finish."""
+    runner = _started_runner(peer, clock, tmp_path)
+    peer.records["remote-job-1"]["state"] = "queued"
+    clock.advance(6)
+    assert runner.is_running() is True
+    assert runner.terminal_stage() is None
+
+    # The peer's watchdog promotes it, it trains, it finishes.
+    peer.records["remote-job-1"]["state"] = "running"
+    clock.advance(6)
+    assert runner.is_running() is True
+    peer.finish("remote-job-1", state="done", exit_code=0)
+    clock.advance(6)
+    assert runner.is_running() is False
+    assert runner.terminal_stage() == "COMPLETED"
+
+
+def test_stopping_a_peer_side_queued_run_relays_the_cancel_as_interrupted(
+    peer, clock, tmp_path, local_identity, nodes_file, no_dataset_push
+) -> None:
+    """Stop of a run the peer still holds queued is the peer's CANCEL: its
+    registry removes the record outright and answers with the removed record,
+    still saying "queued". The runner must settle INTERRUPTED right there —
+    otherwise the next poll 404s and DELETED files a deliberate cancel as
+    `failed`."""
+    from makermodslab.jobs import classify_terminal_state
+
+    runner = _started_runner(peer, clock, tmp_path)
+    peer.records["remote-job-1"]["state"] = "queued"
+
+    runner.stop()
+
+    assert runner.stop_signalled() is True
+    assert runner.is_running() is False
+    assert runner.terminal_stage() == "INTERRUPTED"
+    message = runner.terminal_message()
+    assert message is not None and "never started" in message
+    assert (
+        classify_terminal_state(
+            returncode=runner.returncode(),
+            stop_requested=True,
+            terminal_stage=runner.terminal_stage(),
+        )
+        == "interrupted"
+    )
+
+
 def test_remote_metrics_are_mirrored_onto_the_local_record(
     peer, clock, tmp_path, local_identity, nodes_file, no_dataset_push
 ) -> None:
@@ -767,6 +827,54 @@ def test_registry_start_records_the_target_node_and_remote_id(
     clock.advance(6)
     reg._tick()
     assert reg.get(record.id).state == "done"
+
+
+def test_an_offloaded_submit_never_enters_the_local_queue(
+    tmp_path, monkeypatch, peer, clock, local_identity, nodes_file, no_dataset_push
+) -> None:
+    """The local queue exists because this machine has one training slot; a
+    lan_node run spends the PEER's slot, so a busy local slot — and even a
+    non-empty local queue — must not park it. It starts on the peer
+    immediately, and the waiting local runs keep their places."""
+    from makermodslab.jobs import JobRecord, JobTarget
+    from makermodslab.nodes import NodeRegistry
+
+    registry = NodeRegistry(clock=clock, transport=peer.transport())
+    registry.add(peer.url)
+    _swap_node_registry(monkeypatch, registry)
+    _stub_hub_status(monkeypatch)
+    _lan_runner_factory(monkeypatch, peer, clock)
+
+    reg = _quiesced_registry(tmp_path / "root")
+    with reg._lock:
+        reg._records["busy"] = JobRecord(
+            id="busy",
+            name="busy",
+            state="running",
+            config=_request(),
+            output_dir=str(tmp_path / "root" / "busy" / "run"),
+            started_at=0.0,
+            runner="local",
+            process_pid=4242,
+        )
+        reg._records["waiting"] = JobRecord(
+            id="waiting",
+            name="waiting",
+            state="queued",
+            config=_request(),
+            output_dir=str(tmp_path / "root" / "waiting" / "run"),
+            started_at=0.0,
+            runner="local",
+            queue_seq=1,
+        )
+        reg._next_queue_seq = 2
+
+    record = reg.start(_request(), JobTarget(runner="lan_node", node_instance_id=PEER_ID))
+
+    assert record.state == "running"  # on the peer now, not in our line
+    assert record.queue_position == 0
+    assert [r.id for r in reg.list_queue()] == ["waiting"]
+    assert peer.submissions  # it really was handed to the peer
 
 
 def test_old_job_json_without_node_fields_still_loads(tmp_path) -> None:

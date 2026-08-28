@@ -390,6 +390,31 @@ def is_valid_robot_name(name: str) -> bool:
     return not any(bad in name for bad in _INVALID_NAME_CHARS)
 
 
+# Display names for training runs (JobRecord.name / display_name). Long enough
+# for any sentence a card can render, short enough that a pasted document can't
+# become a "name" that bloats every listing response carrying it.
+JOB_NAME_MAX_LENGTH = 200
+
+
+def validate_job_name(name: str) -> str:
+    """Validate a training-run display name; returns the trimmed name.
+
+    THE shared validator for both paths that accept one — submit
+    (`TrainingRequest.job_name`, via JobRegistry.start) and
+    `JobRegistry.rename` — so what one path refuses the other can't store.
+    Raises ValueError with a user-facing message (both callers surface it as
+    HTTP 400). Deliberately a boundary check, not a pydantic model constraint:
+    legacy records persisted before validation existed must keep loading."""
+    trimmed = name.strip()
+    if not trimmed:
+        raise ValueError("Display name cannot be empty.")
+    if len(trimmed) > JOB_NAME_MAX_LENGTH:
+        raise ValueError(f"Display name is too long — keep it under {JOB_NAME_MAX_LENGTH} characters.")
+    if not is_valid_robot_name(trimmed):
+        raise ValueError("Invalid display name.")
+    return trimmed
+
+
 def _empty_record(name: str) -> dict:
     record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
     for field in _ROBOT_STRING_FIELDS:

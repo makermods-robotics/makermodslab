@@ -170,6 +170,17 @@ async def wiggle_gripper(port: str) -> dict:
             "message": "Replay is currently active — wait for it to stop before wiggling.",
             "code": ErrorCode.ROBOT_BUSY_REPLAY,
         }
+    # Lazy, because jobs imports this module back the same way.
+    from . import jobs as _jobs
+
+    if (training := _jobs.training_is_active()) is not None:
+        return {
+            "success": False,
+            "message": (
+                f"Training run '{training}' is using this machine — wait for it to stop before wiggling."
+            ),
+            "code": ErrorCode.ROBOT_BUSY_TRAINING,
+        }
 
     wiggle_active = True
     # The claim above is the real state transition — broadcast the hint so

@@ -33,6 +33,8 @@ from enum import StrEnum
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
@@ -55,6 +57,10 @@ class ErrorCode(StrEnum):
     ROBOT_BUSY_AUTO_CALIBRATION = "robot.busy.auto_calibration"
     ROBOT_BUSY_WIGGLE = "robot.busy.wiggle"
     ROBOT_BUSY_RELEASING = "robot.busy.releasing"
+    # A live LOCAL training run holds the machine (GPU + the arms' USB bus).
+    # The reverse direction never refuses: a submit made while a feature runs
+    # QUEUES instead (jobs.JobRegistry._robot_busy).
+    ROBOT_BUSY_TRAINING = "robot.busy.training"
 
     # hardware.* — the physical layer (serial bus, servos), distinct from the
     # robot record.
@@ -76,6 +82,25 @@ class ErrorCode(StrEnum):
     JOB_HAS_CHILDREN = "job.has_children"
     JOB_NOT_RUNNING = "job.not_running"
     JOB_DATASET_NOT_ON_HUB = "job.dataset_not_on_hub"
+    # The local training queue (PR #83). `queue_stale`: a reorder named a set
+    # of runs that is no longer the queue — refetch and retry, the one 409 in
+    # this family a retry can clear. `state_changed`: a stop/cancel whose
+    # expect_state precondition no longer holds. `has_queued_dependents`: a
+    # delete/cancel would take the checkpoint a QUEUED run will train from —
+    # the fine-tune edge build_child_index deliberately does not model.
+    # `removal_failed`: the record's job.json could not be unlinked; nothing
+    # was removed and the request is safe to retry.
+    JOB_QUEUE_STALE = "job.queue_stale"
+    JOB_STATE_CHANGED = "job.state_changed"
+    JOB_HAS_QUEUED_DEPENDENTS = "job.has_queued_dependents"
+    JOB_REMOVAL_FAILED = "job.removal_failed"
+    # `not_terminal`: a surface that deletes a run's ARTIFACTS (POST
+    # /models/delete) was aimed at a run that hasn't finished — running or
+    # queued. Distinct from `not_running` (a stop aimed at nothing stoppable):
+    # here the run is very much alive or about to be, and the remedy is to
+    # stop/cancel it where it lives (the jobs surface), not to retry the
+    # delete.
+    JOB_NOT_TERMINAL = "job.not_terminal"
 
     # Library resources.
     DATASET_NOT_FOUND = "dataset.not_found"
@@ -142,3 +167,20 @@ def install_error_handlers(app: FastAPI) -> None:
         if exc.details is not None:
             body["details"] = exc.details
         return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """FastAPI's 422, with `code` as an additive sibling.
+
+        The body keeps FastAPI's exact `detail` shape (the pydantic error
+        list), so clients that parse it keep working; `request.validation`
+        rides beside it the way every ApiError's code does — a schema-level
+        refusal (an unparsable body, an out-of-range field, a reorder list
+        past its 512-id bound) is the request domain's own condition, and
+        an SDK should not have to sniff the 422 status to know that.
+        """
+        body: dict[str, Any] = {
+            "detail": jsonable_encoder(exc.errors()),
+            "code": str(ErrorCode.REQUEST_VALIDATION),
+        }
+        return JSONResponse(status_code=422, content=body)

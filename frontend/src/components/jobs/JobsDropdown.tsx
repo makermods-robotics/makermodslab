@@ -12,6 +12,7 @@ import {
   HardDrive,
   HelpCircle,
   Loader2,
+  Router,
   Square,
   Trash2,
   XCircle,
@@ -90,6 +91,13 @@ interface Presentation {
  * resolved word here would freeze whichever language loaded first. Colour, icon
  * and spin are not copy and stay as they are. */
 const statePresentation = {
+  // Same Clock + warn pairing as the Hub QUEUED stage below — one word, one
+  // look, whichever queue holds the run.
+  queued: {
+    labelKey: JOB_STATE_LABELS.queued,
+    color: "text-warn",
+    Icon: Clock,
+  },
   running: {
     labelKey: JOB_STATE_LABELS.running,
     color: "text-ok",
@@ -226,9 +234,18 @@ function describeEntry(entry: JobsEntry, t: Translate): Described {
   }
   const job = entry.job;
   const state = statePresentation[job.state];
-  const present: Presentation = { ...state, label: t(state.labelKey) };
+  const present: Presentation = {
+    ...state,
+    // A queued run's label carries its live 1-based position ("Queued · #2");
+    // the position is derived per response, so it is always current.
+    label:
+      job.state === "queued" && (job.queue_position ?? 0) > 0
+        ? t("jobs.jobState.queuedAt", { position: job.queue_position ?? 0 })
+        : t(state.labelKey),
+  };
   const isRunning = job.state === "running";
   const isCloud = job.runner === "hf_cloud";
+  const isNode = job.runner === "lan_node";
   const target = job.config?.steps || job.metrics.total_steps || 0;
   const current = job.metrics.current_step;
   const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
@@ -257,14 +274,21 @@ function describeEntry(entry: JobsEntry, t: Translate): Described {
     when: relativeTime(
       job.ended_at != null ? job.ended_at * 1000 : (job.started_at ?? 0) * 1000,
     ),
-    // The flavor is the Hub's own hardware name — data.
+    // The flavor is the Hub's own hardware name, and a node's short instance
+    // id is the run's routing key — both data. (This helper is pure — no
+    // registry lookup — so the node column shows the id; the detail card's
+    // chip resolves the node's display name.)
     whereLabel: isCloud
       ? (job.hf_flavor ?? t("jobs.location.cloud"))
-      : t("jobs.location.local"),
-    WhereIcon: isCloud ? Globe : HardDrive,
+      : isNode
+        ? (job.node_instance_id?.slice(0, 8) ?? t("jobs.location.node"))
+        : t("jobs.location.local"),
+    WhereIcon: isCloud ? Globe : isNode ? Router : HardDrive,
     whereTitle: isCloud
       ? t("jobs.location.cloudTitle")
-      : t("jobs.location.localTitle"),
+      : isNode
+        ? t("jobs.location.nodeTitle")
+        : t("jobs.location.localTitle"),
     running: isRunning,
     progress: isRunning
       ? {

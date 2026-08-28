@@ -1797,6 +1797,23 @@
         "title": "JobMetricsHistoryResponse",
         "type": "object"
       },
+      "JobQueueResponse": {
+        "description": "server.py list_job_queue / reorder_job_queue — the WHOLE local training\nqueue (JobRegistry.list_queue / reorder_queue), in the order it will run,\neach record annotated with its 1-based queue_position. Same JobRecord model\nas the history list — a queued record is uniform-with-defaults, not a\ndifferent shape — but the ordering contract differs (run order, uncapped),\nwhich is why this is not JobListResponse.",
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobRecord"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs"
+        ],
+        "title": "JobQueueResponse",
+        "type": "object"
+      },
       "JobRecord": {
         "properties": {
           "ancestor_ids": {
@@ -1987,6 +2004,38 @@
             ],
             "title": "Process Pid"
           },
+          "queue_position": {
+            "default": 0,
+            "title": "Queue Position",
+            "type": "integer"
+          },
+          "queue_seq": {
+            "default": 0,
+            "title": "Queue Seq",
+            "type": "integer"
+          },
+          "queued_hub_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued Hub Ref"
+          },
+          "queued_resume_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued Resume Ref"
+          },
           "remote_job_id": {
             "anyOf": [
               {
@@ -2015,6 +2064,7 @@
           },
           "state": {
             "enum": [
+              "queued",
               "running",
               "done",
               "failed",
@@ -2655,7 +2705,7 @@
         "type": "object"
       },
       "NodeEntry": {
-        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started. capabilities is\na plain dict, not HealthCapabilities — it's the PEER's self-reported\nblock, and a version-skewed peer must not fail our response validation.\nlast_verified_at is the server's monotonic registry clock (ordering and\nfreshness relative to other entries, not wall-clock time).",
+        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started — and on a\ndiscovered candidate the verify handshake hasn't confirmed yet, which\nadditionally carries status \"pending\" (never \"pending\" with a non-null\ninstance_id). capabilities is a plain dict, not HealthCapabilities — it's\nthe PEER's self-reported block, and a version-skewed peer must not fail\nour response validation. last_verified_at is the server's monotonic\nregistry clock (ordering and freshness relative to other entries, not\nwall-clock time); last_seen_at is its wall-clock sibling — epoch seconds\nof the same last successful handshake, null until one happens (and always\nnull on the self entry), so clients can render \"last seen X ago\". source\nsays how the entry got here: \"manual\" for the self entry and hand-added\npeers (the only ones persisted), a source id for discovery-source\ncandidates.",
         "properties": {
           "capabilities": {
             "anyOf": [
@@ -2684,6 +2734,17 @@
             "title": "Is Self",
             "type": "boolean"
           },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
           "last_verified_at": {
             "anyOf": [
               {
@@ -2706,10 +2767,19 @@
             ],
             "title": "Name"
           },
+          "source": {
+            "enum": [
+              "manual",
+              "tailscale"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "ok",
-              "unreachable"
+              "unreachable",
+              "pending"
             ],
             "title": "Status",
             "type": "string"
@@ -2745,13 +2815,15 @@
           "capabilities",
           "status",
           "last_verified_at",
-          "is_self"
+          "last_seen_at",
+          "is_self",
+          "source"
         ],
         "title": "NodeEntry",
         "type": "object"
       },
       "NodeListResponse": {
-        "description": "server.py list_nodes — the self entry first, then registered peers.",
+        "description": "server.py list_nodes — the self entry first, then registered peers.\n\n`sources` (additive) is the list of registered discovery-source ids —\n[\"tailscale\"] when the server was started with --discover-tailscale, []\notherwise — so a client can tell \"no peers found\" apart from \"discovery\nis not even on\" instead of promising discovery that will never happen.",
         "properties": {
           "nodes": {
             "items": {
@@ -2759,10 +2831,18 @@
             },
             "title": "Nodes",
             "type": "array"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sources",
+            "type": "array"
           }
         },
         "required": [
-          "nodes"
+          "nodes",
+          "sources"
         ],
         "title": "NodeListResponse",
         "type": "object"
@@ -3061,6 +3141,24 @@
           "new_name"
         ],
         "title": "RenameJobBody",
+        "type": "object"
+      },
+      "ReorderQueueRequest": {
+        "properties": {
+          "job_ids": {
+            "items": {
+              "maxLength": 200,
+              "type": "string"
+            },
+            "maxItems": 512,
+            "title": "Job Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_ids"
+        ],
+        "title": "ReorderQueueRequest",
         "type": "object"
       },
       "ReplayRequest": {
@@ -3651,6 +3749,7 @@
         "properties": {
           "batch_size": {
             "default": 8,
+            "exclusiveMinimum": 0.0,
             "title": "Batch Size",
             "type": "integer"
           },
@@ -3707,6 +3806,7 @@
           },
           "env_eval_freq": {
             "default": 0,
+            "minimum": 0.0,
             "title": "Env Eval Freq",
             "type": "integer"
           },
@@ -3734,11 +3834,13 @@
           },
           "eval_batch_size": {
             "default": 50,
+            "exclusiveMinimum": 0.0,
             "title": "Eval Batch Size",
             "type": "integer"
           },
           "eval_n_episodes": {
             "default": 10,
+            "exclusiveMinimum": 0.0,
             "title": "Eval N Episodes",
             "type": "integer"
           },
@@ -3793,11 +3895,13 @@
           },
           "log_freq": {
             "default": 50,
+            "exclusiveMinimum": 0.0,
             "title": "Log Freq",
             "type": "integer"
           },
           "num_workers": {
             "default": 4,
+            "minimum": 0.0,
             "title": "Num Workers",
             "type": "integer"
           },
@@ -3892,6 +3996,7 @@
           },
           "policy_type": {
             "default": "act",
+            "pattern": "^[a-z0-9_]+$",
             "title": "Policy Type",
             "type": "string"
           },
@@ -3972,6 +4077,7 @@
           },
           "save_freq": {
             "default": 1000,
+            "exclusiveMinimum": 0.0,
             "title": "Save Freq",
             "type": "integer"
           },
@@ -3989,6 +4095,7 @@
           },
           "steps": {
             "default": 10000,
+            "exclusiveMinimum": 0.0,
             "title": "Steps",
             "type": "integer"
           },
@@ -5956,6 +6063,70 @@
         ]
       }
     },
+    "/api/v1/jobs/queue": {
+      "get": {
+        "description": "The whole local training queue, in the order it will run.\n\nSeparate from `GET /jobs` because that is a capped, newest-first PAGE of\nhistory and this is a complete list. Deriving the queue from that page was\nwrong twice over: a queued record carries its SUBMIT time, so queued runs\ncrowd the top of the page and pushed the actually-running job off it, and\npast the page size the queue itself was truncated — which silently dropped\nthe runs at the HEAD of the line and made every reorder a 409, since\n`reorder_queue` requires the whole list.",
+        "operationId": "list_job_queue",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Job Queue",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/queue/reorder": {
+      "post": {
+        "description": "Set the order of the local training queue.\n\nLocal runs are one-at-a-time, so a second Start enqueues rather than\nfailing; this is how the user changes their mind about what goes next.\nOnly queued jobs can be reordered — the run already on the GPU is not in\nthe list, and a job that started while the drag was in flight makes the\nrequest stale (409).",
+        "operationId": "reorder_job_queue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderQueueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reorder Job Queue",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/v1/jobs/runners/hardware": {
       "get": {
         "description": "Return HF Jobs flavor catalog + auth state for the TargetCard.\n\nBoth the flavors list and the whoami result are cached in-process to\nkeep this endpoint cheap (it can be re-fetched whenever auth state\nchanges). The whoami cache is invalidated on login.",
@@ -6399,6 +6570,7 @@
     },
     "/api/v1/jobs/{job_id}/stop": {
       "post": {
+        "description": "Stop a running job, or cancel a queued one.\n\n`expect_state` is optional and is the caller's precondition: pass the state\nthe UI was showing when it drew the button. Cancel and kill are the same\nrequest here, so a Cancel drawn against a stale queue would otherwise\nSIGTERM a run the watchdog promoted in the meantime.\n\nTyped as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value\nused to reach the comparison, fail it, and come back as a 409 saying the job\n\"changed while you were looking at it\" — reporting a client's typo as a race,\nwhich no retry can ever clear. It is now a 422, and `/openapi.json`\nadvertises the real member set instead of \"any string\".",
         "operationId": "stop_job",
         "parameters": [
           {
@@ -6408,6 +6580,29 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
             }
           }
         ],
@@ -6549,7 +6744,7 @@
     },
     "/api/v1/models/delete": {
       "post": {
-        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training; 502 on a delete failure.",
+        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training or queued (job.not_terminal —\nonly a terminal run has artifacts to delete; a queued run is cancelled on\nthe jobs surface, never through here); 502 on a delete failure.",
         "operationId": "models_delete",
         "requestBody": {
           "content": {
@@ -6901,8 +7096,20 @@
     },
     "/api/v1/nodes": {
       "get": {
-        "description": "All known nodes: this server first (is_self=true, built from the same\nhealth fields the handshake reads, so clients render one uniform list),\nthen every registered peer. Peers whose last probe is older than the TTL\nare re-verified inline; a peer that fails re-verification is reported\n`unreachable` but kept until explicitly removed.",
+        "description": "All known nodes: this server first (is_self=true, built from the same\nhealth fields the handshake reads, so clients render one uniform list),\nthen every registered peer. Peers whose last probe is older than the TTL\nare re-verified inline; a peer that fails re-verification is reported\n`unreachable` but kept until explicitly removed. `sources` names the\nregistered discovery sources, so a client can tell \"no peers\" apart from\n\"discovery is off\". ?force=true is the manual-refresh contract: this one\npass bypasses the TTL — discovery runs now and every known entry is\nprobed now — so a refresh button answers with the world as it is, not as\nit was up to TTL seconds ago.",
         "operationId": "list_nodes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -6913,6 +7120,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Nodes",
@@ -6999,6 +7216,314 @@
           }
         },
         "summary": "Remove Node",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs": {
+      "get": {
+        "description": "Server-to-server workload proxy: the peer's own typed GET /api/v1/jobs,\nreturned verbatim (the browser talks to ITS server; only servers talk to\npeers). The response reuses JobListResponse because the peer runs this\nsame code — and on version skew the stance is passthrough: a newer peer's\nadditive fields are dropped by the model, never an error, so the proxy\ndoesn't break the moment one machine updates first. 404 node.not_found\nfor an unknown instance_id; 502 node.unreachable when the peer doesn't\nanswer (short timeout — a peer that can't list its jobs promptly is as\ngood as down for scheduling purposes).",
+        "operationId": "get_node_jobs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Jobs",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/queue": {
+      "get": {
+        "description": "The peer's own typed GET /api/v1/jobs/queue, passed through — the EXACT\nqueue. The sibling jobs proxy reads the peer's default jobs page, which is\nlimited and can undercount queued runs on a busy peer; a client that shows\na queued count reads this instead. Same passthrough/version-skew stance\nand error mapping as the jobs proxy.",
+        "operationId": "get_node_queue",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Queue",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}": {
+      "delete": {
+        "description": "Forward a delete to the peer (terminal runs only — the peer refuses the\nrest). Same passthrough stance as the stop above: the peer's coded\nrefusals (409 job.has_children / job.has_queued_dependents, 404\njob.not_found, …) keep THEIR status and body; only transport-level failure\nis 502 node.unreachable, and 404 node.not_found names an unknown node.",
+        "operationId": "delete_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Node Job",
+        "tags": [
+          "nodes"
+        ]
+      },
+      "get": {
+        "description": "Drill-in proxy: the peer's own GET /api/v1/jobs/{job_id}, passed\nthrough verbatim (same passthrough/version-skew stance as the jobs proxy —\na newer peer's additive fields are dropped by the model, never an error).\n404 node.not_found for an unknown instance_id; 502 node.unreachable for\nANY failure to read the peer, its own 404 for an unknown job included.",
+        "operationId": "get_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Job",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}/logs": {
+      "get": {
+        "description": "The peer's own GET /api/v1/jobs/{job_id}/logs, passed through. The peer\ndrains its runner's live queue per call, so this proxy is inherently\nincremental — each call returns only the lines that arrived since the last\none, whoever made it. Same error mapping as the record proxy above.",
+        "operationId": "get_node_job_logs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Job Logs",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}/stop": {
+      "post": {
+        "description": "Forward a stop/cancel to the peer, `expect_state` precondition included.\n\nError stance — subtly different from the GET proxies, where any HTTP error\ncounts as unreachable: a stop is a request the peer may REFUSE for its own\nreasons (409 job.state_changed / job.has_queued_dependents, 404\njob.not_found, …), and those coded refusals pass through with the PEER's\nstatus and body, never re-wrapped as 502. Only transport-level failure is\n502 node.unreachable; 404 node.not_found still names an unknown NODE.",
+        "operationId": "stop_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Node Job",
         "tags": [
           "nodes"
         ]
@@ -10459,6 +10984,7 @@
     },
     "/jobs/{job_id}/stop": {
       "post": {
+        "description": "Stop a running job, or cancel a queued one.\n\n`expect_state` is optional and is the caller's precondition: pass the state\nthe UI was showing when it drew the button. Cancel and kill are the same\nrequest here, so a Cancel drawn against a stale queue would otherwise\nSIGTERM a run the watchdog promoted in the meantime.\n\nTyped as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value\nused to reach the comparison, fail it, and come back as a 409 saying the job\n\"changed while you were looking at it\" — reporting a client's typo as a race,\nwhich no retry can ever clear. It is now a 422, and `/openapi.json`\nadvertises the real member set instead of \"any string\".",
         "operationId": "stop_job_jobs__job_id__stop_post",
         "parameters": [
           {
@@ -10468,6 +10994,29 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
             }
           }
         ],
@@ -10609,7 +11158,7 @@
     },
     "/models/delete": {
       "post": {
-        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training; 502 on a delete failure.",
+        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training or queued (job.not_terminal —\nonly a terminal run has artifacts to delete; a queued run is cancelled on\nthe jobs surface, never through here); 502 on a delete failure.",
         "operationId": "models_delete_models_delete_post",
         "requestBody": {
           "content": {

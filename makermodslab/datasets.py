@@ -1398,16 +1398,21 @@ def _dataset_in_use(repo_id: str) -> str | None:
     if mgr.state == "running" and mgr.output_repo_id == repo_id:
         return "A merge is producing this dataset right now. Wait for it to finish first."
 
-    # Local training: a running local job whose config trains on this dataset.
+    # Local training: a running OR QUEUED local job whose config trains on this
+    # dataset. Queued counts because a queued run has already been validated
+    # against this dataset (the submit-time preflight even confirms it is on
+    # disk) and will train on it when the slot frees, but nothing re-checks at
+    # launch — so renaming or deleting it here produced a bare "exited with
+    # code 1" hours later, with nothing tying the failure to this action. Before
+    # the queue existed a second local submit was refused outright, so a
+    # not-yet-started consumer of a dataset could not exist. Asked of the
+    # registry EXACTLY (one snapshot under its lock) rather than scanned off a
+    # `list(limit=…)` page, where an active run past the page size was
+    # invisible.
     from .jobs import job_registry
 
-    for record in job_registry.list(limit=200):
-        if (
-            record.state == "running"
-            and record.runner == "local"
-            and record.config.dataset_repo_id == repo_id
-        ):
-            return "A local training run is using this dataset. Stop it first."
+    if job_registry.local_dataset_in_use(repo_id):
+        return "A local training run is using this dataset, or is queued to. Stop or cancel it first."
 
     return None
 

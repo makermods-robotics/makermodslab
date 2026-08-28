@@ -481,10 +481,25 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         configToRequest(config, checkpointUploadKind),
       );
       // The job's name is data — shown exactly as the backend returned it.
-      toast({
-        title: t("training.configurator.toast.startedTitle"),
-        description: job.name,
-      });
+      // A busy local slot QUEUES the run rather than refusing (PR #83): say
+      // so, with its 1-based position when the record carries one.
+      if (job.state === "queued") {
+        toast({
+          title: t("training.configurator.toast.queuedTitle"),
+          description:
+            (job.queue_position ?? 0) > 0
+              ? t("training.configurator.toast.queuedBody", {
+                  name: job.name,
+                  position: job.queue_position ?? 0,
+                })
+              : job.name,
+        });
+      } else {
+        toast({
+          title: t("training.configurator.toast.startedTitle"),
+          description: job.name,
+        });
+      }
       onStarted?.(job.id);
       // The monitor is a dialog over the studio's Train panel, not a route.
       // openJobMonitor opens the studio; off-Launchpad callers (the
@@ -625,7 +640,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const targetRequiresAuth = config.target.runner === "hf_cloud";
   const targetMissingFlavor =
     config.target.runner === "hf_cloud" && !config.target.flavor;
-  const localBlocked = config.target.runner === "local" && localJobRunning;
+  // A running local job no longer blocks Start: the backend QUEUES the
+  // submission (PR #83). `localJobRunning` survives only to make the button
+  // say what the click will actually do.
+  const willQueue = config.target.runner === "local" && localJobRunning;
   // When resuming, total steps must be strictly above the checkpoint's step:
   // equal trains nothing and lerobot requires --steps above the resumed step.
   const resumeStepError =
@@ -649,15 +667,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     isStarting ||
     uploading ||
     !datasetRepoId ||
-    localBlocked ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
     uploadBlockedOffline ||
     checkpointUploadBlockedOffline ||
     resumeStepError != null;
-  const startTooltip = localBlocked
-    ? t("training.configurator.tooltip.localBusy")
-    : targetRequiresAuth && !authenticated
+  const startTooltip =
+    targetRequiresAuth && !authenticated
       ? t("training.configurator.tooltip.needAuth")
       : targetMissingFlavor
         ? t("training.configurator.tooltip.needFlavor")
@@ -665,7 +681,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           ? t("training.configurator.tooltip.offlineDataset")
           : checkpointUploadBlockedOffline
             ? t("training.configurator.tooltip.offlineCheckpoint")
-            : undefined;
+            : willQueue
+              ? t("training.configurator.tooltip.willQueue")
+              : undefined;
 
   return (
     <div className="w-full">
@@ -841,7 +859,11 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
                         : t("training.configurator.button.startFinetuning")
                       : needsUpload
                         ? t("training.configurator.button.uploadAndStart")
-                        : t("training.configurator.button.startTraining")}
+                        : willQueue
+                          ? // The local slot is busy — the click ENQUEUES, and
+                            // the button says so instead of promising a start.
+                            t("training.configurator.button.queueTraining")
+                          : t("training.configurator.button.startTraining")}
                 </>
               )}
             </Button>
