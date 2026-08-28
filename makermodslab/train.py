@@ -338,7 +338,10 @@ def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:
 
 
 def build_training_command(
-    request: TrainingRequest, output_dir: str, python_executable: str = "python"
+    request: TrainingRequest,
+    output_dir: str,
+    python_executable: str = "python",
+    video_backend: str | None = None,
 ) -> list[str]:
     """Build the argv list to invoke `<python_executable> -m lerobot.scripts.lerobot_train`.
 
@@ -351,6 +354,15 @@ def build_training_command(
     so the subprocess uses the same interpreter as MakerMods Lab itself — otherwise
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
+
+    `video_backend` overrides lerobot's dataset video decoder when set — the
+    LOCAL runner passes "pyav" when torchcodec's native libraries don't load
+    on this host (see utils.system.torchcodec_loads); the cloud runner leaves
+    it None (the container ships working FFmpeg). Emitted on the resume branch
+    too: the checkpoint's train_config.json records whatever backend the
+    ORIGINAL host used, and a resume can land on a host where that backend
+    doesn't load (a plain string field, so the draccus raw-string merge that
+    forbids list-typed overrides here is not a concern).
     """
     cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
 
@@ -400,10 +412,14 @@ def build_training_command(
             cmd.extend(["--policy.private", "false"])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
+        if video_backend:
+            cmd.extend(["--dataset.video_backend", video_backend])
         return cmd
 
     # Dataset
     cmd.extend(["--dataset.repo_id", request.dataset_repo_id])
+    if video_backend:
+        cmd.extend(["--dataset.video_backend", video_backend])
     if request.dataset_revision:
         cmd.extend(["--dataset.revision", request.dataset_revision])
     if request.dataset_root:

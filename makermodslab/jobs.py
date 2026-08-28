@@ -50,6 +50,7 @@ from .utils.naming import (
     derive_imported_title,
     imported_name_suffixes,
 )
+from .utils.system import torchcodec_loads
 
 logger = logging.getLogger(__name__)
 
@@ -647,7 +648,11 @@ class LocalJobRunner:
         # Build the command via the helper that lives in train.py.
         from .train import build_training_command  # avoid import cycle at module load
 
-        cmd = build_training_command(config, output_dir, sys.executable)
+        # pyav fallback when torchcodec's dylibs don't load here (missing
+        # FFmpeg): pyav ships its own bundled FFmpeg, so training works on a
+        # bare host instead of dying at the first decoded batch.
+        video_backend = None if torchcodec_loads() else "pyav"
+        cmd = build_training_command(config, output_dir, sys.executable, video_backend=video_backend)
         logger.info("Starting job %s: %s", job_id, " ".join(cmd))
 
         # Open the persistent log sink (one JSON line per stdout line). Held

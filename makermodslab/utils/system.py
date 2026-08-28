@@ -433,3 +433,50 @@ def probe_gpu() -> dict[str, str] | None:
     if _gpu_cache is _GPU_UNPROBED:
         _gpu_cache = _probe_gpu_uncached()
     return _gpu_cache  # type: ignore[return-value]
+
+
+# --- torchcodec loadability probe ---------------------------------------------
+
+# Cached like the GPU probe. Subprocess-isolated on purpose: probing means
+# dlopening torchcodec's FFmpeg-linked dylibs, and a broken dylib can do worse
+# than raise — it can hard-crash the process. The trainer is a subprocess, so
+# the probe mirrors exactly what the trainer will experience.
+_TORCHCODEC_UNPROBED = object()
+_torchcodec_cache: object = _TORCHCODEC_UNPROBED
+
+
+def _probe_torchcodec_uncached() -> bool:
+    """True when torchcodec's native libraries actually LOAD on this host.
+
+    `import torchcodec` succeeding is NOT enough — lerobot picks torchcodec as
+    the video backend whenever the package imports, but the FFmpeg shared
+    libraries it dlopens (libavutil & co) load lazily at first decode, and a
+    host without FFmpeg installed dies on the first training batch
+    (field-debugged on a Mac with no Homebrew ffmpeg). torchcodec._core.ops
+    performs that dlopen at import, so importing it in a subprocess is the
+    honest preflight.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", "import torchcodec._core.ops"],
+            capture_output=True,
+            timeout=30,
+        )
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001 — a probe failure means "can't use it"
+        logger.debug("torchcodec probe failed to run", exc_info=True)
+        return False
+
+
+def torchcodec_loads() -> bool:
+    """Cached _probe_torchcodec_uncached."""
+    global _torchcodec_cache
+    if _torchcodec_cache is _TORCHCODEC_UNPROBED:
+        _torchcodec_cache = _probe_torchcodec_uncached()
+        if not _torchcodec_cache:
+            logger.warning(
+                "torchcodec's native libraries don't load on this host (FFmpeg shared "
+                "libraries missing?) — local training will decode video with pyav instead. "
+                "Install ffmpeg (brew install ffmpeg / apt install ffmpeg) to use torchcodec."
+            )
+    return _torchcodec_cache  # type: ignore[return-value]
