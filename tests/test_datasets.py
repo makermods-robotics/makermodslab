@@ -714,15 +714,17 @@ def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
     _make_dataset(tmp_lerobot_home, "makermods/train_ds", episodes=1)
 
     # _dataset_in_use imports job_registry from .jobs lazily (datasets<->record
-    # cycle), so patch it at its source module.
+    # cycle), so patch it at its source module. The registry answers via
+    # local_dataset_in_use (exact scan; matching covered by
+    # test_dataset_in_use_sees_every_active_run_not_a_page).
     from makermodslab import jobs
 
-    job = MagicMock()
-    job.state = "running"
-    job.runner = "local"
-    job.config.dataset_repo_id = "makermods/train_ds"
     with (
-        patch.object(jobs.job_registry, "list", return_value=[job]),
+        patch.object(
+            jobs.job_registry,
+            "local_dataset_in_use",
+            side_effect=lambda repo_id: repo_id == "makermods/train_ds",
+        ),
         pytest.raises(DatasetRenameError) as exc,
     ):
         rename_local_dataset("makermods/train_ds", "renamed")
@@ -2567,6 +2569,90 @@ def test_get_episode_joint_series_hub_fallback_degrades_on_download_failure(
         assert ds.get_episode_joint_series("alice/hub_only", 0) is None
 
 
+def test_get_episode_action_series_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos", "gripper.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0],
+                "timestamp": [0.0, 0.033],
+                "action": [[10.0, 50.0], [10.5, 51.0]],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+
+    with patch("makermodslab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_action_series("alice/local", 0)
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result["action_names"] == ["shoulder_pan.pos", "gripper.pos"]
+    assert result["timestamps"] == [0.0, 0.033]
+    assert result["values"] == [[10.0, 50.0], [10.5, 51.0]]
+
+
+def test_get_episode_action_series_returns_none_on_malformed_chunk_index(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Mirrors get_episode_joint_series's malformed-index guard — a corrupt
+    or adversarial Hub dataset must 404 gracefully, not raise, since this
+    now feeds a hardware-driving code path."""
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [float("nan")], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 0) is None
+
+
+def test_get_episode_action_series_missing_episode_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "timestamp": [0.0], "action": [[1.0]]}),
+        data_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 7) is None
+
+
 # ---------------------------------------------------------------------------
 # End-to-end route coverage for Hub dataset viewer — Tasks 1–5 integrated
 # through the real FastAPI routes without production code changes.
@@ -2997,3 +3083,47 @@ def test_push_dataset_to_hub_invalidates_the_cached_hub_facts() -> None:
     assert ds._HUB_STATUS_CACHE == {}
     assert ds._HUB_HAS_DATA_CACHE == {}
     assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path) -> None:
+    """_dataset_in_use scanned `job_registry.list(limit=200)` — a PAGE — so an
+    active local run past the 200th record was invisible and its dataset
+    could be renamed or deleted out from under it. The check now asks the
+    registry exactly (one snapshot under the lock), so no depth of queue or
+    history can hide a consumer."""
+    from unittest.mock import patch as _patch
+
+    from makermodslab import jobs
+    from makermodslab.datasets import _dataset_in_use
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    with _patch.object(JobRegistry, "_start_watchdog", lambda self: None):
+        reg = JobRegistry(tmp_lerobot_home / "outputs" / "train")
+
+    # 201 queued runs on other datasets ahead of the one that matters.
+    for i in range(201):
+        reg._records[f"q{i:03d}"] = JobRecord(
+            id=f"q{i:03d}",
+            name=f"q{i:03d}",
+            state="queued",
+            config=TrainingRequest(dataset_repo_id="user/other"),
+            output_dir=str(reg._output_root / f"q{i:03d}" / "run"),
+            started_at=float(i),
+            runner="local",
+            queue_seq=i + 1,
+        )
+    reg._records["target"] = JobRecord(
+        id="target",
+        name="target",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/held"),
+        output_dir=str(reg._output_root / "target" / "run"),
+        started_at=999.0,
+        runner="local",
+        queue_seq=999,
+    )
+
+    with _patch.object(jobs, "job_registry", reg):
+        assert _dataset_in_use("user/held") is not None
+        assert _dataset_in_use("user/untouched") is None

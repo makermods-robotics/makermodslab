@@ -4,6 +4,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { Boxes, Pause, Play, SkipBack, SkipForward, VideoOff } from "lucide-react";
 import {
   Dialog,
@@ -15,8 +16,12 @@ import { Button } from "@/components/ui/button";
 import { useStudio } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
+import { cn } from "@/lib/utils";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
+import EpisodeReplayPanel from "@/components/dialogs/EpisodeReplayPanel";
 import {
   EpisodeJointSeries,
   EpisodeSummary,
@@ -84,6 +89,7 @@ const EpisodeViewer: React.FC<{
   selectedEpisode: number;
   onSelectEpisode: (episodeIndex: number) => void;
 }> = ({ repoId, cameras, episodes, selectedEpisode, onSelectEpisode }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [joints, setJoints] = useState<EpisodeJointSeries | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -306,135 +312,157 @@ const EpisodeViewer: React.FC<{
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [gotoEpisode, handlePlayPause]);
 
-  if (cameras.length === 0) {
-    return (
-      <div className="flex flex-1 items-center justify-center rounded-md border border-border bg-muted/30 text-sm text-muted-foreground">
-        This dataset has no camera data to view.
-      </div>
-    );
-  }
+  // Drives the chart's scrubFrac from the replay's own local elapsed-time
+  // clock while a hardware replay is playing — the same prop that camera
+  // playback drives via currentTime, just a different clock source. Reset
+  // to null (falls back to the camera-driven currentTime) once the replay
+  // leaves the "playing" phase.
+  const [replayElapsedS, setReplayElapsedS] = useState<number | null>(null);
+  const handleReplayElapsedChange = useCallback((elapsedS: number, phase: string) => {
+    setReplayElapsedS(phase === "playing" ? elapsedS : null);
+  }, []);
+
+  const effectiveCurrentTime = replayElapsedS ?? currentTime;
+  const effectiveScrubFrac = episode?.duration ? effectiveCurrentTime / episode.duration : 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div
-        ref={gridWrapRef}
-        className="relative flex-1 overflow-auto rounded-md border border-border bg-[#0c0f14]"
-      >
+      {cameras.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center rounded-md border border-border bg-muted/30 text-sm text-muted-foreground">
+          {t("dialogs.datasetDetail.noCameras")}
+        </div>
+      ) : (
         <div
-          className="grid justify-center content-center gap-2 p-2"
-          style={{
-            gridTemplateColumns: `repeat(${layout.cols}, ${layout.tileW}px)`,
-            gridAutoRows: `${layout.tileH}px`,
-          }}
+          ref={gridWrapRef}
+          className="relative flex-1 overflow-auto rounded-md border border-border bg-[#0c0f14]"
         >
-          {cameras.map((camera) => (
+          <div
+            className="grid justify-center content-center gap-2 p-2"
+            style={{
+              gridTemplateColumns: `repeat(${layout.cols}, ${layout.tileW}px)`,
+              gridAutoRows: `${layout.tileH}px`,
+            }}
+          >
+            {cameras.map((camera) => (
+              <div
+                key={camera}
+                className="relative overflow-hidden rounded border border-white/10 bg-black"
+              >
+                <span className="absolute left-1.5 top-1.5 z-10 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-zinc-100">
+                  {camera}
+                </span>
+                {videoErrors[camera] ? (
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-3 text-center text-zinc-300">
+                    <VideoOff className="h-4 w-4" />
+                    <p className="text-[10px] leading-snug">
+                      {t("dialogs.datasetDetail.videoDecodeError")}
+                    </p>
+                  </div>
+                ) : (
+                  <video
+                    key={`${repoId}:${selectedEpisode}:${camera}`}
+                    ref={(el) => {
+                      videoRefs.current[camera] = el;
+                    }}
+                    src={episodeVideoUrl(baseUrl, repoId, selectedEpisode, camera)}
+                    className="h-full w-full object-cover"
+                    muted
+                    playsInline
+                    onLoadedMetadata={(e) => {
+                      e.currentTarget.currentTime = offsetFor(camera);
+                    }}
+                    onTimeUpdate={
+                      camera === primaryCamera
+                        ? (e) => handlePrimaryTimeUpdate(e.currentTarget.currentTime)
+                        : undefined
+                    }
+                    onEnded={camera === primaryCamera ? handlePrimaryEnded : undefined}
+                    onError={() =>
+                      setVideoErrors((prev) => ({ ...prev, [camera]: true }))
+                    }
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {cameras.length > 0 ? (
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => gotoEpisode(-1)}
+            disabled={!episode || !hasPrev}
+            aria-label={t("dialogs.datasetDetail.previousEpisode")}
+          >
+            <SkipBack className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={handlePlayPause}
+            disabled={!episode}
+            aria-label={
+              playing
+                ? t("dialogs.datasetDetail.pause")
+                : t("dialogs.datasetDetail.play")
+            }
+          >
+            {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => gotoEpisode(1)}
+            disabled={!episode || !hasNext}
+            aria-label={t("dialogs.datasetDetail.nextEpisode")}
+          >
+            <SkipForward className="h-3.5 w-3.5" />
+          </Button>
+          <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
+            {episode ? `${fmtTime(currentTime)} / ${fmtTime(episode.duration)}` : "—"}
+          </span>
+          <div
+            ref={scrubRef}
+            className="relative h-5 flex-1 cursor-pointer"
+            onPointerDown={(e) => {
+              draggingRef.current = true;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              forEachVideo((v) => v.pause());
+              setPlaying(false);
+              seekFromClientX(e.clientX);
+            }}
+            onPointerMove={(e) => {
+              if (draggingRef.current) seekFromClientX(e.clientX);
+            }}
+            onPointerUp={(e) => {
+              draggingRef.current = false;
+              e.currentTarget.releasePointerCapture(e.pointerId);
+            }}
+          >
+            <div className="absolute inset-y-0 my-auto h-1 w-full rounded-full bg-muted" />
             <div
-              key={camera}
-              className="relative overflow-hidden rounded border border-white/10 bg-black"
-            >
-              <span className="absolute left-1.5 top-1.5 z-10 rounded bg-black/50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-zinc-100">
-                {camera}
-              </span>
-              {videoErrors[camera] ? (
-                <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-3 text-center text-zinc-300">
-                  <VideoOff className="h-4 w-4" />
-                  <p className="text-[10px] leading-snug">
-                    Can't decode this camera's video in this browser.
-                  </p>
-                </div>
-              ) : (
-                <video
-                  key={`${repoId}:${selectedEpisode}:${camera}`}
-                  ref={(el) => {
-                    videoRefs.current[camera] = el;
-                  }}
-                  src={episodeVideoUrl(baseUrl, repoId, selectedEpisode, camera)}
-                  className="h-full w-full object-cover"
-                  muted
-                  playsInline
-                  onLoadedMetadata={(e) => {
-                    e.currentTarget.currentTime = offsetFor(camera);
-                  }}
-                  onTimeUpdate={
-                    camera === primaryCamera
-                      ? (e) => handlePrimaryTimeUpdate(e.currentTarget.currentTime)
-                      : undefined
-                  }
-                  onEnded={camera === primaryCamera ? handlePrimaryEnded : undefined}
-                  onError={() =>
-                    setVideoErrors((prev) => ({ ...prev, [camera]: true }))
-                  }
-                />
-              )}
-            </div>
-          ))}
+              className="absolute inset-y-0 my-auto h-1 rounded-full bg-foreground"
+              style={{ width: `${scrubFrac * 100}%` }}
+            />
+            <div
+              className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-foreground shadow"
+              style={{ left: `calc(${scrubFrac * 100}% - 6px)` }}
+            />
+          </div>
         </div>
-      </div>
+      ) : null}
 
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={() => gotoEpisode(-1)}
-          disabled={!episode || !hasPrev}
-          aria-label="Previous episode"
-        >
-          <SkipBack className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={handlePlayPause}
-          disabled={!episode}
-          aria-label={playing ? "Pause" : "Play"}
-        >
-          {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={() => gotoEpisode(1)}
-          disabled={!episode || !hasNext}
-          aria-label="Next episode"
-        >
-          <SkipForward className="h-3.5 w-3.5" />
-        </Button>
-        <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
-          {episode ? `${fmtTime(currentTime)} / ${fmtTime(episode.duration)}` : "—"}
-        </span>
-        <div
-          ref={scrubRef}
-          className="relative h-5 flex-1 cursor-pointer"
-          onPointerDown={(e) => {
-            draggingRef.current = true;
-            e.currentTarget.setPointerCapture(e.pointerId);
-            forEachVideo((v) => v.pause());
-            setPlaying(false);
-            seekFromClientX(e.clientX);
-          }}
-          onPointerMove={(e) => {
-            if (draggingRef.current) seekFromClientX(e.clientX);
-          }}
-          onPointerUp={(e) => {
-            draggingRef.current = false;
-            e.currentTarget.releasePointerCapture(e.pointerId);
-          }}
-        >
-          <div className="absolute inset-y-0 my-auto h-1 w-full rounded-full bg-muted" />
-          <div
-            className="absolute inset-y-0 my-auto h-1 rounded-full bg-foreground"
-            style={{ width: `${scrubFrac * 100}%` }}
-          />
-          <div
-            className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-foreground shadow"
-            style={{ left: `calc(${scrubFrac * 100}% - 6px)` }}
-          />
-        </div>
-      </div>
-
-      <JointPositionChart joints={joints} episode={episode} scrubFrac={scrubFrac} />
+      <JointPositionChart joints={joints} episode={episode} scrubFrac={effectiveScrubFrac} />
+      <EpisodeReplayPanel
+        repoId={repoId}
+        episodeIndex={selectedEpisode}
+        onElapsedChange={handleReplayElapsedChange}
+      />
     </div>
   );
 };
@@ -445,6 +473,13 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   onOpenChange,
   onStudioAction,
 }) => {
+  const { t } = useTranslation();
+  const { language } = useLanguage();
+  // `.eyebrow` bundles `uppercase` with letter-spacing; the uppercase is a
+  // no-op on Chinese but the tracking is not, so both come off together.
+  const eyebrow = isCaselessScript(language)
+    ? "text-[11px] font-semibold text-muted-foreground"
+    : "eyebrow";
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio } = useStudio();
   const { setSelectedDataset } = useSelectedDataset();
@@ -487,7 +522,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
-          <p className="eyebrow">MakerMods Lab Dataset Viewer</p>
+          <p className={eyebrow}>{t("dialogs.datasetDetail.eyebrow")}</p>
           <DialogTitle className="break-all pt-1 font-mono text-base font-semibold">
             {repoId}
           </DialogTitle>
@@ -497,7 +532,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
           <div className="flex min-h-0 min-w-0 flex-col gap-3 p-4">
             {episodesLoading ? (
               <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                Loading episodes…
+                {t("dialogs.datasetDetail.loadingEpisodes")}
               </div>
             ) : episodes && episodes.length > 0 && selectedEpisode != null ? (
               <EpisodeViewer
@@ -512,13 +547,13 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                 <VideoOff className="h-6 w-6 text-muted-foreground" />
                 <p className="text-sm font-medium text-foreground">
                   {episodes && episodes.length === 0
-                    ? "No episodes recorded yet"
-                    : "No viewable footage yet"}
+                    ? t("dialogs.datasetDetail.noEpisodesTitle")
+                    : t("dialogs.datasetDetail.noFootageTitle")}
                 </p>
                 <p className="max-w-sm text-xs text-muted-foreground">
                   {episodes && episodes.length === 0
-                    ? "Record at least one episode into this dataset to view its camera footage here."
-                    : "A Hub dataset with video streams on demand here — a first-time view of a new episode may take a moment to fetch. This message means the dataset predates the viewer's format, or has no video to show."}
+                    ? t("dialogs.datasetDetail.noEpisodesBody")
+                    : t("dialogs.datasetDetail.noFootageBody")}
                 </p>
               </div>
             )}
@@ -526,7 +561,13 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
           <div className="flex min-h-0 flex-col divide-y divide-border overflow-y-auto border-l border-border">
             <div className="flex min-h-0 flex-1 flex-col p-3">
-              <p className="eyebrow mb-2">episodes {episodes ? `(${episodes.length})` : ""}</p>
+              <p className={cn(eyebrow, "mb-2")}>
+                {episodes
+                  ? t("dialogs.datasetDetail.episodesHeadingWithCount", {
+                      total: episodes.length,
+                    })
+                  : t("dialogs.datasetDetail.episodesHeading")}
+              </p>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {episodes && episodes.length > 0 ? (
                   <div className="space-y-0.5">
@@ -545,7 +586,9 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                           {String(ep.episode_index).padStart(2, "0")}
                         </span>
                         <span className="min-w-0 flex-1 truncate">
-                          Episode {ep.episode_index}
+                          {t("dialogs.datasetDetail.episodeRow", {
+                            index: ep.episode_index,
+                          })}
                         </span>
                         <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
                           {ep.duration.toFixed(1)}s
@@ -555,8 +598,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   </div>
                 ) : (
                   <p className="px-1 text-xs leading-relaxed text-muted-foreground">
-                    Episodes appear here once this dataset is downloaded to your
-                    machine.
+                    {t("dialogs.datasetDetail.episodesEmpty")}
                   </p>
                 )}
               </div>
@@ -572,7 +614,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
             <div className="p-3">
               <Button onClick={handleTrain} className="w-full gap-2">
                 <Boxes className="h-4 w-4" />
-                Train a skill from this
+                {t("dialogs.datasetDetail.trainSkill")}
               </Button>
             </div>
           </div>

@@ -21,6 +21,8 @@ import time
 
 import pytest
 
+from lerobot.motors import Motor, MotorNormMode
+
 
 def test_teleoperate_request_rejects_missing_fields() -> None:
     from pydantic import ValidationError
@@ -385,6 +387,7 @@ def test_start_teleoperation_blocked_when_calibration_active(monkeypatch: pytest
     assert result == {
         "success": False,
         "message": "Calibration is currently active. Stop it first.",
+        "code": "robot.busy.calibration",
     }
 
 
@@ -398,6 +401,7 @@ def test_start_teleoperation_blocked_when_auto_calibration_active(monkeypatch: p
     assert result == {
         "success": False,
         "message": "Auto-calibration is currently active. Stop it first.",
+        "code": "robot.busy.auto_calibration",
     }
 
 
@@ -411,6 +415,24 @@ def test_start_teleoperation_blocked_when_wiggle_active(monkeypatch: pytest.Monk
     assert result == {
         "success": False,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+        "code": "robot.busy.wiggle",
+    }
+
+
+def test_start_teleoperation_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay drives the same follower bus open-loop — teleoperation must
+    refuse to start while it's active, or both threads race to write goal
+    positions to the same servos."""
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+
+    result = teleop.handle_start_teleoperation(_stub_teleop_request())
+    assert result == {
+        "success": False,
+        "message": "Replay is currently active. Stop it first.",
+        "code": "robot.busy.replay",
     }
 
 
@@ -1257,10 +1279,14 @@ class _RestBus:
     """Bus double for rest-pose capture/return (makermodslab.rest_pose)."""
 
     _MOTORS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+    # Real SO-101 layout: every joint is +/-100 range, only the gripper is 0..100.
+    _NORM_MODES = dict.fromkeys(_MOTORS, MotorNormMode.RANGE_M100_100) | {
+        "gripper": MotorNormMode.RANGE_0_100
+    }
 
     def __init__(self, positions=None, moving: int = 1, port: str = "COM_FOLLOWER") -> None:
         self.port = port
-        self.motors = dict.fromkeys(self._MOTORS)
+        self.motors = {m: Motor(i + 1, "sts3215", self._NORM_MODES[m]) for i, m in enumerate(self._MOTORS)}
         self.positions = dict.fromkeys(self._MOTORS, 1000) if positions is None else dict(positions)
         self.moving = moving
         self.fail_reads = False
@@ -1321,6 +1347,16 @@ def test_capture_rest_pose_reads_raw_ticks() -> None:
     assert capture_rest_pose(bus) == {}  # never raises — the session must still start
 
 
+def test_capture_rest_pose_normalized_reads_floats() -> None:
+    """normalize=True reads the same normalized units robot.send_action()
+    uses, for a caller (replay's ease-in) whose target is an action dict
+    rather than raw ticks."""
+    from makermodslab.rest_pose import capture_rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 12.5, "gripper": 90.0})
+    assert capture_rest_pose(bus, normalize=True) == {"shoulder_pan": 12.5, "gripper": 90.0}
+
+
 def test_return_to_rest_pose_arrives_and_writes_gentle_goals(rest_clock: _RestClock) -> None:
     """The return writes a gentle profile speed then the captured goals, and
     reports 'returned' once every motor is within tolerance."""
@@ -1346,6 +1382,161 @@ def test_return_to_rest_pose_arrives_and_writes_gentle_goals(rest_clock: _RestCl
     speed_writes = [w for w in bus.writes if w[0] == "Goal_Velocity"]
     assert {w[2] for w in speed_writes} == {rest_pose.RETURN_POS_SPEED}
     assert {w[1] for w in speed_writes} == set(targets)
+
+
+def test_return_to_rest_pose_arrives_with_normalized_targets(rest_clock: _RestClock) -> None:
+    """normalize=True writes/reads/compares in the same normalized units as
+    robot.send_action() — no raw-tick conversion needed for a target that's
+    already an action dict — and a caller-supplied tolerance is honored
+    instead of the raw-ticks default."""
+    import makermodslab.rest_pose as rest_pose
+
+    targets = {"shoulder_pan": 10.0, "gripper": 50.0}
+    bus = _RestBus(positions={"shoulder_pan": 10.5, "gripper": 49.0})
+
+    arrived, reason = rest_pose.return_to_rest_pose(
+        bus, targets, label="follower arm", normalize=True, tolerance=2.0
+    )
+
+    assert arrived is True
+    assert reason.startswith("returned: max delta 1.0")
+    # Written via the SAME sync_write call shape, only normalize flips.
+    assert bus.sync_writes[0] == ("Goal_Position", targets)
+
+
+def test_return_to_rest_pose_normalized_default_tolerance_is_raw_ticks_constant(
+    rest_clock: _RestClock,
+) -> None:
+    """Omitting `tolerance` with normalize=True still falls back to
+    RETURN_ARRIVE_TOLERANCE (20) — documented so a caller isn't surprised by
+    an inherited raw-ticks-sized tolerance in normalized-unit space."""
+    import makermodslab.rest_pose as rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 10.0})
+    arrived, _ = rest_pose.return_to_rest_pose(bus, {"shoulder_pan": 10.0}, normalize=True)
+    assert arrived is True
+
+
+def test_return_to_rest_pose_clamps_out_of_range_normalized_target(rest_clock: _RestClock) -> None:
+    """A recorded action can carry a normalized target outside the bus's
+    representable range (lerobot's own calibration-aware conversion clamps
+    both the Goal_Position write and the Present_Position read-back to
+    [-100, 100] / [0, 100]). The arrival check must compare against the same
+    clamped value that was actually written, or a saturated joint can never
+    be reported as arrived — it stalls no matter how the arm is posed."""
+    import makermodslab.rest_pose as rest_pose
+
+    # shoulder_lift is pinned at its clamp boundary (-100.0) and cannot move
+    # any further — exactly what lerobot's read-back reports for a target
+    # below -100.
+    bus = _RestBus(positions={"shoulder_lift": -100.0})
+
+    arrived, reason = rest_pose.return_to_rest_pose(
+        bus, {"shoulder_lift": -103.56}, label="follower arm", normalize=True, tolerance=2.0
+    )
+
+    assert arrived is True
+    assert reason.startswith("returned: max delta 0")
+    # The goal actually written is the clamped, reachable value — matches
+    # what the comparison used, and what lerobot would have written anyway.
+    assert bus.sync_writes[0] == ("Goal_Position", {"shoulder_lift": -100.0})
+
+
+def test_return_to_rest_pose_clamps_out_of_range_gripper_target(rest_clock: _RestClock) -> None:
+    """Same clamp behavior on the gripper's [0, 100] range, not just the
+    +/-100 joints."""
+    import makermodslab.rest_pose as rest_pose
+
+    bus = _RestBus(positions={"gripper": 100.0})
+
+    arrived, reason = rest_pose.return_to_rest_pose(
+        bus, {"gripper": 104.0}, label="follower arm", normalize=True, tolerance=2.0
+    )
+
+    assert arrived is True
+    assert reason.startswith("returned: max delta 0")
+
+
+class _ConvergingBus:
+    """Bus double for one motor whose Present_Position closes toward the
+    Goal_Position target at a fixed rate per elapsed second, driven off the
+    same simulated clock the rest_pose loop's own time.sleep/monotonic calls
+    advance — reproduces a physically-converging (never stuck) motor without
+    a real sleep, per the handoff's reproduction recipe for the stall-window
+    unit-space defect."""
+
+    def __init__(
+        self, clock: _RestClock, motor: str, norm_mode: MotorNormMode, start: float, rate_per_s: float
+    ):
+        self.clock = clock
+        self.motors = {motor: Motor(1, "sts3215", norm_mode)}
+        self._motor = motor
+        self._start = start
+        self._rate = rate_per_s
+        self._target: float | None = None
+        self._t0: float | None = None
+
+    def write(self, *a, **k) -> None:
+        pass
+
+    def sync_write(self, reg: str, values: dict, normalize: bool = True) -> None:
+        if reg == "Goal_Position":
+            self._target = float(values[self._motor])
+            self._t0 = self.clock.now
+
+    def sync_read(self, reg: str, normalize: bool = True) -> dict:
+        if reg != "Present_Position":
+            return {}
+        elapsed = max(0.0, self.clock.now - (self._t0 or 0.0))
+        direction = 1.0 if self._target >= self._start else -1.0
+        pos = self._start + direction * self._rate * elapsed
+        pos = min(pos, self._target) if direction > 0 else max(pos, self._target)
+        return {self._motor: pos}
+
+
+def test_return_to_rest_pose_normalized_default_stall_progress_matches_raw_ticks_constant(
+    rest_clock: _RestClock,
+) -> None:
+    """Omitting `stall_min_progress` preserves today's behavior (the
+    raw-ticks RETURN_STALL_MIN_PROGRESS, unconverted) — same
+    opt-in-to-change shape as `tolerance`'s existing default. A motor
+    converging at only 3 units/s never clears that raw-ticks-sized 10-unit
+    bar within one stall window, so it is reported as stalled even though it
+    was steadily, genuinely moving toward the target."""
+    import makermodslab.rest_pose as rest_pose
+
+    bus = _ConvergingBus(rest_clock, "wrist_roll", MotorNormMode.RANGE_M100_100, start=-20.0, rate_per_s=3.0)
+
+    arrived, reason = rest_pose.return_to_rest_pose(
+        bus, {"wrist_roll": 0.0}, label="follower arm", normalize=True, tolerance=2.0
+    )
+
+    assert arrived is False
+    assert reason.startswith("stalled")
+
+
+def test_return_to_rest_pose_custom_stall_min_progress_lets_slow_convergence_arrive(
+    rest_clock: _RestClock,
+) -> None:
+    """A caller in normalized-unit space (replay's ease-in) can supply a
+    stall-progress threshold sized for its own unit space instead of
+    inheriting the raw-ticks constant — the SAME physical convergence as
+    above must now be recognized as real progress and arrive."""
+    import makermodslab.rest_pose as rest_pose
+
+    bus = _ConvergingBus(rest_clock, "wrist_roll", MotorNormMode.RANGE_M100_100, start=-20.0, rate_per_s=3.0)
+
+    arrived, reason = rest_pose.return_to_rest_pose(
+        bus,
+        {"wrist_roll": 0.0},
+        label="follower arm",
+        normalize=True,
+        tolerance=2.0,
+        stall_min_progress=1.0,
+    )
+
+    assert arrived is True
+    assert reason.startswith("returned")
 
 
 def test_return_to_rest_pose_stalls_without_progress(rest_clock: _RestClock) -> None:

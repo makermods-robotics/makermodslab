@@ -266,3 +266,24 @@ def test_policy_extra_route_known_and_core(client) -> None:
     assert smol["install_target"] == "lerobot[smolvla]"
     core = client.get("/system/policy-extra/act").json()
     assert core["needs_extra"] is False
+
+
+def test_torchcodec_probe_caches_and_reports(monkeypatch):
+    from makermodslab.utils import system as sysmod
+
+    calls = []
+    monkeypatch.setattr(sysmod, "_torchcodec_cache", sysmod._TORCHCODEC_UNPROBED)
+    monkeypatch.setattr(sysmod, "_probe_torchcodec_uncached", lambda: calls.append(1) or False)
+    assert sysmod.torchcodec_loads() is False
+    assert sysmod.torchcodec_loads() is False
+    assert len(calls) == 1
+
+
+def test_torchcodec_probe_subprocess_failure_means_unusable(monkeypatch):
+    from makermodslab.utils import system as sysmod
+
+    def boom(*a, **k):
+        raise OSError("no interpreter")
+
+    monkeypatch.setattr(sysmod.subprocess, "run", boom)
+    assert sysmod._probe_torchcodec_uncached() is False

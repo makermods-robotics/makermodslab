@@ -1,4 +1,5 @@
 import React from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
@@ -9,8 +10,12 @@ import {
   RobotStatus,
 } from "@/components/studio/panel/primitives";
 import { useHfAuth } from "@/contexts/HfAuthContext";
-import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
-import { validateDatasetName } from "@/lib/datasetName";
+import { RobotRecord } from "@/hooks/useRobots";
+import { formatRobotSetupGap } from "@/lib/robotSetupGap";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 
 interface RecordingFormProps {
   robot: RobotRecord | null;
@@ -62,31 +67,33 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
   releaseStreamsRef,
 }) => {
   const { auth } = useHfAuth();
+  const { t } = useTranslation();
 
   // null when the name is valid; a message otherwise (incl. empty). Mirrors the
   // backend, so Start can't fire a recording the recorder will reject.
-  const nameError = validateDatasetName(datasetName);
+  const nameIssue = datasetNameIssue(datasetName);
+  const nameError = nameIssue ? formatDatasetNameIssue(t, nameIssue) : null;
 
   return (
     <div className="space-y-6">
       <p className="text-sm leading-relaxed text-muted-foreground">
-        Name the dataset and set the capture parameters, then start recording
-        on the selected robot.
+        {t("studio.collect.form.intro")}
       </p>
 
       {/* Robot readiness — a warning, not a parameter, so no eyebrow. A ready
           robot renders nothing: the robot menu already names the selection. */}
       <RobotStatus ready={!!robot && robot.is_clean}>
         {!robot ? (
-          <>
-            Select or create a robot before recording — use the robot menu in
-            the top-right corner of this window.
-          </>
+          t("studio.collect.form.noRobot")
         ) : (
-          <>
-            <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open Robot
-            settings before recording.
-          </>
+          <Trans
+            i18nKey="studio.collect.form.robotNotReady"
+            values={{
+              name: robot.name,
+              gap: formatRobotSetupGap(t, robot),
+            }}
+            components={[<strong key="0" />]}
+          />
         )}
       </RobotStatus>
 
@@ -94,7 +101,7 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
           no category heading sits above them restating "Dataset". */}
       <div className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="datasetName">Dataset name *</Label>
+          <Label htmlFor="datasetName">{t("studio.collect.form.datasetName")}</Label>
           <Input
             id="datasetName"
             value={datasetName}
@@ -107,37 +114,44 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
             <p className="text-xs text-destructive">{nameError}</p>
           ) : (
             <p className="text-xs text-muted-foreground">
-              Letters, numbers, <code>.</code> <code>_</code> <code>-</code>{" "}
-              only; start and end with a letter or number.
+              <Trans
+                i18nKey="studio.collect.form.nameHint"
+                components={[<code key="0" />, <code key="1" />, <code key="2" />]}
+              />
             </p>
           )}
           {datasetName &&
             (auth.status === "authenticated" ? (
               <p className="text-xs text-muted-foreground">
-                Will be saved as{" "}
-                <span className="font-mono text-foreground">
-                  {auth.username}/{datasetName}
-                </span>
+                {/* The repo id is DATA — interpolated verbatim, never split
+                    across translated fragments. */}
+                <Trans
+                  i18nKey="studio.collect.form.savedAs"
+                  values={{ repoId: `${auth.username}/${datasetName}` }}
+                  components={[
+                    <span key="0" className="font-mono text-foreground" />,
+                  ]}
+                />
               </p>
             ) : auth.status === "unauthenticated" ? (
               <p className="text-xs text-amber-700 dark:text-amber-300">
-                Log in to Hugging Face to set the repository owner.
+                {t("studio.collect.form.loginHint")}
               </p>
             ) : null)}
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="singleTask">Task description *</Label>
+          <Label htmlFor="singleTask">{t("studio.collect.form.task")}</Label>
           <Input
             id="singleTask"
             value={singleTask}
             onChange={(e) => setSingleTask(e.target.value)}
-            placeholder="e.g., pick up the red block and place it on the blue square"
+            placeholder={t("studio.collect.form.taskPlaceholder")}
           />
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="numEpisodes">Number of episodes</Label>
+          <Label htmlFor="numEpisodes">{t("studio.collect.form.numEpisodes")}</Label>
           <NumberInput
             id="numEpisodes"
             min="1"
@@ -151,7 +165,9 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
 
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="episodeTimeS">Episode duration (s)</Label>
+            <Label htmlFor="episodeTimeS">
+              {t("studio.collect.form.episodeTime")}
+            </Label>
             <NumberInput
               id="episodeTimeS"
               min="1"
@@ -162,7 +178,9 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="resetTimeS">Reset duration (s)</Label>
+            <Label htmlFor="resetTimeS">
+              {t("studio.collect.form.resetTime")}
+            </Label>
             <NumberInput
               id="resetTimeS"
               min="1"
@@ -183,13 +201,13 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
         releaseStreamsRef={releaseStreamsRef}
         emptyLabel={
           robot
-            ? "This robot has no cameras. Add them in Robot settings to record video."
-            : "Select a robot to see its cameras."
+            ? t("studio.collect.form.camerasEmptyRobot")
+            : t("studio.collect.form.camerasNoRobot")
         }
       />
 
       {/* Advanced */}
-      <AdvancedSection summary="Streaming encoding, push to Hub">
+      <AdvancedSection summary={t("studio.collect.form.advancedSummary")}>
           <div className="flex items-start gap-3">
             <Checkbox
               id="streamingEncoding"
@@ -202,12 +220,10 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
                 htmlFor="streamingEncoding"
                 className="cursor-pointer font-medium"
               >
-                Streaming video encoding
+                {t("studio.collect.form.streamingLabel")}
               </Label>
               <p className="text-xs text-muted-foreground">
-                Encodes frames in real time during capture so each episode saves
-                almost instantly. Uncheck to fall back to the slower
-                PNG-then-encode flow.
+                {t("studio.collect.form.streamingHint")}
               </p>
             </div>
           </div>
@@ -223,12 +239,10 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
                 htmlFor="pushToHub"
                 className="cursor-pointer font-medium"
               >
-                Push to Hugging Face Hub
+                {t("studio.collect.form.pushToHubLabel")}
               </Label>
               <p className="text-xs text-muted-foreground">
-                Uploads the dataset to your Hugging Face account in the
-                background once the session ends. Uncheck to keep it local —
-                you can still upload it later from the dataset library.
+                {t("studio.collect.form.pushToHubHint")}
               </p>
             </div>
           </div>

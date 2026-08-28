@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { Check, GitMerge, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,10 +11,13 @@ import {
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useHfAuth } from "@/contexts/HfAuthContext";
-import { useRobots, robotSetupGap } from "@/hooks/useRobots";
+import { useRobots } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
-import { validateDatasetName } from "@/lib/datasetName";
+import {
+  datasetNameIssue,
+  formatDatasetNameIssue,
+} from "@/lib/datasetName";
 import { useStudio } from "@/contexts/StudioContext";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import RecordingForm from "@/components/studio/RecordingForm";
@@ -53,6 +57,7 @@ import type { DatasetItem } from "@/lib/replayApi";
  */
 const CollectPanel: React.FC = () => {
   const { auth } = useHfAuth();
+  const { t } = useTranslation();
   const { selectedRecord } = useRobots();
   const { datasets, loading: datasetsLoading, refresh } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
@@ -144,34 +149,32 @@ const CollectPanel: React.FC = () => {
   const handleStartRecording = async () => {
     if (!selectedRecord) {
       toast({
-        title: "No robot selected",
-        description:
-          "Select or create a robot first — use the robot menu in the top-right corner.",
+        title: t("studio.collect.toast.noRobotTitle"),
+        description: t("studio.collect.toast.noRobotBody"),
         variant: "destructive",
       });
       return;
     }
     const robot = selectedRecord;
-    if (!robot.is_clean) {
-      toast({
-        title: "Robot not ready",
-        description: `${robot.name} ${robotSetupGap(robot)}. Open Robot settings before recording.`,
-        variant: "destructive",
-      });
-      return;
-    }
+    // No is_clean gate here any more: record readiness is the SERVER's check
+    // now (400 robot.not_ready from POST /api/v1/sessions, rendered by the
+    // session dialog's start-failure toast). The Start button below still
+    // disables on the same condition as a courtesy.
     if (!datasetName || !singleTask) {
       toast({
-        title: "Missing dataset details",
-        description: "Please enter a dataset name and task description.",
+        title: t("studio.collect.toast.missingDetailsTitle"),
+        description: t("studio.collect.toast.missingDetailsBody"),
         variant: "destructive",
       });
       return;
     }
-    const nameError = validateDatasetName(datasetName);
+    const nameIssue = datasetNameIssue(datasetName);
+    const nameError = nameIssue ? formatDatasetNameIssue(t, nameIssue) : null;
     if (nameError) {
       toast({
-        title: "Invalid dataset name",
+        title: t("studio.collect.toast.invalidNameTitle"),
+        // validateDatasetName's own message — client-side, but owned by
+        // lib/datasetName.ts, so it is shown exactly as returned.
         description: nameError,
         variant: "destructive",
       });
@@ -185,34 +188,24 @@ const CollectPanel: React.FC = () => {
 
     if (cameras.length > 0 && releaseStreamsRef.current) {
       toast({
-        title: "Preparing camera resources",
-        description: `Releasing ${cameras.length} camera stream(s) for recording...`,
+        title: t("studio.collect.toast.preparingCamerasTitle"),
+        description: t("studio.collect.toast.releasingStreams", {
+          count: cameras.length,
+        }),
       });
       releaseStreamsRef.current();
       await new Promise((resolve) => setTimeout(resolve, 500));
       toast({
-        title: "Camera resources ready",
-        description:
-          "Camera streams released successfully. Starting recording...",
+        title: t("studio.collect.toast.camerasReadyTitle"),
+        description: t("studio.collect.toast.camerasReadyBody"),
       });
     }
 
+    // Robot NAME + dataset-shaped options only: the session dialog POSTs this
+    // to /api/v1/sessions and the server resolves everything hardware-shaped
+    // (ports, configs, mode, right-arm fields, cameras) from the saved record.
     const recordingConfig = {
-      leader_port: robot.leader_port,
-      follower_port: robot.follower_port,
-      leader_config: robot.leader_config,
-      follower_config: robot.follower_config,
-      // Bimanual: forward mode + the right arm so the backend records a BiSO pair.
-      mode: robot.mode,
-      right_leader_port: robot.right_leader_port,
-      right_follower_port: robot.right_follower_port,
-      right_leader_config: robot.right_leader_config,
-      right_follower_config: robot.right_follower_config,
-      // Robot name → the record the backend resolves this session's CAMERAS
-      // from (the request carries no camera payload). Bimanual also uses it as
-      // the BiSO staging base id, naming the per-session staging dir; it does
-      // not affect which calibration drives which arm.
-      robot_name: robot.name,
+      robot: robot.name,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,
@@ -223,8 +216,6 @@ const CollectPanel: React.FC = () => {
       push_to_hub: false,
       resume: false,
       streaming_encoding: streamingEncoding,
-      // No `cameras` here on purpose: the backend resolves this session's
-      // cameras from the robot record named above.
     };
 
     setActiveRecording(recordingConfig);
@@ -259,18 +250,22 @@ const CollectPanel: React.FC = () => {
   const canStart =
     !!selectedRecord &&
     selectedRecord.is_clean &&
-    validateDatasetName(datasetName) === null &&
+    datasetNameIssue(datasetName) === null &&
     singleTask.trim().length > 0;
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="1" title="Collect" />
+      <PanelHeader
+        step="1"
+        title={t("studio.collect.title")}
+        dataTour="studio-collect"
+      />
 
       {/* Record new dataset — the form slides open in place (no dialog). */}
       <Collapsible open={formOpen} onOpenChange={toggleForm} className="space-y-5">
         <CollapsibleTrigger asChild>
           <PanelEntryControl open={formOpen} dotClassName="bg-red-500">
-            Record new dataset
+            {t("studio.collect.entry")}
           </PanelEntryControl>
         </CollapsibleTrigger>
         <CollapsibleContent className={SLIDE}>
@@ -309,7 +304,7 @@ const CollectPanel: React.FC = () => {
           className="w-full gap-2"
         >
           <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
-          Start recording
+          {t("studio.collect.start")}
         </Button>
       </div>
 
@@ -323,7 +318,7 @@ const CollectPanel: React.FC = () => {
           className="space-y-3"
         >
           <LibraryHeader
-            title="Your datasets"
+            title={t("studio.collect.library.title")}
             count={libraryDatasets.length}
             open={libraryOpen}
             actions={
@@ -338,8 +333,8 @@ const CollectPanel: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setSelectedDataset(null)}
-                      aria-label="Clear selected dataset"
-                      title="Clear selected dataset"
+                      aria-label={t("studio.collect.library.clearSelected")}
+                      title={t("studio.collect.library.clearSelected")}
                       className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
                     >
                       <X className="h-3 w-3" />
@@ -353,7 +348,7 @@ const CollectPanel: React.FC = () => {
                   className="h-7 shrink-0 gap-1.5 px-2 text-xs"
                 >
                   <GitMerge className="h-3.5 w-3.5" />
-                  Merge datasets
+                  {t("studio.collect.library.merge")}
                 </Button>
                 <button
                   type="button"
@@ -361,8 +356,8 @@ const CollectPanel: React.FC = () => {
                     clearDatasetInfoCache();
                     refresh();
                   }}
-                  aria-label="Refresh dataset list"
-                  title="Refresh dataset list"
+                  aria-label={t("studio.collect.library.refresh")}
+                  title={t("studio.collect.library.refresh")}
                   className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
                 >
                   <RefreshCw

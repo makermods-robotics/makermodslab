@@ -112,13 +112,24 @@ export default {
 					to: {
 						height: '0'
 					}
+				},
+				'spotlight-pulse': {
+					'0%, 100%': {
+						boxShadow: '0 0 0 0 hsl(var(--ring) / 0.55)',
+						transform: 'scale(1)'
+					},
+					'50%': {
+						boxShadow: '0 0 0 8px hsl(var(--ring) / 0)',
+						transform: 'scale(1.04)'
+					}
 				}
 			},
 			animation: {
 				'accordion-down': 'accordion-down 0.2s ease-out',
 				'accordion-up': 'accordion-up 0.2s ease-out',
 				'collapsible-down': 'collapsible-down 0.25s cubic-bezier(0.2, 0, 0, 1)',
-				'collapsible-up': 'collapsible-up 0.2s cubic-bezier(0.2, 0, 0, 1)'
+				'collapsible-up': 'collapsible-up 0.2s cubic-bezier(0.2, 0, 0, 1)',
+				'spotlight-pulse': 'spotlight-pulse 1.8s cubic-bezier(0.2, 0, 0, 1) infinite'
 			}
 		}
 	},

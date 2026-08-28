@@ -1,10 +1,10 @@
 # Builds the frontend on every pull request, so a lockfile or source change that
 # breaks the build is caught *before* it reaches main.
 #
-# Why this exists: build_frontend.yml only runs on push to main, so until this
-# workflow the first thing to run `npm ci` on Linux was the job that fires after
-# a merge. Its failure is silent — frontend/dist just never gets rebuilt and prod
-# keeps serving the previous bundle. That has bitten us three times (e345e61,
+# Why this exists: build_frontend.yml only runs on push to main or staging, so
+# until this workflow the first thing to run `npm ci` on Linux was the job that
+# fires after a merge. Its failure is silent — frontend/dist just never gets
+# rebuilt and prod keeps serving the previous bundle. That has bitten us three times (e345e61,
 # 944cb05, c18d42c), each a different flavour of the same root cause: a lockfile
 # generated on a developer's machine that ubuntu-latest cannot install.
 #
@@ -32,6 +32,7 @@ on:
   pull_request:
     branches:
       - main
+      - staging
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -61,14 +62,28 @@ jobs:
       - name: Install (npm ci)
         run: npm ci
 
-      - name: Typecheck
-        run: npx tsc --noEmit
+      # Two projects, because the root tsconfig.json is a solution file
+      # (`"files": []` plus references) — a bare `tsc --noEmit` against it checks
+      # nothing and exits 0.
+      - name: Typecheck (app)
+        run: npx tsc --noEmit -p tsconfig.app.json
 
-      # Non-blocking: `npm run lint` currently reports 3 pre-existing errors, all
-      # `require()`-style imports in tailwind.config.ts, plus 24 warnings. Per
-      # CLAUDE.md we do not fix pre-existing lint unrelated to a change, so this
-      # surfaces regressions in the log without failing the gate on day one.
-      # Clear the tailwind.config.ts errors and this can become blocking.
+      # tsconfig.app.json only includes `src`, so the build's own config files
+      # sat outside every project CI ran. That is not hypothetical: it is how a
+      # dead `esbuild.pure` option survived the Vite 8 upgrade, silently ending
+      # production console.log stripping with nothing going red.
+      - name: Typecheck (build configs)
+        run: npx tsc --noEmit -p tsconfig.node.json
+
+      # Non-blocking: `npm run lint` currently reports 4 pre-existing errors in 3
+      # files — tailwind.config.ts:137,138 (`no-require-imports`),
+      # src/components/ui/command.tsx:24 (`no-empty-object-type`) and
+      # src/hooks/useSpotlightTarget.ts:58 (`prefer-const`) — plus 24 warnings.
+      # Per CLAUDE.md we do not fix pre-existing lint unrelated to a change, so
+      # this surfaces regressions in the log without failing the gate on day one.
+      # Clear all four and this can become blocking; clearing only the
+      # tailwind.config.ts pair would turn the required Build gate red on two
+      # untouched `src` files.
       - name: Lint (non-blocking)
         run: npm run lint
         continue-on-error: true

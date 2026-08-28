@@ -23,6 +23,7 @@ on:
   pull_request:
     branches:
       - main
+      - staging
     paths:
       - "makermodslab/**"
       - "tests/**"
@@ -31,6 +32,7 @@ on:
   push:
     branches:
       - main
+      - staging
     paths:
       - "makermodslab/**"
       - "tests/**"

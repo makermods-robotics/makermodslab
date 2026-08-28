@@ -42,7 +42,7 @@ from tqdm.auto import tqdm as _base_tqdm
 
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
 from .train import TrainingRequest
-from .utils.config import is_valid_robot_name
+from .utils.config import validate_job_name
 from .utils.errors import is_out_of_memory
 from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
 from .utils.naming import (
@@ -50,19 +50,31 @@ from .utils.naming import (
     derive_imported_title,
     imported_name_suffixes,
 )
+from .utils.system import torchcodec_loads
 
 logger = logging.getLogger(__name__)
 
 
-JobState = Literal["running", "done", "failed", "interrupted"]
+# "queued" is a LOCAL-ONLY state: accepted, validated, and waiting for the one
+# local training slot to free up. Cloud runs never enter it — each HF Job gets
+# its own container, so any number can be in flight and HF's own scheduler owns
+# the waiting (its QUEUED *stage*, which is a different thing living on HubJob).
+#
+# It is a pre-start state, so it is not terminal and not "running": the
+# watchdog skips it, models.py's ("done", "interrupted") gate skips it (a job
+# that never started has no checkpoints), and cancelling one lands it in
+# `interrupted` like any other stop.
+JobState = Literal["queued", "running", "done", "failed", "interrupted"]
 
 
 class JobTarget(BaseModel):
     """Where a job should run. `local` ⇒ LocalJobRunner. `hf_cloud` requires
-    a non-empty `flavor` from HfApi.list_jobs_hardware()."""
+    a non-empty `flavor` from HfApi.list_jobs_hardware(). `lan_node` requires
+    a non-empty `node_instance_id` naming a registered peer (nodes.py)."""
 
-    runner: Literal["local", "hf_cloud"] = "local"
+    runner: Literal["local", "hf_cloud", "lan_node"] = "local"
     flavor: str | None = None
+    node_instance_id: str | None = None
 
 
 class TrainingMetrics(BaseModel):
@@ -111,10 +123,18 @@ class JobRecord(BaseModel):
     exit_code: int | None = None
     error_message: str | None = None
     metrics: TrainingMetrics = TrainingMetrics()
-    runner: Literal["local", "hf_cloud", "imported"] = "local"
+    runner: Literal["local", "hf_cloud", "imported", "lan_node"] = "local"
     # PID of the detached subprocess (local runner only); survives uvicorn
     # --reload so a fresh registry can re-attach by tailing the log file.
     process_pid: int | None = None
+    # LAN-node identifiers (lan_node runner only). The peer that runs the job
+    # (its registry identity), the URL the job was submitted to (kept so a
+    # restart can reattach without a registry probe at boot), and the job's id
+    # in THAT peer's registry. Additive nullables: records written before
+    # these fields existed load with all three as None.
+    node_instance_id: str | None = None
+    node_url: str | None = None
+    remote_job_id: str | None = None
     # HF Jobs identifiers (hf_cloud runner only)
     hf_job_id: str | None = None
     hf_flavor: str | None = None
@@ -161,6 +181,32 @@ class JobRecord(BaseModel):
     # than a continuation, and its source must keep its own row.
     child_ids: list[str] = []
     ancestor_ids: list[str] = []
+
+    # ---- local training queue (state == "queued") ----
+    #
+    # Sort key for the queue, ascending. Assigned from a monotonic counter at
+    # enqueue and rewritten wholesale by `reorder_queue`. PERSISTED, unlike
+    # `queue_position` below, because the order is a user decision that has to
+    # survive a restart — a drag that evaporates on reload is worse than no
+    # drag at all. 0 on every record that has never been queued.
+    queue_seq: int = 0
+    # 1-based place in line, derived at list/get time over the whole registry —
+    # same deal as checkpoint_count and the lineage fields (it depends on the
+    # OTHER queued records, so a value frozen into job.json would be stale the
+    # moment anything ahead of it starts). 0 ⇒ not queued.
+    queue_position: int = 0
+    # The one piece of `start`'s deferred-work resolution that has to outlive
+    # the request, because a queued job launches later — possibly in a later
+    # PROCESS. At most one is ever set, and only for local runs (the two
+    # upload paths are cloud-only, and cloud never queues):
+    #   * `queued_hub_ref` — a fine-tune whose base checkpoint is a hub ref
+    #     still to be downloaded (`deferred_hub_ref`).
+    #   * `queued_resume_ref` — a cloud parent's checkpoint to download for a
+    #     local continuation (`deferred_resume_ref`).
+    # Cleared when the job leaves the queue, so a finished record never claims
+    # transfers it already did.
+    queued_hub_ref: str | None = None
+    queued_resume_ref: str | None = None
 
 
 class JobCheckpoint(BaseModel):
@@ -234,6 +280,12 @@ class JobRunner(Protocol):
 # `exit_code` for anyone debugging.
 STOPPED_BY_REQUEST_MESSAGE = "Stopped at your request, not by a training error."
 
+# Written to `error_message` when the loader retires a `queued` record that
+# only a local run could ever have been: see _load_from_disk. It shares the
+# `interrupted` state with a stopped run, so the state alone cannot tell the
+# user this one never trained a single step — the message has to.
+UNQUEUEABLE_RUNNER_MESSAGE = "Only local runs wait in the queue, so this one never started."
+
 # Written to `error_message` for a run that ended while we weren't watching and
 # left no evidence of how: no exit status from the wrapper (see
 # _EXIT_STATUS_FILENAME), no platform stage, and no stop of ours. The run is
@@ -279,6 +331,14 @@ def classify_terminal_state(
            chooses to report an enforced timeout) is left as `failed` rather
            than guessed at — see the module note in `JobRegistry.stop`.
          * DELETED   → `failed`, unchanged from before.
+         * INTERRUPTED → `interrupted`, regardless of `stop_requested`. Only
+           a runner RELAYING another MakerMods Lab registry's own verdict reports
+           this stage (LanNodeJobRunner, mapping the remote record's
+           `interrupted`): that registry already ran this very classification
+           next to the run, with the stop-intent evidence local to it — so a
+           stop pressed on the peer must not be re-derived here into `failed`
+           just because OUR registry recorded no intent. The remote analogue
+           of trusting the platform's stage.
     2. `returncode == 0` → `done`, whatever else is true. A clean exit means
        the trainer ran its own shutdown path to completion, which SIGTERM does
        not produce; intent never overrides it.
@@ -299,6 +359,8 @@ def classify_terminal_state(
         if stage == "COMPLETED":
             return "done"
         if stage == "CANCELED" and stop_requested:
+            return "interrupted"
+        if stage == "INTERRUPTED":
             return "interrupted"
         return "failed"
     if returncode == 0:
@@ -586,7 +648,11 @@ class LocalJobRunner:
         # Build the command via the helper that lives in train.py.
         from .train import build_training_command  # avoid import cycle at module load
 
-        cmd = build_training_command(config, output_dir, sys.executable)
+        # pyav fallback when torchcodec's dylibs don't load here (missing
+        # FFmpeg): pyav ships its own bundled FFmpeg, so training works on a
+        # bare host instead of dying at the first decoded batch.
+        video_backend = None if torchcodec_loads() else "pyav"
+        cmd = build_training_command(config, output_dir, sys.executable, video_backend=video_backend)
         logger.info("Starting job %s: %s", job_id, " ".join(cmd))
 
         # Open the persistent log sink (one JSON line per stdout line). Held
@@ -1102,7 +1168,11 @@ _INCOMPLETE_REMEDY = "Resume an earlier checkpoint, or fine-tune from its weight
 
 # Plain-language names for the runner ids, so a user-facing refusal reads like
 # the Compute control the user actually clicked rather than an internal literal.
-_RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
+_RUNNER_LABELS = {
+    "local": "Local — your machine",
+    "hf_cloud": "Hugging Face Cloud",
+    "lan_node": "Another MakerMods Lab node",
+}
 
 
 def hub_checkpoint_missing_files(api, repo_id: str, step_dir: str) -> list[str]:
@@ -1550,6 +1620,34 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
 
 
 _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
+
+# None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
+# mode: each builds a pretrained backbone (a vision-language model for
+# smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
+# object with no unconditional download anywhere in modeling_<policy>.py —
+# real weights only ever arrive via --policy.pretrained_path, which
+# lerobot_train never receives unless we pass one. (Contrast ACT, Diffusion
+# and VQ-BeT, whose vision backbone is a real torchvision checkpoint
+# downloaded unconditionally via `pretrained_backbone_weights`, and TDMPC,
+# which has no pretrained-checkpoint concept at all — "from scratch" is
+# already correct for those four.) A request that names neither a fine-tune
+# source nor an explicit policy_pretrained_path is defaulted onto the
+# matching public foundation checkpoint instead, in JobRegistry.start.
+_POLICY_FOUNDATION_BASE_REPO_ID = {
+    "smolvla": "lerobot/smolvla_base",
+    "pi0": "lerobot/pi0_base",
+    "pi05": "lerobot/pi05_base",
+    "pi0_fast": "lerobot/pi0fast-base",
+}
+
+# The subset of _POLICY_FOUNDATION_BASE_REPO_ID's values whose OWN camera keys
+# are known ahead of time (we chose them, above) rather than placeholders like
+# smolvla_base's camera1/camera2/camera3 — pi0/pi05/pi0_fast's public
+# checkpoints name their pretraining rig's real cameras (e.g.
+# observation.images.base_0_rgb), so _is_placeholder_camera_set can't
+# recognize them as a generic base. Checked by repo id instead, in
+# _check_pretrained_feature_space.
+_KNOWN_FOUNDATION_BASE_REPO_IDS = frozenset(_POLICY_FOUNDATION_BASE_REPO_ID.values())
 
 
 _HUB_CKPT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
@@ -2141,7 +2239,16 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
       traceback after the dataset download. SmolVLA/pi0/pi05 pad the
       proprioceptive dims to 32, so a 6-dof checkpoint loads CLEANLY into a
       12-dof (bimanual) run and trains garbage that is recorded as a
-      fine-tune. Refused.
+      fine-tune. Refused for ordinary checkpoints.
+
+      KNOWN FOUNDATION BASE EXEMPTION: the public PI checkpoints publish
+      32-wide state/action features because 32 is their padding capacity, not
+      the degree of freedom of one robot. LeRobot deliberately pads a normal
+      6-dof SO-101 or 12-dof bimanual dataset to that width. SmolVLA uses the
+      same max-dimension padding. The exact repo ids in
+      _KNOWN_FOUNDATION_BASE_REPO_IDS therefore warn and continue; applying
+      the ordinary checkpoint rule to them would reject the canonical base
+      fine-tune before LeRobot gets a chance to pad the data.
     * RENAMED CAMERAS — the same number of cameras under different keys (the
       bimanual ``left_``-prefix case). Refused as a SELECTION mistake, not an
       architectural one: ACT drives every camera through one shared backbone
@@ -2160,16 +2267,28 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
       all dropped and the dataset's all start from scratch. Same selection
       mistake, so the same refusal.
 
-      ONE EXEMPTION — a GENERIC BASE. When every one of the CHECKPOINT's camera
-      keys is a placeholder (``camera1``/``camera2``/… — see
-      _is_placeholder_camera_set), the checkpoint was never tied to a rig at
-      all: ``lerobot/smolvla_base`` ships exactly that, and adapting it to a
-      named 3-camera rig is the CANONICAL SmolVLA fine-tune, not a mixup.
-      That case demotes to the warn path. The gate is checkpoint-side only —
-      a user's dataset always carries real mount names, so the dataset side
-      tells us nothing — and it is all-or-nothing, so a checkpoint mixing a
-      placeholder with a real mount stays refused. Phase 2 may replace this
-      exemption with an explicit confirm once there is a UI to confirm in.
+      TWO EXEMPTIONS — a GENERIC BASE, checkpoint-side, by two different
+      tells:
+
+      1. Every one of the CHECKPOINT's camera keys is a placeholder
+         (``camera1``/``camera2``/… — see _is_placeholder_camera_set): the
+         checkpoint was never tied to a rig at all. ``lerobot/smolvla_base``
+         ships exactly that, and adapting it to a named 3-camera rig is the
+         CANONICAL SmolVLA fine-tune, not a mixup. All-or-nothing: a
+         checkpoint mixing a placeholder with a real mount stays refused.
+      2. The pretrained_path IS one of _KNOWN_FOUNDATION_BASE_REPO_IDS. This
+         covers the pi0/pi05/pi0_fast public checkpoints, whose cameras name
+         their OWN pretraining rig (``observation.images.base_0_rgb``, …) —
+         real mount names, not placeholders, so tell 1 can't catch them. We
+         chose these exact repo ids ourselves (JobRegistry.start's
+         no-starting-point default), so knowing them ahead of time is exact,
+         not a heuristic.
+
+      Either tell demotes the pair to the warn path below instead of a
+      refusal. The gate is checkpoint-side only — a user's dataset always
+      carries real mount names, so the dataset side tells us nothing. Phase 2
+      may replace this exemption with an explicit confirm once there is a UI
+      to confirm in.
     * MISSING / EXTRA CAMERA, DIFFERENT RESOLUTION — legitimate choices
       (ACT's shared backbone handles a changed sensor count; resolution only
       moves the token count and VRAM). Phase 1 logs a warning; the
@@ -2192,9 +2311,13 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
     if not dataset_features:
         return
 
+    is_known_foundation_base = pretrained_path in _KNOWN_FOUNDATION_BASE_REPO_IDS
+
     # -- state / action width ------------------------------------------------
     # The dataset's own dims are what lerobot will build the policy from, so a
-    # difference here is exactly the width the loaded weights won't fit.
+    # difference here is exactly the width the loaded weights won't fit for an
+    # ordinary checkpoint. Known foundation bases are different: LeRobot pads
+    # their dataset vectors to the policy's configured maximum width.
     for label, ckpt_feature, dataset_key in (
         ("robot state", ckpt_inputs.get("observation.state"), "observation.state"),
         ("action", ckpt_outputs.get("action"), "action"),
@@ -2202,6 +2325,19 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
         ckpt_dim = _flat_feature_dim(ckpt_feature)
         dataset_dim = _flat_feature_dim(dataset_features.get(dataset_key))
         if ckpt_dim is None or dataset_dim is None or ckpt_dim == dataset_dim:
+            continue
+        if is_known_foundation_base:
+            logger.warning(
+                "Fine-tune feature space: checkpoint %s is a known foundation "
+                "base; allowing dataset %s's %d-dim %s to bind to its %d-dim "
+                "published feature because LeRobot pads foundation policies to "
+                "their configured maxima.",
+                pretrained_path,
+                dataset_repo_id,
+                dataset_dim,
+                label,
+                ckpt_dim,
+            )
             continue
         raise ValueError(
             f"The checkpoint this run starts from ({pretrained_path}) was trained "
@@ -2226,11 +2362,13 @@ def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) 
     # to `renamed` first (its wording is accurate there), so this branch is in
     # practice the unequal-count case the rename rule alone would let through.
     disjoint = bool(ckpt_names) and bool(dataset_names) and ckpt_names.isdisjoint(dataset_names)
-    if (renamed or disjoint) and _is_placeholder_camera_set(ckpt_names):
+    is_generic_base = _is_placeholder_camera_set(ckpt_names) or is_known_foundation_base
+    if (renamed or disjoint) and is_generic_base:
         # A generic base being bound to a named rig for the first time — the
-        # canonical smolvla_base fine-tune. Recorded, not refused.
+        # canonical fine-tune for whichever foundation model this is.
+        # Recorded, not refused.
         logger.warning(
-            "Fine-tune feature space: checkpoint %s carries placeholder camera "
+            "Fine-tune feature space: checkpoint %s carries generic-base camera "
             "names (%s); binding them to dataset %s's cameras (%s).",
             pretrained_path,
             _describe_cameras(ckpt_names),
@@ -2383,7 +2521,28 @@ def _paths_are_same_dir(a: str, b: str) -> bool:
 
 
 def _job_dir(output_root: Path, job_id: str) -> Path:
-    return output_root / job_id
+    """The job's directory under `output_root` — and never anywhere else.
+
+    Refuses (loudly) any id whose joined path resolves outside the root.
+    `Path.__truediv__` DISCARDS the left side for an absolute right side, so a
+    path-shaped id ("/tmp/x_…", "../evil") silently produced a directory
+    outside the sandbox that every downstream helper (log path, job.json,
+    rmtree on delete) would then read and write. Request validation refuses
+    such ids at the boundary (TrainingRequest.policy_type's pattern); this is
+    the defense-in-depth layer for ids that arrive any other way — a
+    hand-edited job.json, a future caller — because the root is where delete's
+    rmtree is aimed.
+
+    Returns the UNRESOLVED join (callers persist/compare these strings), the
+    containment check runs on the resolved form so symlink and `..` spellings
+    can't dodge it.
+    """
+    path = output_root / job_id
+    resolved = path.resolve()
+    root = Path(output_root).resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ValueError(f"job id {job_id!r} resolves outside the training-output root {str(output_root)!r}")
+    return path
 
 
 def _job_log_path(output_root: Path, job_id: str) -> Path:
@@ -2546,6 +2705,43 @@ def ancestor_ids_of(records: Mapping[str, JobRecord], job_id: str) -> list[str]:
     return out
 
 
+_NAMED_IDS_LIMIT = 10
+# Longest id worth echoing whole. Generated ids run ~150 chars at the extreme
+# (policy type + a full repo-id slug + timestamp); anything past this is not a
+# job id, it is payload, and an error body must not read it back.
+_NAMED_ID_MAX_CHARS = 200
+
+
+def _name_some(ids: builtins.list[str]) -> str:
+    """Render ids for an error message, naming at most `_NAMED_IDS_LIMIT`,
+    each truncated to `_NAMED_ID_MAX_CHARS`.
+
+    An error body exists to tell a human which id to fix; echoing every one of
+    a caller-sized list instead produced a 360 KB response that helps nobody and
+    is the caller's own input read back. Capping the COUNT alone still let ten
+    multi-KB strings build a megabyte 400, so each id is bounded too (the
+    reorder endpoint refuses oversized ids at validation; this is the backstop
+    for every other caller). The count still gives them the scale of what they
+    sent.
+    """
+    shown = ", ".join(
+        repr(i if len(i) <= _NAMED_ID_MAX_CHARS else i[:_NAMED_ID_MAX_CHARS] + "…")
+        for i in ids[:_NAMED_IDS_LIMIT]
+    )
+    extra = len(ids) - _NAMED_IDS_LIMIT
+    return f"{shown} and {extra} more" if extra > 0 else shown
+
+
+def _queue_order(record: JobRecord) -> tuple[int, float]:
+    """Sort key for the queue: enqueue order, `started_at` breaking ties.
+
+    Defined once and used by everything that puts queued runs in order, so the
+    positions the UI shows cannot drift from the order `_drain_queue` promotes
+    in — two copies of this key would be two orders the moment either changed.
+    """
+    return (record.queue_seq, record.started_at)
+
+
 def _owner_holds_step(owner: JobRecord, step: int) -> bool:
     """Whether `owner` has a checkpoint at `step`, for the rewind guard.
 
@@ -2561,16 +2757,73 @@ def _owner_holds_step(owner: JobRecord, step: int) -> bool:
     return any(c.step == step for c in _list_local_checkpoints(owner.output_dir))
 
 
-class JobAlreadyRunningError(Exception):
-    """Raised when start() is called while another local job is running."""
-
-
 class JobNotFoundError(Exception):
     """Raised when a lookup hits an unknown id."""
 
 
+class QueueChangedError(Exception):
+    """A reorder named a set of jobs that is no longer the queue.
+
+    Carries the CURRENT queue for logging and for callers that want it. NOT
+    shipped as a response header: it was, and nothing ever read it — the
+    frontend refetches on 409, which is simpler and always right — while a deep
+    queue made the header big enough (~14 KB at 300 jobs) to trip the 8 KB
+    header cap on any reverse proxy in front of a `--lan` deployment, turning a
+    409 into a 502.
+    """
+
+    def __init__(self, current_ids: builtins.list[str]) -> None:
+        self.current_ids = current_ids
+        super().__init__("The queue changed while you were reordering it.")
+
+
 class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
+
+
+class JobSourceOfQueuedRunError(Exception):
+    """Raised when delete() would take the checkpoint a QUEUED run will read.
+
+    A fine-tune resolves its base checkpoint to an ABSOLUTE PATH at submit time
+    and carries only that string; nothing re-resolves it at launch. So deleting
+    the source run wipes the directory out from under a run that has not started
+    — and, because `build_child_index` deliberately excludes fine-tune edges (a
+    fine-tune is a new model, not a continuation), `JobHasChildrenError` does
+    not see it.
+
+    Before the queue existed the exposure was the seconds between the request
+    returning and lerobot loading the weights. Now it is however long the queue
+    is, which turns a near-impossible race into an ordinary sequence of clicks:
+    fine-tune from A, then tidy up by deleting A, then wait. The run would fail
+    hours later with a raw path-not-found traceback naming a directory the user
+    deliberately removed and has no reason to connect to it.
+    """
+
+    def __init__(self, job_id: str, queued_ids: builtins.list[str]) -> None:
+        self.job_id = job_id
+        self.queued_ids = queued_ids
+        super().__init__(f"{job_id} holds the checkpoint {len(queued_ids)} queued run(s) will train from.")
+
+
+class JobRemovalFailedError(Exception):
+    """Raised when a job's `job.json` could not be removed.
+
+    The record is LEFT EXACTLY AS IT WAS when this fires — in memory, on disk,
+    in whatever state the caller found it. Removal is durable or it does not
+    happen: a record dropped from memory while its `job.json` survives is read
+    straight back by the next restart, so the run REAPPEARS. For a cancelled
+    queued run that is the sharp case — it comes back in the queue and trains,
+    the one outcome a cancel exists to prevent — but a deleted run returning to
+    the history is the same failure with a smaller blast radius.
+
+    Reporting the failure and keeping the record lets the user retry against a
+    state that still matches what they see.
+    """
+
+    def __init__(self, job_id: str, reason: OSError) -> None:
+        self.job_id = job_id
+        self.reason = reason
+        super().__init__(f"Could not remove {job_id}'s record from disk: {reason}")
 
 
 class JobHasChildrenError(Exception):
@@ -2591,6 +2844,29 @@ class JobHasChildrenError(Exception):
         super().__init__(job_id)
         self.job_id = job_id
         self.child_ids = child_ids
+
+
+class JobStateChangedError(Exception):
+    """Raised when stop() is given an `expect_state` the record no longer has.
+
+    "Cancel this queued run" and "kill this training run" are the same request
+    on the wire, and the client decided which one it was rendering some time
+    ago. Between that decision and the click, the watchdog can promote the run:
+    a blocking `window.confirm` holds the JS thread but not the server, and a
+    queue list can be left stale indefinitely by a single failed fetch. Without
+    a precondition the click SIGTERMs a live training run and the UI cheerfully
+    reports "Removed from the queue", because it picks its wording from the same
+    stale record.
+
+    Carries what the caller expected and what is actually there; the HTTP layer
+    turns them into the message.
+    """
+
+    def __init__(self, job_id: str, expected: str, actual: str) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+        self.expected = expected
+        self.actual = actual
 
 
 class JobAlreadyContinuedError(Exception):
@@ -2644,8 +2920,8 @@ class JobRegistry:
 
     On instantiation, scans outputs/train/ for existing job.json files. For
     each record marked 'running': local jobs reattach if the pid is alive
-    (else 'interrupted'); hf_cloud jobs always reattach and let the tail loop
-    drive finalisation.
+    (else 'interrupted'); hf_cloud and lan_node jobs always reattach and let
+    their polling drive finalisation.
     """
 
     def __init__(self, output_root: Path) -> None:
@@ -2668,6 +2944,12 @@ class JobRegistry:
         # and only ever written forward; guarded by _lock, like _records.
         self._next_job_number: int = 1
 
+        # Next value `_take_queue_seq` will hand out. Unlike the job number
+        # this needs no counter file: queue keys only have to order the jobs
+        # CURRENTLY queued, so restarting from one above the highest seq on
+        # disk is enough, and a registry with an empty queue starts over at 1.
+        self._next_queue_seq: int = 1
+
         # job_id -> the thread materializing that job's base checkpoint before
         # its trainer can start (see _materialize_then_start). Entries are left
         # behind once the thread finishes — a finished Thread object is inert
@@ -2689,6 +2971,11 @@ class JobRegistry:
         # running job (id, state, metrics, wandb url, checkpoint count) so
         # the dashboard keeps the progress bar live without refetching /jobs.
         self._on_progress: Callable[[builtins.list[dict]], None] | None = None
+
+        # Latches once the first time `_robot_busy` cannot answer, so a
+        # permanently broken robot module logs a single traceback instead of
+        # one per watchdog tick (~86k/day).
+        self._robot_check_failed = False
 
         self._migrate_legacy_cwd_jobs()
         self._load_from_disk()
@@ -2794,24 +3081,49 @@ class JobRegistry:
 
     # -- public API --
 
-    def _assert_no_running_local(self, target: JobTarget) -> None:
-        """Raise JobAlreadyRunningError if a local training is already running.
+    def _local_slot_busy(self) -> str | None:
+        """The id of the local run currently holding the single local slot, or
+        None if it is free.
 
         Local trainings are bounded by this machine's GPU/USB resources, so at
         most one runs at a time. Cloud trainings each get their own remote
-        container, so any number can be in flight in parallel.
+        container, so any number can be in flight in parallel — this says
+        nothing about them.
+
+        A busy slot refuses nothing: the new run is accepted as `queued` and the
+        watchdog starts it once the slot frees. So this reports, and the callers
+        decide what that means.
 
         Takes NO lock, so it is callable both inside and outside the registry's
         critical section (self._lock is a plain Lock — re-entering it would
         deadlock). Iterates a snapshot, so a concurrent mutation can't break the
-        walk. `start` calls it twice on purpose: once early to fail fast, and
-        once under the lock that inserts the record — the latter is the one that
-        actually enforces the invariant."""
-        if target.runner != "local":
-            return
+        walk."""
         for r in list(self._records.values()):
             if r.state == "running" and r.runner == "local":
-                raise JobAlreadyRunningError(r.id)
+                return r.id
+        return None
+
+    def _queued_records(self) -> builtins.list[JobRecord]:
+        """Every queued job, in the order they will run. Caller holds the lock
+        (or accepts a snapshot's staleness)."""
+        return sorted((r for r in self._records.values() if r.state == "queued"), key=_queue_order)
+
+    @staticmethod
+    def _queue_positions(snapshot: Mapping[str, JobRecord]) -> dict[str, int]:
+        """Map job id to its 1-based queue position.
+
+        Built once per read and shared across the records being annotated:
+        sorting inside the per-record stamp instead made a queue read O(N² log N)
+        on an endpoint the UI polls.
+        """
+        ordered = sorted((r for r in snapshot.values() if r.state == "queued"), key=_queue_order)
+        return {r.id: i for i, r in enumerate(ordered, start=1)}
+
+    @staticmethod
+    def _annotate_queue(record: JobRecord, positions: Mapping[str, int]) -> None:
+        """Stamp the derived 1-based `queue_position`, in place. 0 for anything
+        not queued — which `positions` expresses by simply not holding it."""
+        record.queue_position = positions.get(record.id, 0)
 
     def _annotate_lineage(
         self,
@@ -2829,16 +3141,49 @@ class JobRegistry:
         record.child_ids = list(children.get(record.id, ()))
         record.ancestor_ids = ancestor_ids_of(snapshot, record.id)
 
+    @staticmethod
+    def _list_order(record: JobRecord) -> tuple[int, float, float]:
+        """Sort key for `list()`: active work first, then history newest-first.
+
+        `started_at` alone was the key, and it silently dropped the RUNNING run
+        off the page: a queued record carries its SUBMIT time in `started_at`
+        (restamped only at promotion), so every run submitted after the current
+        one started sorted above it — past `limit` queued submits, the page held
+        nothing but the queue and the one actually-running job vanished from
+        GET /jobs (and from the peer-workload panel, which reads this listing).
+
+        Three bands, each internally ordered: running (newest first — cloud
+        runs make several possible), then the queue in the order it will run
+        (`_queue_order`, the same key `_drain_queue` promotes by), then
+        everything terminal, newest first.
+        """
+        if record.state == "running":
+            return (0, -record.started_at, 0.0)
+        if record.state == "queued":
+            seq, started = _queue_order(record)
+            return (1, float(seq), started)
+        return (2, -record.started_at, 0.0)
+
     def list(self, limit: int = 10) -> builtins.list[JobRecord]:
         with self._lock:
             snapshot = dict(self._records)
-        records = sorted(snapshot.values(), key=lambda r: r.started_at, reverse=True)[:limit]
+        # ANNOTATE COPIES, never the shared records. These derived stamps used
+        # to land in place on the live objects, outside the lock: two
+        # concurrent reads scribbled over each other mid-serialization, and a
+        # racing `_persist` could freeze a derived value into job.json — the
+        # self-contradicting file reorder_queue/rename go out of their way to
+        # zero fields against. model_copy is shallow (config/metrics stay
+        # shared, they are not annotated) and the page is limit-bounded, so
+        # this costs a handful of small copies per read.
+        records = [r.model_copy() for r in sorted(snapshot.values(), key=self._list_order)[:limit]]
         # Indexed over the whole snapshot, then applied to the page: a run's
         # leaf-ness is a fact about the registry, not about what fits on a page.
         children = build_child_index(snapshot.values())
+        positions = self._queue_positions(snapshot)
         for r in records:
             r.checkpoint_count = self._count_checkpoints(r)
             self._annotate_lineage(r, snapshot, children)
+            self._annotate_queue(r, positions)
         return records
 
     def get(self, job_id: str) -> JobRecord:
@@ -2847,18 +3192,63 @@ class JobRegistry:
         record = snapshot.get(job_id)
         if record is None:
             raise JobNotFoundError(job_id)
+        record = record.model_copy()  # see list(): derived stamps go on a copy
         record.checkpoint_count = self._count_checkpoints(record)
         self._annotate_lineage(record, snapshot, build_child_index(snapshot.values()))
+        self._annotate_queue(record, self._queue_positions(snapshot))
         return record
 
-    def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
-        from .runners.hf_cloud import HfCloudJobRunner  # lazy import to avoid circular import
+    def local_dataset_in_use(self, repo_id: str) -> bool:
+        """True when a RUNNING or QUEUED local run trains on `repo_id`.
 
+        The exact answer `datasets._dataset_in_use` needs before letting a
+        dataset be renamed or deleted. It used to derive this from
+        `list(limit=200)` — a PAGE — so an active run past the 200th record
+        was invisible and its dataset could be pulled out from under it. One
+        snapshot under the lock, then a plain scan; queued counts because a
+        queued run was validated against this dataset at submit and nothing
+        re-downloads at launch."""
+        with self._lock:
+            records = list(self._records.values())
+        return any(
+            r.state in ("running", "queued") and r.runner == "local" and r.config.dataset_repo_id == repo_id
+            for r in records
+        )
+
+    def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
         target = target or JobTarget()
+        # The submit half of the shared display-name rule (rename is the other
+        # half): a blank/absent job_name still means "derive a name below", but
+        # a non-blank one must pass the same character and length checks a
+        # rename would — the two paths write the same fields, and this one
+        # accepted anything. ValueError → this endpoint's ordinary 400.
+        if config.job_name is not None and config.job_name.strip():
+            config.job_name = validate_job_name(config.job_name)
         if target.runner == "hf_cloud" and not target.flavor:
             raise ValueError("flavor is required when runner is hf_cloud")
+        if target.runner == "lan_node":
+            if not target.node_instance_id:
+                raise ValueError("node_instance_id is required when runner is lan_node")
+            # Phase-1 scope: a lan_node run is always a FRESH run on the peer.
+            # Continuations/fine-tunes from an existing run would need the F7
+            # byte-movement machinery taught a third destination; refused with
+            # the remedy named rather than silently mis-launched (MT42's rule).
+            if config.resume or config.finetune_from_job_id:
+                raise ValueError(
+                    f"Continuing or fine-tuning an existing run on "
+                    f"{_RUNNER_LABELS['lan_node'].lower()} isn't supported yet. "
+                    "Run the continuation locally or on Hugging Face Cloud instead."
+                )
+            # Verify the peer BEFORE any record exists, so an unknown or dead
+            # node is a clean coded refusal (node.not_found / node.unreachable)
+            # with no failed record left behind — the same fail-fast placement
+            # as the cloud dataset preflight below. Read via the module
+            # attribute so tests can swap the singleton.
+            from . import nodes
 
-        # Cloud preflight (belt-and-braces): the HF Jobs pod resolves the
+            nodes.node_registry.resolve(target.node_instance_id)
+
+        # Remote preflight (belt-and-braces): both remote runners resolve the
         # dataset by repo_id from the Hub and can't see this machine's local
         # cache, so a local-only dataset would fail the remote job. Reject up
         # front with a clear error instead of submitting a doomed job. Only a
@@ -2867,7 +3257,7 @@ class JobRegistry:
         # fallback so a network blip doesn't wrongly refuse a Hub dataset. The
         # browser flow uploads-then-trains before ever reaching here, so this
         # path is primarily for non-UI callers.
-        if target.runner == "hf_cloud":
+        if target.runner in ("hf_cloud", "lan_node"):
             from .datasets import get_hub_status
 
             if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
@@ -2927,11 +3317,12 @@ class JobRegistry:
                 "or drop finetune_from_step to train from scratch."
             )
 
-        # Fail fast on the local-run mutex before any of the (possibly slow)
-        # pretrained-path work below. Re-checked under the lock at record
-        # creation — THAT is the authoritative check; this one only spares a
-        # doomed request a needless download.
-        self._assert_no_running_local(target)
+        # Deliberately no local-slot pre-flight: a busy slot does not doom a
+        # submit any more, it queues it. Every VALIDATION below still runs
+        # synchronously, so a bad request is refused at submit time rather than
+        # surfacing minutes later when the queue reaches it — only the launch is
+        # deferred. The authoritative slot check is under the lock at record
+        # creation.
 
         # ------------------------------------------------------------------
         # Pretrained-path resolution runs OUTSIDE the registry lock.
@@ -2971,6 +3362,18 @@ class JobRegistry:
             config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                 source, config.finetune_from_step
             )
+        elif (
+            config.policy_type in _POLICY_FOUNDATION_BASE_REPO_ID
+            and not config.policy_pretrained_path
+            and not config.resume
+        ):
+            # No starting point selected: default to the matching public
+            # foundation checkpoint rather than random weights (see
+            # _POLICY_FOUNDATION_BASE_REPO_ID). Runs the same pretrained-path
+            # checks below as any other fine-tune — the camera-name exemption
+            # in _check_pretrained_feature_space exists for exactly these
+            # checkpoints.
+            config.policy_pretrained_path = _POLICY_FOUNDATION_BASE_REPO_ID[config.policy_type]
 
         # Whatever put a pretrained_path on this request — the fine-tune
         # resolution above, or a caller setting the public field directly —
@@ -3037,12 +3440,29 @@ class JobRegistry:
             deferred_finetune_upload, hub_ref = self._resolve_upload_finetune(finetune_source, config)
             config.policy_pretrained_path = hub_ref
 
-        with self._lock:
-            # Authoritative local-run mutex: re-checked here, under the lock
-            # that also inserts the record, so two concurrent starts can't both
-            # pass. (The pre-flight copy above is only a fail-fast.)
-            self._assert_no_running_local(target)
+        # Asked BEFORE the lock, and for the same reason `_drain_queue` phase 1
+        # asks before its own: `_robot_busy` reads seven feature modules whose
+        # `training_is_active()` calls take THIS lock from inside their own
+        # `_state_lock`. Reading them while holding it closes the cycle and
+        # deadlocks. Never move this inside.
+        #
+        # Why `start` asks at all, when it historically did not: the mutex was
+        # one-way. All seven features now refuse while a training run is live, but
+        # nothing stopped the reverse — a submit made during a recording or a
+        # rollout still launched a trainer straight on top of it, and inference
+        # is the pairing this file calls the worst one (both want several GB of
+        # VRAM; hours of work end as "exited with code 1"). The old rationale was
+        # that a direct submit meant the user was present and knew what else they
+        # had running, which is exactly the reasoning the seven features stopped
+        # accepting from each other.
+        #
+        # It QUEUES rather than refuses, which is what makes this safe on a
+        # branch whose premise is that a busy machine queues: the run keeps its
+        # place and `_drain_queue` starts it when the robot is idle — the same
+        # thing that already happens when the slot itself is busy.
+        robot_busy = self._robot_busy() if (target.runner == "local") else None
 
+        with self._lock:
             # Resume: turn the selected source run + step into the config_path
             # lerobot needs. Do this under the lock (source lookup) and before
             # creating the record so a bad selection fails cleanly with no
@@ -3246,18 +3666,36 @@ class JobRegistry:
                 if (config.job_name and config.job_name.strip())
                 else f"{config.policy_type.upper()} · {config.dataset_repo_id}"
             )
+            # The one local training slot decides whether this run starts now
+            # or waits. Checked HERE, under the lock that also inserts the
+            # record, so two concurrent starts can't both read a free slot and
+            # both launch. Cloud runs never queue — see the JobState comment.
+            #
+            # A NON-EMPTY QUEUE COUNTS AS BUSY, not just an occupied slot. The
+            # slot is genuinely free for a moment on every handover — `_tick`
+            # finalises the ending run and only reaches `_drain_queue` at the
+            # end of the same tick, and a slot released by a prepare thread
+            # waits up to a full second for the next tick. Asking only "is
+            # something running" let a run submitted inside that window start
+            # immediately and jump every run already waiting, which is the one
+            # promise a queue exists to make.
+            queued = target.runner == "local" and (
+                self._local_slot_busy() is not None or bool(self._queued_records()) or robot_busy is not None
+            )
+
             record = JobRecord(
                 id=job_id,
                 # Allocated here, inside the same lock that inserts the record,
                 # so two concurrent starts can't be handed the same number.
                 job_number=self._take_job_number(),
                 name=name,
-                state="running",
+                state="queued" if queued else "running",
                 config=config,
                 output_dir=lerobot_output_dir,
                 started_at=time.time(),
                 runner=target.runner,
                 hf_flavor=target.flavor,
+                node_instance_id=target.node_instance_id if target.runner == "lan_node" else None,
                 # Built AFTER the resume block above, which is what resolves a
                 # "latest checkpoint" request into a concrete step — see
                 # _initial_metrics / _resume_start_step.
@@ -3266,16 +3704,115 @@ class JobRegistry:
 
             job_dir.mkdir(parents=True, exist_ok=True)
             self._records[job_id] = record
-            self._persist(record, force=True)
 
-            log_path = _job_log_path(self._output_root, job_id)
+            if queued:
+                # Everything that could refuse this run has already run — only
+                # the launch is deferred. Park the resolved transfer refs on the
+                # record (they are the sole part of the resolution above that a
+                # later process can't recompute) and let the watchdog's
+                # _drain_queue start it when the slot frees.
+                record.queue_seq = self._take_queue_seq()
+                record.queued_hub_ref = deferred_hub_ref
+                record.queued_resume_ref = deferred_resume_ref
+                try:
+                    self._persist(record, force=True)
+                except Exception:
+                    # INSERT AND PERSIST ARE ATOMIC, in delete()'s sense: a run
+                    # exists once it is durable, or not at all. The insert above
+                    # came first (same lock, so no reader saw the gap), and a
+                    # persist that throws (ENOSPC, EIO) surfaces as this
+                    # endpoint's 500 — but the in-memory record used to stay
+                    # behind: a QUEUED ghost the caller was told failed, which
+                    # the watchdog then promoted and TRAINED. Roll the insert
+                    # back and let the error propagate; the claimed job dir is
+                    # left behind but holds no job.json, so the loader ignores
+                    # it (rmtree is I/O with no business inside the lock).
+                    self._forget_locked(job_id)
+                    raise
+                # Stamp the derived position before handing the record back.
+                # This response is the ONLY thing the submitting client has
+                # until a refetch lands, and an un-annotated record reports
+                # position 0 — so the UI could not tell the user where in line
+                # the run it just accepted actually is. Annotated AFTER the
+                # persist, so the derived value is not what reaches disk.
+                self._annotate_queue(record, self._queue_positions(self._records))
+            else:
+                try:
+                    self._persist(record, force=True)
+                except Exception:
+                    # Same rollback as the queued branch, sharper failure mode:
+                    # nothing has launched yet, and a `running` record with no
+                    # runner pins the single local slot for the LIFE of the
+                    # process (stop can't see it, delete refuses it, every
+                    # drain early-returns at the slot check).
+                    self._forget_locked(job_id)
+                    raise
+                self._launch_locked(
+                    record,
+                    target,
+                    deferred_hub_ref=deferred_hub_ref,
+                    deferred_resume_ref=deferred_resume_ref,
+                    deferred_resume_upload=deferred_resume_upload,
+                    deferred_finetune_upload=deferred_finetune_upload,
+                )
+        # Both paths converge here, OUTSIDE the lock. Every _notify_change in
+        # this file is deferred until the critical section is over (see the
+        # `notify` flag in _start_after_prepare): a listener that reads the
+        # registry would deadlock on a plain Lock.
+        self._notify_change()
+        return record
 
-            deferred = (
-                deferred_hub_ref is not None
-                or deferred_resume_ref is not None
-                or deferred_resume_upload is not None
-                or deferred_finetune_upload is not None
-            )
+    def _launch_locked(
+        self,
+        record: JobRecord,
+        target: JobTarget,
+        *,
+        deferred_hub_ref: str | None = None,
+        deferred_resume_ref: str | None = None,
+        deferred_resume_upload: tuple[Path, str, str] | None = None,
+        deferred_finetune_upload: tuple[Path, str, str] | None = None,
+    ) -> None:
+        """Put a `running` record on a runner. CALLER HOLDS `self._lock`.
+
+        Split out of `start` so the queue can reach it: a dequeued job takes
+        exactly this path, minutes (or a restart) after the validation and
+        path-resolution that `start` did once. Everything it needs is either on
+        the record or in the deferred-* arguments, which is why the two
+        local-relevant refs are persisted on the record itself.
+
+        Does NOT fire `_notify_change` — both callers do, after their own
+        bookkeeping.
+        """
+        from .runners.hf_cloud import HfCloudJobRunner  # lazy: circular import
+
+        job_id = record.id
+        config = record.config
+        lerobot_output_dir = record.output_dir
+        log_path = _job_log_path(self._output_root, job_id)
+
+        # The runner whose process is actually live, once one is. See the
+        # method-wide handler below.
+        started: JobRunner | None = None
+        deferred = (
+            deferred_hub_ref is not None
+            or deferred_resume_ref is not None
+            or deferred_resume_upload is not None
+            or deferred_finetune_upload is not None
+        )
+        # EVERY failure below has to release the slot. The caller (`_drain_queue`,
+        # and `start`'s direct path) has ALREADY flipped this record to "running"
+        # so the slot closes behind the promotion — so a throw that leaves it
+        # `running` with no usable runner pins the slot forever: `_tick` skips a
+        # record with no runner, `_local_slot_busy` keeps naming it, `_drain_queue`
+        # early-returns on every later tick, and the user can neither stop it (not
+        # running, from `stop`'s point of view) nor delete it (it IS running). The
+        # queue would be dead for the life of the process with no way out of the UI.
+        #
+        # So the try must cover the WHOLE launch: the deferred branch's
+        # PreparingJobRunner registration and `thread.start()`, and the `_persist`
+        # + `_runners` bookkeeping after a SUCCESSFUL start — not `runner.start()`
+        # alone.
+        try:
             if deferred:
                 # Something still has to move (GBs, minutes). Hand the caller its
                 # job id NOW — the record exists, is "running", and has a log
@@ -3337,6 +3874,10 @@ class JobRegistry:
             else:
                 if target.runner == "local":
                     runner = LocalJobRunner(record.metrics, log_file_path=log_path)
+                elif target.runner == "lan_node":
+                    from .runners.lan_node import LanNodeJobRunner  # lazy, like HfCloudJobRunner
+
+                    runner = LanNodeJobRunner(record.metrics, log_path, target.node_instance_id)
                 else:
                     runner = HfCloudJobRunner(
                         record.metrics,
@@ -3345,19 +3886,39 @@ class JobRegistry:
                         _resume_total_steps(config),
                     )
 
-                try:
-                    runner.start(job_id, config, lerobot_output_dir)
-                except Exception as exc:
-                    logger.exception("Failed to start runner for job %s", job_id)
-                    record.state = "failed"
-                    record.ended_at = time.time()
-                    record.error_message = f"Failed to start runner: {exc}"
-                    self._persist(record, force=True)
-                    raise
+                # No local handler: the method-wide one below covers this and
+                # every other failure on both branches, and additionally drops
+                # the half-registered runner that a bare re-raise left behind.
+                #
+                # Recorded BEFORE the call, not after. Neither runner's `start`
+                # is atomic: `LocalJobRunner.start` spawns the subprocess and
+                # only THEN starts its stdout thread, and `HfCloudJobRunner.start`
+                # sets `_hf_job_id` and only then starts two worker threads. A
+                # throw from the second half of either (a thread-table
+                # exhaustion is the realistic one) would otherwise reach the
+                # handler with `started` still None — skipping `stop()`,
+                # releasing the slot, and letting the next drain put a SECOND
+                # trainer on the same GPU. `process_pid`/`hf_job_id` are
+                # assigned further down, so that orphan would be unreachable
+                # from the UI and would survive a restart.
+                #
+                # Binding first costs nothing when the runner never started:
+                # `LocalJobRunner.stop` returns immediately while `_process is
+                # None`, as does `HfCloudJobRunner.stop` while `_hf_job_id is
+                # None`.
+                started = runner
+                runner.start(job_id, config, lerobot_output_dir)
+                # From here the PROCESS EXISTS. Anything that throws below —
+                # `pid()`, the cloud id reads, `_persist` — must stop it again,
+                # or the handler's release of the slot hands the machine to a
+                # second trainer while this one is still on the GPU.
 
                 # Capture runner-specific identifiers.
                 if target.runner == "local":
                     record.process_pid = runner.pid()
+                elif target.runner == "lan_node":
+                    record.node_url = runner.node_url()
+                    record.remote_job_id = runner.remote_job_id()
                 else:
                     record.hf_job_id = runner.hf_job_id()
                     record.hf_job_url = runner.hf_job_url()
@@ -3367,8 +3928,40 @@ class JobRegistry:
 
                 self._persist(record, force=True)
                 self._runners[job_id] = runner
-        self._notify_change()
-        return record
+        except Exception as exc:
+            logger.exception("Failed to launch job %s", job_id)
+            # Stop anything that actually started before releasing the slot.
+            # Marking the record `failed` is what lets `_local_slot_busy` hand
+            # the machine to the next run, so a trainer still alive here would
+            # be a SECOND local training on the same GPU and arms — the one
+            # invariant this whole feature exists to hold — and an orphan the
+            # UI could never reach (`stop` refuses a non-running record, while
+            # `delete` would rmtree the output dir under the live process).
+            # For a cloud run the same throw would otherwise leave an HF Job
+            # billing with no `hf_job_id` persisted to cancel it by.
+            if started is not None:
+                with contextlib.suppress(Exception):
+                    started.stop()
+            record.state = "failed"
+            record.ended_at = time.time()
+            record.error_message = f"Failed to start runner: {exc}"
+            # Release the queue bookkeeping: this record is terminal, so it must
+            # not keep a sort key or claim transfers it never performed.
+            # `queue_seq` in particular doubles as `_drain_queue`'s
+            # promoted-but-not-yet-launched marker, and a terminal record has no
+            # business carrying it.
+            record.queue_seq = 0
+            record.queue_position = 0
+            record.queued_hub_ref = None
+            record.queued_resume_ref = None
+            # Drop the half-registered launch. A PreparingJobRunner left here
+            # reports is_running() forever, which is precisely what wedges the
+            # slot; a real runner whose bookkeeping never completed is already
+            # orphaned and must not be mistaken for a live job.
+            self._runners.pop(job_id, None)
+            self._prepare_threads.pop(job_id, None)
+            self._persist(record, force=True)
+            raise
 
     def _materialize_then_start(
         self,
@@ -3682,16 +4275,47 @@ class JobRegistry:
                     self._finalize_prepare_locked(job_id, "failed", f"Failed to start runner: {exc}")
                     notify = True
                     return
-                if target.runner == "local":
-                    record.process_pid = runner.pid()
-                else:
-                    record.hf_job_id = runner.hf_job_id()
-                    record.hf_job_url = runner.hf_job_url()
-                    # config was mutated by HfCloudJobRunner.start to set
-                    # policy_repo_id; mirror it onto the record for the UI.
-                    record.hf_repo_id = record.config.policy_repo_id
-                self._runners[job_id] = runner
-                self._persist(record, force=True)
+                # Inside a try for the same reason `_launch_locked` covers its
+                # WHOLE launch rather than `runner.start()` alone: the trainer is
+                # already live and detached here, so a throw between its birth
+                # and its pid reaching disk leaves the durable record saying
+                # `running`, `queue_seq > 0`, `process_pid: None` — precisely
+                # what `_load_from_disk` reads as "promoted but never launched".
+                # It would demote the run and hand the queue a SECOND trainer for
+                # the same output dir while the first is still on the GPU. This
+                # is the one path where a live trainer's pid can fail to reach
+                # disk, so the handler stops what it started rather than trusting
+                # a write that has already failed once.
+                try:
+                    if target.runner == "local":
+                        record.process_pid = runner.pid()
+                    else:
+                        record.hf_job_id = runner.hf_job_id()
+                        record.hf_job_url = runner.hf_job_url()
+                        # config was mutated by HfCloudJobRunner.start to set
+                        # policy_repo_id; mirror it onto the record for the UI.
+                        record.hf_repo_id = record.config.policy_repo_id
+                    self._runners[job_id] = runner
+                    # A real trainer exists now, so the promoted-but-never-launched
+                    # marker can go — and with it the transfer refs, which are the
+                    # other half of that marker: `_drain_queue` leaves both set
+                    # precisely so a crash during the transfer above returns the
+                    # run to the queue WITH what it still needs to download,
+                    # instead of filing it as a run that trained. A no-op for a
+                    # direct submit, where they are already 0/None.
+                    record.queue_seq = 0
+                    record.queued_hub_ref = None
+                    record.queued_resume_ref = None
+                    self._persist(record, force=True)
+                except Exception as exc:
+                    logger.exception("Failed to record the started runner for job %s", job_id)
+                    try:
+                        runner.stop()
+                    except Exception:
+                        logger.exception("Could not stop the half-recorded runner for job %s", job_id)
+                    self._finalize_prepare_locked(job_id, "failed", f"Failed to start runner: {exc}")
+                    notify = True
+                    return
                 notify = True
         finally:
             if notify:
@@ -4004,9 +4628,14 @@ class JobRegistry:
 
         # Best-effort policy type for the display name; inference reads the
         # real config from the checkpoint, so a wrong guess here is harmless.
+        # Slug-normalized because TrainingRequest.policy_type is constrained to
+        # `^[a-z0-9_]+$` (it is the first segment of generated job ids): an
+        # external checkpoint whose config carries an off-vocabulary "type"
+        # ("PI0-Fast") must degrade to a safe label, not fail the import.
         policy_type = "model"
         with contextlib.suppress(Exception):
-            policy_type = str(_read_checkpoint_config(ckpts[-1]).get("type") or "model")
+            raw_type = str(_read_checkpoint_config(ckpts[-1]).get("type") or "")
+            policy_type = re.sub(r"[^a-z0-9_]+", "_", raw_type.lower()).strip("_") or "model"
 
         with self._lock:
             job_id = self._unique_job_id(policy_type, "imported")
@@ -4046,30 +4675,47 @@ class JobRegistry:
         back to `name` when unset.
 
         Aliases are display-only, so uniqueness is NOT enforced (unlike
-        calibration/robot renames, where the name is a file key). The same
-        is_valid-style guard is applied for consistency (rejects path-ish
-        characters); trimmed; empty ⇒ ValueError (→ HTTP 400)."""
-        name = new_name.strip()
-        if not name:
-            raise ValueError("Display name cannot be empty.")
-        if not is_valid_robot_name(name):
-            raise ValueError("Invalid display name.")
+        calibration/robot renames, where the name is a file key). Validation
+        (trim, non-empty, path-ish characters, length cap) is the SHARED
+        `validate_job_name` — the same rule `start` applies to a submitted
+        `job_name`, so what one path refuses the other can't store."""
+        name = validate_job_name(new_name)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
                 raise JobNotFoundError(job_id)
             record.display_name = name
+            # Zeroed before the write, then restamped after it, exactly as
+            # `start` and `reorder_queue` do. `queue_position` is DERIVED and is
+            # stamped onto the live record by every read, so renaming a job that
+            # a `GET /jobs/queue` had just annotated wrote that read's position
+            # into job.json — the self-contradicting file `reorder_queue` calls
+            # "a trap for the next reader", reintroduced through a path that fix
+            # did not consider. Restamped afterwards because this record is the
+            # rename response, and an un-annotated one reports position 0.
+            record.queue_position = 0
             self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
         self._notify_change()
         return record
 
-    def stop(self, job_id: str) -> JobRecord:
+    def stop(self, job_id: str, expect_state: JobState | None = None) -> JobRecord:
         """Ask a running job to stop, and record that we asked.
 
+        `expect_state` is an optimistic-concurrency precondition, and it exists
+        because "cancel this queued run" and "kill this training run" are the
+        same request on the wire. A client that renders a Cancel button decided
+        the job was `queued` at render time; by the time the user clicks — after
+        a blocking `window.confirm`, or against a queue list left stale by one
+        failed fetch — the watchdog may have promoted it. Without the
+        precondition that click SIGTERMs a live training run and the UI reports
+        "Removed from the queue", because the caller picks its wording from the
+        same stale record. Passing what the caller believed makes that a 409
+        instead of hours of lost work.
+
         The intent is registered under the lock BEFORE any signal or cancel
-        leaves this process, so the watchdog can never finalise a stop it
-        doesn't know about — the reason every Stop press used to land in
-        history as `failed`.
+        leaves this process, so the watchdog can never finalise a stop it does
+        not know about and file a deliberate stop as `failed`.
 
         Intent alone does not decide the outcome: the runner still gets to
         report that it finished on its own, or that it was already dead when we
@@ -4093,12 +4739,56 @@ class JobRegistry:
             record = self._records.get(job_id)
             if record is None:
                 raise JobNotFoundError(job_id)
-            runner = self._runners.get(job_id)
-            # Raised under the lock (it used to be checked outside it) so the
-            # intent below can't be recorded for a job that just finalised.
-            if record.state != "running" or runner is None:
-                raise JobNotRunningError(job_id)
-            self._stop_requested.add(job_id)
+            # Checked under the lock, so the state it approves is the state the
+            # rest of this critical section acts on — a check outside would be
+            # the very race it exists to close.
+            if expect_state is not None and record.state != expect_state:
+                raise JobStateChangedError(job_id, expect_state, record.state)
+            # A queued job has no process to signal and no runner to ask, so
+            # Stop means CANCEL: the record is removed outright. It never
+            # executed — no logs, no metrics, no checkpoints, an output dir
+            # holding nothing but its own job.json — so there is no history a
+            # tombstone could preserve, only a record that every later question
+            # about runs would have to special-case.
+            #
+            # Removal is exactly `delete()`'s effect, done inline because
+            # `delete` takes this same lock and re-entering a plain Lock
+            # deadlocks.
+            if record.state == "queued":
+                # So it needs `delete()`'s guards too: removing a record does
+                # not remove the references to it. A queued run holds no
+                # checkpoints of its own, but `_resolve_checkpoint_owner` lets a
+                # continuation attach to a leaf that saved nothing and read the
+                # bytes from an ANCESTOR — only a `done` source is refused — so
+                # a queued run is a legal resume parent. Cancelling one
+                # unguarded severed its child's lineage, left a phantom parent
+                # id in `build_child_index` (both ends then read as leaves),
+                # un-forked `JobAlreadyContinuedError` so the grandparent could
+                # be continued twice, and made that grandparent deletable while
+                # a queued run was still waiting to resume from its checkpoints.
+                children = build_child_index(self._records.values()).get(job_id, [])
+                if children:
+                    raise JobHasChildrenError(job_id, children)
+                dependents = self._queued_dependents_of(record)
+                if dependents:
+                    raise JobSourceOfQueuedRunError(job_id, dependents)
+                # Disk first, then memory — see `_remove_locked`. A cancel that
+                # only reached memory comes back as a queued run on the next
+                # restart and trains.
+                self._remove_locked(job_id)
+                cancelled = record
+            else:
+                cancelled = None
+                runner = self._runners.get(job_id)
+                # Raised under the lock, not outside it, so the intent below
+                # cannot be recorded for a job that just finalised.
+                if record.state != "running" or runner is None:
+                    raise JobNotRunningError(job_id)
+                self._stop_requested.add(job_id)
+        if cancelled is not None:
+            self._discard_job_dir(job_id)
+            self._notify_change()
+            return cancelled
         runner.stop()
         # The watchdog will finalise the record (state, ended_at, exit_code).
         # Wait briefly so the caller sees the new state in the response.
@@ -4184,6 +4874,11 @@ class JobRegistry:
             return _list_imported_local(record.output_dir)
         if record.runner == "local":
             return _list_local_checkpoints(record.output_dir)
+        if record.runner == "lan_node":
+            # The run executed as a plain local run on the peer, so its
+            # checkpoints live on the PEER's disk — nothing to list here in
+            # this phase (remote checkpoint browsing comes with the SDK).
+            return []
         return self._list_cloud_cached(record.hf_repo_id)
 
     def list_checkpoints(self, job_id: str) -> builtins.list[JobCheckpoint]:
@@ -4257,6 +4952,101 @@ class JobRegistry:
             "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
         }
 
+    def _queued_dependents_of(self, record: JobRecord) -> builtins.list[str]:
+        """Ids of QUEUED runs that will read `record`'s checkpoints when they
+        launch. Caller holds `self._lock`.
+
+        Three ways a queued run can depend on this one:
+          * it named this run as its fine-tune source (`finetune_from_job_id`);
+          * its resolved `policy_pretrained_path` points INSIDE this run's
+            output dir, which is how a CHAIN REWIND fine-tune reaches an
+            ancestor's checkpoint without naming that ancestor as its source;
+          * its frozen `config_path` points inside this run's output dir, which
+            is how a local→local RESUME reaches the checkpoint OWNER — which is
+            not always its parent. A tip-resume's owner is its parent, so
+            `JobHasChildrenError` usually covers it; that stops being true the
+            moment the node in between is itself removable.
+        """
+        out_dir = (record.output_dir or "").rstrip("/")
+        dependents: builtins.list[str] = []
+        for other in self._records.values():
+            if other.state != "queued" or other.id == record.id:
+                continue
+            if other.config.finetune_from_job_id == record.id:
+                dependents.append(other.id)
+                continue
+            pretrained = other.config.policy_pretrained_path or ""
+            # Path containment, not prefix-matching on the raw string: a
+            # sibling dir like "<root>/run-12-old" starts with "<root>/run-12".
+            if out_dir and (pretrained == out_dir or pretrained.startswith(out_dir + "/")):
+                dependents.append(other.id)
+                continue
+            config_path = other.config.config_path or ""
+            if out_dir and (config_path == out_dir or config_path.startswith(out_dir + "/")):
+                dependents.append(other.id)
+        return dependents
+
+    def _forget_locked(self, job_id: str) -> None:
+        """Drop every in-memory trace of a job. CALLER HOLDS `self._lock`.
+
+        In-memory only: this makes a job invisible, not deleted, and nothing it
+        does survives a restart. Its one caller is `_remove_locked`, which takes
+        `job.json` first so the durable half can never be skipped; the job
+        DIRECTORY goes later via `_discard_job_dir`, outside the lock (rmtree is
+        filesystem I/O and has no business in a critical section).
+        """
+        self._records.pop(job_id, None)
+        self._runners.pop(job_id, None)
+        self._last_persist_at.pop(job_id, None)
+        self._stop_requested.discard(job_id)
+        self._prepare_threads.pop(job_id, None)
+
+    def _remove_locked(self, job_id: str) -> None:
+        """Remove a job from DISK and then from memory. CALLER HOLDS `self._lock`.
+
+        The order is the point. `job.json` is the only trace of a job that
+        outlives the process, so it goes first: forgetting the record and
+        unlinking afterwards means any failure but "already gone" leaves a
+        job.json on disk with no record behind it, and `_load_from_disk` reads
+        it straight back on the next restart. A cancelled queued run returns to
+        the queue and TRAINS; a deleted run returns to the history.
+
+        Raises `JobRemovalFailedError` with the record untouched if the unlink
+        fails, so a caller that cannot finish reports a state the user can still
+        act on. Both `delete()` and `stop()`'s cancel path go through here, so
+        the two cannot drift apart about what "gone" means.
+
+        One unlink of a local file, the same class of I/O `_persist` already
+        does inside this critical section — and done under the lock so no reader
+        can observe a record whose file is already gone.
+        """
+        try:
+            _job_meta_path(self._output_root, job_id).unlink()
+        except FileNotFoundError:
+            pass  # Already gone: the removal is durable by definition.
+        except OSError as exc:
+            raise JobRemovalFailedError(job_id, exc) from exc
+        self._forget_locked(job_id)
+
+    def _discard_job_dir(self, job_id: str) -> None:
+        """Delete a removed job's directory. Call OUTSIDE the lock.
+
+        Best effort, and deliberately not fatal: `_remove_locked` has already
+        taken `job.json`, so nothing left here can bring the run back. What
+        survives a failure is a directory the loader skips, which is not a
+        reason to fail an operation that has already taken effect.
+        """
+        try:
+            shutil.rmtree(_job_dir(self._output_root, job_id))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.exception(
+                "Removed %s, but could not delete its directory. The run is gone and "
+                "cannot come back; the leftover directory is inert.",
+                job_id,
+            )
+
     def delete(self, job_id: str) -> None:
         with self._lock:
             record = self._records.get(job_id)
@@ -4272,17 +5062,28 @@ class JobRegistry:
             children = build_child_index(self._records.values()).get(job_id, [])
             if children:
                 raise JobHasChildrenError(job_id, children)
-            self._records.pop(job_id, None)
-            self._runners.pop(job_id, None)
-            self._last_persist_at.pop(job_id, None)
-            self._stop_requested.discard(job_id)
-            self._prepare_threads.pop(job_id, None)
-        with contextlib.suppress(FileNotFoundError):
-            shutil.rmtree(_job_dir(self._output_root, job_id))
+            # Same protection for the edge build_child_index deliberately does
+            # NOT model: a queued fine-tune froze this run's checkpoint path at
+            # submit and will read it when the slot frees.
+            dependents = self._queued_dependents_of(record)
+            if dependents:
+                raise JobSourceOfQueuedRunError(job_id, dependents)
+            # Disk first, then memory — see `_remove_locked`. A delete that only
+            # reached memory comes back in the history on the next restart.
+            self._remove_locked(job_id)
+        self._discard_job_dir(job_id)
         self._notify_change()
 
     def shutdown(self) -> None:
-        """For tests / orderly process exit. Not wired to FastAPI lifespan today."""
+        """Stop the watchdog. Called from FastAPI's shutdown hook and by tests.
+
+        Stops only the WATCHDOG, never a run: a training already in flight is
+        left alone, exactly as it is across a restart (it is reattached by
+        `_load_from_disk`). What this prevents is the queue promoting a NEW run
+        while the server is going away — `LocalJobRunner` spawns a detached
+        wrapper, so such a run would outlive the process that started it with no
+        UI left to stop it.
+        """
         self._stop_watchdog.set()
 
     # -- internals --
@@ -4297,6 +5098,46 @@ class JobRegistry:
                 record = JobRecord.model_validate(data)
             except Exception as exc:
                 logger.warning("Skipping malformed job.json at %s: %s", meta, exc)
+                continue
+            if (
+                record.state == "running"
+                and record.runner == "local"
+                and record.queue_seq > 0
+                and record.process_pid is None
+            ):
+                # PROMOTED BUT NEVER LAUNCHED. `_drain_queue` flips a queued run
+                # to `running` and persists BEFORE launching, so the slot closes
+                # behind the promotion — and it deliberately leaves `queue_seq`
+                # set until a real trainer exists, precisely so a crash in that
+                # window is recognisable here. For a DEFERRED launch that window
+                # is not a hairline: the whole base-checkpoint download happens
+                # before any process exists, so this is an ordinary-reboot-sized
+                # hole, not a microsecond one.
+                #
+                # `process_pid is None` is the other half of the test and is not
+                # optional. An IMMEDIATE launch persists a live pid while
+                # `queue_seq` is still set (`_launch_locked` writes the pid, and
+                # only then does `_drain_queue` clear the marker), so on
+                # `queue_seq` alone a hard kill in that gap would demote a run
+                # whose detached trainer is still on the GPU, erase the only pid
+                # recording it, and hand the queue a second trainer for the same
+                # output dir.
+                #
+                # Without this the run was filed as `interrupted` with
+                # "restarted while this run was training" — untrue, since it
+                # never trained a step — and silently left the queue, which for
+                # a continuation also stranded its parent as superseded. Put it
+                # back where it was instead; it keeps its place because
+                # `queue_seq` is exactly the sort key it was queued under.
+                logger.info(
+                    "Job %s was promoted but never launched; returning it to the queue.",
+                    record.id,
+                )
+                record.state = "queued"
+                record.process_pid = None
+                self._write_meta(record)
+                self._next_queue_seq = max(self._next_queue_seq, record.queue_seq + 1)
+                self._records[record.id] = record
                 continue
             if record.state == "running":
                 if record.runner == "local":
@@ -4362,12 +5203,64 @@ class JobRegistry:
                     )
                     runner.reattach(record.hf_job_id)
                     self._runners[record.id] = runner
+                elif record.runner == "lan_node" and record.node_url and record.remote_job_id:
+                    # Same shape as the hf_cloud reattach above: the peer kept
+                    # training while we were down, so reattach by the record's
+                    # stored url + remote id and let the watchdog's polling
+                    # drive finalisation. A peer that has since vanished
+                    # resolves through the runner's lost-peer grace window.
+                    logger.info(
+                        "Re-attaching to LAN-node job %s (%s on %s)",
+                        record.id,
+                        record.remote_job_id,
+                        record.node_url,
+                    )
+                    from .runners.lan_node import LanNodeJobRunner
+
+                    runner = LanNodeJobRunner(
+                        record.metrics,
+                        _job_log_path(self._output_root, record.id),
+                        record.node_instance_id or "",
+                    )
+                    runner.reattach(record.remote_job_id, record.node_url)
+                    self._runners[record.id] = runner
                 else:
                     # Malformed running record — mark interrupted.
                     record.state = "interrupted"
                     if record.ended_at is None:
                         record.ended_at = time.time()
                     self._write_meta(record)
+            elif record.state == "queued":
+                # A queued job survives a restart as itself: nothing was
+                # started, so there is nothing to reattach or reconcile — the
+                # first watchdog tick's _drain_queue picks it up in the same
+                # order it had. Only the sort counter has to be recovered, so a
+                # job enqueued after the restart lands BEHIND the ones already
+                # waiting rather than jumping the line with a fresh seq of 1.
+                #
+                # Cloud can't legitimately be here (it never queues), but a
+                # hand-edited or downgraded-then-upgraded record could be, and
+                # leaving one parked forever behind a slot it does not wait for
+                # is the one outcome with no way out from the UI.
+                if record.runner != "local":
+                    logger.warning(
+                        "Queued job %s has runner %r; only local runs queue. Marking interrupted.",
+                        record.id,
+                        record.runner,
+                    )
+                    record.state = "interrupted"
+                    record.ended_at = time.time()
+                    if record.error_message is None:
+                        record.error_message = UNQUEUEABLE_RUNNER_MESSAGE
+                    # Queue fields released: nothing that will never run keeps
+                    # a place in line on disk.
+                    record.queue_seq = 0
+                    record.queue_position = 0
+                    record.queued_hub_ref = None
+                    record.queued_resume_ref = None
+                    self._write_meta(record)
+                else:
+                    self._next_queue_seq = max(self._next_queue_seq, record.queue_seq + 1)
             self._records[record.id] = record
 
     def _dedupe_imported_records(self) -> None:
@@ -4488,6 +5381,524 @@ class JobRegistry:
             record.name = resolved
             self._write_meta(record)
 
+    # -- local training queue --
+
+    def list_queue(self) -> builtins.list[JobRecord]:
+        """The WHOLE local queue, in run order, annotated with positions.
+
+        Deliberately UNCAPPED, unlike `list()`. The queue is not a page of
+        history — it is the machine's plan, and a truncated plan is worse than
+        no plan: the frontend derived it from `list(limit=10)` and, past ten
+        queued runs, showed neither the run about to start nor a correct
+        position, while every reorder sent a partial list that `reorder_queue`
+        (correctly) refused with a 409 the user could do nothing about. It is
+        also bounded by construction — only runs a user explicitly submitted and
+        has not yet cancelled are in it.
+        """
+        with self._lock:
+            snapshot = dict(self._records)
+            ordered = self._queued_records()
+            children = build_child_index(snapshot.values())
+        # Re-filtered after the lock: `snapshot` is a SHALLOW copy, so it holds
+        # the live record objects and one of them can be promoted out of the
+        # queue between the two statements above. Returning a `running` record
+        # under a heading that says "queued" is the exact confusion the cancel
+        # guard in the UI exists to catch, so don't ship it in the first place.
+        # Copied for the same reason list() copies: the annotations below are
+        # derived, and they belong on the response, not on the shared records.
+        ordered = [r.model_copy() for r in ordered if r.state == "queued"]
+        positions = self._queue_positions(snapshot)
+        for r in ordered:
+            # The same annotations `list()` applies, so a record means the same
+            # thing whichever endpoint returned it — a queued CONTINUATION
+            # carries its lineage here too, rather than an empty ancestor list
+            # that only looks right until someone reads it.
+            r.checkpoint_count = self._count_checkpoints(r)
+            self._annotate_lineage(r, snapshot, children)
+            self._annotate_queue(r, positions)
+        return ordered
+
+    def reorder_queue(self, job_ids: builtins.list[str]) -> builtins.list[JobRecord]:
+        """Rewrite the queue order to `job_ids`, first to run first.
+
+        `job_ids` must name exactly the currently queued jobs — the frontend
+        sends the whole list back after a drag, and accepting a partial one
+        would leave the omitted jobs' positions to chance. A stale list (the job
+        at the head started, or one was cancelled, between the drag and the
+        request) is refused rather than half-applied, because the alternative is
+        silently reordering around a job the user could still see on screen.
+
+        Refuses nothing about WHERE the user dropped things: any permutation is
+        legitimate, including moving a run that was queued last to the front.
+        """
+        # A MALFORMED list and a STALE one are different failures and must not
+        # share an answer. `sorted(a) != sorted(b)` collapses "you named a job
+        # that isn't queued", "you sent the same id twice" and "the queue moved
+        # under your drag" into one refusal whose message says "the list has been
+        # refreshed; try again" — advice that can never work for the first two,
+        # so a non-UI caller retries the same impossible body forever. Name the
+        # bad ids instead; only a genuine set mismatch against a live queue is
+        # the race.
+        #
+        # The duplicate check is pure — it reads only the request — so it runs
+        # BEFORE the lock. Validating a caller-sized body inside the registry
+        # lock made every /jobs* request and the watchdog wait on it.
+        seen: set[str] = set()
+        duplicates = sorted({jid for jid in job_ids if jid in seen or seen.add(jid)})
+        if duplicates:
+            raise ValueError(
+                f"The queue order lists {_name_some(duplicates)} more than once; "
+                "each queued run must appear exactly once."
+            )
+        with self._lock:
+            current = [r.id for r in self._queued_records()]
+            # "Not in the queue" is TWO different answers and they were sharing
+            # one. An id the registry has never heard of is a malformed body:
+            # 400, and retrying it unchanged can never work. An id that names a
+            # REAL run which merely LEFT the queue — it started, finished, or was
+            # cancelled between the drag and the request — is the ordinary race
+            # this endpoint exists to absorb, and it needs the 409 that says
+            # refresh, which is advice that succeeds on the next try. Answering
+            # it with 400 told the user their drag was malformed when the queue
+            # had simply moved on, and that is by far the likelier of the two:
+            # it is what happens every time the watchdog promotes the head
+            # mid-drag. It is also what this endpoint's docstring always claimed
+            # happened.
+            not_queued = sorted(set(job_ids) - set(current))
+            never_a_job = [u for u in not_queued if u not in self._records]
+            if never_a_job:
+                raise ValueError(
+                    f"{_name_some(never_a_job)} is not a run at all, so it "
+                    "cannot be given a place in the queue."
+                )
+            # Left the queue, or the queue gained a run the client had not seen
+            # (a subset). Both mean the client's picture is out of date, and
+            # both are answered the same way: refresh and drag again.
+            if not_queued or sorted(job_ids) != sorted(current):
+                raise QueueChangedError(current)
+            by_id = {r.id: r for r in self._records.values()}
+            # Renumbered from a fresh block at the TOP of the counter rather
+            # than 1..N, so a reorder can never collide with a job enqueued
+            # concurrently (which took a seq from the same counter).
+            base = self._take_queue_seq(count=len(job_ids))
+            # A reorder is all-or-nothing. Each iteration mutates memory and
+            # then writes, so a persist that throws partway (ENOSPC, EIO on an
+            # external volume — the failure class `_drain_queue` grew a handler
+            # for) used to leave THREE orders in play: the prefix that wrote,
+            # the suffix that never moved, and an in-memory order matching
+            # neither disk nor the drag. The user sees a 500 and reasonably
+            # concludes nothing happened, while the head of the queue — the run
+            # `_drain_queue` promotes next — has silently changed under them.
+            previous = {jid: by_id[jid].queue_seq for jid in job_ids}
+            try:
+                for offset, jid in enumerate(job_ids):
+                    record = by_id[jid]
+                    record.queue_seq = base + offset
+                    # Cleared before the write: `_annotate_queue` stamps this onto
+                    # the live record on every read, so without this the file keeps
+                    # the PRE-drag position — after a reversal, exactly the inverted
+                    # order. Nothing in-repo believes the persisted value (every
+                    # path re-derives it), but a job.json that contradicts itself is
+                    # a trap for the next reader.
+                    record.queue_position = 0
+                    self._persist(record, force=True)
+            except Exception:
+                # Memory first, so the queue is coherent even if re-writing the
+                # prefix fails too; the seq values are the authority and every
+                # position is re-derived from them. A record whose rewrite also
+                # throws is left for the next `_persist` to correct — it can
+                # only be one this call already touched, so disk cannot end up
+                # holding an order that was never requested.
+                logger.exception("Could not persist the queue reorder; restoring the previous order")
+                for jid, seq in previous.items():
+                    by_id[jid].queue_seq = seq
+                for jid in job_ids:
+                    try:
+                        self._persist(by_id[jid], force=True)
+                    except Exception:
+                        logger.exception("Could not restore the queue order of %s", jid)
+                raise
+            snapshot = dict(self._records)
+            ordered = self._queued_records()
+        positions = self._queue_positions(snapshot)
+        for r in ordered:
+            self._annotate_queue(r, positions)
+        self._notify_change()
+        return ordered
+
+    def _take_queue_seq(self, count: int = 1) -> int:
+        """Reserve `count` consecutive queue sort keys and return the first.
+        Caller holds `self._lock`. Monotonic and never reused, so ordering is
+        total even across a reorder that races an enqueue."""
+        seq = self._next_queue_seq
+        self._next_queue_seq += count
+        return seq
+
+    def _queued_launch_refusal(self, record: JobRecord) -> str | None:
+        """Why this queued run must NOT launch now, or None if it still may.
+
+        Re-runs the two submit-time checks whose answer can change while a run
+        waits, and returns the refusal as the `error_message` to finalise with.
+
+        Only `ValueError` counts as a refusal — that is what the checks raise
+        for a genuine contradiction, and what `start` surfaces as a 400. Any
+        OTHER exception (an unreadable config.json, a Hub hiccup, a dataset
+        directory momentarily absent) is logged and treated as "no opinion":
+        failing a legitimate run on a transient read would be a worse bug than
+        the one this guards against, and the trainer itself still refuses a
+        checkpoint it genuinely cannot load.
+
+        That `except Exception` is close to unreachable, and pretending
+        otherwise is how this check reads as stronger than it is: both helpers
+        swallow their own read failures (`read_pretrained_config` suppresses
+        everything; `read_dataset_features` catches OSError/ValueError and
+        returns None outright while offline) and answer "no opinion" by
+        returning None. So the common failure is not an exception — it is
+        SILENCE, precisely when the network is worse at promotion time than it
+        was at submit time, which for a run that waited hours is ordinary.
+
+        That silence is dangerous because lerobot loads weights with
+        `strict=False`: a checkpoint whose feature space no longer matches the
+        dataset loads cleanly and trains garbage recorded as a fine-tune. It
+        still launches — refusing every run whose base cannot be re-read would
+        make the queue unusable offline — but it must not do so quietly, so an
+        unverifiable base is logged as such.
+        """
+        config = record.config
+        if config.resume:
+            # A RESUME carries no pretrained path to re-verify — what it froze
+            # at submit is `config_path`, the checkpoint's train_config.json a
+            # local→local continuation hands the trainer. The registry's own
+            # delete/cancel guards (`_queued_dependents_of`) protect that file
+            # from registry-mediated removal, but not from the DISK changing
+            # under a run that waited hours: a checkpoint pruned by hand, an
+            # unmounted external volume. Unchecked, the trainer died at launch
+            # with a raw path-not-found traceback nobody could tie to the
+            # cause; refuse cleanly with the path named instead. A missing
+            # file is definitive (unlike the Hub reads below there is no
+            # transient-network excuse for a local stat), so this refusal
+            # doesn't launch-anyway. Cloud-parent resumes carry a
+            # queued_resume_ref and no config_path yet — nothing to check.
+            if config.config_path and not os.path.isfile(config.config_path):
+                return (
+                    f"The checkpoint this continuation was queued to resume from is gone: "
+                    f"{config.config_path} no longer exists. It was there when the run was "
+                    "queued; something removed it while the run waited."
+                )
+            return None
+        if not config.policy_pretrained_path:
+            return None
+        try:
+            _check_pretrained_policy_type(config.policy_pretrained_path, config.policy_type)
+            _check_pretrained_feature_space(config.policy_pretrained_path, config.dataset_repo_id)
+        except ValueError as exc:
+            return (
+                f"{exc} This was valid when the run was queued; something it depends on "
+                "changed while it waited."
+            )
+        except Exception:
+            logger.exception("Could not re-validate queued job %s at launch; launching anyway", record.id)
+            return None
+        # Reached only when neither check objected — which includes the case
+        # where neither could READ anything and said nothing. Asked afterwards
+        # so a real refusal above still wins, and so the checks keep their own
+        # ordering; the read is cached by huggingface_hub on the path where it
+        # succeeds, so this costs a local stat rather than a second fetch.
+        if read_pretrained_config(config.policy_pretrained_path) is None:
+            logger.warning(
+                "Could not re-read the base checkpoint for queued job %s (%s) at launch, so "
+                "policy type and feature space were NOT re-verified. Starting anyway; note "
+                "lerobot loads weights with strict=False, so a base that no longer matches "
+                "this dataset will load cleanly and train from mismatched weights.",
+                record.id,
+                config.policy_pretrained_path,
+            )
+        return None
+
+    def _robot_busy(self) -> str | None:
+        """What the robot is doing right now, or None if it is idle.
+
+        Local training is bounded by this machine's GPU/USB (the premise
+        `_local_slot_busy` is built on), and teleoperation, recording,
+        inference, replay, calibration, auto-calibration and wiggle are all
+        mutually exclusive with each other for exactly that reason — each
+        checks the other six before starting (CLAUDE.md: "New features that
+        drive the robot must add the same reciprocal checks against every
+        existing one"). Training never joined that set, which was survivable
+        while a training could only begin from an explicit user submit: the
+        user was present and knew what else they had running.
+
+        The queue removes that. `_drain_queue` starts a trainer from a WATCHDOG
+        THREAD, at an arbitrary moment, with nobody at the keyboard — several GB
+        of VRAM and four dataloader workers arriving under a live rollout or a
+        recording session. So the queue asks first, and simply waits: the run
+        stays queued and the next tick tries again, which is the same thing that
+        happens while the slot itself is busy.
+
+        Imported lazily and read without their locks: these are plain module
+        globals, this is an advisory "is now a good moment" check rather than a
+        mutex, and the cost of a stale read is one second's delay.
+
+        Never raises. These seven modules pull in cv2, av and the lerobot robot
+        backends, none of which `jobs` depended on before the queue existed, and
+        this runs as the FIRST statement of `_drain_queue` — so an ImportError
+        here (a headless install, a half-installed optional extra, a broken cv2)
+        would propagate out through `_tick` to `_watchdog_loop`'s blanket
+        handler and `_drain_queue` would never complete again for the life of
+        the process. Queued runs would sit forever against an idle GPU while the
+        UI looked perfectly healthy, because job finalisation runs earlier in
+        the tick and would keep working.
+
+        A failure is reported as IDLE rather than busy, which is both the
+        fail-safe direction and the accurate one: a robot module that cannot be
+        imported is a robot module whose feature cannot be running.
+        """
+        try:
+            from . import (
+                auto_calibrate as _auto_calibrate,
+                calibrate as _calibrate,
+                record as _record,
+                replay as _replay,
+                rollout as _rollout,
+                teleoperate as _teleoperate,
+                wiggle as _wiggle,
+            )
+
+            if _record.recording_active:
+                return "a recording session"
+            if _rollout.inference_active:
+                return "an inference session"
+            if _teleoperate.teleoperation_active:
+                return "teleoperation"
+            if _replay.replay_active:
+                return "a replay"
+            if _calibrate.calibration_is_active():
+                return "calibration"
+            if _auto_calibrate.auto_calibration_is_active():
+                return "auto-calibration"
+            if _wiggle.wiggle_active:
+                return "a wiggle"
+        except Exception:
+            if not self._robot_check_failed:
+                self._robot_check_failed = True
+                logger.exception(
+                    "Cannot tell whether the robot is in use; the training queue will "
+                    "promote runs without waiting for it. This is logged once."
+                )
+        return None
+
+    def _drain_queue(self) -> None:
+        """Start the next queued job if the single local slot is free.
+
+        Called from every watchdog tick (cheap: one dict scan) rather than only
+        from the finalisation path, so the queue also moves after a cancel, a
+        delete, a launch failure, and a process restart that came up with
+        queued records on disk and nothing running.
+
+        THREE PHASES, because the middle one must not hold the lock:
+
+          1. under the lock, pick the head and read what validating it needs;
+          2. OUTSIDE the lock, re-validate it (see `_queued_launch_refusal` —
+             this reads the dataset and the checkpoint's config, which for a
+             hub ref is a NETWORK round-trip). Holding the registry lock across
+             that froze every job endpoint and the watchdog itself for the
+             length of a Hub call plus its retries — the same MT23 coupling
+             `start` documents and avoids by resolving outside the lock;
+          3. re-take the lock, confirm the head has not changed underneath us,
+             then promote and launch.
+
+        A launch that throws does NOT stall the queue: `_launch_locked` marks
+        that record `failed`, and the next tick tries the one behind it.
+        """
+        # -- phase 1: pick the head --------------------------------------
+        # A shutdown means NO new promotion, including from a drain already in
+        # flight — `shutdown()` exists precisely so the queue can't spawn a
+        # detached trainer while the server is going away, and stopping only
+        # the next tick left this call free to do exactly that. Re-checked
+        # again before phase 3, because phase 2 is the network-long window a
+        # shutdown most plausibly lands in.
+        if self._stop_watchdog.is_set():
+            return
+        # Asked BEFORE the lock: it reads other modules' globals and must not
+        # widen this lock's reach. Waiting rather than failing — the run keeps
+        # its place and the next tick tries again.
+        busy_with = self._robot_busy()
+        if busy_with is not None:
+            logger.debug("Holding the training queue: %s is using the robot", busy_with)
+            return
+
+        with self._lock:
+            if self._local_slot_busy() is not None:
+                return
+            queue = self._queued_records()
+            if not queue:
+                return
+            head_id = queue[0].id
+
+        # -- phase 2: validate it, lock RELEASED --------------------------
+        # `_queued_launch_refusal` reads a snapshot-free live record, which is
+        # safe: it only reads config fields, and a record's config is fixed at
+        # submit. If the record leaves the queue while we are out here, phase 3
+        # notices and does nothing.
+        record = self._records.get(head_id)
+        if record is None:
+            return
+        stale = self._queued_launch_refusal(record)
+
+        # Re-asked AFTER the slow phase: for a hub-ref base, the validation
+        # above is a network round-trip plus retries, and a recording/teleop
+        # session that started during it was invisible to the phase-1 check —
+        # the promotion went ahead and a trainer landed on the GPU (and the
+        # arms' USB bus) under a live session. Still OUTSIDE the lock, and it
+        # must stay there: `training_is_active` documents the lock cycle that
+        # moving this inside the critical section would close (feature lock →
+        # registry lock here, registry lock → feature flags there). The
+        # remaining single-read gap is the same one every phase-1-only tick
+        # already had; waiting is free — the run keeps its place and the next
+        # tick re-asks.
+        busy_with = self._robot_busy()
+        if busy_with is not None:
+            logger.debug("Holding the training queue: %s started using the robot", busy_with)
+            return
+        # The shutdown twin of the re-check above — see phase 1. A stop event
+        # set during the slow phase must hold the promotion, not just the next
+        # tick's.
+        if self._stop_watchdog.is_set():
+            return
+
+        # -- phase 3: promote and launch ----------------------------------
+        notify = False
+        try:
+            with self._lock:
+                record = self._records.get(head_id)
+                # Re-checked because phases 1 and 2 were not atomic: the head
+                # may have been cancelled, deleted, reordered behind another
+                # run, or already promoted while we were validating. Any of
+                # those means this call has nothing left to do — the next tick
+                # picks up whatever the truth now is.
+                if record is None or record.state != "queued":
+                    return
+                if self._local_slot_busy() is not None:
+                    return
+                if [r.id for r in self._queued_records()][:1] != [head_id]:
+                    return
+
+                if stale is not None:
+                    record.state = "failed"
+                    # Restamped like the promotion below, and for the same
+                    # reason: `started_at` is still the ENQUEUE time here, so
+                    # leaving it would file a run that never executed a step as
+                    # having lasted however long it sat in the queue.
+                    record.started_at = time.time()
+                    record.ended_at = record.started_at
+                    record.error_message = stale
+                    record.queue_seq = 0
+                    record.queue_position = 0
+                    record.queued_hub_ref = None
+                    record.queued_resume_ref = None
+                    self._persist(record, force=True)
+                    logger.warning("Queued job %s no longer valid at launch: %s", record.id, stale)
+                    # Return rather than falling through to the next queued job:
+                    # the slot is still free, so the next tick drains again in a
+                    # second and the queue keeps moving without this method
+                    # having to loop.
+                    notify = True
+                    return
+
+                hub_ref = record.queued_hub_ref
+                resume_ref = record.queued_resume_ref
+                # Promoted BEFORE the launch so `_local_slot_busy` closes behind
+                # it — otherwise a second caller reaching this line would see a
+                # free slot and start a second trainer. `started_at` is
+                # restamped to the moment it actually began: it is what the UI
+                # shows as the run's start and what elapsed-time readings
+                # subtract from, and leaving it at enqueue time would report a
+                # run that waited an hour as an hour old the second it started.
+                record.state = "running"
+                record.started_at = time.time()
+                # `queue_seq` is deliberately NOT cleared yet — it is what tells
+                # a restart that landed in this window that the promotion never
+                # completed, so the run goes back in the queue instead of being
+                # filed as an interrupted run that never ran. It is cleared once
+                # a real trainer exists: below for an immediate launch, and in
+                # `_start_after_prepare` for a deferred one.
+                record.queue_position = 0
+                # The transfer refs are deliberately NOT cleared here, for the
+                # same reason and on the same schedule as `queue_seq`: they are
+                # the half of the marker that says WHAT the promotion still owes.
+                # `start` parks them on the record because they are the only part
+                # of submit-time resolution a later process cannot recompute
+                # (see the comment there). Clearing them at promotion persisted
+                # `None`, so a crash during the deferred download came back from
+                # `_load_from_disk` as a queued run with no refs — and the next
+                # drain, reading them as None, took `_launch_locked`'s IMMEDIATE
+                # branch and spawned a trainer with no download at all: a
+                # fine-tune handed lerobot the unresolvable `repo@checkpoints/N`
+                # form, a continuation a `resume=True` with no config_path. The
+                # recovery path destroyed the run it existed to save. They are
+                # cleared where `queue_seq` is, once a real trainer exists.
+                # Set BEFORE the persist rather than after it. A persist that
+                # throws (ENOSPC, EIO on an external volume) would otherwise
+                # leave the record mutated in memory with `notify` still False,
+                # so no client is ever told.
+                notify = True
+                try:
+                    self._persist(record, force=True)
+                except Exception:
+                    # Put it back in the queue rather than leaving it `running`
+                    # with no runner, which pins the slot for the LIFE OF THE
+                    # PROCESS: `_tick` skips a runner-less record,
+                    # `_local_slot_busy` keeps naming it, every later drain
+                    # early-returns at the slot check, and the user can neither
+                    # stop it (not running, as far as `stop` is concerned) nor
+                    # delete it (it IS running). The next tick simply retries.
+                    logger.exception(
+                        "Could not persist the promotion of %s; returning it to the queue",
+                        record.id,
+                    )
+                    record.state = "queued"
+                    # The refs need no restoring — the promotion above no longer
+                    # clears them. `state` is the only field this has to undo.
+                    return
+                try:
+                    self._launch_locked(
+                        record,
+                        JobTarget(runner="local"),
+                        deferred_hub_ref=hub_ref,
+                        deferred_resume_ref=resume_ref,
+                    )
+                except Exception as exc:
+                    # `_launch_locked` guarantees — for EVERY failure, on both
+                    # its branches — that the record is left `failed`, with any
+                    # runner it managed to start stopped and deregistered, which
+                    # is what frees the slot again. Without that guarantee this
+                    # handler would be the thing that killed the queue: it
+                    # swallows the error, and a record stuck `running` with no
+                    # runner pins the slot for the life of the process.
+                    logger.exception("Queued job %s failed to launch: %s", record.id, exc)
+                else:
+                    if hub_ref is None and resume_ref is None:
+                        # Launched. The record is now a normal running job and
+                        # owes the queue nothing.
+                        record.queue_seq = 0
+                        self._persist(record, force=True)
+                    # Otherwise the launch was DEFERRED: `_launch_locked`
+                    # returned as soon as it started the prepare thread, and the
+                    # transfer it is about to do (GBs, minutes) has not moved a
+                    # byte — the prepare thread is still blocked on this very
+                    # lock. Clearing the marker here left the single LONGEST
+                    # crash window in the feature uncovered: a reboot during the
+                    # download found `running` with no pid and no exit status,
+                    # and filed the run `interrupted` with "restarted while this
+                    # run was training" — which it never did — dropping it from
+                    # the queue and, for a continuation, stranding its parent as
+                    # superseded. `_start_after_prepare` clears it once a real
+                    # trainer exists.
+        finally:
+            # Outside the lock, like every other _notify_change in this file.
+            if notify:
+                self._notify_change()
+
     def _start_watchdog(self) -> None:
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_loop, name="job-registry-watchdog", daemon=True
@@ -4508,6 +5919,26 @@ class JobRegistry:
 
         progress_snapshots: builtins.list[dict] = []
 
+        # The whole finalisation pass runs under a try so the drain in the
+        # `finally` below happens on EVERY tick. It used to sit after the loop
+        # as a plain statement, which meant one runner whose finalisation
+        # raises — a cloud runner's platform poll, an unreadable log tail —
+        # skipped it on every tick: `_watchdog_loop` caught the exception,
+        # re-ticked, and raised again, so queued runs sat forever against an
+        # idle local slot while the UI looked healthy (finalisation of the
+        # HEALTHY runs kept working, so nothing else visibly broke). The
+        # exception still propagates — the watchdog's handler is the one place
+        # that logs it — but it no longer starves the queue.
+        try:
+            self._tick_finalise(running_ids, progress_snapshots)
+        finally:
+            # After finalisations, so a run that just ended frees its slot
+            # within the same tick that ended it rather than a second later.
+            self._drain_queue()
+
+    def _tick_finalise(
+        self, running_ids: builtins.list[str], progress_snapshots: builtins.list[dict]
+    ) -> None:
         for jid in running_ids:
             with self._lock:
                 runner = self._runners.get(jid)
@@ -4577,11 +6008,17 @@ class JobRegistry:
                     if state == "interrupted":
                         # Never the synthetic exit-code text here: that message
                         # on a run the user stopped themselves is what made a
-                        # deliberate pause look like a broken model. The
-                        # classifier only reaches `interrupted` when we asked,
-                        # so the unconfirmed wording belongs to the branch
-                        # above — a disappearance nobody asked for.
-                        record.error_message = (
+                        # deliberate pause look like a broken model. A
+                        # runner-supplied reason wins when one exists — a LAN
+                        # peer's record says in its own words whether ITS user
+                        # asked for the stop, which the local intent flags
+                        # cannot (the INTERRUPTED stage reaches here without
+                        # any local stop). Otherwise the classifier only
+                        # reaches `interrupted` when we asked, so the
+                        # unconfirmed wording belongs to the branch above — a
+                        # disappearance nobody asked for.
+                        reason = _runner_hook(runner, "terminal_message")
+                        record.error_message = reason or (
                             STOPPED_BY_REQUEST_MESSAGE if stop_requested else UNCONFIRMED_OUTCOME_MESSAGE
                         )
                     elif state == "failed":
@@ -4595,7 +6032,17 @@ class JobRegistry:
                         record.error_message = oom_reason or reason or f"Subprocess exited with code {rc}"
                 self._runners.pop(jid, None)
                 self._stop_requested.discard(jid)
-            self._persist(record, force=True)
+                # Inside the lock, unlike every other _persist-then-notify in
+                # this file, because this one races `delete()`. `_write_meta`
+                # opens with `mkdir(parents=True, exist_ok=True)`, so a persist
+                # that lands after a concurrent delete recreates the directory
+                # AND the job.json of a job the user just removed: it vanishes
+                # from the UI and returns on the next restart. That is the
+                # resurrection `_remove_locked` was written to end — it unlinks
+                # under the lock so no reader can see a record whose file is
+                # gone — but a WRITER holding a reference from a previous
+                # acquisition slipped past it.
+                self._persist(record, force=True)
             self._notify_change()
 
         self._notify_progress(progress_snapshots)
@@ -4713,6 +6160,38 @@ _DEFAULT_OUTPUT_ROOT = Path(
 ).expanduser()
 job_registry = JobRegistry(_DEFAULT_OUTPUT_ROOT)
 
+
+def training_is_active() -> str | None:
+    """The name of the local training run using this machine, or None.
+
+    The reciprocal of `JobRegistry._robot_busy`, and the other half of the
+    mutual exclusion CLAUDE.md requires ("New features that drive the robot must
+    add the same reciprocal checks against every existing one"). Training sat
+    outside that set for as long as a run could only begin from an explicit
+    submit — the user was present and knew what else they had running. The queue
+    starts runs from a watchdog thread with nobody at the keyboard, so the seven
+    robot features have to be able to see one coming.
+
+    Reports only LOCAL runs that are actually `running`. A cloud run is somebody
+    else's GPU, and a `queued` run has not claimed anything yet.
+
+    LOCK ORDER, and it is load-bearing: this takes the registry lock, and its
+    callers hold their own feature lock when they call it. `_robot_busy` must
+    therefore keep reading their flags from OUTSIDE the registry lock, exactly
+    as it does today — moving that check inside the critical section (a tempting
+    way to tighten the promotion race) closes the cycle and deadlocks the
+    watchdog against whichever feature is starting.
+    """
+    with job_registry._lock:
+        busy_id = job_registry._local_slot_busy()
+        if busy_id is None:
+            return None
+        record = job_registry._records.get(busy_id)
+        if record is None:
+            return busy_id
+        return record.display_name or record.name or record.id
+
+
 __all__ = [
     "JobState",
     "JobTarget",
@@ -4726,12 +6205,17 @@ __all__ = [
     "PreparingJobRunner",
     "JobRegistry",
     "make_snapshot_progress_tqdm",
-    "JobAlreadyRunningError",
+    "JobRemovalFailedError",
     "JobNotFoundError",
+    "JobSourceOfQueuedRunError",
+    "JobStateChangedError",
     "JobNotRunningError",
+    "QueueChangedError",
     "job_registry",
+    "training_is_active",
     "parse_metrics_into",
     "classify_terminal_state",
     "STOPPED_BY_REQUEST_MESSAGE",
+    "UNQUEUEABLE_RUNNER_MESSAGE",
     "UNCONFIRMED_OUTCOME_MESSAGE",
 ]

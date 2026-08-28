@@ -1,4 +1,6 @@
 import React from "react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -10,6 +12,7 @@ import {
   HardDrive,
   HelpCircle,
   Loader2,
+  Router,
   Square,
   Trash2,
   XCircle,
@@ -19,6 +22,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import { runTaskTitle } from "@/lib/modelNames";
 import {
@@ -27,6 +32,7 @@ import {
 } from "@/components/training/types";
 import {
   HubJob,
+  JOB_STATE_LABELS,
   JobRecord,
   isHubJobActive,
   jobDisplayName,
@@ -69,6 +75,10 @@ function relativeTime(ms: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/** The `t` a component gets from `useTranslation()`. Passed into the pure
+ * describe helpers below, which run outside any component. */
+type Translate = TFunction;
+
 interface Presentation {
   label: string;
   color: string;
@@ -76,27 +86,78 @@ interface Presentation {
   spin?: boolean;
 }
 
-const statePresentation: Record<JobRecord["state"], Presentation> = {
-  running: { label: "Running", color: "text-ok", Icon: Loader2, spin: true },
-  done: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
-  failed: { label: "Failed", color: "text-destructive", Icon: XCircle },
-  interrupted: { label: "Stopped", color: "text-warn", Icon: AlertTriangle },
-};
-
-const stagePresentation: Record<string, Presentation> = {
-  RUNNING: { label: "Running", color: "text-ok", Icon: Loader2, spin: true },
-  QUEUED: { label: "Queued", color: "text-warn", Icon: Clock },
-  SCHEDULING: { label: "Starting", color: "text-warn", Icon: Clock },
-  COMPLETED: {
-    label: "Done",
+/** State/stage → presentation, keyed by the WIRE value (never translated).
+ * These maps hold translation KEYS: they are built at import time, so a
+ * resolved word here would freeze whichever language loaded first. Colour, icon
+ * and spin are not copy and stay as they are. */
+const statePresentation = {
+  // Same Clock + warn pairing as the Hub QUEUED stage below — one word, one
+  // look, whichever queue holds the run.
+  queued: {
+    labelKey: JOB_STATE_LABELS.queued,
+    color: "text-warn",
+    Icon: Clock,
+  },
+  running: {
+    labelKey: JOB_STATE_LABELS.running,
+    color: "text-ok",
+    Icon: Loader2,
+    spin: true,
+  },
+  done: {
+    labelKey: JOB_STATE_LABELS.done,
     color: "text-muted-foreground",
     Icon: CheckCircle2,
   },
-  FAILED: { label: "Failed", color: "text-destructive", Icon: XCircle },
+  failed: {
+    labelKey: JOB_STATE_LABELS.failed,
+    color: "text-destructive",
+    Icon: XCircle,
+  },
+  interrupted: {
+    labelKey: JOB_STATE_LABELS.interrupted,
+    color: "text-warn",
+    Icon: AlertTriangle,
+  },
+} as const;
+
+// SCHEDULING reads "Starting" here and "Scheduling" on the Hub job card — two
+// deliberate wordings, so they point at two keys.
+const stagePresentation = {
+  RUNNING: {
+    labelKey: "jobs.stage.running",
+    color: "text-ok",
+    Icon: Loader2,
+    spin: true,
+  },
+  QUEUED: { labelKey: "jobs.stage.queued", color: "text-warn", Icon: Clock },
+  SCHEDULING: {
+    labelKey: "jobs.stage.starting",
+    color: "text-warn",
+    Icon: Clock,
+  },
+  COMPLETED: {
+    labelKey: "jobs.stage.completed",
+    color: "text-muted-foreground",
+    Icon: CheckCircle2,
+  },
+  FAILED: {
+    labelKey: "jobs.stage.failed",
+    color: "text-destructive",
+    Icon: XCircle,
+  },
   // HF API uses "CANCELED" (single L); accept both spellings.
-  CANCELED: { label: "Cancelled", color: "text-warn", Icon: AlertTriangle },
-  CANCELLED: { label: "Cancelled", color: "text-warn", Icon: AlertTriangle },
-};
+  CANCELED: {
+    labelKey: "jobs.stage.cancelled",
+    color: "text-warn",
+    Icon: AlertTriangle,
+  },
+  CANCELLED: {
+    labelKey: "jobs.stage.cancelled",
+    color: "text-warn",
+    Icon: AlertTriangle,
+  },
+} as const;
 
 interface Described {
   /** What the title line RENDERS: a generated run name peeled to its task. */
@@ -128,20 +189,27 @@ interface Described {
 
 /** Normalize a local/cloud run or a Hub-only job into the one shape the
  * trigger and the rows both render, so a run reads the same in either place. */
-function describeEntry(entry: JobsEntry): Described {
+function describeEntry(entry: JobsEntry, t: Translate): Described {
   if (entry.kind === "hub") {
     const job = entry.job;
     const stage = job.status?.stage?.toUpperCase() ?? "";
-    const present = stagePresentation[stage] ?? {
-      label: stage || "Unknown",
-      color: "text-muted-foreground",
-      Icon: HelpCircle,
-    };
+    const known = stagePresentation[stage];
+    // An unmapped stage keeps the RAW Hub string — it is data, and showing it
+    // beats showing nothing; only the last-resort word is translated.
+    const present: Presentation = known
+      ? { ...known, label: t(known.labelKey) }
+      : {
+          label: stage || t("jobs.stage.unknown"),
+          color: "text-muted-foreground",
+          Icon: HelpCircle,
+        };
     // A Hub-only job is named by its image/space, never by the "{POLICY} · {ds}"
     // shape, and nothing here knows what policy it trains — so no peel and no
     // chip.
     const hubName =
-      job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`;
+      job.docker_image ??
+      job.space_id ??
+      t("jobs.hubJob.fallbackTitle", { id: job.id.slice(0, 12) });
     return {
       name: hubName,
       fullName: hubName,
@@ -152,11 +220,12 @@ function describeEntry(entry: JobsEntry): Described {
       policyTitle: "",
       present,
       when: relativeTime(entry.time),
-      whereLabel: job.flavor ?? "Hub",
+      // The flavor is the Hub's own hardware name — data.
+      whereLabel: job.flavor ?? t("jobs.location.hub"),
       WhereIcon: Globe,
       whereTitle: job.owner
-        ? `Hugging Face job · ${job.owner}`
-        : "Hugging Face job",
+        ? t("jobs.jobsDropdown.hubJobTitleWithOwner", { owner: job.owner })
+        : t("jobs.jobsDropdown.hubJobTitle"),
       running: isHubJobActive(job),
       // A HubJob reports a stage, never a step count — there is no progress to
       // render, so the row shows its stage alone rather than a fake bar.
@@ -164,9 +233,19 @@ function describeEntry(entry: JobsEntry): Described {
     };
   }
   const job = entry.job;
-  const present = statePresentation[job.state];
+  const state = statePresentation[job.state];
+  const present: Presentation = {
+    ...state,
+    // A queued run's label carries its live 1-based position ("Queued · #2");
+    // the position is derived per response, so it is always current.
+    label:
+      job.state === "queued" && (job.queue_position ?? 0) > 0
+        ? t("jobs.jobState.queuedAt", { position: job.queue_position ?? 0 })
+        : t(state.labelKey),
+  };
   const isRunning = job.state === "running";
   const isCloud = job.runner === "hf_cloud";
+  const isNode = job.runner === "lan_node";
   const target = job.config?.steps || job.metrics.total_steps || 0;
   const current = job.metrics.current_step;
   const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
@@ -195,17 +274,31 @@ function describeEntry(entry: JobsEntry): Described {
     when: relativeTime(
       job.ended_at != null ? job.ended_at * 1000 : (job.started_at ?? 0) * 1000,
     ),
-    whereLabel: isCloud ? (job.hf_flavor ?? "Cloud") : "Local",
-    WhereIcon: isCloud ? Globe : HardDrive,
-    whereTitle: isCloud ? "Runs on Hugging Face cloud" : "Runs on this machine",
+    // The flavor is the Hub's own hardware name, and a node's short instance
+    // id is the run's routing key — both data. (This helper is pure — no
+    // registry lookup — so the node column shows the id; the detail card's
+    // chip resolves the node's display name.)
+    whereLabel: isCloud
+      ? (job.hf_flavor ?? t("jobs.location.cloud"))
+      : isNode
+        ? (job.node_instance_id?.slice(0, 8) ?? t("jobs.location.node"))
+        : t("jobs.location.local"),
+    WhereIcon: isCloud ? Globe : isNode ? Router : HardDrive,
+    whereTitle: isCloud
+      ? t("jobs.location.cloudTitle")
+      : isNode
+        ? t("jobs.location.nodeTitle")
+        : t("jobs.location.localTitle"),
     running: isRunning,
     progress: isRunning
       ? {
           pct,
           text:
+            // Numbers stay exactly as they were formatted; only the
+            // no-numbers-yet word is translated.
             target > 0
               ? `${current.toLocaleString()} / ${target.toLocaleString()} · ${pct.toFixed(1)}%`
-              : "starting…",
+              : t("jobs.progress.starting"),
           starting: target === 0,
         }
       : null,
@@ -240,13 +333,24 @@ const COL_POLICY = "w-[4rem] shrink-0";
 const COL_WHERE = "w-[4.5rem] shrink-0";
 const COL_WHEN = "w-[3.5rem] shrink-0 text-right";
 
+/** `uppercase` is a no-op on a caseless script but the letter-spacing beside it
+ * is not — left on, a Chinese label renders visibly over-spaced. Both are
+ * dropped together there. */
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({
   children,
-}) => (
-  <div className="px-2 pb-0.5 pt-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-    {children}
-  </div>
-);
+}) => {
+  const { language } = useLanguage();
+  return (
+    <div
+      className={cn(
+        "px-2 pb-0.5 pt-1.5 text-[10px] text-muted-foreground",
+        isCaselessScript(language) ? "" : "uppercase tracking-wide",
+      )}
+    >
+      {children}
+    </div>
+  );
+};
 
 interface RowProps {
   entry: JobsEntry;
@@ -276,7 +380,8 @@ const JobsRow: React.FC<RowProps> = ({
   onDismissHub,
   resuming,
 }) => {
-  const d = describeEntry(entry);
+  const { t } = useTranslation();
+  const d = describeEntry(entry, t);
   const Icon = d.present.Icon;
   // Narrow once so the row's actions read off the concrete record.
   const record = entry.kind === "job" ? entry.job : null;
@@ -353,10 +458,16 @@ const JobsRow: React.FC<RowProps> = ({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
+                // English on purpose: a native confirm's OK/Cancel come from
+                // the BROWSER's locale, so a translated question over English
+                // buttons reads worse than an English one. Replacing it with an
+                // AlertDialog is a separate UX change.
                 if (window.confirm("Stop this run?")) onStop(record.id);
               }}
-              aria-label="Stop this run"
-              title="Stop this run"
+              // Identical words on the accessible name and the hover text, so
+              // one key rather than two that could drift apart.
+              aria-label={t("jobs.jobsDropdown.stopAria")}
+              title={t("jobs.jobsDropdown.stopAria")}
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <Square className="h-3 w-3" />
@@ -370,8 +481,8 @@ const JobsRow: React.FC<RowProps> = ({
                 e.stopPropagation();
                 onResume(record);
               }}
-              aria-label="Resume from the newest usable checkpoint"
-              title="Resume from the newest usable checkpoint"
+              aria-label={t("jobs.jobsDropdown.resumeAria")}
+              title={t("jobs.jobsDropdown.resumeAria")}
               className="flex h-5 w-5 items-center justify-center rounded text-info transition-colors hover:bg-info/10 disabled:opacity-50"
             >
               {resuming ? (
@@ -387,8 +498,8 @@ const JobsRow: React.FC<RowProps> = ({
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
-              aria-label="Open this job on the Hub"
-              title="Open on the Hub"
+              aria-label={t("jobs.jobsDropdown.openHubAria")}
+              title={t("jobs.jobsDropdown.openHubTitle")}
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <ExternalLink className="h-3 w-3" />
@@ -399,6 +510,7 @@ const JobsRow: React.FC<RowProps> = ({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
+                // English on purpose — see the Stop confirm above.
                 if (
                   window.confirm(
                     "Remove this job from the list? The job record on Hugging Face is unaffected.",
@@ -406,8 +518,8 @@ const JobsRow: React.FC<RowProps> = ({
                 )
                   onDismissHub(hub.id);
               }}
-              aria-label="Remove job from list"
-              title="Remove from list"
+              aria-label={t("jobs.hubJob.removeAria")}
+              title={t("jobs.hubJob.removeTitle")}
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
             >
               <Trash2 className="h-3 w-3" />
@@ -467,6 +579,7 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
   resumingId,
   emptyMessage,
 }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const [untrackedOpen, setUntrackedOpen] = React.useState(false);
 
@@ -482,9 +595,11 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
     setOpen(false);
   };
 
-  const renderGroup = (label: string, group: JobsEntry[]) =>
+  // `id` is the React key (stable across a language switch); `label` is the
+  // rendered copy.
+  const renderGroup = (id: string, label: string, group: JobsEntry[]) =>
     group.length === 0 ? null : (
-      <div key={label}>
+      <div key={id}>
         <SectionLabel>{label}</SectionLabel>
         {group.map((entry) => (
           <JobsRow
@@ -510,7 +625,7 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
   const active = groupsFor(entries);
   const rest = groupsFor(untracked);
 
-  const d = selected ? describeEntry(selected) : null;
+  const d = selected ? describeEntry(selected, t) : null;
   const TriggerIcon = d?.present.Icon;
 
   if (isEmpty) {
@@ -526,7 +641,7 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label="Select a training run"
+          aria-label={t("jobs.jobsDropdown.triggerAria")}
           className="relative w-full overflow-hidden rounded-md border border-border bg-background px-2 py-1.5 text-left transition-colors hover:border-ring/50 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <div className="flex items-center gap-2">
@@ -573,7 +688,7 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
               </>
             ) : (
               <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                Select a run
+                {t("jobs.jobsDropdown.placeholder")}
               </span>
             )}
             <ChevronDown
@@ -597,13 +712,24 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
         align="start"
         className="w-[var(--radix-popover-trigger-width)] max-w-none p-1"
       >
-        <div aria-label="Training runs" className="max-h-72 overflow-y-auto">
-          {renderGroup("Launched from MakerMods Lab", active.lab)}
-          {renderGroup("Other Hub jobs", active.hub)}
+        <div
+          aria-label={t("jobs.jobsDropdown.listAria")}
+          className="max-h-72 overflow-y-auto"
+        >
+          {renderGroup("lab", t("jobs.jobsDropdown.groups.lab"), active.lab)}
+          {renderGroup("hub", t("jobs.jobsDropdown.groups.hub"), active.hub)}
           {untracked.length > 0 && untrackedOpen ? (
             <>
-              {renderGroup("Untracked · launched from MakerMods Lab", rest.lab)}
-              {renderGroup("Untracked · other Hub jobs", rest.hub)}
+              {renderGroup(
+                "untracked-lab",
+                t("jobs.jobsDropdown.groups.untrackedLab"),
+                rest.lab,
+              )}
+              {renderGroup(
+                "untracked-hub",
+                t("jobs.jobsDropdown.groups.untrackedHub"),
+                rest.hub,
+              )}
             </>
           ) : null}
         </div>
@@ -622,8 +748,12 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
               )}
             />
             {untrackedOpen
-              ? "Hide untracked"
-              : `Untracked (${untracked.length})`}
+              ? t("jobs.jobsDropdown.hideUntracked")
+              : // A plain row count, passed as `total` rather than `count` so
+                // i18next does not read it as a plural selector.
+                t("jobs.jobsDropdown.untracked", {
+                  total: untracked.length,
+                })}
           </button>
         ) : null}
       </PopoverContent>

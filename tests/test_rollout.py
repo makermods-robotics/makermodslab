@@ -640,6 +640,22 @@ def test_handle_start_inference_blocked_when_recording_active(monkeypatch) -> No
     assert "Recording" in result["message"]
 
 
+def test_handle_start_inference_blocked_when_a_training_run_is_active(monkeypatch) -> None:
+    """The worst pairing of the six: both want several GB of VRAM.
+
+    The training queue already waits for inference. Until it was mutual, this
+    direction walked straight over a run the watchdog had just promoted — and
+    whichever process lost the OOM lost hours, reported only as "Subprocess
+    exited with code 1" with nothing tying it to this click."""
+    from makermodslab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makermodslab.jobs.training_is_active", lambda: "ACT · user/ds")
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "ACT · user/ds" in result["message"]
+
+
 def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None:
     from makermodslab import rollout
 
@@ -680,6 +696,19 @@ def test_handle_start_inference_blocked_when_wiggle_active(monkeypatch) -> None:
     assert result["success"] is False
     assert result["status_code"] == 409
     assert "wiggle" in result["message"].lower()
+
+
+def test_handle_start_inference_blocked_when_replay_active(monkeypatch) -> None:
+    """Replay drives the same follower bus open-loop — inference must refuse
+    to start while it's active, or both threads race to write goal positions
+    to the same servos."""
+    from makermodslab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "replay" in result["message"].lower()
 
 
 def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp_path) -> None:
