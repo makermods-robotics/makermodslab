@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 import {
   CheckCircle2,
   Hand,
@@ -246,6 +247,7 @@ const InferenceSessionDialog: React.FC<{
 }> = ({ sessionId, onExit, coachingLineage }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio, deployPrefill } = useStudio();
+  const navigate = useNavigate();
   const { toast } = useToast();
   const { t } = useTranslation();
   const [status, setStatus] = useState<InferenceStatus | null>(null);
@@ -780,6 +782,35 @@ const InferenceSessionDialog: React.FC<{
   // No navigate("/") despite the studio overlay living on Launchpad: lineage is
   // only ever set by DeployPanel, which IS the studio, so a session that can
   // reach this button was launched from there and is already on that route.
+  // Hand the next step to the surface the operator LANDS on, rather than
+  // keeping it inside the modal they are closing. Same router-state contract
+  // CollectHandoff uses after a recording session — see CoachHandoff.
+  const exitWithHandoff = useCallback(() => {
+    if (coachMode && correctionsSaved > 0 && coachDataset && !datasetDeleted) {
+      navigate("/", {
+        replace: true,
+        state: {
+          coached: {
+            repo_id: coachDataset,
+            corrections_saved: correctionsSaved,
+            base_job_id: coachingLineage?.jobId,
+            base_name: coachingLineage?.jobName,
+            training_repo_id: coachingLineage?.trainingDatasetRepoId,
+          },
+        },
+      });
+    }
+    onExit();
+  }, [
+    coachMode,
+    correctionsSaved,
+    coachDataset,
+    datasetDeleted,
+    coachingLineage,
+    navigate,
+    onExit,
+  ]);
+
   const handleMergeAndFinetune = useCallback(() => {
     if (!canHandOff || !coachingLineage) return;
     // Named after the TRAINING dataset, not the corrections. The merged result
@@ -1112,7 +1143,9 @@ const InferenceSessionDialog: React.FC<{
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !live) onExit();
+        // Closing a finished coaching session leaves the merge + fine-tune
+        // offer on the Launchpad rather than letting it die with the dialog.
+        if (!open && !live) exitWithHandoff();
       }}
     >
       <DialogContent

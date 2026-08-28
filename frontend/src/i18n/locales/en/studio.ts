@@ -210,6 +210,17 @@ export default {
   },
 
   // ── Panel 3 · Run (Deploy) ────────────────────────────────────────────────
+  // The post-coaching handoff, a sibling of CollectHandoff on the Launchpad:
+  // a session that produced data puts the next step where the operator LANDS.
+  coachHandoff: {
+    saved_one: "{{count}} correction saved to <0>{{dataset}}</0>",
+    saved_other: "{{count}} corrections saved to <0>{{dataset}}</0>",
+    next: "Merge them with <0>{{dataset}}</0> — what this skill was last trained on — then fine-tune it on the result. Training takes one dataset, so the merge isn't optional.",
+    manual:
+      "To turn these into a better policy, merge them with the dataset this checkpoint was <0>last</0> trained on, then fine-tune from the same checkpoint on the merged result. Both steps are in the dataset library and the training panel.",
+    action: "Merge & fine-tune",
+  },
+
   deploy: {
     title: "Run",
     picker: {
@@ -261,8 +272,9 @@ export default {
       },
       eval: {
         title: "Score it",
-        what: "Repeat the task and score every attempt into a success rate.",
-        commitment: "hands off · minutes per episode",
+        what: "Repeat the task, and you judge every attempt into a success rate.",
+        commitment:
+          "hands on between episodes — you reset the scene and score each one",
       },
       coach: {
         title: "Coach it",
@@ -277,10 +289,12 @@ export default {
         "The session ends once you've saved this many. You can stop early at any point and keep everything recorded so far.",
       datasetLabel: "Corrections dataset",
       datasetPlaceholder: "e.g., fold_shirt_fixes",
+      // Stand-in for the typed half of the name while the box is empty.
+      datasetFallback: "correction",
       // <0> wraps {{prefix}}, the literal on-disk name — an identifier, so it
       // stays in the Latin script whatever the language.
       datasetHint:
-        "Saved as <0>{{prefix}}</0> plus a timestamp — deployment datasets carry that prefix so they're never confused with recorded demonstrations.",
+        "Saved as <0>{{prefix}}</0> plus a timestamp. Leave it empty to use the greyed name, taken from the dataset this model was trained on; anything you type replaces it, and clearing the box brings it back.",
       leaderLabel: "Leader arm",
       leaderNoRobot: "Select a robot above.",
       leaderMissing:
@@ -313,6 +327,15 @@ export default {
       // Appended to `hint` when the task was auto-filled from the checkpoint's
       // own training dataset. Leading space is added by the caller.
       prefilled: "Filled in from the dataset it was trained on.",
+      // Placeholder when the lineage offered no task at all. Never an invented
+      // example: a fake task greyed into the slot the REAL inherited one uses
+      // is indistinguishable from one.
+      placeholderNone: "No task found on the training dataset — type one",
+      // Shown for a policy that does NOT read the task. Coaching still saves it.
+      hintCoach:
+        "Saved with every correction, so you can tell later what this session was teaching.",
+      leaveEmpty:
+        "Leave it empty to use the greyed task from the dataset it was trained on.",
       multiTaskHint_one:
         "Its training dataset has {{count}} task — pick the one you're running:",
       multiTaskHint_other:
@@ -379,6 +402,30 @@ export default {
       coeffInvalid: "Enter a number greater than 0.",
       coeffHint:
         "Weights are exp(-coeff × age): higher favours the newest prediction, lower averages more evenly. The ACT paper uses {{value}}.",
+    },
+    // The action row: each verb selects its mode and launches it in one press.
+    runVerbs: {
+      groupLabel: "Start a run",
+      single: "Just run it",
+      // {{count}} is the episode / correction target — a number, so no plural.
+      eval: "Score it · {{count}}",
+      coach: "Coach it · {{count}}",
+    },
+    // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
+    blocked: {
+      noRobot: "Select a robot above.",
+      followerNotReady: "This robot's follower arm isn't ready.",
+      noCheckpoint: "Pick a skill and a checkpoint.",
+      armMismatch: "This checkpoint doesn't match the robot's arm count.",
+      camerasUnbound: "Bind every camera the checkpoint expects.",
+      temporalEnsemble: "Fix the temporal-ensemble setting.",
+      runInProgress: "A run is already in progress.",
+      taskRequired:
+        "Describe the task first — this policy is language-conditioned.",
+      leaderMissing:
+        "Coaching needs a leader arm — add its port and calibration in Robot settings.",
+      coachTaskRequired:
+        "Describe the task first — it's saved with every correction.",
     },
     actions: {
       start: "Start inference",

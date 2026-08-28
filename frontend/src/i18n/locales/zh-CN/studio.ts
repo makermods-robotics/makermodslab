@@ -151,6 +151,16 @@ export default {
     },
   },
 
+  // 指导结束后的交接卡片，与 Launchpad 上的 CollectHandoff 并列：
+  // 产出了数据的会话，应该把下一步放在操作者真正会看到的地方。
+  coachHandoff: {
+    saved_other: "已保存 {{count}} 次纠正到 <0>{{dataset}}</0>",
+    next: "把它们与 <0>{{dataset}}</0>（该技能最近一次训练所用的数据集）合并，然后基于合并结果微调它。训练只接受一个数据集，所以合并这一步不能省。",
+    manual:
+      "要把它们变成更好的策略，请与该检查点<0>最近一次</0>训练所用的数据集合并，然后基于同一个检查点在合并结果上微调。两个步骤分别在数据集库和训练面板中。",
+    action: "合并并微调",
+  },
+
   deploy: {
     title: "运行",
     picker: {
@@ -189,8 +199,8 @@ export default {
       },
       eval: {
         title: "给它打分",
-        what: "反复执行该任务，并把每次尝试的结果汇总为成功率。",
-        commitment: "无需上手 · 每个片段数分钟",
+        what: "反复执行该任务，由你为每次尝试评判，汇总为成功率。",
+        commitment: "片段之间需要上手 — 由你复位现场并为每次尝试评分",
       },
       coach: {
         title: "指导它",
@@ -205,10 +215,12 @@ export default {
         "保存到这个数量后会话就会结束。你也可以随时提前停止，此前录到的内容都会保留。",
       datasetLabel: "纠正数据集",
       datasetPlaceholder: "例如：fold_shirt_fixes",
+      // 输入框为空时，名称中由用户输入的那一半的替代文字。
+      datasetFallback: "correction",
       // <0> 包住 {{prefix}}，即磁盘上的实际名称 —— 它是标识符，
       // 无论什么语言都保持拉丁字母。
       datasetHint:
-        "保存为 <0>{{prefix}}</0> 加一个时间戳 — 部署产生的数据集都带这个前缀，以免与录制的示范数据混淆。",
+        "保存为 <0>{{prefix}}</0> 加一个时间戳。留空即使用灰显的名称，它取自该模型训练所用的数据集；你输入的内容会替换它，清空输入框则会恢复。",
       leaderLabel: "主臂",
       leaderNoRobot: "请先在上方选择一台机器人。",
       leaderMissing:
@@ -235,6 +247,12 @@ export default {
       // 当任务描述是从该检查点自己的训练数据集自动填入时，追加在 hint 之后。
       // 前面的空格由调用方补上。
       prefilled: "已根据它训练所用的数据集自动填入。",
+      // 当血缘里根本没有任务时使用的占位文字。绝不编造示例：把假任务灰显在
+      // 真正继承来的任务所用的同一位置，二者将无法区分。
+      placeholderNone: "训练数据集里没有找到任务 — 请手动输入一个",
+      // 用于不读取任务的策略。指导仍会保存这个字符串。
+      hintCoach: "它会随每次纠正一起保存，方便你日后知道这次会话教的是什么。",
+      leaveEmpty: "留空即使用灰显的任务，它取自该模型训练所用的数据集。",
       multiTaskHint_other:
         "它的训练数据集里有 {{count}} 个任务，按出现次数从多到少排列 — 请选择你要执行的那个：",
     },
@@ -290,6 +308,27 @@ export default {
       coeffInvalid: "请输入大于 0 的数字。",
       coeffHint:
         "权重为 exp(-系数 × 时间差)：系数越大越偏向最新的预测，越小则平均得越均匀。ACT 论文取 {{value}}。",
+    },
+    // 操作行：每个动词都在一次按下中同时选定模式并启动。
+    runVerbs: {
+      groupLabel: "开始一次运行",
+      single: "直接跑一次",
+      // {{count}} 是片段数 / 纠正次数目标，是数字，因此没有复数形式。
+      eval: "打分 · {{count}}",
+      coach: "指导 · {{count}}",
+    },
+    // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
+    blocked: {
+      noRobot: "请先在上方选择一台机器人。",
+      followerNotReady: "这台机器人的从臂尚未就绪。",
+      noCheckpoint: "请选择一个技能和一个检查点。",
+      armMismatch: "该检查点与这台机器人的机械臂数量不匹配。",
+      camerasUnbound: "请为检查点所需的每个摄像头完成绑定。",
+      temporalEnsemble: "请先修正时间集成设置。",
+      runInProgress: "已有一次运行正在进行中。",
+      taskRequired: "请先描述任务 — 该策略以语言为条件。",
+      leaderMissing: "指导需要一条主臂 — 请在机器人设置中补上它的端口和标定。",
+      coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
     },
     actions: {
       start: "开始推理",
