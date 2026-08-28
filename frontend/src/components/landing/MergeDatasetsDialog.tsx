@@ -80,6 +80,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   const [status, setStatus] = useState<MergeStatus | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  // Set when the merge is one confirmation away: the sources are identical
+  // apart from a column we're willing to drop (see MergeStartResult).
+  const [dropPrompt, setDropPrompt] = useState<{
+    message: string;
+    features: string[];
+  } | null>(null);
   const logBoxRef = useRef<HTMLDivElement>(null);
   const notifiedDone = useRef(false);
 
@@ -335,9 +341,13 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     !selected.has(effectiveOutput) &&
     status?.state !== "running";
 
-  const handleMerge = async () => {
+  // `dropFeatures` is empty on the first attempt. If the server comes back
+  // saying the sources differ only by a droppable column, we surface the ask
+  // and the user's confirmation retries with the names filled in.
+  const handleMerge = async (dropFeatures: string[] = []) => {
     setStarting(true);
     setStartError(null);
+    setDropPrompt(null);
     try {
       const res = await startDatasetMerge(
         baseUrl,
@@ -345,8 +355,16 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         selectedIds,
         effectiveOutput,
         selectedIds.map((repoId) => weightOf(repoId)),
+        dropFeatures,
       );
       if (!res.started) {
+        // Not a failure — a question. Merging coaching corrections back into
+        // the demos they were collected against lands here every time, and
+        // showing it as a red error would read as "you can't do this".
+        if (res.droppable_features?.length) {
+          setDropPrompt({ message: res.message, features: res.droppable_features });
+          return;
+        }
         setStartError(res.message);
         return;
       }
@@ -614,9 +632,29 @@ const MergeDatasetsDialog: React.FC<Props> = ({
             {startError ? (
               <p className="text-sm text-destructive">{startError}</p>
             ) : null}
+            {dropPrompt ? (
+              <div className="rounded-lg border border-warn/40 bg-warn/10 p-3">
+                <p className="text-sm leading-relaxed text-warn">
+                  {dropPrompt.message}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Your original datasets aren't modified — the column is removed
+                  from a working copy used only for this merge.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-3"
+                  disabled={starting}
+                  onClick={() => handleMerge(dropPrompt.features)}
+                >
+                  Drop {dropPrompt.features.join(", ")} and merge
+                </Button>
+              </div>
+            ) : null}
             <div className="flex justify-end">
               <Button
-                onClick={handleMerge}
+                onClick={() => handleMerge()}
                 disabled={!canMerge || starting}
                 className=""
               >

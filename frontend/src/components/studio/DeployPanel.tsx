@@ -94,6 +94,16 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
 // just stops the stepper from offering a number that would be silently reduced.
 const MAX_EVAL_EPISODES = 200;
 
+// Mirrors rollout.MAX_COACHING_CORRECTIONS. Far lower than the eval bound
+// because every correction is a hands-on takeover — the operator is standing at
+// the arm for all of them.
+const MAX_COACHING_CORRECTIONS = 100;
+
+// The three shapes a Deploy run can take. One control instead of inferring the
+// mode from an episode count, which was already a little cryptic at 1-vs-many
+// and would be worse with a third option folded in.
+type RunMode = "single" | "eval" | "coach";
+
 /** Coefficient of the original ACT paper's exponential weighting (see
  * lerobot's ACTTemporalEnsembler). Offered as the starting point when the user
  * switches temporal ensembling on. */
@@ -278,6 +288,13 @@ const DeployPanel: React.FC = () => {
   // switches the session dialog into eval mode — N scored episodes with a reset
   // between each and an accuracy at the end. Clamped again server-side.
   const [evalEpisodes, setEvalEpisodes] = useState(1);
+  // Which of the three run shapes this launch is. `evalEpisodes` still carries
+  // the count, but the MODE is explicit now rather than implied by it being >1.
+  const [runMode, setRunMode] = useState<RunMode>("single");
+  // Coaching (DAgger): run the policy, take over when it's about to fail, and
+  // record each takeover as training data. See StartInferenceRequest.coaching.
+  const [targetCorrections, setTargetCorrections] = useState(10);
+  const [coachDatasetName, setCoachDatasetName] = useState("");
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
@@ -701,9 +718,21 @@ const DeployPanel: React.FC = () => {
   // Inference drives the follower(s) only — gate on follower_ready, not
   // is_clean, so a robot with no leader port/calibration (which inference
   // never touches) can still deploy.
+  // Coaching drives the leader as well — and drives it under torque during the
+  // handover — so "follower is ready" is not enough. Without this the panel
+  // showed green lights, Start was enabled, and the leader gap only surfaced
+  // as a 400 from the server after the user had committed to a launch.
+  const coachLeaderMissing =
+    runMode === "coach" &&
+    (!robot?.leader_port ||
+      !robot?.leader_config ||
+      (robot?.mode === "bimanual" &&
+        (!robot?.right_leader_port || !robot?.right_leader_config)));
+
   const canStart =
     !!robot &&
     robot.follower_ready &&
+    !coachLeaderMissing &&
     !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
@@ -786,6 +815,9 @@ const DeployPanel: React.FC = () => {
       // Robot NAME + policy-shaped options only — ports, configs, mode and
       // the camera devices behind the bindings resolve server-side from the
       // saved record. The owner attaches the lease the session dialog renews.
+      // Coaching's LEADER arms resolve there too, off the same record: no
+      // separate picker, because the record already pairs leader with follower
+      // and re-asking would only be a chance to get it wrong.
       const { session } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "inference",
         robot: robot.name,
@@ -797,8 +829,21 @@ const DeployPanel: React.FC = () => {
           camera_dims: cameraDimsPayload,
           duration_s: durationS,
           checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-          eval_episodes: evalEpisodes,
-          inference_engine: inferenceEngine,
+          // Only ever >1 in eval mode — the count field is hidden otherwise,
+          // but pinning it here means a stale value left over from switching
+          // modes can't quietly turn a single run into a 20-episode evaluation.
+          eval_episodes: runMode === "eval" ? evalEpisodes : 1,
+          // Coaching is pinned to sync server-side too (RTC snaps the arm back
+          // toward its pre-correction pose on hand-back); sending it correctly
+          // from here keeps the request honest rather than relying on that.
+          inference_engine: runMode === "coach" ? "sync" : inferenceEngine,
+          ...(runMode === "coach"
+            ? {
+                coaching: true,
+                target_corrections: targetCorrections,
+                coaching_dataset_name: coachDatasetName,
+              }
+            : {}),
           // ACT-only, and only while the switch is on — otherwise omitted so
           // the checkpoint's own (ensembling-off) config stands.
           temporal_ensemble_coeff:
@@ -1022,13 +1067,24 @@ const DeployPanel: React.FC = () => {
             ) : (
               /* The plural is on the follower ARM count — 2 for a bimanual
                  robot, 1 otherwise. The number itself is never printed; it
-                 only picks the variant, replacing the old `{s}` splice. */
+                 only picks the variant, replacing the old `{s}` splice.
+                 Coaching gets its own key AND its own gap scope: it teleoperates
+                 through the leader too, so a missing leader port is a real
+                 blocker there and noise in every other mode. */
               <Trans
-                i18nKey="studio.deploy.robotNotReady"
+                i18nKey={
+                  runMode === "coach"
+                    ? "studio.deploy.robotNotReadyCoach"
+                    : "studio.deploy.robotNotReady"
+                }
                 count={isBimanual ? 2 : 1}
                 values={{
                   name: robot.name,
-                  gap: formatRobotSetupGap(t, robot, "follower"),
+                  gap: formatRobotSetupGap(
+                    t,
+                    robot,
+                    runMode === "coach" ? "all" : "follower",
+                  ),
                 }}
                 components={[<strong key="0" />]}
               />
@@ -1107,70 +1163,179 @@ const DeployPanel: React.FC = () => {
                 </div>
               ) : null}
               <div className="space-y-2">
-                <Label htmlFor="deploy-duration">
-                  {t("studio.deploy.duration.label")}
-                </Label>
-                <NumberInput
-                  id="deploy-duration"
-                  min={1}
-                  value={durationS}
-                  onChange={(v) => {
-                    if (v !== undefined) setDurationS(v);
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t("studio.deploy.duration.hint")}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="deploy-episodes">
-                  {t("studio.deploy.episodes.label")}
-                </Label>
-                <NumberInput
-                  id="deploy-episodes"
-                  min={1}
-                  max={MAX_EVAL_EPISODES}
-                  value={evalEpisodes}
-                  onChange={(v) => {
-                    if (v !== undefined) setEvalEpisodes(v);
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {evalEpisodes > 1
-                    ? t("studio.deploy.episodes.evalHint", {
-                        episodes: evalEpisodes,
-                      })
-                    : t("studio.deploy.episodes.hint")}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="deploy-engine">
-                  {t("studio.deploy.engine.label")}
+                <Label htmlFor="deploy-run-mode">
+                  {t("studio.deploy.runMode.label")}
                 </Label>
                 <Select
-                  value={inferenceEngine}
-                  onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
+                  value={runMode}
+                  onValueChange={(v) => setRunMode(v as RunMode)}
                 >
-                  <SelectTrigger id="deploy-engine">
+                  <SelectTrigger id="deploy-run-mode">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {/* Option VALUES ("sync" / "rtc") are what the backend
-                        parses — only the labels are translated. */}
-                    <SelectItem value="sync">
-                      {t("studio.deploy.engine.sync")}
+                    {/* Option VALUES ("single" / "eval" / "coach") are what the
+                        backend parses — only the labels are translated. */}
+                    <SelectItem value="single">
+                      {t("studio.deploy.runMode.single")}
                     </SelectItem>
-                    <SelectItem value="rtc">
-                      {t("studio.deploy.engine.rtc")}
+                    <SelectItem value="eval">
+                      {t("studio.deploy.runMode.eval")}
+                    </SelectItem>
+                    <SelectItem value="coach">
+                      {t("studio.deploy.runMode.coach")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  {inferenceEngine === "rtc"
-                    ? t("studio.deploy.engine.rtcHint")
-                    : t("studio.deploy.engine.syncHint")}
+                  {runMode === "coach"
+                    ? t("studio.deploy.runMode.coachHint")
+                    : runMode === "eval"
+                      ? t("studio.deploy.runMode.evalHint")
+                      : t("studio.deploy.runMode.singleHint")}
                 </p>
               </div>
+              {runMode !== "coach" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-duration">
+                    {t("studio.deploy.duration.label")}
+                  </Label>
+                  <NumberInput
+                    id="deploy-duration"
+                    min={1}
+                    value={durationS}
+                    onChange={(v) => {
+                      if (v !== undefined) setDurationS(v);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {runMode === "eval"
+                      ? t("studio.deploy.duration.hint")
+                      : t("studio.deploy.duration.singleHint")}
+                  </p>
+                </div>
+              ) : null}
+              {runMode === "eval" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-episodes">
+                    {t("studio.deploy.episodes.label")}
+                  </Label>
+                  <NumberInput
+                    id="deploy-episodes"
+                    min={1}
+                    max={MAX_EVAL_EPISODES}
+                    value={evalEpisodes}
+                    onChange={(v) => {
+                      if (v !== undefined) setEvalEpisodes(v);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("studio.deploy.episodes.scoreHint")}
+                  </p>
+                </div>
+              ) : null}
+              {runMode === "coach" ? (
+                <>
+                  <div className="space-y-2">
+                    <Label htmlFor="deploy-corrections">
+                      {t("studio.deploy.coaching.correctionsLabel")}
+                    </Label>
+                    <NumberInput
+                      id="deploy-corrections"
+                      min={1}
+                      max={MAX_COACHING_CORRECTIONS}
+                      value={targetCorrections}
+                      onChange={(v) => {
+                        if (v !== undefined) setTargetCorrections(v);
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("studio.deploy.coaching.correctionsHint")}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="deploy-coach-dataset">
+                      {t("studio.deploy.coaching.datasetLabel")}
+                    </Label>
+                    <Input
+                      id="deploy-coach-dataset"
+                      value={coachDatasetName}
+                      onChange={(e) => setCoachDatasetName(e.target.value)}
+                      placeholder={t("studio.deploy.coaching.datasetPlaceholder")}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {/* <0> wraps the literal on-disk prefix, which is an
+                          identifier and stays in the Latin script. */}
+                      <Trans
+                        i18nKey="studio.deploy.coaching.datasetHint"
+                        values={{
+                          prefix: `rollout_${coachDatasetName || "corrections"}_`,
+                        }}
+                        components={[<span key="0" className="font-mono" />]}
+                      />
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("studio.deploy.coaching.leaderLabel")}</Label>
+                    <p
+                      className={`text-xs ${
+                        coachLeaderMissing ? "text-destructive" : "text-muted-foreground"
+                      }`}
+                    >
+                      {!robot
+                        ? t("studio.deploy.coaching.leaderNoRobot")
+                        : coachLeaderMissing
+                          ? t("studio.deploy.coaching.leaderMissing")
+                          : t("studio.deploy.coaching.leaderFrom", {
+                              name: robot.name,
+                              // Calibration file names — data, never translated.
+                              configs: isBimanual
+                                ? `${robot.leader_config} + ${robot.right_leader_config}`
+                                : robot.leader_config,
+                            })}
+                    </p>
+                    {isBimanual ? (
+                      <p className="text-xs text-warn">
+                        {t("studio.deploy.coaching.bimanualWarning")}
+                      </p>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+              {runMode !== "coach" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-engine">
+                    {t("studio.deploy.engine.label")}
+                  </Label>
+                  <Select
+                    value={inferenceEngine}
+                    onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
+                  >
+                    <SelectTrigger id="deploy-engine">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {/* Option VALUES ("sync" / "rtc") are what the backend
+                          parses — only the labels are translated. */}
+                      <SelectItem value="sync">
+                        {t("studio.deploy.engine.sync")}
+                      </SelectItem>
+                      <SelectItem value="rtc">
+                        {t("studio.deploy.engine.rtc")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {inferenceEngine === "rtc"
+                      ? t("studio.deploy.engine.rtcHint")
+                      : t("studio.deploy.engine.syncHint")}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {t("studio.deploy.engine.coachingNote")}
+                </p>
+              )}
             </>
           ) : null}
 
@@ -1373,11 +1538,15 @@ const DeployPanel: React.FC = () => {
             ? t("studio.deploy.actions.starting")
             : checkingExtra
               ? t("studio.deploy.actions.checking")
-              : evalEpisodes > 1
-                ? t("studio.deploy.actions.startEval", {
-                    episodes: evalEpisodes,
+              : runMode === "coach"
+                ? t("studio.deploy.actions.startCoach", {
+                    corrections: targetCorrections,
                   })
-                : t("studio.deploy.actions.start")}
+                : runMode === "eval"
+                  ? t("studio.deploy.actions.startEval", {
+                      episodes: evalEpisodes,
+                    })
+                  : t("studio.deploy.actions.start")}
         </Button>
         <Button
           onClick={handleStop}

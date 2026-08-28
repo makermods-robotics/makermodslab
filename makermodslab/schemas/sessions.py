@@ -128,6 +128,12 @@ class InferenceOptions(BaseModel):
     # the arm under a different engine than the user chose).
     inference_engine: Literal["sync", "rtc"] = "sync"
     temporal_ensemble_coeff: float | None = None
+    # Coaching (DAgger). Policy-shaped like the rest: the LEADER arms a coaching
+    # session drives are hardware, so they resolve from the record server-side —
+    # see `_build_inference_request`.
+    coaching: bool = False
+    target_corrections: int = 10
+    coaching_dataset_name: str = ""
 
 
 class ReplayOptions(BaseModel):

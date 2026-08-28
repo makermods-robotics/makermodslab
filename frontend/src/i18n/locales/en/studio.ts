@@ -242,6 +242,46 @@ export default {
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arm — leader setup isn't needed.)",
     robotNotReady_other:
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arms — leader setup isn't needed.)",
+    // Coaching's variant: it teleoperates through the leader, so {{gap}} here
+    // is the ALL-arms gap and the parenthetical says why the leader matters.
+    robotNotReadyCoach_one:
+      "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Coaching also uses the leader arm — you teleoperate with it during takeovers, so it needs a port and a calibration.)",
+    robotNotReadyCoach_other:
+      "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Coaching also uses the leader arms — you teleoperate with them during takeovers, so they need a port and a calibration.)",
+    // Which shape the run takes. Option VALUES ("single"/"eval"/"coach") are
+    // identifiers the frontend switches on — only these labels are translated.
+    runMode: {
+      label: "Run mode",
+      single: "Single run",
+      eval: "Evaluate — scored episodes",
+      coach: "Coach — take over when it fails",
+      singleHint: "Runs the policy once.",
+      evalHint:
+        "Runs the policy repeatedly with a reset between each, scoring every episode into an accuracy.",
+      coachHint:
+        "Watch the policy run and take over with the leader arm the moment it's about to fail. Each takeover is saved as training data — merge it with your original demos and fine-tune to fix exactly what went wrong.",
+    },
+    // Coaching-only parameters, shown when run mode is "coach".
+    coaching: {
+      correctionsLabel: "Corrections to collect",
+      correctionsHint:
+        "The session ends once you've saved this many. You can stop early at any point and keep everything recorded so far.",
+      datasetLabel: "Corrections dataset",
+      datasetPlaceholder: "e.g., fold_shirt_fixes",
+      // <0> wraps {{prefix}}, the literal on-disk name — an identifier, so it
+      // stays in the Latin script whatever the language.
+      datasetHint:
+        "Saved as <0>{{prefix}}</0> plus a timestamp — deployment datasets carry that prefix so they're never confused with recorded demonstrations.",
+      leaderLabel: "Leader arm",
+      leaderNoRobot: "Select a robot above.",
+      leaderMissing:
+        "This robot has no leader arm configured. Add its port and calibration in Robot settings — coaching can't run without one.",
+      // {{configs}} is one or two calibration file names — data, never translated.
+      leaderFrom:
+        "Taken from {{name}}: {{configs}}. You'll teleoperate with it during takeovers.",
+      bimanualWarning:
+        "Bimanual: park the leader arms near the robot's pose before taking over. With two arms the robot moves to meet the leaders rather than the other way round, so a takeover from across the bench sweeps both arms through the scene. Takeovers that would travel too far are refused.",
+    },
     checkpoint: {
       label: "Checkpoint",
       none: "No checkpoints available for this skill yet.",
@@ -265,6 +305,7 @@ export default {
     duration: {
       label: "Max duration (s)",
       hint: "Per episode. An episode that runs this long without you calling it a success counts as a failure.",
+      singleHint: "The run stops after this long.",
     },
     episodes: {
       label: "Episodes",
@@ -273,6 +314,7 @@ export default {
       evalHint:
         "Evaluation run: {{episodes}} episodes with a reset between each, scored into an accuracy.",
       hint: "Leave at 1 for a single run. More than 1 starts a scored evaluation.",
+      scoreHint: "How many episodes to score into the accuracy.",
     },
     engine: {
       label: "Inference engine",
@@ -284,6 +326,9 @@ export default {
         "One policy forward per control step. The arm pauses briefly between action chunks.",
       rtcHint:
         "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
+      // Shown INSTEAD of the picker in coaching mode, which is pinned to sync.
+      coachingNote:
+        "Coaching always uses the Sync engine. Real-Time Chunking makes the arm jump back toward its pre-correction pose when the policy resumes, which isn't safe with a hand nearby.",
     },
     cameras: {
       title: "Cameras",
@@ -323,6 +368,8 @@ export default {
       start: "Start inference",
       // {{episodes}} rather than {{count}} — the branch is picked in code.
       startEval: "Start evaluation ({{episodes}})",
+      // {{corrections}} rather than {{count}} — same reason as startEval.
+      startCoach: "Start coaching ({{corrections}})",
       starting: "Starting…",
       checking: "Checking…",
       stop: "Stop inference",

@@ -28,7 +28,40 @@ export type InferencePhase =
   // Eval only, terminal: every episode ran — `accuracy` is populated.
   | "finished"
   // Eval only, terminal: the user aborted. Partial tally, NO accuracy claimed.
-  | "aborted";
+  | "aborted"
+  // Coaching only. These REPLACE `running` for the life of a coaching session,
+  // because "running" doesn't answer the one question an operator standing at
+  // the arm needs answered: is the robot driving, or am I?
+  //   watching   — the policy drives; watch for the failure
+  //   holding    — frozen; the arm holds its pose, nothing is recorded
+  //   correcting — you are driving through the leader; frames ARE recorded
+  | "watching"
+  | "holding"
+  | "correcting"
+  // Coaching only: the arm is physically travelling into position for a
+  // handover. Neither steady state is true for that ~2s window.
+  | "handing_over"
+  // Coaching only: the correction is being written to disk. Synchronous on the
+  // runner's control loop, so the arm is frozen and the policy hasn't resumed.
+  | "saving";
+
+// lerobot's own DAggerPhase, passed through unrenamed so a status payload and a
+// lerobot log line agree. The operator-facing wording is a rendering concern —
+// see PHASE_META in InferenceSessionDialog.
+export type CoachingPhase =
+  | "autonomous"
+  | "paused"
+  | "correcting"
+  // NOT one of lerobot's — ours. Covers the window where `_apply_transition`
+  // is driving an arm and no lerobot phase describes what is happening:
+  // single-arm the leader is being driven to the follower's pose, bimanual
+  // BOTH followers are sliding to meet the leaders. Reporting either steady
+  // state there tells the operator the arm is still when it is moving.
+  | "handing_over"
+  // Also ours: `save_episode()` is writing the parquet and encoding video, on
+  // the control loop, with the arm held. Without this the banner inherited
+  // "correcting" and kept claiming the operator was driving after they let go.
+  | "saving";
 
 // One episode's verdict. `error` (a crash: serial glitch, camera drop, policy
 // blow-up) is deliberately NEITHER success nor failure — it's excluded from the
@@ -85,6 +118,31 @@ export interface InferenceStatus {
   // an aborted session reports its partial tally with accuracy null, and so
   // does a session where every episode crashed.
   accuracy?: number | null;
+  // --- Coaching (DAgger) ---------------------------------------------------
+  // False (with null companions) for every non-coaching run — the shape is
+  // stable, so `coaching` is the only flag worth branching on. Unlike the eval
+  // block, this one SURVIVES onto the terminal payload: the dataset name and
+  // tally are what the follow-up card needs to offer "merge" and "fine-tune",
+  // and they have to outlive the session that produced them.
+  coaching?: boolean;
+  // Null until the runner reports one — there is a window after the session
+  // goes live where neither "the policy is driving" nor "the arm is frozen" is
+  // known to be true, and the UI must say "Starting…" rather than guess.
+  coaching_phase?: CoachingPhase | null;
+  corrections_saved?: number | null;
+  corrections_target?: number | null;
+  // Recorded correction time across the session, in seconds. Reported next to
+  // the count because ten one-second twitches and ten ten-second recoveries are
+  // very different datasets.
+  correction_seconds?: number | null;
+  // The dataset lerobot ACTUALLY created, timestamp and all. Null until the
+  // session reports it (shortly after the policy loads) — it cannot be derived
+  // from `coaching_dataset_name`, which is only what was asked for.
+  coaching_dataset?: string | null;
+  // Set when a takeover was refused because the leader sits too far from the
+  // follower, with the offending joints named. Cleared on the next successful
+  // phase change, so it always describes the LAST attempt, not a history.
+  align_error?: string | null;
 }
 
 // Kind-agnostic fallback stop. The session dialog stops by session id
@@ -134,6 +192,75 @@ export async function startNextInferenceEpisode(
     "/api/v1/inference-next-episode",
     { method: "POST", action: "Start next episode" },
   );
+}
+
+// --- Coaching controls ------------------------------------------------------
+// All five are 409 when no coaching session is live or it is still starting up.
+// None of them pre-checks the phase client-side: the runner's phase is
+// authoritative and the browser only ever holds a copy that is one poll stale,
+// so a command that arrives at the wrong moment is a harmless no-op the runner
+// logs — far better than a button that refuses something the arm was ready for.
+
+// Take control from the policy and start recording. ONE press covers the whole
+// handover: the policy pauses, the leader arm is driven to the follower's pose
+// (so you pick up an arm already where the robot is), and only then does the
+// correction begin. Upstream lerobot needs two keys and four presses per cycle;
+// the composition lives in the runner so the operator's job is one button.
+export async function coachingTakeover(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-takeover", {
+    method: "POST",
+    action: "Take over",
+  });
+}
+
+// End the correction, SAVE it, and hand control back to the policy.
+export async function coachingHandback(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-handback", {
+    method: "POST",
+    action: "Hand back",
+  });
+}
+
+// End the correction and DISCARD it. The fumbled-takeover escape: a botched
+// correction is poison training data, and upstream lerobot has no way to reject
+// one once it starts.
+export async function coachingCancel(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-cancel", {
+    method: "POST",
+    action: "Discard correction",
+  });
+}
+
+// Freeze the policy without taking over — the arm holds its pose and nothing is
+// recorded. For deciding, or repositioning the scene, without committing.
+export async function coachingHold(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-hold", {
+    method: "POST",
+    action: "Hold",
+  });
+}
+
+// Hand control back to the policy from a hold.
+export async function coachingResume(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-resume", {
+    method: "POST",
+    action: "Resume policy",
+  });
 }
 
 export async function getInferenceStatus(

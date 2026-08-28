@@ -42,6 +42,7 @@ import contextlib
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -55,10 +56,29 @@ from typing import IO, Any, Literal
 from pydantic import BaseModel
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .api_errors import ErrorCode
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
+from .dagger_protocol import (
+    CMD_QUIT as DAGGER_CMD_QUIT,
+    COMMANDS as DAGGER_COMMANDS,
+    EVENT_ALIGN_REQUIRED,
+    EVENT_CORRECTION_CANCELLED,
+    EVENT_CORRECTION_SAVED,
+    EVENT_DATASET,
+    EVENT_ERROR as DAGGER_EVENT_ERROR,
+    EVENT_PHASE,
+    EVENT_READY as DAGGER_EVENT_READY,
+    PHASE_CORRECTING as DAGGER_PHASE_CORRECTING,
+    PHASE_HANDING_OVER as DAGGER_PHASE_HANDING_OVER,
+    PHASE_PAUSED as DAGGER_PHASE_PAUSED,
+    PHASE_SAVING as DAGGER_PHASE_SAVING,
+    PHASES as DAGGER_PHASES,
+    parse_event as parse_dagger_event,
+    parse_fields as parse_dagger_fields,
+)
 from .eval_protocol import (
     CMD_EPISODE,
     CMD_QUIT,
@@ -86,8 +106,11 @@ from .utils.config import (
     bimanual_base_id,
     bind_robot_cameras,
     list_robot_records,
+    setup_calibration_files,
     setup_follower_calibration_file,
+    stage_bimanual_calibrations,
     stage_bimanual_follower_calibrations,
+    validate_dataset_repo_id,
 )
 from .utils.errors import friendly_hint, is_cleanup_error
 
@@ -140,11 +163,20 @@ class InferenceRequest(BaseModel):
     camera_dims: dict[str, PolicyCameraDims] = {}
     duration_s: int = 60
     # Bimanual: the follower_port/follower_config above is the LEFT arm; these
-    # add the RIGHT arm. Inference has no leader arms — only the two followers
-    # are driven — so there is no right_leader_* here (cf. record/teleop).
+    # add the RIGHT arm.
     mode: str = "single"
     right_follower_port: str = ""
     right_follower_config: str = ""
+    # LEADER arms. Blank for every non-coaching run: a plain rollout and an eval
+    # drive the followers from the policy and have no use for a leader, which is
+    # why inference carried no leader fields at all until coaching arrived. A
+    # COACHING session is the exception — the whole point is that a human takes
+    # over through the leader — so these are required when `coaching` is true
+    # (and the right_* pair additionally when mode is bimanual).
+    leader_port: str = ""
+    leader_config: str = ""
+    right_leader_port: str = ""
+    right_leader_config: str = ""
     # Robot record name. Two jobs:
     #   1. It names the record `camera_bindings` resolve against (required
     #      whenever any binding is set — a missing record is a 400).
@@ -181,6 +213,21 @@ class InferenceRequest(BaseModel):
     # original ACT paper uses 0.01. Only ACT checkpoints have this field in
     # their config, so the UI offers it for `policy_type == "act"` alone.
     temporal_ensemble_coeff: float | None = None
+    # COACHING (DAgger / HG-DAgger) mode — the third session shape, alongside
+    # the single rollout and the multi-episode eval. The policy drives; the
+    # operator takes over through the leader arm when it is about to fail; each
+    # takeover is recorded as one episode of a new dataset. Mutually exclusive
+    # with eval mode (`eval_episodes > 1`) — a coaching session has no episode
+    # verdicts to tally, and an eval has no leader to take over with.
+    coaching: bool = False
+    # How many corrections to collect before the session ends on its own.
+    # Clamped server-side to [1, MAX_COACHING_CORRECTIONS].
+    target_corrections: int = 10
+    # Dataset name for the corrections, WITHOUT the owner or the mandatory
+    # `rollout_` prefix — both are applied server-side (see
+    # `_coaching_dataset_repo_id`). lerobot then appends its own timestamp, so
+    # the name on disk is discovered from the runner rather than predicted here.
+    coaching_dataset_name: str = ""
 
 
 inference_active: bool = False
@@ -297,6 +344,27 @@ PHASE_RESETTING = "resetting"
 PHASE_FINISHED = "finished"
 PHASE_ABORTED = "aborted"
 
+# COACHING-ONLY phases. Like the eval phases above, the setup ladder
+# (downloading_model → loading_policy → connecting) runs once per session; these
+# three then replace `running` for the rest of it, because "running" is not a
+# useful thing to tell an operator who needs to know, at a glance, whether the
+# ROBOT or THEY are currently driving. They map 1:1 onto lerobot's DAggerPhase
+# (autonomous / paused / correcting) and are translated in `_on_dagger_phase`.
+#   watching   — the policy is driving, the operator is watching for a failure
+#   holding    — frozen: the policy is paused and the arm holds its pose
+#   correcting — the operator is driving through the leader; frames are recorded
+# The arm is physically travelling into position for a handover — the one
+# phase that is ours rather than lerobot's. See PHASE_HANDING_OVER in
+# dagger_protocol for why a distinct state is required and not cosmetic.
+PHASE_HANDING_OVER = "handing_over"
+# The correction is being written to disk (parquet + video encode). Synchronous
+# on the runner's control loop, so the arm is frozen and the policy has not
+# resumed — the operator is waiting, and needs to be told why.
+PHASE_SAVING = "saving"
+PHASE_WATCHING = "watching"
+PHASE_HOLDING = "holding"
+PHASE_CORRECTING = "correcting"
+
 # Per-episode verdicts, in the order the UI tallies them.
 #   success — the user pressed "task succeeded" and we terminated the episode.
 #   failure — the episode ran out its --duration without the user calling it.
@@ -311,6 +379,11 @@ EPISODE_ERROR = "error"
 # Upper bound on a single eval session. 200 episodes × a 60s duration is
 # already a >3h bench session; anything past this is a typo, not a plan.
 MAX_EVAL_EPISODES = 200
+
+# Upper bound on one coaching session. A correction is a hands-on takeover —
+# the operator is standing at the arm for every one of them — so the realistic
+# ceiling is far lower than eval's. 100 is already a long, tiring session.
+MAX_COACHING_CORRECTIONS = 100
 
 
 def clamp_eval_episodes(value: int | None) -> int:
@@ -428,6 +501,97 @@ class _EvalSession:
 # eval-only endpoint gates on this being non-None, which is what keeps the
 # single-episode flow bit-for-bit unchanged. Mutated under `_state_lock`.
 _eval_session: _EvalSession | None = None
+
+
+@dataclass
+class _CoachSession:
+    """Bookkeeping for ONE coaching (DAgger) session.
+
+    The coaching counterpart of `_EvalSession`, and deliberately a separate type
+    rather than more optional fields on that one: the two sessions share a
+    subprocess shape and nothing else. An eval tallies verdicts over episodes
+    the runner starts on command; a coaching session tallies corrections the
+    OPERATOR starts, and has no notion of a per-episode verdict at all.
+
+    Mutated only under `_state_lock`. None whenever the session is not a
+    coaching one, which is what every coaching-only endpoint gates on."""
+
+    request: InferenceRequest
+    corrections_target: int
+    # The runner's reported phase, or None until it reports one.
+    #
+    # None, NOT `paused`. Both real phases are claims about who holds the arm,
+    # and there is a window between the runner reporting READY and its control
+    # loop emitting the first PHASE where neither is known to be true. It used
+    # to default to `paused`, which renders as "the arm is frozen" — a sentence
+    # the UI would show at the exact moment the policy was starting to drive.
+    # None renders as "Starting…", which is the only honest answer there.
+    phase: str | None = None
+    corrections_saved: int = 0
+    # Wall-clock seconds of recorded correction, summed across the session.
+    # Reported alongside the count because ten one-second twitches and ten
+    # ten-second recoveries are very different datasets.
+    correction_seconds: float = 0.0
+    # Resolved by the runner AFTER lerobot stamps its timestamp onto the
+    # repo_id, and unknowable before that (see dagger_protocol's DATASET note).
+    # None until the runner reports it.
+    dataset_repo_id: str | None = None
+    dataset_root: str | None = None
+    # Set when a takeover was refused because the leader sits too far from the
+    # follower; carries the joint deltas for the UI. Cleared on the next
+    # successful phase change, so it reads as "your last attempt", not history.
+    align_error: str | None = None
+    # A QUIT has been written and the runner is winding down. Suppresses crash
+    # containment so an expected exit isn't reported as a failure.
+    quitting: bool = False
+    # The runner's own ERROR line, preferred over log-tail mining when present.
+    runner_error: str | None = None
+
+
+# Coaching bookkeeping for the CURRENT session, or None when the session is a
+# plain rollout / an eval / nothing. Mutated under `_state_lock`.
+_coach_session: _CoachSession | None = None
+
+
+def clamp_coaching_corrections(value: int | None) -> int:
+    """Coerce a requested correction target into [1, MAX_COACHING_CORRECTIONS].
+
+    Clamps rather than rejects, exactly as `clamp_eval_episodes` does and for
+    the same reason: a nonsensical target is a UI slip, and the session is
+    stoppable at any moment anyway — the target is a stopping convenience, not a
+    commitment."""
+    try:
+        target = int(value)
+    except (TypeError, ValueError):
+        return 10
+    return max(1, min(target, MAX_COACHING_CORRECTIONS))
+
+
+def _coach_fields(cs: _CoachSession | None) -> dict[str, Any]:
+    """The coaching block of an /inference-status payload.
+
+    Emitted on EVERY payload so the shape is stable for the frontend, mirroring
+    `_eval_fields`: a non-coaching run reports `coaching: False` with null
+    companions rather than omitting the keys."""
+    if cs is None:
+        return {
+            "coaching": False,
+            "coaching_phase": None,
+            "corrections_saved": None,
+            "corrections_target": None,
+            "correction_seconds": None,
+            "coaching_dataset": None,
+            "align_error": None,
+        }
+    return {
+        "coaching": True,
+        "coaching_phase": cs.phase,
+        "corrections_saved": cs.corrections_saved,
+        "corrections_target": cs.corrections_target,
+        "correction_seconds": round(cs.correction_seconds, 1),
+        "coaching_dataset": cs.dataset_repo_id,
+        "align_error": cs.align_error,
+    }
 
 
 def _eval_fields(
@@ -686,6 +850,211 @@ def _on_runner_error(message: str) -> None:
         ev = _eval_session
         if ev is not None:
             ev.runner_error = message or None
+
+
+def _pump_dagger_stdout(proc: subprocess.Popen, log_handle) -> None:
+    """Tee the coaching runner's output to the log and act on its protocol events.
+
+    Structurally the same job as `_pump_runner_stdout` — one pump for the whole
+    session, phase changes arriving as lines rather than as process exits — but
+    against the DAgger vocabulary. Kept separate rather than parameterised: the
+    two protocols share no event beyond READY/ERROR, and a single pump switching
+    on which session is live would be harder to read than two that each know
+    exactly what they are reading."""
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            try:
+                line = raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            try:
+                log_handle.write(line)
+                log_handle.flush()
+            except Exception:
+                pass
+            try:
+                _handle_dagger_line(line)
+            except Exception:
+                # One malformed event must not take the pump — and with it every
+                # remaining phase change — down with it. A frozen phase display
+                # over a moving arm is exactly the failure this guards against.
+                logger.exception("Coaching runner event handling failed for %r", line.strip())
+    except Exception as exc:
+        logger.exception("Coaching runner stdout pump failed: %s", exc)
+    finally:
+        with contextlib.suppress(Exception):
+            log_handle.close()
+        rc: int | None = None
+        with contextlib.suppress(Exception):
+            rc = proc.wait(timeout=_RUNNER_REAP_TIMEOUT_S)
+        _handle_dagger_exit(proc, rc)
+
+
+def _handle_dagger_line(line: str) -> None:
+    """Dispatch one line of coaching-runner output.
+
+    Non-protocol lines are lerobot's own logging; during the one-time
+    load/connect those are the fragments `_PHASE_MARKERS` recognises, so the UI
+    still names the wait. They're only honoured before the session has reported
+    a phase — once the operator is watching a live policy, a log line that
+    happens to mention "Connecting robot" must not drag the display back to a
+    setup phase."""
+    parsed = parse_dagger_event(line)
+    if parsed is None:
+        with _state_lock:
+            cs = _coach_session
+            started = cs is not None and cs.dataset_repo_id is not None
+        if not started:
+            _advance_setup_phase(line)
+        return
+    event, payload = parsed
+    if event == DAGGER_EVENT_READY:
+        _on_dagger_ready()
+    elif event == EVENT_DATASET:
+        _on_dagger_dataset(parse_dagger_fields(payload))
+    elif event == EVENT_PHASE:
+        _on_dagger_phase(parse_dagger_fields(payload).get("phase", ""))
+    elif event == EVENT_CORRECTION_SAVED:
+        _on_correction_saved(parse_dagger_fields(payload))
+    elif event == EVENT_CORRECTION_CANCELLED:
+        _on_correction_cancelled()
+    elif event == EVENT_ALIGN_REQUIRED:
+        _on_align_required(parse_dagger_fields(payload))
+    elif event == DAGGER_EVENT_ERROR:
+        _on_dagger_error(payload)
+
+
+def _on_dagger_ready() -> None:
+    """The runner finished its one-time load + connect.
+
+    Unlike eval's READY this issues no command: a coaching session starts
+    driving the moment the control loop begins, and every transition after that
+    is the operator's to request. All this does is retire the setup phases."""
+    global _inference_rollout_started_at
+    with _state_lock:
+        if not inference_active or _coach_session is None:
+            return
+        _inference_rollout_started_at = time.time()
+        setup_s = _inference_rollout_started_at - (_inference_started_at or _inference_rollout_started_at)
+    logger.info("Coaching session live after %.1fs of setup", setup_s)
+
+
+def _on_dagger_dataset(fields: dict[str, str]) -> None:
+    """Record the dataset name lerobot actually created.
+
+    This is the only place the app learns it. `stamp_repo_id` appends a
+    timestamp inside the subprocess, so the name the user typed is not the name
+    on disk, and reconstructing it here would mean guessing the second the
+    subprocess reached that line (see dagger_protocol)."""
+    with _state_lock:
+        cs = _coach_session
+        if cs is None:
+            return
+        cs.dataset_repo_id = fields.get("repo_id") or None
+        cs.dataset_root = fields.get("root") or None
+    logger.info("Coaching dataset: %s", fields.get("repo_id"))
+
+
+def _on_dagger_phase(phase: str) -> None:
+    """Translate a lerobot DAggerPhase into the app's operator-facing phase.
+
+    An unrecognised phase is ignored rather than passed through: the value ends
+    up driving a banner that tells the operator whether the robot or they are in
+    control, and showing an unknown string there is worse than showing a stale
+    one they can still act on."""
+    if phase not in DAGGER_PHASES:
+        logger.warning("Ignoring unrecognised coaching phase %r", phase)
+        return
+    app_phase = {
+        DAGGER_PHASE_CORRECTING: PHASE_CORRECTING,
+        DAGGER_PHASE_PAUSED: PHASE_HOLDING,
+        DAGGER_PHASE_HANDING_OVER: PHASE_HANDING_OVER,
+        DAGGER_PHASE_SAVING: PHASE_SAVING,
+    }.get(phase, PHASE_WATCHING)
+    with _state_lock:
+        cs = _coach_session
+        if cs is None:
+            return
+        cs.phase = phase
+        # A phase actually changed, so the last refused takeover is history.
+        cs.align_error = None
+        if _inference_meta:
+            _inference_meta["phase"] = app_phase
+
+
+def _on_correction_saved(fields: dict[str, str]) -> None:
+    """Tally one saved correction."""
+    with _state_lock:
+        cs = _coach_session
+        if cs is None:
+            return
+        # Trust the runner's own count over incrementing our own: it is the side
+        # that knows whether an episode was written, and a dropped event would
+        # otherwise leave the two permanently out of step.
+        try:
+            cs.corrections_saved = int(fields.get("n", cs.corrections_saved + 1))
+        except ValueError:
+            cs.corrections_saved += 1
+        with contextlib.suppress(ValueError):
+            cs.correction_seconds += float(fields.get("seconds", 0.0))
+        saved = cs.corrections_saved
+        target = cs.corrections_target
+    logger.info("Correction %d/%d saved", saved, target)
+
+
+def _on_correction_cancelled() -> None:
+    """A correction was discarded — nothing to tally, but worth logging.
+
+    No status field of its own: the operator already knows (they pressed it),
+    and the count not moving is the feedback. Logged so a dataset with fewer
+    episodes than takeovers is explicable after the fact."""
+    logger.info("Correction discarded by the operator")
+
+
+def _on_align_required(fields: dict[str, str]) -> None:
+    """A takeover was refused: the leader sits too far from the follower.
+
+    Turned into a plain-language sentence HERE rather than in the frontend
+    because the joint list needs the same treatment as every other hardware
+    hint in this module — the UI renders a message, it doesn't compose one."""
+    joints = (fields.get("joints") or "").replace(",", ", ").replace(":", " ")
+    detail = f" ({joints})" if joints else ""
+    message = (
+        "Takeover refused: the leader arms are too far from the robot's pose. "
+        f"Move them closer and try again{detail}."
+    )
+    with _state_lock:
+        cs = _coach_session
+        if cs is not None:
+            cs.align_error = message
+    logger.warning(message)
+
+
+def _on_dagger_error(message: str) -> None:
+    """Stash the coaching runner's own exception text ahead of its exit."""
+    with _state_lock:
+        cs = _coach_session
+        if cs is not None:
+            cs.runner_error = message or None
+
+
+def _handle_dagger_exit(proc: subprocess.Popen, rc: int | None) -> None:
+    """Finalise a finished/dead coaching runner (called from the pump's EOF).
+
+    Unlike eval, a coaching runner exiting is usually the HAPPY path: the
+    session ends when the correction target is reached and the runner returns on
+    its own. So this reports a terminal result rather than containing a crash,
+    and only calls it an error when the exit code says so."""
+    with _state_lock:
+        cs = _coach_session
+        if cs is None or _inference_proc is not proc:
+            # Already finalised (a stop that ran to completion), or a stale pump.
+            return
+        # `quitting` means the operator pressed Stop and we asked the runner to
+        # wind down. The runner then exits 0 — a clean exit — so without this the
+        # session would be reported as having run to completion, and the summary
+        # would congratulate the user on finishing a run they cut short.
+        _finalise_coaching_locked(rc, cs, aborted=cs.quitting and not rc)
 
 
 def _handle_runner_exit(proc: subprocess.Popen, rc: int | None) -> None:
@@ -970,6 +1339,47 @@ def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None
         )
 
 
+@contextmanager
+def _open_leader(port: str, leader_id: str):
+    """Open a bare leader bus on `port`, yield the connected teleop, and release
+    the port read-only on exit.
+
+    The leader-side twin of `_open_follower`, and used for the same reason: a
+    coaching session's subprocess opens this port, so the identity check has to
+    happen before it and hand the port back. Torque is never enabled here."""
+    teleop = SO101Leader(SO101LeaderConfig(port=port, id=leader_id))
+    teleop.bus.connect()
+    try:
+        yield teleop
+    finally:
+        teleop.bus.disconnect(disable_torque=False)
+
+
+def _preflight_leader_identity(
+    port: str, leader_id: str, follower_id: str, config_name: str | None = None
+) -> list[str]:
+    """Read-only identity check of ONE leader arm before a coaching session.
+
+    The leader-side twin of `_preflight_arm_identity`, and needed only for
+    coaching — it is the one inference flow that connects a leader at all. Not
+    an optional nicety: during a pause the runner ENABLES TORQUE on this arm and
+    drives it to the follower's pose, so an unrecognised arm on this port is
+    every bit as capable of moving unexpectedly as the follower is.
+
+    Verified sequentially against the follower rather than with both buses open
+    at once, matching the invariant the bimanual follower preflight already
+    keeps. The counterpart slot is passed explicitly (we know the follower's
+    config for this very session) instead of looked up from the robot records
+    the way `_counterpart_leader_slots` has to, so a port swap is caught against
+    the pair the operator actually selected."""
+    with _open_leader(port, leader_id) as teleop:
+        return verify_devices(
+            ((teleop, "leader"),),
+            extra_slots=[ArmSlot("follower", "follower", follower_id)],
+            config_names=[config_name] if config_name is not None else None,
+        )
+
+
 def _preflight_motor_registers(port: str, follower_id: str) -> list[str]:
     """Prime the follower's RAM motor registers before the rollout subprocess
     starts.
@@ -1103,21 +1513,43 @@ def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: l
     Split out from `_build_rollout_cmd` because eval mode points the SAME flags
     at a different entry point (`makermodslab.eval_runner`, which speaks
     `lerobot-rollout`'s argv verbatim). One list, two front-ends, so a flag
-    added for one is never missing from the other."""
+    added for one is never missing from the other. Coaching mode is the third
+    front-end (`makermodslab.dagger_runner`) and layers `--strategy.*` /
+    `--dataset.*` / `--teleop.*` on top; `robot_args` carries the teleop block
+    for it, built alongside the `--robot.*` block in `_prepare_robot`."""
+    coaching = request.coaching
     args = [
-        "--strategy.type=base",
+        # Coaching replaces the strategy wholesale (see `_coaching_cli_args`);
+        # every other run is a plain autonomous rollout.
+        *([] if coaching else ["--strategy.type=base"]),
         # Emitted unconditionally, including for the "sync" default — same
         # reasoning as --strategy.type=base above and the teardown pin below:
         # `inference` is a draccus ChoiceRegistry field whose default lives
         # upstream (RolloutConfig.inference = SyncInferenceConfig), so naming it
         # makes the choice ours and keeps an upstream default flip from
         # silently changing which engine drives the arm.
-        f"--inference.type={request.inference_engine}",
+        #
+        # Coaching is pinned to sync regardless of what was requested, and the
+        # request layer refuses rtc + coaching outright so the two can't
+        # disagree. On this lerobot pin, resuming autonomous control after a
+        # correction leaves the RTC engine holding the PRE-correction
+        # observation, so it predicts its first chunk as though the arm were
+        # still where the operator found it and snaps back toward that pose
+        # (lerobot issue #3747; fix PR #4398 is unmerged). That is a physical
+        # hazard at the exact moment the operator has just let go.
+        f"--inference.type={'sync' if coaching else request.inference_engine}",
         f"--policy.path={policy_path}",
         f"--policy.device={_detect_device()}",
         *robot_args,
         f"--task={request.task}",
-        f"--duration={request.duration_s}",
+        # A coaching session has no clock. `duration` would end it mid-takeover
+        # with the arm under the operator's hand, and the session already has
+        # two honest endings: the correction target, and the Stop button. The
+        # operator is standing at the robot by definition, so an unbounded
+        # session is not an unattended one.
+        f"--duration={0 if coaching else request.duration_s}",
+        *([f"--fps={_COACHING_FPS}"] if coaching else []),
+        *(_coaching_cli_args(request) if coaching else []),
         # Pin the teardown behaviour the stop dialog promises ("eases the
         # follower back to its start pose, then goes limp"). lerobot's
         # RolloutConfig.return_to_initial_position defaults to True today,
@@ -1148,6 +1580,112 @@ def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: l
     return args
 
 
+# The control-loop rate a coaching session runs and records at. Pinned to
+# lerobot's own `RolloutConfig.fps` default rather than left implicit, and
+# emitted on BOTH `--fps` and `--dataset.fps`: the two must agree (the dataset's
+# timestamps are derived from the loop's tick rate), and inheriting an upstream
+# default on one of them is exactly how they would silently drift apart.
+_COACHING_FPS = 30
+
+
+def _coaching_dataset_repo_id(request: InferenceRequest) -> str:
+    """`rollout_<name>` for a coaching session's correction dataset.
+
+    Bare, with no owner — the same shape `RecordingRequest.dataset_repo_id`
+    carries. The Hub namespace is applied at upload time, not creation time, so
+    a logged-out operator can still coach and push later.
+
+    Two upstream constraints, neither optional:
+
+      * lerobot REFUSES a rollout dataset whose name doesn't start with
+        `rollout_` ("Dataset names for rollout must start with 'rollout_'",
+        lerobot/rollout/context.py). Applied here rather than asked of the user,
+        who should not have to know that a deployment dataset is a different
+        kind of thing from a recorded one.
+      * lerobot appends its OWN `_YYYYmmdd_HHMMSS` inside the subprocess
+        (`stamp_repo_id`, called unconditionally on the create path). So this is
+        the name we ASK for, not the one that will exist; the real one comes
+        back over the protocol. Deliberately NOT pre-stamped here the way
+        record.py stamps its own — that would produce a double timestamp.
+    """
+    name = (request.coaching_dataset_name or "corrections").strip().strip("/")
+    # Tolerate an operator who typed the prefix themselves rather than doubling it.
+    return name if name.startswith("rollout_") else f"rollout_{name}"
+
+
+def _teleop_args(request: InferenceRequest, leader_id: str, leader_staging: str | None) -> list[str]:
+    """The `--teleop.*` block for a coaching session.
+
+    The leader mirrors the follower's shape: an SO-101 leader for a single arm,
+    a BiSO leader wrapping two sub-arms for bimanual. `leader_staging` is the
+    per-session dir the two library calibrations were staged into under BiSO's
+    `<base>_left/right.json` convention; None for single-arm, where the
+    calibration file is addressed by id out of the shared leader dir.
+
+    Built here rather than in utils/robot_factory.py for the same reason the
+    `--robot.*` args are: the factory assembles config OBJECTS for the
+    in-process flows (teleoperate, record), while everything in this module has
+    to cross a subprocess boundary as argv."""
+    if request.mode == "bimanual":
+        return [
+            "--teleop.type=bi_so_leader",
+            f"--teleop.id={leader_id}",
+            f"--teleop.calibration_dir={leader_staging}",
+            f"--teleop.left_arm_config.port={request.leader_port}",
+            f"--teleop.right_arm_config.port={request.right_leader_port}",
+        ]
+    return [
+        "--teleop.type=so101_leader",
+        f"--teleop.port={request.leader_port}",
+        f"--teleop.id={leader_id}",
+    ]
+
+
+def _coaching_cli_args(request: InferenceRequest) -> list[str]:
+    """The DAgger-strategy flags layered on top of the shared rollout args."""
+    return [
+        "--strategy.type=dagger",
+        # Corrections-only. The runner refuses the continuous mode outright, and
+        # merge.py's "drop the intervention column" shortcut is only lossless
+        # because of this: with corrections-only, EVERY recorded frame is
+        # intervention=True, so the column carries no information. Flipping this
+        # to true invalidates that reasoning — see merge.py.
+        "--strategy.record_autonomous=false",
+        f"--strategy.num_episodes={clamp_coaching_corrections(request.target_corrections)}",
+        f"--dataset.repo_id={_coaching_dataset_repo_id(request)}",
+        f"--dataset.fps={_COACHING_FPS}",
+        f"--dataset.single_task={request.task}",
+        # Encode frames as they are captured rather than in one lump at save
+        # time. MEASURED on the station, 132 frames x 2 cameras at 480x640:
+        # save_episode takes 2.32s with lerobot's default (False) and 0.44s
+        # with this on, producing identical output and no leftover PNGs.
+        # `save_episode()` runs synchronously on the control loop at the
+        # hand-back edge, so that difference is time the operator spends
+        # waiting with the arm frozen.
+        #
+        # NOTE: deliberately NOT setting `rgb_encoder.vcodec=auto` the way
+        # record.py does. On this station "auto" resolves to h264_nvenc, which
+        # lerobot's own `detect_available_encoders` reports as available but
+        # PyAV then FAILS to open ("avcodec_open2(h264_nvenc)", Errno 22) — so
+        # pinning auto breaks encoding outright. The software default
+        # (libsvtav1) encodes the same episode in 0.8s, which is not a
+        # bottleneck worth risking that on.
+        "--dataset.streaming_encoding=true",
+        # NO `--dataset.root`, deliberately — the one place this flow diverges
+        # from record.py, which pins its root explicitly. lerobot stamps the
+        # timestamp onto repo_id INSIDE the subprocess and then derives the root
+        # from the stamped name; a root computed out here, before the stamp,
+        # would point at a directory whose name no longer matches the dataset
+        # and the library would never find it again. Leaving it None puts the
+        # dataset at HF_LEROBOT_HOME/<stamped id>, which is exactly where
+        # datasets.py looks.
+        # Push is the operator's decision, made afterwards from the library, not
+        # a side effect of coaching. Uploading mid-session also competes with
+        # the control loop for the machine.
+        "--dataset.push_to_hub=false",
+    ]
+
+
 def _build_rollout_cmd(request: InferenceRequest, policy_path: str, robot_args: list[str]) -> list[str]:
     """The full `lerobot-rollout` argv — one rollout, one process.
 
@@ -1172,6 +1710,21 @@ def _build_eval_runner_cmd(request: InferenceRequest, policy_path: str, robot_ar
         sys.executable,
         "-m",
         "makermodslab.eval_runner",
+        *_rollout_cli_args(request, policy_path, robot_args),
+    ]
+
+
+def _build_dagger_runner_cmd(request: InferenceRequest, policy_path: str, robot_args: list[str]) -> list[str]:
+    """The full `makermodslab.dagger_runner` argv — one process, one coaching session.
+
+    Identical flags to `_build_rollout_cmd`, different entry point: the runner
+    parses `lerobot-rollout`'s config with lerobot's own parser and then serves
+    takeover/hand-back commands off stdin instead of driving the strategy from a
+    keyboard listener it cannot reach from a browser."""
+    return [
+        sys.executable,
+        "-m",
+        "makermodslab.dagger_runner",
         *_rollout_cli_args(request, policy_path, robot_args),
     ]
 
@@ -1239,6 +1792,9 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
     pressed during the (long) download never reaches here — no bus is opened and
     no register is written. Raises ArmIdentityError on a hard arm mismatch;
     returns (robot_args, warn-but-allow messages)."""
+    if request.coaching:
+        return _prepare_coaching_robot(request)
+
     is_bimanual = request.mode == "bimanual"
     if is_bimanual:
         # BiSO loads each sub-arm's calibration as "<base>_left/right.json"
@@ -1297,6 +1853,90 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
     identity_warnings += _preflight_motor_registers(request.follower_port, follower_id)
 
     return _single_robot_args(request, follower_id), identity_warnings
+
+
+def _prepare_coaching_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
+    """`_prepare_robot` for a coaching session: followers AND leaders.
+
+    Split out rather than branched into the main body because it is the only
+    inference flow with a leader side, and folding four extra staging/preflight
+    steps into a function whose every comment says "inference has no leader
+    arms" would make both paths harder to read.
+
+    Returns `(argv, warnings)` where argv carries the `--robot.*` block followed
+    by the `--teleop.*` one — `_rollout_cli_args` splices it in whole, so the
+    leader travels the same path the follower already does.
+
+    The leader gets the SAME arm-identity preflight the follower gets. It is not
+    a passive device here: torque is enabled on it during the pause so it can be
+    driven to the follower's pose, so an unrecognised arm on that port is just
+    as capable of moving unexpectedly."""
+    identity_warnings: list[str] = []
+
+    if request.mode == "bimanual":
+        # Both sides staged, unlike the follower-only inference path — a
+        # coaching session genuinely drives the leaders, so their library
+        # calibrations must exist and be staged under BiSO's naming convention.
+        base = bimanual_base_id(request.robot_name)
+        leader_staging, follower_staging, _ = stage_bimanual_calibrations(
+            base,
+            request.leader_config,
+            request.right_leader_config,
+            request.follower_config,
+            request.right_follower_config,
+        )
+        left_id, right_id = f"{base}_left", f"{base}_right"
+
+        if request.skip_identity_check:
+            logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+        else:
+            # Each bus opens/verifies/releases sequentially — never two at once.
+            identity_warnings += _preflight_arm_identity(
+                request.follower_port, left_id, config_name=request.follower_config
+            )
+            identity_warnings += _preflight_arm_identity(
+                request.right_follower_port, right_id, config_name=request.right_follower_config
+            )
+            # The counterpart slot is the follower's LIBRARY stem, not the BiSO
+            # staging alias — the identity library is keyed by library names
+            # (same reason `config_name` is passed alongside the alias id).
+            identity_warnings += _preflight_leader_identity(
+                request.leader_port,
+                left_id,
+                request.follower_config,
+                config_name=request.leader_config,
+            )
+            identity_warnings += _preflight_leader_identity(
+                request.right_leader_port,
+                right_id,
+                request.right_follower_config,
+                config_name=request.right_leader_config,
+            )
+        # Register reset on the FOLLOWER buses only. `reset_torque_limit` exists
+        # to undo an autocal's torque cap on the arm that will be driven under
+        # load; the leaders are back-driven by hand and a cap there is harmless.
+        identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
+        identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
+
+        robot_args = _bimanual_robot_args(request, base, follower_staging)
+        return robot_args + _teleop_args(request, base, leader_staging), identity_warnings
+
+    # Single arm. `setup_calibration_files` is the shared helper teleoperation
+    # and recording already use for exactly this pair; it returns both basenames
+    # without their .json extension, which is the form `--robot.id`/`--teleop.id`
+    # want (lerobot appends the extension itself).
+    leader_id, follower_id = setup_calibration_files(request.leader_config, request.follower_config)
+
+    if request.skip_identity_check:
+        logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+    else:
+        identity_warnings += _preflight_arm_identity(request.follower_port, follower_id)
+        identity_warnings += _preflight_leader_identity(request.leader_port, leader_id, follower_id)
+
+    identity_warnings += _preflight_motor_registers(request.follower_port, follower_id)
+
+    robot_args = _single_robot_args(request, follower_id)
+    return robot_args + _teleop_args(request, leader_id, None), identity_warnings
 
 
 def _fail_startup(error: str) -> None:
@@ -1386,6 +2026,18 @@ def _spawn_rollout_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
+            # Own process group, so teardown can reap the WHOLE tree.
+            #
+            # LeRobotDataset spawns image-writer subprocesses of its own, and
+            # they hold camera and file handles. `proc.kill()` only signals the
+            # direct child, so a runner that had to be force-killed left those
+            # writers behind — still holding /dev/video*, so the NEXT session
+            # could not open the cameras. Observed on the station: two orphaned
+            # dagger_runner processes surviving SIGTERM by eight minutes.
+            #
+            # posix-only; on Windows the flag is ignored by `_terminate_tree`,
+            # which falls back to signalling the process alone.
+            start_new_session=True,
         )
     except Exception:
         with contextlib.suppress(Exception):
@@ -1402,6 +2054,65 @@ def _spawn_rollout_process(
     return proc, log_handle, log_path
 
 
+def _signal_group(proc: subprocess.Popen, signum: int) -> bool:
+    """Signal the runner's whole process group. False when that isn't possible.
+
+    Returns False (rather than raising) for every reason the group route can be
+    unavailable — no `pid`, no process groups on this platform, the group
+    already gone, or a test stand-in that isn't a real Popen — so the caller can
+    fall back to signalling the single process.
+
+    REFUSES to signal our own process group. `start_new_session=True` puts the
+    runner in its own, so this should never trigger; if it ever did, the call
+    would take down the FastAPI server along with the runner, and a wedged
+    camera is a far better outcome than a dead app."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        return False
+    try:
+        if pgid == os.getpgid(0):
+            logger.warning("Runner shares our process group; signalling it alone")
+            return False
+    except Exception:
+        return False
+    try:
+        os.killpg(pgid, signum)
+        return True
+    except Exception as exc:
+        logger.debug("killpg failed (%s); signalling the process alone", exc)
+        return False
+
+
+def _terminate_tree(proc: subprocess.Popen, timeout: float = 5.0) -> None:
+    """Signal a runner AND its children, escalating SIGTERM -> SIGKILL.
+
+    `Popen.terminate()`/`kill()` reach only the direct child. The runner forks
+    image writers (LeRobotDataset's `image_writer_processes`), and those keep
+    the cameras open after their parent dies — which is what left the NEXT
+    session unable to connect. Spawned with `start_new_session=True`, the runner
+    leads its own process group, so one `killpg` takes the tree down together.
+
+    Degrades to signalling the process alone whenever the group route is
+    unavailable, so it stays correct on non-posix and under test doubles."""
+    for signum, fallback in ((signal.SIGTERM, "terminate"), (signal.SIGKILL, "kill")):
+        with contextlib.suppress(Exception):
+            if proc.poll() is not None:
+                return
+        if not _signal_group(proc, signum):
+            with contextlib.suppress(Exception):
+                getattr(proc, fallback)()
+        try:
+            proc.wait(timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            logger.warning("Runner did not exit %.0fs after %s", timeout, fallback)
+        except Exception:
+            return
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=timeout)
+
+
 def _stdin_seed(request: InferenceRequest) -> bytes:
     """Newlines to pre-answer lerobot's per-arm calibration prompt.
 
@@ -1415,8 +2126,14 @@ def _stdin_seed(request: InferenceRequest) -> bytes:
     for the one-shot path subsequent input() calls in the recalibration path get
     EOF and raise — fine, because we never want to enter that path from the UI.
     For the eval runner, whose stdin stays open as a command channel, an
-    unconsumed newline surfaces as a blank command line and is ignored."""
-    return b"\n\n" if request.mode == "bimanual" else b"\n"
+    unconsumed newline surfaces as a blank command line and is ignored.
+
+    A COACHING session connects LEADERS as well, and `SOLeader.calibrate()`
+    fires the same prompt, so it needs one newline per arm on BOTH sides:
+    two for single (follower + leader), four for bimanual."""
+    arms = 2 if request.mode == "bimanual" else 1
+    sides = 2 if request.coaching else 1
+    return b"\n" * (arms * sides)
 
 
 def _launch_rollout_subprocess(
@@ -1446,6 +2163,23 @@ def _launch_eval_runner(
     that replaces spawning-and-killing a process per episode."""
     return _spawn_rollout_process(
         _build_eval_runner_cmd(request, policy_path, robot_args),
+        _stdin_seed(request),
+        close_stdin=False,
+    )
+
+
+def _launch_dagger_runner(
+    request: InferenceRequest,
+    policy_path: str,
+    robot_args: list[str],
+) -> tuple[subprocess.Popen, IO[str], Path]:
+    """Spawn the coaching runner — one process for the whole session.
+
+    stdin STAYS OPEN: it is the command channel (`TAKEOVER` / `HANDBACK` /
+    `CANCEL` / `HOLD` / `RESUME` / `QUIT`) that replaces the keyboard listener
+    upstream's DAgger strategy installs, which a browser cannot reach."""
+    return _spawn_rollout_process(
+        _build_dagger_runner_cmd(request, policy_path, robot_args),
         _stdin_seed(request),
         close_stdin=False,
     )
@@ -1490,20 +2224,14 @@ def _quit_runner(proc: subprocess.Popen) -> None:
         proc.wait(timeout=_RUNNER_QUIT_TIMEOUT_S)
         return
     except subprocess.TimeoutExpired:
-        logger.warning("Eval runner did not exit %.0fs after QUIT; terminating", _RUNNER_QUIT_TIMEOUT_S)
+        logger.warning("Runner did not exit %.0fs after QUIT; terminating", _RUNNER_QUIT_TIMEOUT_S)
     except Exception as exc:
-        logger.exception("Waiting for the eval runner to quit failed: %s", exc)
+        logger.exception("Waiting for the runner to quit failed: %s", exc)
         return
-    try:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            logger.warning("Eval runner did not exit 5s after SIGTERM; killing")
-            proc.kill()
-            proc.wait()
-    except Exception as exc:
-        logger.exception("Terminating the eval runner failed: %s", exc)
+    # Whole tree, not just the runner — see `_terminate_tree`. A runner wedged
+    # inside a slow `save_episode()` cannot answer QUIT, and leaving its image
+    # writers behind is what blocks the next session's cameras.
+    _terminate_tree(proc)
 
 
 def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Event) -> None:
@@ -1562,6 +2290,7 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
     #    second arm-identity pass.
     with _state_lock:
         is_eval = _eval_session is not None
+        is_coaching = _coach_session is not None
         if _eval_session is not None:
             _eval_session.policy_path = policy_path
             _eval_session.robot_args = list(robot_args)
@@ -1569,7 +2298,12 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
             # finished loading — it is pending from this moment.
             _eval_session.episode_pending = True
 
-    launch = _launch_eval_runner if is_eval else _launch_rollout_subprocess
+    if is_coaching:
+        launch = _launch_dagger_runner
+    elif is_eval:
+        launch = _launch_eval_runner
+    else:
+        launch = _launch_rollout_subprocess
     try:
         proc, log_handle, log_path = launch(request, policy_path, robot_args)
     except Exception as exc:
@@ -1595,7 +2329,14 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
                 # fragile for path comparisons) — read by inference_in_use_path so
                 # models.delete_local_model can refuse deleting it mid-run.
                 "policy_path": policy_path,
-                "duration_s": request.duration_s,
+                # 0 for coaching, and it must be: a coaching session runs
+                # `--duration=0` (unbounded — it ends on the correction target
+                # or the Stop button), and the dialog's hung-run safety net
+                # fires on `rollout_elapsed_s > duration_s + 10`. Reporting the
+                # request's nominal duration here would have that net stop a
+                # perfectly healthy session ten seconds past a clock it is not
+                # running against — quite possibly mid-takeover.
+                "duration_s": 0 if request.coaching else request.duration_s,
                 "log_path": str(log_path),
                 "phase": carried_phase,
             }
@@ -1617,29 +2358,32 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
         # 5 s. Leaving the orphan behind would keep the serial bus open and
         # block the next session.
         logger.info("Inference startup abandoned after spawn (stop requested); killing subprocess")
-        with contextlib.suppress(Exception):
-            proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            logger.warning("Abandoned subprocess did not exit in 5s; killing")
-            with contextlib.suppress(Exception):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                proc.wait(timeout=5)
+        _terminate_tree(proc)
         with contextlib.suppress(Exception):
             log_handle.close()
         return
 
     # Start the stdout pump only after committing, so it never advances the phase
     # of a subprocess we might have abandoned above.
+    if is_coaching:
+        pump = _pump_dagger_stdout
+    elif is_eval:
+        pump = _pump_runner_stdout
+    else:
+        pump = _pump_stdout
     threading.Thread(
-        target=_pump_runner_stdout if is_eval else _pump_stdout,
+        target=pump,
         args=(proc, log_handle),
         name="inference-stdout-pump",
         daemon=True,
     ).start()
-    logger.info("Inference started: pid=%s policy=%s eval=%s", proc.pid, policy_path, is_eval)
+    logger.info(
+        "Inference started: pid=%s policy=%s eval=%s coaching=%s",
+        proc.pid,
+        policy_path,
+        is_eval,
+        is_coaching,
+    )
 
 
 def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
@@ -1653,7 +2397,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     launch modal; the multi-minute Hub download moves off the request thread so
     the UI lands on the inference page and shows download progress there."""
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
-    global _last_result, _last_log_path, _inference_startup_thread, _eval_session
+    global _last_result, _last_log_path, _inference_startup_thread, _eval_session, _coach_session
 
     # Mutex with every other feature that drives the same serial bus (see
     # CLAUDE.md's "State model & mutual exclusion").
@@ -1765,7 +2509,23 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         # "episode 1 / N". A count of 1 leaves `_eval_session` None, which is
         # what keeps the historical single-rollout flow untouched.
         episodes = clamp_eval_episodes(request.eval_episodes)
-        _eval_session = _EvalSession(request=request, episodes_total=episodes) if episodes > 1 else None
+        _eval_session = (
+            _EvalSession(request=request, episodes_total=episodes)
+            if episodes > 1 and not request.coaching
+            else None
+        )
+        # Coaching is decided here too, and is exclusive with eval (the
+        # validation above this call refuses the combination). Seeding it now
+        # means the very first status poll already reports "0 / N corrections"
+        # rather than a bare rollout the UI would render as a plain run.
+        _coach_session = (
+            _CoachSession(
+                request=request,
+                corrections_target=clamp_coaching_corrections(request.target_corrections),
+            )
+            if request.coaching
+            else None
+        )
 
     # The claim above is the real state transition — broadcast the hint so
     # every WS client (any page, any remote UI) refetches /inference-status.
@@ -1773,16 +2533,83 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
 
     def _release_slot() -> None:
         global inference_active, _inference_started_at, _inference_cancel, _inference_meta
-        global _eval_session
+        global _eval_session, _coach_session
         with _state_lock:
             inference_active = False
             _inference_started_at = None
             _inference_cancel = None
             _inference_meta = {}
             _eval_session = None
+            _coach_session = None
         # The pre-spawn guards below released the just-claimed slot: undo the
         # claim's active=True hint.
         notify_session_changed("inference", False)
+
+    # --- Coaching-mode guards -------------------------------------------------
+    # All cheap and synchronous, so a misconfigured coaching launch 4xxs in the
+    # panel rather than failing minutes later, after a model download, as an
+    # opaque subprocess crash.
+    if request.coaching:
+        if request.eval_episodes and clamp_eval_episodes(request.eval_episodes) > 1:
+            _release_slot()
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": (
+                    "A coaching session can't also be an evaluation. "
+                    "Evaluation scores episodes the policy runs alone; coaching records "
+                    "the moments you take over."
+                ),
+            }
+        if request.inference_engine == "rtc":
+            # Refused server-side, not merely hidden in the UI: on this lerobot
+            # pin the RTC engine keeps the pre-correction observation across a
+            # hand-back and snaps the arm toward where it used to be
+            # (lerobot #3747). That is a physical hazard at the exact instant
+            # the operator has just let go of the leader.
+            _release_slot()
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": (
+                    "Coaching runs on the standard (sync) inference engine. "
+                    "Real-Time Chunking makes the arm jump back toward its pre-correction "
+                    "pose when the policy resumes, which isn't safe with a hand nearby."
+                ),
+            }
+        missing = []
+        if not request.leader_port:
+            missing.append("leader port")
+        if not request.leader_config:
+            missing.append("leader calibration")
+        if request.mode == "bimanual":
+            if not request.right_leader_port:
+                missing.append("right leader port")
+            if not request.right_leader_config:
+                missing.append("right leader calibration")
+        if missing:
+            _release_slot()
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": (
+                    f"Coaching needs a leader arm to take over with — missing: {', '.join(missing)}."
+                ),
+            }
+        name_ok, name_reason = validate_dataset_repo_id(_coaching_dataset_repo_id(request))
+        if not name_ok:
+            _release_slot()
+            return {"success": False, "status_code": 400, "message": name_reason}
+        if not request.task.strip():
+            # The task string is written into every recorded frame and is what a
+            # language-conditioned policy is fine-tuned against. An empty one
+            # silently produces a dataset that can't be used with SmolVLA/pi0.
+            _release_slot()
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": "Describe the task before coaching — it's saved with every correction.",
+            }
 
     # Arm-count guard: reject a single-arm checkpoint on a bimanual robot (and
     # vice versa) BEFORE spawning the worker, where the shape mismatch would
@@ -1870,13 +2697,14 @@ def _go_idle_locked() -> None:
     Caller must hold `_state_lock`. Does NOT touch `_last_result` — whether a
     teardown leaves a terminal payload behind is the caller's decision."""
     global inference_active, _inference_proc, _inference_started_at
-    global _inference_rollout_started_at, _inference_meta, _eval_session
+    global _inference_rollout_started_at, _inference_meta, _eval_session, _coach_session
     inference_active = False
     _inference_proc = None
     _inference_started_at = None
     _inference_rollout_started_at = None
     _inference_meta = {}
     _eval_session = None
+    _coach_session = None
     # Final release. Caller holds _state_lock; the notify is a lock-free
     # droppable queue put, so this cannot deadlock.
     notify_session_changed("inference", False)
@@ -1909,7 +2737,119 @@ def _abort_eval_locked(ev: _EvalSession) -> None:
         "rollout_elapsed_s": 0,
         "elapsed_s": 0,
         **_eval_fields(ev),
+        **_coach_fields(None),
     }
+
+
+def _finalise_coaching_locked(rc: int | None, cs: _CoachSession, *, aborted: bool = False) -> None:
+    """End a coaching session and leave its terminal payload behind.
+
+    Caller must hold `_state_lock`. One function for all three endings, because
+    they differ only in the phase they report and none of them scores anything:
+
+      * the runner returned on its own, having collected the target (`finished`)
+      * the user stopped it early (`aborted`, partial tally kept)
+      * the runner died (`error`, with the cause mined out)
+
+    Unlike an aborted EVAL — which must not claim an accuracy it did not
+    measure — a stopped coaching session loses nothing by reporting its partial
+    tally: every correction it saved is on disk and is exactly as useful as it
+    would have been had the session run to target. The count is a description,
+    not a claim.
+    """
+    global _last_result
+    finished_meta = _inference_meta
+    finished_started = _inference_started_at
+    finished_rollout_started = _inference_rollout_started_at
+    # The runner's own ERROR line beats mining the log tail; fall back to the
+    # tail only when it died without saying why.
+    error = None
+    if rc:
+        error = cs.runner_error or _extract_error_from_log(finished_meta.get("log_path"))
+    if aborted:
+        terminal_phase = PHASE_ABORTED
+    elif rc:
+        terminal_phase = PHASE_ERROR
+    else:
+        terminal_phase = PHASE_FINISHED
+    outcome = "ok" if aborted else _classify_outcome(rc, finished_rollout_started is not None, error)
+    _go_idle_locked()
+    _last_result = {
+        "inference_active": False,
+        "exited": True,
+        "exit_code": rc,
+        "outcome": outcome,
+        "error": error,
+        "hint": friendly_hint(error),
+        "phase": terminal_phase,
+        "policy_ref": finished_meta.get("policy_ref"),
+        "duration_s": finished_meta.get("duration_s"),
+        "log_path": finished_meta.get("log_path"),
+        "started_at": finished_started,
+        "rollout_started_at": finished_rollout_started,
+        "rollout_elapsed_s": 0,
+        "elapsed_s": 0,
+        **_eval_fields(None),
+        # The coaching block SURVIVES into the terminal payload, unlike the live
+        # session it describes. It carries the dataset name and the tally — the
+        # two things the follow-up card needs to offer "merge this" and
+        # "fine-tune on it" — and those must outlive the session that produced
+        # them or the operator is left to find the dataset by hand.
+        **_coach_fields(cs),
+    }
+    logger.info(
+        "Coaching session ended (%s): %d/%d corrections, dataset=%s",
+        terminal_phase,
+        cs.corrections_saved,
+        cs.corrections_target,
+        cs.dataset_repo_id,
+    )
+
+
+def handle_coaching_command(command: str) -> dict[str, Any]:
+    """Forward one operator command to the coaching runner.
+
+    The five verbs (`TAKEOVER` / `HANDBACK` / `CANCEL` / `HOLD` / `RESUME`) all
+    land here; the runner is what interprets them against the current phase.
+    Deliberately does NOT pre-check the phase server-side: the runner's phase is
+    authoritative and this process only ever holds a copy that is one event
+    stale, so refusing here would sometimes reject a command the arm was
+    perfectly ready for. An invalid command is a no-op the runner logs.
+
+    QUIT is not accepted — ending the session is `/stop-inference`, which also
+    releases the slot and writes the terminal payload."""
+    verb = (command or "").strip().upper()
+    if verb == DAGGER_CMD_QUIT or verb not in DAGGER_COMMANDS:
+        return {
+            "success": False,
+            "status_code": 400,
+            "message": f"Unrecognised coaching command: {command!r}",
+        }
+    with _state_lock:
+        cs = _coach_session
+        proc = _inference_proc
+        if not inference_active or cs is None:
+            return {"success": False, "status_code": 409, "message": "No coaching session is active"}
+        if cs.quitting:
+            return {"success": False, "status_code": 409, "message": "The session is shutting down"}
+        if proc is None:
+            # Still in the pre-subprocess window (model download / arm
+            # preflight). There is nothing to command yet, and saying so beats
+            # a silent no-op the operator reads as a dead button.
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "The session is still starting up",
+            }
+    # Written outside the lock: the pipe can block if the runner is wedged, and
+    # holding `_state_lock` through that would stall every status poll.
+    if not _send_runner_command(proc, verb):
+        return {
+            "success": False,
+            "status_code": 409,
+            "message": "The coaching session is not responding",
+        }
+    return {"success": True, "message": f"{verb.capitalize()} sent"}
 
 
 def handle_stop_inference() -> dict[str, Any]:
@@ -1954,10 +2894,16 @@ def handle_stop_inference() -> dict[str, Any]:
             _inference_cancel.set()
         proc = _inference_proc
         ev = _eval_session
+        cs = _coach_session
         # Surface the stop as its own phase so a status poll racing the
         # terminate/wait below sees "stopping" rather than a stale "running".
         if _inference_meta:
             _inference_meta["phase"] = PHASE_STOPPING
+        if cs is not None:
+            # Same reason as eval's `quitting`: the runner is about to exit
+            # because we asked it to, and the pump's EOF path must not report
+            # that expected exit as a crash.
+            cs.quitting = True
         if ev is not None:
             # Suppress crash containment: the runner is about to exit because we
             # asked it to, and an expected exit must not be scored an error.
@@ -1970,13 +2916,22 @@ def handle_stop_inference() -> dict[str, Any]:
             # driven the robot, and the orphaned startup worker bails at its next
             # cancel check), or, in eval mode, while parked in a reset after the
             # runner crashed. Either way there's nothing to terminate.
+            if cs is not None:
+                _finalise_coaching_locked(None, cs, aborted=True)
+                return {"success": True, "message": "Coaching session stopped"}
             if ev is not None:
                 _abort_eval_locked(ev)
                 return {"success": True, "message": "Evaluation aborted"}
             _go_idle_locked()
             return {"success": True, "message": "Inference stopped"}
 
-    if ev is not None:
+    if cs is not None:
+        # QUIT rather than SIGTERM, for the same reason eval does: the runner
+        # breaks out of the control loop, FINALIZES THE DATASET (encoding any
+        # pending video) and eases the follower home. A signal here would risk
+        # losing the corrections the operator just spent the session collecting.
+        _quit_runner(proc)
+    elif ev is not None:
         # Eval mode: QUIT rather than SIGTERM. The runner breaks out of the
         # running episode, eases the follower home and disconnects properly —
         # a signal would cut that short. The in-flight episode is deliberately
@@ -1985,13 +2940,7 @@ def handle_stop_inference() -> dict[str, Any]:
         _quit_runner(proc)
     else:
         try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                logger.warning("Inference did not exit in 5s; killing")
-                proc.kill()
-                proc.wait()
+            _terminate_tree(proc)
         except Exception as exc:
             logger.exception("Stop inference: %s", exc)
 
@@ -1999,6 +2948,10 @@ def handle_stop_inference() -> dict[str, Any]:
         # Re-read: a status poll could have finalised the exit (and, in eval
         # mode, even finished the session) while we were outside the lock.
         ev = _eval_session
+        cs = _coach_session
+        if cs is not None:
+            _finalise_coaching_locked(None, cs, aborted=True)
+            return {"success": True, "message": "Coaching session stopped"}
         if ev is not None:
             _abort_eval_locked(ev)
             return {"success": True, "message": "Evaluation aborted"}
@@ -2147,10 +3100,7 @@ def handle_next_episode() -> dict[str, Any]:
             # Aborted while we were spawning — kill what we just started rather
             # than leave a policy driving the arm for a dead session.
             logger.info("Eval runner respawn abandoned right after spawn; killing subprocess")
-            with contextlib.suppress(Exception):
-                proc.terminate()
-            with contextlib.suppress(Exception):
-                proc.wait(timeout=5)
+            _terminate_tree(proc)
             with contextlib.suppress(Exception):
                 log_handle.close()
             return {"success": False, "status_code": 409, "message": "No evaluation is active"}
@@ -2417,6 +3367,15 @@ def handle_inference_status() -> dict[str, Any]:
             return {**_last_result, "shutting_down": shutting_down}
         if proc is not None and proc.poll() is not None:
             rc = proc.returncode
+            if _coach_session is not None:
+                # Coaching mode: phase changes arrive on the RUNNER's stdout, so
+                # an exit observed here is the session ending — cleanly at its
+                # target, or badly. Backstop for the pump (which normally
+                # notices EOF first); `_finalise_coaching_locked` clears
+                # `_inference_proc`, so whichever path arrives second finds
+                # nothing left to finalise.
+                _finalise_coaching_locked(rc, _coach_session)
+                return {**_last_result, "shutting_down": shutting_down}
             if _eval_session is not None:
                 # Eval mode: episode boundaries arrive on the RUNNER's stdout,
                 # so an exit here is the runner dying — a crash, not an episode
@@ -2467,6 +3426,7 @@ def handle_inference_status() -> dict[str, Any]:
                     "rollout_elapsed_s": 0,
                     "elapsed_s": 0,
                     **_eval_fields(None),
+                    **_coach_fields(None),
                 }
                 # Final release (lazy finalisation of a subprocess that died
                 # on its own). Under _state_lock; the notify is a lock-free
@@ -2477,6 +3437,7 @@ def handle_inference_status() -> dict[str, Any]:
         rollout_elapsed = time.time() - _inference_rollout_started_at if _inference_rollout_started_at else 0
         return {
             **_eval_fields(_eval_session),
+            **_coach_fields(_coach_session),
             # A crashed episode parks the eval session in the reset phase with
             # its mined error still on show, so the user can decide to continue
             # or abort. Null on every other live payload.

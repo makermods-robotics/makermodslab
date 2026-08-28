@@ -28,12 +28,19 @@ def _write_info(
     fps: int = 30,
     cameras: tuple[str, ...] = ("front", "wrist"),
     action_shape: tuple[int, ...] = (6,),
+    extra_features: tuple[str, ...] = (),
 ) -> None:
-    """Write a minimal ``<cache>/<repo_id>/meta/info.json`` for the helper to read."""
+    """Write a minimal ``<cache>/<repo_id>/meta/info.json`` for the helper to read.
+
+    ``extra_features`` adds scalar columns beyond the common set — used to model
+    a coaching dataset, which carries an ``intervention`` bool that a recorded
+    dataset does not."""
     features: dict = {
         "action": {"dtype": "float32", "shape": list(action_shape)},
         "observation.state": {"dtype": "float32", "shape": list(action_shape)},
     }
+    for name in extra_features:
+        features[name] = {"dtype": "bool", "shape": [1]}
     for cam in cameras:
         features[f"observation.images.{cam}"] = {
             "dtype": "video",
@@ -628,3 +635,141 @@ def test_run_cli_removes_the_output_when_weights_cannot_be_stored(
 
     assert merge._run_cli(["a/out", "a/one", "a/two", "--weights", "1", "3"]) == 1
     assert not (tmp_lerobot_home / "a/out").exists()
+
+# ---------------------------------------------------------------------------
+# Droppable features
+#
+# A coaching (DAgger) dataset carries an `intervention` bool that the recorded
+# demonstrations it was collected against do not. Merging the two — the whole
+# point of a coaching session — therefore trips lerobot's exact-feature-set
+# requirement. These cover the offer-to-drop path that resolves it.
+# ---------------------------------------------------------------------------
+
+
+def test_droppable_features_finds_a_column_only_one_source_has(tmp_lerobot_home: Path) -> None:
+    from makermodslab.merge import merge_droppable_features
+
+    _write_info(tmp_lerobot_home, "a/demos")
+    _write_info(tmp_lerobot_home, "a/corrections", extra_features=("intervention",))
+    assert merge_droppable_features(["a/demos", "a/corrections"]) == ["intervention"]
+
+
+def test_droppable_features_empty_when_sources_already_agree(tmp_lerobot_home: Path) -> None:
+    from makermodslab.merge import merge_droppable_features
+
+    _write_info(tmp_lerobot_home, "a/one", extra_features=("intervention",))
+    _write_info(tmp_lerobot_home, "a/two", extra_features=("intervention",))
+    assert merge_droppable_features(["a/one", "a/two"]) == []
+
+
+def test_droppable_features_ignores_columns_not_on_the_allowlist(tmp_lerobot_home: Path) -> None:
+    """The allowlist is closed on purpose. Offering to drop any scalar the
+    sources happen to disagree about would let a genuinely meaningful column be
+    discarded on a shrug."""
+    from makermodslab.merge import merge_droppable_features
+
+    _write_info(tmp_lerobot_home, "a/one")
+    _write_info(tmp_lerobot_home, "a/two", extra_features=("next.reward",))
+    assert merge_droppable_features(["a/one", "a/two"]) == []
+
+
+def test_merge_incompatibility_flags_the_intervention_column_by_default(
+    tmp_lerobot_home: Path,
+) -> None:
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/demos")
+    _write_info(tmp_lerobot_home, "a/corrections", extra_features=("intervention",))
+    message = _merge_incompatibility(["a/demos", "a/corrections"])
+    assert message is not None
+    assert "intervention" in message
+
+
+def test_merge_incompatibility_passes_once_the_column_is_dropped(
+    tmp_lerobot_home: Path,
+) -> None:
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/demos")
+    _write_info(tmp_lerobot_home, "a/corrections", extra_features=("intervention",))
+    assert _merge_incompatibility(["a/demos", "a/corrections"], ["intervention"]) is None
+
+
+def test_dropping_a_column_does_not_excuse_a_real_mismatch(tmp_lerobot_home: Path) -> None:
+    """Dropping `intervention` must not become a way to merge datasets that
+    disagree about something that matters."""
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/demos", cameras=("front",))
+    _write_info(
+        tmp_lerobot_home,
+        "a/corrections",
+        cameras=("front", "wrist"),
+        extra_features=("intervention",),
+    )
+    message = _merge_incompatibility(["a/demos", "a/corrections"], ["intervention"])
+    assert message is not None
+    assert "cameras" in message
+
+
+def test_merge_start_offers_to_drop_rather_than_refusing(tmp_lerobot_home: Path) -> None:
+    """The ordinary case when merging coaching corrections back into their
+    demos. It must read as a question, not a wall."""
+    from makermodslab.merge import MergeManager, MergeRequest
+
+    _write_dataset_tree(tmp_lerobot_home, "a/demos")
+    _write_dataset_tree(tmp_lerobot_home, "a/corrections")
+    _write_info(tmp_lerobot_home, "a/demos")
+    _write_info(tmp_lerobot_home, "a/corrections", extra_features=("intervention",))
+
+    result = MergeManager().start(
+        MergeRequest(source_repo_ids=["a/demos", "a/corrections"], output_repo_id="a/merged")
+    )
+    assert result["started"] is False
+    assert result["droppable_features"] == ["intervention"]
+    assert "intervention" in result["message"]
+
+
+def test_merge_start_still_refuses_an_unresolvable_mismatch(tmp_lerobot_home: Path) -> None:
+    """No `droppable_features` key means "this is a wall, not a question" — the
+    dialog renders it as a plain error."""
+    from makermodslab.merge import MergeManager, MergeRequest
+
+    _write_dataset_tree(tmp_lerobot_home, "a/demos")
+    _write_dataset_tree(tmp_lerobot_home, "a/corrections")
+    _write_info(tmp_lerobot_home, "a/demos", fps=30)
+    _write_info(tmp_lerobot_home, "a/corrections", fps=50)
+
+    result = MergeManager().start(
+        MergeRequest(source_repo_ids=["a/demos", "a/corrections"], output_repo_id="a/merged")
+    )
+    assert result["started"] is False
+    assert "droppable_features" not in result
+    assert "frame rates" in result["message"]
+
+
+def test_merge_request_defaults_to_dropping_nothing() -> None:
+    """A caller that doesn't know about the field must never have a column
+    silently removed from their data."""
+    from makermodslab.merge import MergeRequest
+
+    request = MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/out")
+    assert request.drop_features == []
+
+
+def test_merge_start_ignores_an_unacknowledgeable_drop_request(tmp_lerobot_home: Path) -> None:
+    """Echoing back a name that isn't droppable — or isn't actually in
+    disagreement — must not remove a column. Only the intersection of "the
+    caller agreed" and "it is genuinely mismatched and allowlisted" is stripped."""
+    from makermodslab.merge import _merge_incompatibility, merge_droppable_features
+
+    _write_info(tmp_lerobot_home, "a/one", cameras=("front",))
+    _write_info(tmp_lerobot_home, "a/two", cameras=("front", "wrist"))
+
+    droppable = merge_droppable_features(["a/one", "a/two"])
+    assert droppable == []
+    # A caller asking to drop a camera gets nowhere: it isn't allowlisted, so it
+    # never reaches the drop list and the camera mismatch still refuses.
+    drop = [n for n in droppable if n in {"observation.images.wrist"}]
+    assert drop == []
+    assert _merge_incompatibility(["a/one", "a/two"], drop) is not None

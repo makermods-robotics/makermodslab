@@ -442,6 +442,17 @@ export interface MergeStatus {
  * `MAX_SOURCE_WEIGHT` in makermodslab/merge.py — keep the two in step). */
 export const MAX_SOURCE_WEIGHT = 20;
 
+export interface MergeStartResult {
+  started: boolean;
+  message: string;
+  // Present (and `started` false) when the sources differ ONLY by a column the
+  // merge is willing to drop — in practice the `intervention` flag a coaching
+  // dataset carries and a recorded one doesn't. Not an error: re-submit with
+  // `dropFeatures` set to these names once the user has agreed. See
+  // DROPPABLE_FEATURES in makermodslab/merge.py for why dropping it is lossless.
+  droppable_features?: string[];
+}
+
 /** Start a merge. `sourceWeights` is a per-source integer repeat count,
  * positionally aligned with `sourceRepoIds`; omit it (or pass all 1s) for an
  * unweighted merge. A source with weight 3 contributes its episodes three
@@ -452,7 +463,8 @@ export async function startDatasetMerge(
   sourceRepoIds: string[],
   outputRepoId: string,
   sourceWeights?: number[],
-): Promise<{ started: boolean; message: string }> {
+  dropFeatures: string[] = [],
+): Promise<MergeStartResult> {
   // Only send weights when at least one is non-default, so an ordinary merge
   // keeps the exact request body it had before weights existed.
   const weighted = sourceWeights?.some((w) => w !== 1) ?? false;
@@ -463,6 +475,7 @@ export async function startDatasetMerge(
       source_repo_ids: sourceRepoIds,
       output_repo_id: outputRepoId,
       ...(weighted ? { source_weights: sourceWeights } : {}),
+      drop_features: dropFeatures,
     },
     action: "Merge datasets",
   });

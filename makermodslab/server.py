@@ -70,6 +70,13 @@ from .auto_calibrate import (
 from .calibrate import CalibrationRequest, calibration_manager
 from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
+from .dagger_protocol import (
+    CMD_CANCEL,
+    CMD_HANDBACK,
+    CMD_HOLD,
+    CMD_RESUME,
+    CMD_TAKEOVER,
+)
 from .identify import identify_arm_by_motion
 from .jobs import (
     _KNOWN_FOUNDATION_BASE_REPO_IDS,
@@ -134,6 +141,7 @@ from .replay import (
 )
 from .rollout import (
     InferenceRequest,
+    handle_coaching_command,
     handle_inference_log,
     handle_inference_status,
     handle_next_episode,
@@ -795,6 +803,64 @@ def inference_next_episode():
             code=result.get("code"),
         )
     return result
+
+
+def _coaching_route(command: str):
+    """Shared body for the five coaching controls.
+
+    They differ only in the verb they forward, so the route layer's job is
+    entirely uniform: hand the verb to the orchestrator and translate a refusal
+    into the right status code. Which transitions the verb is legal from is the
+    RUNNER's call, not this layer's — see `handle_coaching_command`."""
+    result = handle_coaching_command(command)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to send the coaching command"),
+        )
+    return result
+
+
+@router.post("/coaching-takeover")
+def coaching_takeover():
+    """Coaching mode only: take control from the policy and start recording.
+
+    One press covers the whole handover — the policy pauses, an actuated leader
+    is driven to the follower's pose so the operator picks up an arm already
+    where the robot is, and only then does the correction begin recording."""
+    return _coaching_route(CMD_TAKEOVER)
+
+
+@router.post("/coaching-handback")
+def coaching_handback():
+    """Coaching mode only: end the correction, SAVE it, and resume the policy."""
+    return _coaching_route(CMD_HANDBACK)
+
+
+@router.post("/coaching-cancel")
+def coaching_cancel():
+    """Coaching mode only: end the correction and DISCARD it.
+
+    The fumbled-takeover escape. Upstream lerobot saves every correction
+    unconditionally, which makes a botched takeover permanent training data;
+    this drops the buffer instead and parks in the held state."""
+    return _coaching_route(CMD_CANCEL)
+
+
+@router.post("/coaching-hold")
+def coaching_hold():
+    """Coaching mode only: freeze the policy without taking over.
+
+    The arm holds its pose and nothing is recorded — for when the operator needs
+    a moment to decide, or to reposition the scene, without committing to a
+    correction."""
+    return _coaching_route(CMD_HOLD)
+
+
+@router.post("/coaching-resume")
+def coaching_resume():
+    """Coaching mode only: hand control back to the policy from a hold."""
+    return _coaching_route(CMD_RESUME)
 
 
 @router.get("/inference-status")

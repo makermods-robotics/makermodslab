@@ -172,6 +172,42 @@ export default {
     noRobot: "选择要运行的机器人 — 使用本窗口右上角的机器人菜单。",
     robotNotReady_other:
       "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（推理只使用从臂 — 无需配置主臂。）",
+    // 指导模式的变体：它要通过主臂遥操作，所以这里的 {{gap}} 是全部机械臂的
+    // 缺项，括号里说明主臂为什么也必须配好。
+    robotNotReadyCoach_other:
+      "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（指导还会用到主臂 — 接管时你要用它遥操作，因此它也需要端口和标定。）",
+    // 本次运行的形态。选项的取值（"single"/"eval"/"coach"）是前端据以分支的
+    // 标识符 — 只有这些标签会被翻译。
+    runMode: {
+      label: "运行模式",
+      single: "单次运行",
+      eval: "评测 — 逐个片段评分",
+      coach: "指导 — 快失败时由你接管",
+      singleHint: "把策略跑一次。",
+      evalHint: "反复运行策略，每次之间复位，并把每个片段的评分汇总为准确率。",
+      coachHint:
+        "看着策略运行，在它快要失败的那一刻用主臂接管。每次接管都会作为训练数据保存 — 把它与你最初的示范数据合并再微调，就能精准修好出问题的地方。",
+    },
+    // 仅在运行模式为 “指导” 时显示的参数。
+    coaching: {
+      correctionsLabel: "计划采集的纠正次数",
+      correctionsHint:
+        "保存到这个数量后会话就会结束。你也可以随时提前停止，此前录到的内容都会保留。",
+      datasetLabel: "纠正数据集",
+      datasetPlaceholder: "例如：fold_shirt_fixes",
+      // <0> 包住 {{prefix}}，即磁盘上的实际名称 —— 它是标识符，
+      // 无论什么语言都保持拉丁字母。
+      datasetHint:
+        "保存为 <0>{{prefix}}</0> 加一个时间戳 — 部署产生的数据集都带这个前缀，以免与录制的示范数据混淆。",
+      leaderLabel: "主臂",
+      leaderNoRobot: "请先在上方选择一台机器人。",
+      leaderMissing:
+        "这台机器人没有配置主臂。请在机器人设置中补上它的端口和标定 — 没有主臂就无法进行指导。",
+      // {{configs}} 是一到两个标定文件名 —— 属于数据，不做翻译。
+      leaderFrom: "取自 {{name}}：{{configs}}。接管时你将用它进行遥操作。",
+      bimanualWarning:
+        "双臂注意：接管前请先把两条主臂停到接近机器人当前姿态的位置。双臂模式下是机器人去迎合主臂，而不是反过来，因此从工作台另一头接管会让两条机械臂横扫整个场景。移动距离过大的接管会被拒绝。",
+    },
     checkpoint: {
       label: "检查点",
       none: "该技能暂无可用的检查点。",
@@ -190,12 +226,14 @@ export default {
     duration: {
       label: "最长时长（秒）",
       hint: "按单个片段计。片段跑满该时长而你没有判定成功，即记为失败。",
+      singleHint: "运行到这个时长后就停止。",
     },
     episodes: {
       label: "片段数",
       evalHint:
         "评测运行：共 {{episodes}} 个片段，每个之间会复位，最终统计为准确率。",
       hint: "保持为 1 即单次运行。大于 1 则启动带评分的评测。",
+      scoreHint: "要计入准确率的片段数量。",
     },
     engine: {
       label: "推理引擎",
@@ -205,6 +243,9 @@ export default {
         "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
       rtcHint:
         "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
+      // 指导模式固定使用 sync，因此显示这句话来代替引擎选择器。
+      coachingNote:
+        "指导始终使用 Sync 引擎。Real-Time Chunking 会让策略恢复时机械臂朝纠正前的姿态弹回，手就在旁边时这并不安全。",
     },
     cameras: {
       title: "摄像头",
@@ -238,6 +279,8 @@ export default {
     actions: {
       start: "开始推理",
       startEval: "开始评测（{{episodes}}）",
+      // 与 startEval 同理，用 {{corrections}} 而不是 {{count}}。
+      startCoach: "开始指导（{{corrections}}）",
       starting: "正在启动…",
       checking: "正在检查…",
       stop: "停止推理",

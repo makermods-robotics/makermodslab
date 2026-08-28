@@ -51,6 +51,7 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rollout, "_last_result", None)
     monkeypatch.setattr(rollout, "_inference_startup_thread", None)
     monkeypatch.setattr(rollout, "_eval_session", None)
+    monkeypatch.setattr(rollout, "_coach_session", None)
 
 
 class _SyncThread:
@@ -3238,3 +3239,641 @@ def test_sharded_weights_are_not_accepted(tmp_path) -> None:
     (d / "model.safetensors.index.json").write_text("{}")
 
     assert models._has_loadable_weights(d) is False
+
+
+# ---------------------------------------------------------------------------
+# Coaching (DAgger) mode
+#
+# The runner's control loop is a subprocess and stays untested per the module
+# docstring above. What is covered here is everything that decides WHETHER and
+# HOW that subprocess is launched: the request schema, the refusals, and the
+# argv — the places a mistake reaches the arm.
+# ---------------------------------------------------------------------------
+
+
+def _coaching_request(**overrides):
+    """A minimally valid coaching request, single-arm."""
+    from makermodslab.rollout import InferenceRequest
+
+    fields = {
+        "follower_port": "/dev/ttyUSB0",
+        "follower_config": "robot_a",
+        "policy_ref": "user/repo@checkpoints/000050",
+        "task": "fold the shirt",
+        "coaching": True,
+        "leader_port": "/dev/ttyUSB1",
+        "leader_config": "teleop_a",
+        "coaching_dataset_name": "shirt_fixes",
+        "target_corrections": 5,
+    }
+    fields.update(overrides)
+    return InferenceRequest(**fields)
+
+
+def test_inference_request_defaults_to_no_coaching() -> None:
+    """Coaching must be opt-in: every existing caller omits the field and has to
+    keep getting a plain rollout."""
+    request = _stub_request()
+    assert request.coaching is False
+    assert request.leader_port == ""
+    assert request.leader_config == ""
+    assert request.right_leader_port == ""
+    assert request.right_leader_config == ""
+    assert request.coaching_dataset_name == ""
+    assert request.target_corrections == 10
+
+
+def test_clamp_coaching_corrections_bounds_and_defaults() -> None:
+    from makermodslab.rollout import MAX_COACHING_CORRECTIONS, clamp_coaching_corrections
+
+    assert clamp_coaching_corrections(5) == 5
+    assert clamp_coaching_corrections(0) == 1
+    assert clamp_coaching_corrections(-3) == 1
+    assert clamp_coaching_corrections(10_000) == MAX_COACHING_CORRECTIONS
+    assert clamp_coaching_corrections(None) == 10
+    assert clamp_coaching_corrections("nonsense") == 10
+
+
+# --- Dataset naming ---------------------------------------------------------
+
+
+def test_coaching_dataset_repo_id_applies_the_rollout_prefix() -> None:
+    """lerobot REFUSES a rollout dataset whose name lacks this prefix, so it is
+    applied for the operator rather than demanded of them."""
+    from makermodslab.rollout import _coaching_dataset_repo_id
+
+    assert _coaching_dataset_repo_id(_coaching_request()) == "rollout_shirt_fixes"
+
+
+def test_coaching_dataset_repo_id_does_not_double_the_prefix() -> None:
+    from makermodslab.rollout import _coaching_dataset_repo_id
+
+    request = _coaching_request(coaching_dataset_name="rollout_shirt_fixes")
+    assert _coaching_dataset_repo_id(request) == "rollout_shirt_fixes"
+
+
+def test_coaching_dataset_repo_id_falls_back_for_a_blank_name() -> None:
+    from makermodslab.rollout import _coaching_dataset_repo_id
+
+    assert _coaching_dataset_repo_id(_coaching_request(coaching_dataset_name="")) == ("rollout_corrections")
+
+
+def test_coaching_dataset_repo_id_is_not_pre_stamped() -> None:
+    """lerobot stamps its own timestamp inside the subprocess. Stamping here too
+    would produce `rollout_x_20260818_120000_20260818_120001`, and the app would
+    then be looking for a directory that doesn't exist."""
+    import re
+
+    from makermodslab.rollout import _coaching_dataset_repo_id
+
+    assert not re.search(r"\d{8}_\d{6}", _coaching_dataset_repo_id(_coaching_request()))
+
+
+# --- CLI arguments ----------------------------------------------------------
+
+
+def _coaching_args(request=None) -> list[str]:
+    from makermodslab.rollout import _rollout_cli_args
+
+    return _rollout_cli_args(request or _coaching_request(), "/tmp/policy", ["--robot.type=x"])
+
+
+def test_coaching_args_select_the_dagger_strategy() -> None:
+    args = _coaching_args()
+    assert "--strategy.type=dagger" in args
+    assert "--strategy.type=base" not in args
+
+
+def test_coaching_args_pin_corrections_only_recording() -> None:
+    """merge.py's "drop the intervention column" shortcut is only lossless
+    because every recorded frame in this mode is a human correction. If this
+    flag ever flips, that reasoning has to be revisited first."""
+    assert "--strategy.record_autonomous=false" in _coaching_args()
+
+
+def test_coaching_args_carry_the_clamped_correction_target() -> None:
+    from makermodslab.rollout import MAX_COACHING_CORRECTIONS
+
+    assert "--strategy.num_episodes=5" in _coaching_args()
+    args = _coaching_args(_coaching_request(target_corrections=10_000))
+    assert f"--strategy.num_episodes={MAX_COACHING_CORRECTIONS}" in args
+
+
+def test_coaching_args_force_the_sync_engine_even_when_rtc_is_requested() -> None:
+    """Defence in depth. The request layer already refuses rtc + coaching; this
+    makes the argv incapable of expressing the unsafe combination even if that
+    guard is ever bypassed. On the pinned lerobot, RTC resumes from the
+    PRE-correction observation and snaps the arm back toward it (issue #3747)."""
+    args = _coaching_args(_coaching_request(inference_engine="rtc"))
+    assert "--inference.type=sync" in args
+    assert "--inference.type=rtc" not in args
+
+
+def test_coaching_args_run_without_a_duration() -> None:
+    """A coaching session ends on its correction target or the Stop button, never
+    on a clock — a timeout could fire mid-takeover, with a hand on the leader."""
+    args = _coaching_args(_coaching_request(duration_s=60))
+    assert "--duration=0" in args
+
+
+def test_coaching_args_omit_the_dataset_root() -> None:
+    """The one place this diverges from record.py, which pins its root. lerobot
+    stamps the repo_id inside the subprocess and derives the root from the
+    STAMPED name; a root computed out here would name a directory the dataset
+    no longer lives in, and the library would never find it."""
+    assert not any(a.startswith("--dataset.root") for a in _coaching_args())
+
+
+def test_coaching_args_carry_the_dataset_and_task() -> None:
+    args = _coaching_args()
+    assert "--dataset.repo_id=rollout_shirt_fixes" in args
+    assert "--dataset.single_task=fold the shirt" in args
+    assert "--dataset.push_to_hub=false" in args
+
+
+def test_coaching_args_keep_control_and_dataset_fps_in_step() -> None:
+    """The dataset's timestamps are derived from the control loop's tick rate;
+    the two disagreeing produces a dataset whose playback speed is wrong."""
+    from makermodslab.rollout import _COACHING_FPS
+
+    args = _coaching_args()
+    assert f"--fps={_COACHING_FPS}" in args
+    assert f"--dataset.fps={_COACHING_FPS}" in args
+
+
+def test_coaching_args_still_pin_return_to_initial_position() -> None:
+    assert "--return_to_initial_position=true" in _coaching_args()
+
+
+def test_non_coaching_args_are_unchanged_by_the_coaching_branch() -> None:
+    """The regression that matters most: every existing run shape must produce
+    exactly the argv it did before coaching existed."""
+    from makermodslab.rollout import _rollout_cli_args
+
+    args = _rollout_cli_args(_stub_request(), "/tmp/policy", ["--robot.type=x"])
+    assert "--strategy.type=base" in args
+    assert "--duration=60" in args
+    assert not any(a == "--strategy.type=dagger" for a in args)
+    assert not any(a.startswith("--dataset.") for a in args)
+    assert not any(a.startswith("--teleop.") for a in args)
+    assert not any(a.startswith("--fps=") for a in args)
+
+
+def test_dagger_runner_cmd_targets_the_coaching_entry_point() -> None:
+    from makermodslab.rollout import _build_dagger_runner_cmd
+
+    cmd = _build_dagger_runner_cmd(_coaching_request(), "/tmp/policy", [])
+    assert cmd[1:3] == ["-m", "makermodslab.dagger_runner"]
+    assert "--strategy.type=dagger" in cmd
+
+
+# --- Teleop argv ------------------------------------------------------------
+
+
+def test_teleop_args_single_arm_names_the_leader_port_and_calibration() -> None:
+    from makermodslab.rollout import _teleop_args
+
+    args = _teleop_args(_coaching_request(), "teleop_a", None)
+    assert args == [
+        "--teleop.type=so101_leader",
+        "--teleop.port=/dev/ttyUSB1",
+        "--teleop.id=teleop_a",
+    ]
+
+
+def test_teleop_args_bimanual_uses_the_biso_leader_and_staging_dir() -> None:
+    from makermodslab.rollout import _teleop_args
+
+    request = _coaching_request(
+        mode="bimanual",
+        right_leader_port="/dev/ttyUSB3",
+        right_leader_config="teleop_b",
+    )
+    args = _teleop_args(request, "base_id", "/staging/leader")
+    assert "--teleop.type=bi_so_leader" in args
+    assert "--teleop.id=base_id" in args
+    assert "--teleop.calibration_dir=/staging/leader" in args
+    assert "--teleop.left_arm_config.port=/dev/ttyUSB1" in args
+    assert "--teleop.right_arm_config.port=/dev/ttyUSB3" in args
+
+
+# --- stdin seeding ----------------------------------------------------------
+
+
+def test_stdin_seed_covers_both_sides_for_coaching() -> None:
+    """One newline per ARM to pre-answer lerobot's calibration prompt. Coaching
+    connects leaders as well as followers, so it needs twice as many as any
+    other inference run — a short seed leaves connect() blocked on input()."""
+    from makermodslab.rollout import _stdin_seed
+
+    assert _stdin_seed(_stub_request()) == b"\n"
+    assert _stdin_seed(_coaching_request()) == b"\n\n"
+    assert _stdin_seed(_coaching_request(mode="bimanual")) == b"\n\n\n\n"
+
+
+# --- Start-request refusals -------------------------------------------------
+
+
+def test_coaching_start_refuses_rtc(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    result = rollout.handle_start_inference(_coaching_request(inference_engine="rtc"))
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "Real-Time Chunking" in result["message"]
+    # The slot must be released, or the next launch 409s on a session that never
+    # started.
+    assert rollout.inference_active is False
+    assert rollout._coach_session is None
+
+
+def test_coaching_start_refuses_a_simultaneous_evaluation(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    result = rollout.handle_start_inference(_coaching_request(eval_episodes=20))
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "evaluation" in result["message"].lower()
+    assert rollout.inference_active is False
+
+
+def test_coaching_start_refuses_a_missing_leader(monkeypatch) -> None:
+    """Without a leader there is nothing to take over WITH — the session would
+    load a policy, connect the arm, and then fail deep inside lerobot."""
+    from makermodslab import rollout
+
+    result = rollout.handle_start_inference(_coaching_request(leader_port=""))
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "leader" in result["message"].lower()
+    assert rollout.inference_active is False
+
+
+def test_coaching_start_refuses_a_missing_right_leader_when_bimanual(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    request = _coaching_request(mode="bimanual", right_follower_port="/dev/ttyUSB2")
+    result = rollout.handle_start_inference(request)
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "right leader" in result["message"].lower()
+
+
+def test_coaching_start_refuses_a_blank_task(monkeypatch) -> None:
+    """The task is written into every recorded frame and is what a
+    language-conditioned policy is fine-tuned against; a blank one silently
+    produces a dataset that can't be used with SmolVLA or pi0."""
+    from makermodslab import rollout
+
+    result = rollout.handle_start_inference(_coaching_request(task="   "))
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert rollout.inference_active is False
+
+
+def test_coaching_start_refuses_an_invalid_dataset_name(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    result = rollout.handle_start_inference(_coaching_request(coaching_dataset_name="a/b/c"))
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert rollout.inference_active is False
+
+
+def test_coaching_start_is_blocked_while_recording(monkeypatch) -> None:
+    """Coaching drives the same bus as everything else, so it inherits the whole
+    mutual-exclusion table — it holds `inference_active`, no new global."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr("makermodslab.record.recording_active", True)
+    result = rollout.handle_start_inference(_coaching_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+# --- Coaching commands ------------------------------------------------------
+
+
+def test_coaching_command_when_idle_returns_409() -> None:
+    from makermodslab.rollout import handle_coaching_command
+
+    result = handle_coaching_command("TAKEOVER")
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "No coaching session" in result["message"]
+
+
+def test_coaching_command_rejects_an_unknown_verb() -> None:
+    from makermodslab.rollout import handle_coaching_command
+
+    result = handle_coaching_command("LAUNCH_MISSILES")
+    assert result["success"] is False
+    assert result["status_code"] == 400
+
+
+def test_coaching_command_rejects_quit() -> None:
+    """Ending the session is /stop-inference, which also releases the slot and
+    writes the terminal payload. A QUIT sent here would leave the orchestrator
+    believing a dead session is still live."""
+    from makermodslab.rollout import handle_coaching_command
+
+    result = handle_coaching_command("QUIT")
+    assert result["success"] is False
+    assert result["status_code"] == 400
+
+
+def test_coaching_command_refuses_before_the_subprocess_exists(monkeypatch) -> None:
+    """During the model download / arm preflight there is nothing to command.
+    Saying so beats a silent no-op the operator reads as a dead button."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout,
+        "_coach_session",
+        rollout._CoachSession(request=_coaching_request(), corrections_target=5),
+    )
+    result = rollout.handle_coaching_command("TAKEOVER")
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "starting up" in result["message"]
+
+
+def test_coaching_command_is_written_to_the_runner(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    written: list[str] = []
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout,
+        "_coach_session",
+        rollout._CoachSession(request=_coaching_request(), corrections_target=5),
+    )
+    monkeypatch.setattr(rollout, "_inference_proc", object())
+    monkeypatch.setattr(rollout, "_send_runner_command", lambda proc, cmd: (written.append(cmd), True)[1])
+
+    assert rollout.handle_coaching_command("takeover")["success"] is True
+    assert written == ["TAKEOVER"]
+
+
+# --- Status payload ---------------------------------------------------------
+
+
+def test_coach_fields_are_present_and_null_for_a_non_coaching_run() -> None:
+    """The payload shape is stable so the frontend branches on `coaching` alone,
+    exactly as it does on `eval_mode`."""
+    from makermodslab.rollout import handle_inference_status
+
+    result = handle_inference_status()
+    assert result["coaching"] is False
+    for key in (
+        "coaching_phase",
+        "corrections_saved",
+        "corrections_target",
+        "correction_seconds",
+        "coaching_dataset",
+        "align_error",
+    ):
+        assert result[key] is None
+
+
+def test_coach_session_starts_with_no_phase_at_all() -> None:
+    """Before the first PHASE event lands, the session must make NO claim about
+    who holds the arm.
+
+    It used to default to `paused`, on the reasoning that claiming the policy
+    was driving would be worse. But `paused` renders as "the arm is frozen",
+    which is equally false and shown at exactly the moment the policy starts
+    driving. None renders as "Starting…" — the only honest answer in a window
+    where neither state is known to be true."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    assert session.phase is None
+    assert session.corrections_saved == 0
+
+
+def test_handing_over_maps_to_its_own_app_phase(monkeypatch) -> None:
+    """The runner announces travel before the ~2s blocking handover. It must
+    reach the UI as its own phase and not collapse into watching/holding —
+    collapsing is what made the banner claim the arm was frozen while both
+    followers swept across the workspace."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_WATCHING})
+    rollout._on_dagger_phase("handing_over")
+    assert session.phase == "handing_over"
+    assert rollout._inference_meta["phase"] == rollout.PHASE_HANDING_OVER
+
+
+def test_on_dagger_phase_ignores_an_unrecognised_value(monkeypatch) -> None:
+    """The phase drives a banner telling the operator who holds the arm. A stale
+    value they can still act on beats an unknown one they can't."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.phase = "autonomous"
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_dagger_phase("banana")
+    assert session.phase == "autonomous"
+
+
+def test_on_dagger_phase_clears_a_stale_alignment_refusal(monkeypatch) -> None:
+    """The refusal describes the LAST takeover attempt; once the phase actually
+    moves it is history and must stop being shown."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.align_error = "too far"
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_dagger_phase("correcting")
+    assert session.phase == "correcting"
+    assert session.align_error is None
+
+
+def test_on_correction_saved_trusts_the_runner_count(monkeypatch) -> None:
+    """The runner is the side that knows whether an episode was written; a
+    dropped event would otherwise leave the two counts permanently out of step."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved({"n": "3", "frames": "90", "seconds": "4.5"})
+    assert session.corrections_saved == 3
+    assert session.correction_seconds == pytest.approx(4.5)
+
+
+def test_on_dagger_dataset_records_the_stamped_name(monkeypatch) -> None:
+    """The only place the app learns the real dataset name — it cannot be
+    derived from what the operator typed."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_dagger_dataset({"repo_id": "rollout_shirt_fixes_20260818_120000", "root": "/cache/x"})
+    assert session.dataset_repo_id == "rollout_shirt_fixes_20260818_120000"
+    assert session.dataset_root == "/cache/x"
+
+
+def test_coaching_terminal_payload_keeps_the_dataset_and_tally(monkeypatch) -> None:
+    """The coaching block must OUTLIVE the session: the follow-up actions (merge,
+    fine-tune) need the dataset name, and it is gone from the live state the
+    moment the session ends."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.corrections_saved = 4
+    session.dataset_repo_id = "rollout_shirt_fixes_20260818_120000"
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {"policy_ref": "user/repo@root"})
+
+    with rollout._state_lock:
+        rollout._finalise_coaching_locked(0, session)
+
+    assert rollout.inference_active is False
+    assert rollout._coach_session is None
+    result = rollout._last_result
+    assert result["phase"] == "finished"
+    assert result["coaching"] is True
+    assert result["corrections_saved"] == 4
+    assert result["coaching_dataset"] == "rollout_shirt_fixes_20260818_120000"
+
+
+def test_coaching_stop_reports_aborted_but_keeps_the_partial_tally(monkeypatch) -> None:
+    """Unlike an aborted EVAL — which must not claim an accuracy it never
+    measured — a stopped coaching session loses nothing by reporting its count.
+    Every correction it saved is on disk and just as useful."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.corrections_saved = 2
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    with rollout._state_lock:
+        rollout._finalise_coaching_locked(None, session, aborted=True)
+
+    assert rollout._last_result["phase"] == "aborted"
+    assert rollout._last_result["outcome"] == "ok"
+    assert rollout._last_result["corrections_saved"] == 2
+
+
+def test_coaching_runner_exit_after_a_stop_reports_aborted(monkeypatch) -> None:
+    """A stopped session exits cleanly (rc 0) because we asked it to via QUIT.
+    Without the `quitting` check the summary would read "Coaching complete" and
+    congratulate the operator on finishing a run they cut short."""
+    from makermodslab import rollout
+
+    proc = object()
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.corrections_saved = 2
+    session.quitting = True
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_proc", proc)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    rollout._handle_dagger_exit(proc, 0)
+
+    assert rollout._last_result["phase"] == "aborted"
+    assert rollout._last_result["corrections_saved"] == 2
+
+
+def test_coaching_runner_exit_at_target_reports_finished(monkeypatch) -> None:
+    """The control: a session the runner ended on its own must NOT read as an
+    abort just because the abort path exists."""
+    from makermodslab import rollout
+
+    proc = object()
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.corrections_saved = 5
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_proc", proc)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    rollout._handle_dagger_exit(proc, 0)
+
+    assert rollout._last_result["phase"] == "finished"
+
+
+def test_coaching_runner_crash_reports_error_even_when_quitting(monkeypatch) -> None:
+    """A non-zero exit is a failure whether or not a stop was in flight — the
+    operator needs to know the dataset may be incomplete."""
+    from makermodslab import rollout
+
+    proc = object()
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    session.quitting = True
+    session.runner_error = "RuntimeError: bus went away"
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_proc", proc)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    rollout._handle_dagger_exit(proc, 1)
+
+    assert rollout._last_result["phase"] == "error"
+    assert rollout._last_result["error"] == "RuntimeError: bus went away"
+
+
+def test_coaching_args_pin_streaming_encoding_but_not_a_hardware_codec() -> None:
+    """Measured on the station, 132 frames x 2 cameras at 480x640:
+    `save_episode` takes 2.32s at lerobot's default and 0.44s with streaming
+    encoding on, for identical output. It runs synchronously on the control
+    loop at the hand-back edge, so that gap is time the operator waits with the
+    arm frozen.
+
+    `rgb_encoder.vcodec=auto` is deliberately NOT set, even though record.py
+    sets it. On this hardware "auto" resolves to h264_nvenc, which lerobot's
+    `detect_available_encoders` claims is available but PyAV cannot open
+    (`avcodec_open2(h264_nvenc)`, Errno 22) — pinning it breaks encoding
+    outright. The software default encodes the same episode in 0.8s, which is
+    not a bottleneck worth risking that on. This assertion is the guard against
+    someone "optimising" it back."""
+    args = _coaching_args()
+    assert "--dataset.streaming_encoding=true" in args
+    assert not any("vcodec" in a for a in args)
+
+
+def test_saving_maps_to_its_own_app_phase(monkeypatch) -> None:
+    """Without a phase of its own, the write window inherited `correcting` —
+    so the banner told the operator they were still driving and recording for
+    the whole (potentially minute-long) save."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_CORRECTING})
+    rollout._on_dagger_phase("saving")
+    assert session.phase == "saving"
+    assert rollout._inference_meta["phase"] == rollout.PHASE_SAVING
+
+
+def test_signal_group_refuses_to_signal_our_own_process_group() -> None:
+    """The guard that stops a teardown killing the FastAPI server.
+
+    `start_new_session=True` puts the runner in its own group, so this should
+    never fire — but if it ever did, `killpg` would take the whole app down
+    with the runner. A wedged camera is a far better outcome than a dead
+    server, so the group route bails and the caller signals the process alone."""
+    import os
+
+    from makermodslab import rollout
+
+    class _OurselvesProc:
+        pid = os.getpid()
+
+    assert rollout._signal_group(_OurselvesProc(), 15) is False
+
+
+def test_signal_group_declines_a_process_without_a_pid() -> None:
+    """Degrades instead of raising, so `_terminate_tree` still falls back to
+    terminate()/kill() on anything that isn't a real Popen."""
+    from makermodslab import rollout
+
+    assert rollout._signal_group(object(), 15) is False

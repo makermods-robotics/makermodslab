@@ -511,6 +511,20 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
 
     # Follower-only: inference never opens the leader bus, so only the
     # follower half of the record travels (right follower iff bimanual).
+    # COACHING is the one exception — the operator takes over THROUGH the
+    # leader — so its arms come off the same record, and only then. Sending
+    # them unconditionally would hand every plain rollout a leader port it has
+    # no business holding.
+    leader = (
+        {
+            "leader_port": record["leader_port"],
+            "leader_config": record["leader_config"],
+            "right_leader_port": record["right_leader_port"],
+            "right_leader_config": record["right_leader_config"],
+        }
+        if opts.coaching
+        else {}
+    )
     return InferenceRequest(
         follower_port=record["follower_port"],
         follower_config=record["follower_config"],
@@ -528,6 +542,10 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
         skip_identity_check=opts.skip_identity_check,
         inference_engine=opts.inference_engine,
         temporal_ensemble_coeff=opts.temporal_ensemble_coeff,
+        coaching=opts.coaching,
+        target_corrections=opts.target_corrections,
+        coaching_dataset_name=opts.coaching_dataset_name,
+        **leader,
     )
 
 

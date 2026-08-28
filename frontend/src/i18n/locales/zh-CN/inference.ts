@@ -12,6 +12,13 @@ export default {
     resetting: "请重置场景",
     finished: "评估完成",
     aborted: "评估已中止",
+    // 指导阶段。本表中唯一从操作者视角（而非系统视角）措辞的几项 —
+    // 它们说明的是此刻由谁在控制机械臂。
+    watching: "策略驾驶中 — 留意失败迹象",
+    holding: "已保持 — 机械臂正维持当前姿态",
+    correcting: "你在驾驶 — 正在录制",
+    handingOver: "正在交接 — 机械臂正在移动",
+    saving: "正在保存这次纠正…",
   },
   result: {
     success: "成功",
@@ -27,6 +34,88 @@ export default {
     settingUp: "正在准备",
     running: "运行中",
     finished: "已完成",
+    coaching: "指导中",
+    coachingComplete: "指导完成",
+    coachingStopped: "指导已停止",
+  },
+
+  // 指导过程中的大横幅。标题刻意醒目：操作者盯着的是机械臂而不是屏幕，
+  // 只能用余光扫到这里。
+  coachBanner: {
+    watching: {
+      title: "观察中",
+      hint: "策略正在驾驶。按空格键接管 — 主臂会先自行移动到机器人当前的姿态，请轻握并顺着它。",
+    },
+    held: {
+      title: "已保持",
+      hint: "机械臂正维持当前姿态。此时不会录制任何内容。",
+    },
+    handingOver: {
+      title: "正在交接",
+      hint: "机械臂正在移动到位 — 不要与它较劲，等它停稳。",
+    },
+    saving: {
+      title: "正在保存…",
+      hint: "正在把这次纠正写入磁盘。机械臂保持不动；写完后策略会继续。",
+    },
+    correcting: {
+      title: "你在驾驶",
+      hint: "正在挽回并纠正 — 每一帧都在录制。",
+    },
+    starting: {
+      title: "正在启动…",
+      hint: "正在加载策略并连接机械臂。",
+    },
+  },
+
+  coach: {
+    // 会话中的控制按钮。每个按钮旁还会显示对应按键，按键名不翻译 ——
+    // space 和 esc 指的是键盘上的实体键。
+    takeOver: "接管",
+    handBack: "交还给策略",
+    discard: "丢弃这次纠正",
+    hold: "保持 — 冻结机械臂",
+    resume: "让策略继续",
+    ending: "正在结束…",
+    endSession: "结束会话并保留纠正数据",
+    // 实时计数。{{saved}} 与 {{target}} 都是原始数字；在运行器报告目标数之前
+    // {{target}} 是 “?”，因此这里不是复数形式。
+    tally: "已完成 {{saved}} / {{target}} 次纠正",
+    recorded: "已录制 {{duration}}",
+    savingTo: "正在保存到 {{dataset}}",
+    // 总结。数据集名称已知与否会改变整句措辞，因此分成两种写法；
+    // <0> 强调的是数据集名称，属于数据。
+    summarySaved_other: "已保存 {{count}} 次纠正。",
+    summarySavedTo_other: "已保存 {{count}} 次纠正到 <0>{{dataset}}</0>。",
+    summaryNextSteps:
+      "要把它们变成更好的策略：把这个数据集与该检查点<0>最近一次</0>训练所用的数据集合并 — 如果你做过微调，那就是微调用的数据集，而不是最初的示范数据 — 然后基于同一个检查点在合并结果上继续微调。训练只接受一个数据集，所以合并这一步不能省。两个步骤分别在数据集库和训练面板中。",
+    summaryNone: "没有保存任何纠正 — 本次会话没有可用于训练的数据。",
+    // 从总结页删掉整个数据集 —— 这是一种正常结果，而不是失败路径。
+    delete: "删除这些纠正数据",
+    deleteConfirm: "确定删除？此操作无法撤销",
+    deleting: "正在删除…",
+    deleted: "已删除",
+    deleteRefused: "服务器拒绝了此次删除。",
+    deleteFailed: "无法删除该数据集",
+    deletedToast: {
+      title: "纠正数据已删除",
+      body: "{{dataset}} 已从磁盘移除。",
+    },
+    // 指令名称。`failed` 中的 {{action}} 取自下面这些名称，
+    // 因此它们按短语而非按钮文案来措辞。
+    cmd: {
+      failed: "{{action}}失败",
+      takeOver: "接管",
+      takingOver: "正在接管…",
+      handBack: "交还",
+      handingBack: "正在交还…",
+      hold: "保持",
+      holding: "正在保持…",
+      resume: "恢复策略",
+      resuming: "正在恢复…",
+      discard: "丢弃纠正",
+      discarding: "正在丢弃…",
+    },
   },
   toast: {
     startedWarningTitle: "已启动，但有警告",
@@ -38,6 +127,10 @@ export default {
     evalAbortedDescription: "结果不完整 — 未记录准确率。",
     evalAccuracy: "成功率 {{percent}}%。",
     evalNoScoreable: "没有可评分的回合。",
+    coachStoppedTitle: "指导会话已停止",
+    coachCompleteTitle: "指导完成",
+    // 这里 count 为 0 也是一种正常结果 —— 会话可能一次纠正都没保存。
+    coachSaved_other: "已保存 {{count}} 次纠正。",
     finishedTitle: "推理已结束",
     finishedDescription: "运行已完成。",
     hungTitle: "推理似乎已卡住",
