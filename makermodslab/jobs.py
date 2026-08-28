@@ -255,6 +255,17 @@ UNCONFIRMED_OUTCOME_MESSAGE = (
     "be confirmed. Any checkpoints on disk are intact."
 )
 
+# Written to `error_message` when the server itself is going away and takes a
+# local run with it (see JobRegistry.stop_local_for_shutdown). Distinct from
+# STOPPED_BY_REQUEST_MESSAGE because the user did not ask for this one — under
+# `--dev` the trigger is a saved .py file, which is nobody's decision about the
+# training — and distinct from UNCONFIRMED_OUTCOME_MESSAGE because here we DO
+# know how the run ended: we ended it, deliberately, and said so before exiting.
+STOPPED_BY_SERVER_SHUTDOWN_MESSAGE = (
+    "Stopped because MakerMods Lab shut down, not by a training error. "
+    "Resume from the last checkpoint to pick this run back up."
+)
+
 
 def classify_terminal_state(
     *,
@@ -4462,8 +4473,136 @@ class JobRegistry:
             shutil.rmtree(_job_dir(self._output_root, job_id))
         self._notify_change()
 
+    def stop_local_for_shutdown(self) -> builtins.list[str]:
+        """End every locally-running job because this process is going away.
+
+        Called from the FastAPI shutdown event, which fires on Ctrl+C, on a
+        `systemctl restart`, and on every `--dev` reload.
+
+        This does not decide the trainer's fate — it only makes it honest. A
+        local trainer dies either way: its stdout is a `subprocess.PIPE` owned
+        by this process, so once we exit, its next write raises BrokenPipeError
+        and it exits 1 with the traceback going into the closed pipe. Nothing
+        is captured, and the run lands in history as `failed` /
+        "Subprocess exited with code 1" — indistinguishable from a real
+        training bug, which is exactly how a healthy run gets mistaken for a
+        broken model. `start_new_session=True` does not prevent this: it
+        escapes the process group, not the pipe (nor, under systemd, the unit's
+        cgroup). Stopping the run here converts that silent accident into a
+        deliberate, explained `interrupted`.
+
+        Cloud runs are deliberately untouched. They execute on HF's GPUs and do
+        not care that this process is exiting, so cancelling one here would
+        throw away a paid run every time somebody saved a .py file under
+        `--dev`.
+
+        Returns the ids it stopped, for the caller to log.
+        """
+        # Take the watchdog out of the picture first, so this method is the
+        # only finaliser. A tick racing it would derive `stop_requested` as
+        # `asked_to_stop and stop_signalled() is not False` — and
+        # LocalJobRunner.stop() reports nothing when the process is ALREADY
+        # gone, which is the normal case under systemd, where the unit's
+        # cgroup TERM reaches the trainer at the same instant it reaches us.
+        # That tick would file `failed`, contradicting the message below.
+        self._stop_watchdog.set()
+
+        with self._lock:
+            targets: builtins.list[tuple[str, JobRunner]] = []
+            for jid, record in self._records.items():
+                if record.state != "running" or record.runner != "local":
+                    continue
+                runner = self._runners.get(jid)
+                if runner is None:
+                    continue
+                targets.append((jid, runner))
+                # Intent recorded BEFORE any signal leaves this process, for
+                # the same reason stop() does it: a watchdog tick that races us
+                # must finalise `interrupted`, never `failed`.
+                self._stop_requested.add(jid)
+                # Pre-set so a racing tick uses this wording rather than
+                # STOPPED_BY_REQUEST_MESSAGE — the user did not request a
+                # reload-driven stop, and telling them they did is a small lie
+                # that costs them the next debugging session.
+                if record.error_message is None:
+                    record.error_message = STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+
+        for jid, runner in targets:
+            try:
+                runner.stop()
+            except Exception:
+                logger.exception("Error stopping job %s during shutdown", jid)
+
+        # Finalise here instead of leaving it to the watchdog: the process is
+        # exiting, so there is no guarantee another tick ever runs. Mirrors
+        # _tick()'s terminal block for the stop-requested case.
+        finalised: builtins.list[JobRecord] = []
+        with self._lock:
+            for jid, runner in targets:
+                record = self._records.get(jid)
+                if record is None:
+                    continue
+                if record.state != "running":
+                    # A tick already in flight when we set the event above beat
+                    # us. Reconcile rather than leaving a record whose state and
+                    # message disagree: `failed` here is that tick's
+                    # stop_signalled()==False reading of a run WE are ending, not
+                    # evidence of a training bug.
+                    if record.state == "failed":
+                        record.state = "interrupted"
+                        record.error_message = STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+                        finalised.append(record)
+                    elif record.state == "done" and (
+                        record.error_message == STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+                    ):
+                        # It finished on its own; the message we pre-set for the
+                        # racing tick's benefit must not outlive that race.
+                        record.error_message = None
+                        finalised.append(record)
+                    continue
+                # returncode() is a required Protocol method, not an optional
+                # hook — but one runner raising here during teardown must not
+                # cost the others their finalisation.
+                try:
+                    rc = runner.returncode()
+                except Exception:
+                    logger.exception("Error reading exit code for job %s", jid)
+                    rc = None
+                if rc is None:
+                    # The runner cannot confirm a code — killed before it could
+                    # report one. We asked, and it is going away with us, so
+                    # `interrupted` is the honest label; classify_terminal_state
+                    # would fall through to `failed` on a missing code, which is
+                    # the assertion we must not make.
+                    record.state = "interrupted"
+                else:
+                    record.state = classify_terminal_state(
+                        returncode=rc, stop_requested=True, terminal_stage=None
+                    )
+                record.ended_at = time.time()
+                record.exit_code = rc
+                if record.state == "done":
+                    # It finished on its own between our intent and our signal.
+                    # It was never stopped, so the message must not survive.
+                    record.error_message = None
+                elif record.error_message is None:
+                    record.error_message = STOPPED_BY_SERVER_SHUTDOWN_MESSAGE
+                self._runners.pop(jid, None)
+                self._stop_requested.discard(jid)
+                finalised.append(record)
+
+        # Outside the lock, as _tick does — _write_meta touches the disk.
+        for record in finalised:
+            self._persist(record, force=True)
+        return [jid for jid, _ in targets]
+
     def shutdown(self) -> None:
-        """For tests / orderly process exit. Not wired to FastAPI lifespan today."""
+        """Stop the watchdog thread, leaving every record as it stands.
+
+        For tests and an orderly process exit. The FastAPI lifespan calls
+        stop_local_for_shutdown() instead, which sets the same event and also
+        ends (and finalises) the runs this process is about to take down.
+        """
         self._stop_watchdog.set()
 
     # -- internals --
@@ -4914,5 +5053,6 @@ __all__ = [
     "parse_metrics_into",
     "classify_terminal_state",
     "STOPPED_BY_REQUEST_MESSAGE",
+    "STOPPED_BY_SERVER_SHUTDOWN_MESSAGE",
     "UNCONFIRMED_OUTCOME_MESSAGE",
 ]

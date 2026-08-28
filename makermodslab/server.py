@@ -3175,6 +3175,26 @@ async def shutdown_event():
         if isinstance(result, Exception):
             logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)
 
+    # Local training is not on the list above because it drives no hardware —
+    # but it does die with this process regardless of what we do here. The
+    # trainer's stdout is a pipe this process owns, so the moment we exit its
+    # next write raises BrokenPipeError and it exits 1, with the traceback
+    # going into the closed pipe: no log line, and a history entry reading
+    # "Subprocess exited with code 1" that looks exactly like a broken model.
+    # (`start_new_session=True` escapes the process group, not the pipe.) So we
+    # end it deliberately instead, and file it as `interrupted` with a reason.
+    # Cloud runs are untouched — they keep going on HF's GPUs.
+    try:
+        stopped = await asyncio.to_thread(job_registry.stop_local_for_shutdown)
+        if stopped:
+            logger.info(
+                "Stopped %d local training job(s) on shutdown: %s",
+                len(stopped),
+                ", ".join(stopped),
+            )
+    except Exception:
+        logger.exception("Failed to stop local training jobs during shutdown")
+
     if manager:
         manager.stop_broadcast_thread()
     logger.info("✅ Cleanup completed")
