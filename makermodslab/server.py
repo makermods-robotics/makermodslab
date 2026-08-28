@@ -1830,9 +1830,17 @@ def get_job_metrics_history(job_id: str):
 
 
 @app.get("/jobs/{job_id}/checkpoints")
-def get_job_checkpoints(job_id: str):
-    """List the checkpoints saved for this job, ascending by step."""
+def get_job_checkpoints(job_id: str, lineage: bool = False):
+    """List the checkpoints saved for this job, ascending by step.
+
+    ``lineage=true`` widens that to the whole resume chain — this run plus the
+    runs it resumed. Opt-in rather than the default so existing callers keep
+    their exact semantics; the skill picker asks for it because a chain is one
+    model and splitting its steps across rows is what this fixes.
+    """
     try:
+        if lineage:
+            return {"checkpoints": job_registry.list_chain_checkpoints(job_id)}
         return {"checkpoints": job_registry.list_checkpoints(job_id)}
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc

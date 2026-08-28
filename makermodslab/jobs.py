@@ -173,6 +173,17 @@ class JobCheckpoint(BaseModel):
     step: int
     source: Literal["local", "hub"]
     ref: str
+    # Which run in a resume chain actually saved this checkpoint. Populated only
+    # by `list_chain_checkpoints`, where a list can span several runs and a step
+    # is no longer unique; a single-run listing leaves these None because the
+    # answer would be the same on every row.
+    #
+    # `owner_job_id` is the useful half for callers: `(owner_job_id, step)` IS
+    # unique, so anything that needs to address one checkpoint by step can do so
+    # without handling the opaque `ref`.
+    owner_job_id: str | None = None
+    owner_job_number: int | None = None
+    owner_name: str | None = None
 
 
 class MetricsHistoryPoint(BaseModel):
@@ -2897,7 +2908,31 @@ class JobRegistry:
         record.child_ids = list(children.get(record.id, ()))
         record.ancestor_ids = ancestor_ids_of(snapshot, record.id)
 
-    def list(self, limit: int = 10) -> builtins.list[JobRecord]:
+    def list(self, limit: int = 10, *, with_checkpoints: bool = True) -> builtins.list[JobRecord]:
+        """The newest `limit` records, lineage-annotated.
+
+        `with_checkpoints=False` skips the per-record checkpoint count, and the
+        saving is not marginal. For a LOCAL record the count is a directory
+        walk, but for a cloud or imported-hub record it goes to the Hub through
+        `_list_cloud_cached` — serially, one record at a time, with no deadline
+        of its own (unlike the author fan-out, which has one). A page holding N
+        such records therefore costs N round-trips whenever the 30s cache is
+        cold, on whatever request happens to arrive first.
+
+        The /models listing was paying that toll three times per request for a
+        field it never reads: it scans up to 500 records only to classify them,
+        and resolves local checkpoint dirs itself. Callers that do not read
+        `checkpoint_count` should opt out.
+
+        Lineage (`child_ids` / `ancestor_ids`) is annotated either way — it is
+        in-memory index work over the snapshot, and the listing's
+        "one skill per resume chain" rule depends on it.
+
+        These are the registry's own record objects, not copies, so opting out
+        leaves whatever `checkpoint_count` the last stamping call wrote. That is
+        safe precisely because the readers of that field stamp it on their own
+        call; a skipped count is never what gets served.
+        """
         with self._lock:
             snapshot = dict(self._records)
         records = sorted(snapshot.values(), key=lambda r: r.started_at, reverse=True)[:limit]
@@ -2905,7 +2940,8 @@ class JobRegistry:
         # leaf-ness is a fact about the registry, not about what fits on a page.
         children = build_child_index(snapshot.values())
         for r in records:
-            r.checkpoint_count = self._count_checkpoints(r)
+            if with_checkpoints:
+                r.checkpoint_count = self._count_checkpoints(r)
             self._annotate_lineage(r, snapshot, children)
         return records
 
@@ -4278,6 +4314,53 @@ class JobRegistry:
             raise JobNotFoundError(job_id)
         return self._checkpoints_for(record)
 
+    def list_chain_checkpoints(self, job_id: str) -> builtins.list[JobCheckpoint]:
+        """Every checkpoint reachable from ``job_id``: its own plus those of the
+        runs it resumed, deduplicated and ascending by step.
+
+        A resume chain is one model trained across several records, so the tip
+        alone is the wrong answer for anything that asks "which checkpoints can
+        I run / deploy?" — the earlier steps live on the ancestors, and a tip
+        that died before its first save has none of its own at all.
+
+        Deduplicated on ``ref`` rather than step: one lineage can legitimately
+        hold two DIFFERENT checkpoints at the same step (a rewind re-trains past
+        a step its ancestor already saved), and both must stay selectable.
+        """
+        with self._lock:
+            snapshot = dict(self._records)
+        record = snapshot.get(job_id)
+        if record is None:
+            raise JobNotFoundError(job_id)
+
+        chain = [record]
+        for ancestor_id in ancestor_ids_of(snapshot, job_id):
+            ancestor = snapshot.get(ancestor_id)
+            if ancestor is not None:
+                chain.append(ancestor)
+
+        seen: set[str] = set()
+        out: builtins.list[JobCheckpoint] = []
+        for link in chain:
+            for ckpt in self._checkpoints_for(link):
+                if ckpt.ref in seen:
+                    continue
+                seen.add(ckpt.ref)
+                # Stamp the owner. Without it two same-step checkpoints from a
+                # rewind are indistinguishable to every caller, and there is no
+                # way to address one of them by step.
+                out.append(
+                    ckpt.model_copy(
+                        update={
+                            "owner_job_id": link.id,
+                            "owner_job_number": link.job_number,
+                            "owner_name": link.display_name or link.config.job_name or link.id,
+                        }
+                    )
+                )
+        out.sort(key=lambda c: c.step)
+        return out
+
     def _list_cloud_cached(
         self, repo_id: str | None, fetch=_list_hub_checkpoints
     ) -> builtins.list[JobCheckpoint]:
@@ -4305,10 +4388,21 @@ class JobRegistry:
             record = self._records.get(job_id)
         if record is None:
             raise JobNotFoundError(job_id)
+        # Own checkpoints first, then the rest of the resume chain. The Run
+        # picker lists a chain's checkpoints under its tip (see
+        # list_chain_checkpoints), so a step owned by an ANCESTOR is offered
+        # there — and resolving single-run only made those 404, which left them
+        # listed but undeployable: the panel gates its Start button on this
+        # summary. Own-first preserves the tip's checkpoint on a same-step
+        # collision, matching how the picker resolves a step today.
         ckpts = self.list_checkpoints(job_id)
         match = next((c for c in ckpts if c.step == step), None)
         if match is None:
-            raise FileNotFoundError(f"No checkpoint at step {step} for job {record.id}")
+            match = next((c for c in self.list_chain_checkpoints(job_id) if c.step == step), None)
+        if match is None:
+            raise FileNotFoundError(
+                f"No checkpoint at step {step} for job {record.id} or the runs it resumed"
+            )
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
         input_features = cfg.get("input_features") or {}
