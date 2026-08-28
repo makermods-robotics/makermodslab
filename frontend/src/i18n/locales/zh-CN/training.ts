@@ -35,9 +35,11 @@ export default {
       jobTimeoutDefault: "24h（默认）",
     },
     finetune: {
+      title: "基于“{{name}}”微调",
       titleWithStep: "基于“{{name}}”微调（第 {{step}} 步）",
       titleLatest: "基于“{{name}}”微调（最新检查点）",
-      body: "这会开启一次<0>全新运行</0>（新的优化器，从第 0 步开始），策略权重由该模型初始化。请选择用于训练的<1>数据集</1>，并像平常一样设置训练参数。",
+      checkpointLabel: "检查点",
+      body: "<0>全新训练</0>，从第 0 步开始：优化器全新初始化，策略权重从该检查点载入。",
     },
     tooltip: {
       localBusy: "已有另一个本地训练在运行",

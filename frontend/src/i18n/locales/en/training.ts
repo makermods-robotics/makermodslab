@@ -55,10 +55,14 @@ export default {
       jobTimeoutDefault: "24h (default)",
     },
     finetune: {
+      // Used when the checkpoint picker is shown: the picker names the step, so
+      // repeating it here printed the same number twice.
+      title: "Fine-tuning from “{{name}}”",
       titleWithStep: "Fine-tuning from “{{name}}” (step {{step}})",
       titleLatest: "Fine-tuning from “{{name}}” (latest checkpoint)",
-      // <0> emphasises "fresh run", <1> the word "dataset".
-      body: "This starts a <0>fresh run</0> (new optimizer, from step 0) with the policy weights initialized from that model. Pick a <1>dataset</1> to train on and set your training parameters as usual.",
+      checkpointLabel: "Checkpoint",
+      // <0> emphasises "Fresh run".
+      body: "<0>Fresh run</0> from step 0 — new optimizer, with the policy weights loaded from this checkpoint.",
     },
     tooltip: {
       localBusy: "Another local training is already running",
