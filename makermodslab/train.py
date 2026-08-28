@@ -337,8 +337,18 @@ def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:
     return flags
 
 
+#: Trainer entry points. The weighted one is MakerMods Lab's own shim: same argv,
+#: same config parsing, but it patches lerobot's hardcoded sampler in-process so
+#: per-episode `sampling_weight` is honoured (see makermodslab/train_weighted.py).
+_TRAINER_MODULE = "lerobot.scripts.lerobot_train"
+_WEIGHTED_TRAINER_MODULE = "makermodslab.train_weighted"
+
+
 def build_training_command(
-    request: TrainingRequest, output_dir: str, python_executable: str = "python"
+    request: TrainingRequest,
+    output_dir: str,
+    python_executable: str = "python",
+    weighted: bool = False,
 ) -> list[str]:
     """Build the argv list to invoke `<python_executable> -m lerobot.scripts.lerobot_train`.
 
@@ -351,8 +361,21 @@ def build_training_command(
     so the subprocess uses the same interpreter as MakerMods Lab itself — otherwise
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
+
+    `weighted` swaps the trainer module for MakerMods Lab's weighted-sampling
+    shim. It is a fact about the DATASET, not about the request — the caller
+    resolves it from the dataset's own `meta/episodes` (see
+    `datasets.dataset_is_weighted`), because a client must not be able to claim a
+    dataset is or isn't weighted. Defaults to False so every existing call site
+    keeps producing byte-identical argv (R2); the cloud runner leaves it at the
+    default because a weighted dataset is refused before it ever gets there
+    (R6/R7 — `makermodslab` is not installed in the HF Jobs container).
     """
-    cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
+    cmd: list[str] = [
+        python_executable,
+        "-m",
+        _WEIGHTED_TRAINER_MODULE if weighted else _TRAINER_MODULE,
+    ]
 
     # Resume: lerobot reconstructs the whole run (policy, dataset, optimizer,
     # batch size, …) from the checkpoint's train_config.json, so we pass ONLY
