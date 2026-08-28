@@ -349,18 +349,20 @@ const ComputeSelector: React.FC<ComputeSelectorProps> = ({
       </OptionRow>
 
       <div className="flex items-center justify-between gap-2 bg-muted/30 px-3 pb-1 pt-1.5">
-        <span className={eyebrow}>
-          {t("training.target.lanNodes")}
+        <span className="flex items-center gap-1">
+          <span className={eyebrow}>
+            {t("training.target.lanNodes")}
+          </span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            title={t("training.target.refreshNodes")}
+            aria-label={t("training.target.refreshNodes")}
+            className="flex items-center rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          >
+            <RefreshCw className="h-3 w-3" />
+          </button>
         </span>
-        <button
-          type="button"
-          onClick={onRefresh}
-          title={t("training.target.refreshNodes")}
-          aria-label={t("training.target.refreshNodes")}
-          className="flex items-center rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-        >
-          <RefreshCw className="h-3 w-3" />
-        </button>
         <button
           type="button"
           onClick={() => {
