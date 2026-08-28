@@ -39,6 +39,8 @@ from lerobot.teleoperators import (
 )
 from lerobot.utils.utils import init_logging
 
+from .api_errors import ErrorCode
+from .session_events import notify_session_changed
 from .utils.config import calibration_dir_for_device, save_robot_record
 
 logger = logging.getLogger(__name__)
@@ -268,7 +270,11 @@ class CalibrationManager:
             # both spawn a worker thread against the same arm.
             with self._status_lock:
                 if self.status.calibration_active:
-                    return {"success": False, "message": "Calibration already active"}
+                    return {
+                        "success": False,
+                        "message": "Calibration already active",
+                        "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+                    }
 
                 # Mutex with every other feature that drives the same serial bus
                 # (see CLAUDE.md's "State model & mutual exclusion"). Lazy
@@ -277,6 +283,7 @@ class CalibrationManager:
                 from . import (
                     auto_calibrate as _auto_calibrate,
                     record as _record,
+                    replay as _replay,
                     rollout as _rollout,
                     teleoperate as _teleoperate,
                     wiggle as _wiggle,
@@ -286,20 +293,47 @@ class CalibrationManager:
                     return {
                         "success": False,
                         "message": "Teleoperation is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
                     }
                 if _record.recording_active:
-                    return {"success": False, "message": "Recording is currently active. Stop it first."}
+                    return {
+                        "success": False,
+                        "message": "Recording is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_RECORDING,
+                    }
                 if _rollout.inference_active:
-                    return {"success": False, "message": "Inference is currently active. Stop it first."}
+                    return {
+                        "success": False,
+                        "message": "Inference is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                    }
                 if _auto_calibrate.auto_calibration_is_active():
                     return {
                         "success": False,
                         "message": "Auto-calibration is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
                     }
                 if _wiggle.wiggle_active:
                     return {
                         "success": False,
                         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                        "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                    }
+                if _replay.replay_active:
+                    return {
+                        "success": False,
+                        "message": "Replay is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_REPLAY,
+                    }
+
+                # Lazy, because jobs imports this module back the same way.
+                from . import jobs as _jobs
+
+                if (training := _jobs.training_is_active()) is not None:
+                    return {
+                        "success": False,
+                        "message": (f"Training run '{training}' is using this machine. Stop it first."),
+                        "code": ErrorCode.ROBOT_BUSY_TRAINING,
                     }
 
                 # Refuse to silently overwrite an existing config file. Completing a
@@ -350,6 +384,10 @@ class CalibrationManager:
                 self._step_complete.clear()
                 self.calibration_thread.start()
 
+            # The claim above (calibration_active=True under the lock) is the
+            # real state transition — broadcast the hint so every WS client
+            # refetches /calibration-status.
+            notify_session_changed("calibration", True, phase="connecting")
             return {"success": True, "message": "Calibration started"}
 
         except Exception as e:
@@ -357,6 +395,10 @@ class CalibrationManager:
             self._update_status(
                 calibration_active=False, status="error", error=str(e), message="Failed to start calibration"
             )
+            # Undo any claim hint: a start that failed after claiming must not
+            # leave clients believing a session is live. (Harmless when the
+            # failure predates the claim — clients refetch and see idle.)
+            notify_session_changed("calibration", False, phase="error")
             return {"success": False, "message": str(e)}
 
     def complete_step(self) -> dict[str, Any]:
@@ -767,6 +809,9 @@ class CalibrationManager:
         self._cleanup_device()
         self._recording_active = False
         self._update_status(calibration_active=False, status=status, message=message)
+        # Final release: every terminal path (completed / cancelled / error /
+        # forced stop) funnels through here, after the device cleanup ran.
+        notify_session_changed("calibration", False, phase=status)
 
     def _cleanup_device(self):
         """Clean up device connection"""

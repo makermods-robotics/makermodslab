@@ -1813,15 +1813,14 @@ def test_upload_manager_bare_repo_id_unauthenticated_errors(monkeypatch: pytest.
     _join_upload(mgr)
     status = mgr.get_status()
     assert status["state"] == "error"
-    assert "Not authenticated with the Hugging Face Hub" in status["message"]
+    assert "hf auth login" in status["message"]
     assert status["dataset_url"] is None
     # Bailing out before the push is the point: no repo is created, so there is
     # no empty-repo litter to clean up before the user retries after logging in.
     ds.push_to_hub.assert_not_called()
-    # This message doesn't match _upload_auth_error()'s 401 patterns, so it
-    # takes the generic branch and carries no docs_url — unlike a 401 raised
-    # from inside push_to_hub(), which does.
-    assert "docs_url" not in status
+    # The explicit pre-push auth refusal follows the same friendly path as a
+    # 401 raised from inside push_to_hub().
+    assert status["docs_url"].startswith("https://huggingface.co/docs")
 
 
 def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2123,6 +2122,7 @@ def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.Mon
         "success": False,
         "status_code": 409,
         "message": "Calibration is currently active. Stop it first.",
+        "code": "robot.busy.calibration",
     }
 
 
@@ -2137,6 +2137,7 @@ def test_start_recording_blocked_when_auto_calibration_active(monkeypatch: pytes
         "success": False,
         "status_code": 409,
         "message": "Auto-calibration is currently active. Stop it first.",
+        "code": "robot.busy.auto_calibration",
     }
 
 
@@ -2151,6 +2152,27 @@ def test_start_recording_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPa
         "success": False,
         "status_code": 409,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+        "code": "robot.busy.wiggle",
+    }
+
+
+def test_start_recording_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recording must refuse to start while a hardware replay owns the same
+    serial bus."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+    # status_code was missing from this refusal until the error-code pass:
+    # server.py's `result.get("status_code", 500)` fallback turned it into an
+    # HTTP 500. It is a 409 like every other reciprocal-check refusal.
+    assert result == {
+        "success": False,
+        "status_code": 409,
+        "message": "Replay is currently active. Stop it first.",
+        "code": "robot.busy.replay",
     }
 
 
@@ -2281,6 +2303,31 @@ def test_start_recording_rejects_with_409_when_inference_active(
     assert result["success"] is False
     assert result["status_code"] == 409
     assert "Inference is currently active" in result["message"]
+
+
+def test_start_recording_rejects_with_409_when_a_training_run_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Training stayed outside the robot mutex for as long as a run could only
+    begin from an explicit submit — the user was present and knew what else they
+    had running. The queue starts runs from a watchdog thread with nobody at the
+    keyboard, so the gate has to be mutual: the queue already waits for a
+    recording session, and now a recording session waits for it."""
+    import makermodslab.jobs as jobs
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(jobs, "training_is_active", lambda: "ACT · user/ds")
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "ACT · user/ds" in result["message"]
 
 
 def test_start_recording_rejects_with_400_for_invalid_dataset_name(

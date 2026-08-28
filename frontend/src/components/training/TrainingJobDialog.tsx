@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 
@@ -8,7 +9,7 @@ import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
+import { Loader2, Play, Square, Trash2, ArrowLeft, XCircle } from "lucide-react";
 
 import {
   JobRecord,
@@ -22,6 +23,7 @@ import {
 } from "@/lib/jobsApi";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
+import { useEyebrowClass } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
 
 const POLL_INTERVAL_MS = 1000;
@@ -112,6 +114,9 @@ const TrainingJobDialog: React.FC<{
 }> = ({ jobId, onExit }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
+  // `.eyebrow`'s tracking over-spaces CJK; useEyebrowClass drops it there.
+  const eyebrow = useEyebrowClass();
 
   const { openStudio } = useStudio();
   const [job, setJob] = useState<JobRecord | null>(null);
@@ -251,14 +256,17 @@ const TrainingJobDialog: React.FC<{
 
   const handleStop = async () => {
     if (!job) return;
+    // Left in English deliberately: window.confirm is a native browser dialog
+    // whose own buttons cannot be translated, so a translated question above
+    // English OK/Cancel reads worse than leaving the pair consistent.
     if (!window.confirm("Stop this run?")) return;
     try {
       const next = await stopJob(baseUrl, fetchWithHeaders, job.id);
       setJob(next);
-      toast({ title: "Stopping…" });
+      toast({ title: t("training.jobDialog.toast.stoppingTitle") });
     } catch (e) {
       toast({
-        title: "Stop failed",
+        title: t("training.jobDialog.toast.stopFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -267,15 +275,16 @@ const TrainingJobDialog: React.FC<{
 
   const handleDelete = async () => {
     if (!job) return;
+    // English for the same reason as handleStop's confirm above.
     if (!window.confirm("Delete this run? This wipes the output directory."))
       return;
     try {
       await deleteJob(baseUrl, fetchWithHeaders, job.id);
-      toast({ title: "Job removed" });
+      toast({ title: t("training.jobDialog.toast.removedTitle") });
       onExit();
     } catch (e) {
       toast({
-        title: "Delete failed",
+        title: t("training.jobDialog.toast.deleteFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -283,6 +292,29 @@ const TrainingJobDialog: React.FC<{
   };
 
   const isRunning = job?.state === "running";
+  const isQueued = job?.state === "queued";
+
+  // Cancel a QUEUED run: the same stop endpoint, with the expect_state
+  // precondition so a click drawn against a stale record refuses (409
+  // job.state_changed) instead of SIGTERMing a promoted run. Cancelling
+  // removes the record outright — the dialog closes on success.
+  const handleCancelQueued = async () => {
+    if (!job) return;
+    // English deliberately — see handleStop's confirm below.
+    if (!window.confirm("Cancel this queued run? It hasn't started training."))
+      return;
+    try {
+      await stopJob(baseUrl, fetchWithHeaders, job.id, "queued");
+      toast({ title: t("training.jobDialog.toast.cancelledTitle") });
+      onExit();
+    } catch (e) {
+      toast({
+        title: t("training.jobDialog.toast.cancelFailedTitle"),
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
 
   // Before the trainer's first metric tick the stats panel can only say
   // "Training starting…" — which is wrong (and worryingly quiet) for the
@@ -303,7 +335,7 @@ const TrainingJobDialog: React.FC<{
       onClick={onExit}
       className="-ml-2 shrink-0 text-muted-foreground hover:text-foreground"
     >
-      <ArrowLeft className="mr-1.5 h-4 w-4" /> Skill studio
+      <ArrowLeft className="mr-1.5 h-4 w-4" /> {t("training.jobDialog.back")}
     </Button>
   );
 
@@ -319,20 +351,28 @@ const TrainingJobDialog: React.FC<{
         className="max-h-[92vh] w-[min(96vw,72rem)] max-w-none gap-0 overflow-y-auto p-6"
         aria-describedby={undefined}
       >
-        <DialogTitle className="sr-only">Training job status</DialogTitle>
+        <DialogTitle className="sr-only">
+          {t("training.jobDialog.srTitle")}
+        </DialogTitle>
 
         {error && !job ? (
           <div className="space-y-4">
             {backButton}
+            {/* {jobId} is data and {error} is the backend's own message —
+                only the framing sentence is translated. */}
             <p className="text-sm text-destructive">
-              Couldn't load job {jobId}: {error}
+              {t("training.jobDialog.loadFailed", {
+                jobId,
+                errorText: error,
+              })}
             </p>
           </div>
         ) : !job ? (
           <div className="space-y-4">
             {backButton}
             <div className="flex items-center justify-center py-20 text-muted-foreground">
-              <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Loading job…
+              <Loader2 className="mr-3 h-6 w-6 animate-spin" />{" "}
+              {t("training.jobDialog.loading")}
             </div>
           </div>
         ) : (
@@ -347,11 +387,19 @@ const TrainingJobDialog: React.FC<{
                     </h2>
                     {job.runner === "hf_cloud" ? (
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        HF · {job.hf_flavor ?? "cloud"}
+                        HF · {job.hf_flavor ?? t("training.jobDialog.cloudFallback")}
+                      </span>
+                    ) : job.runner === "lan_node" ? (
+                      <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                        {/* The short instance id is the run's routing key — data. */}
+                        {t("training.jobDialog.runnerNode")}
+                        {job.node_instance_id
+                          ? ` · ${job.node_instance_id.slice(0, 8)}`
+                          : ""}
                       </span>
                     ) : (
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                        Local
+                        {t("training.jobDialog.runnerLocal")}
                       </span>
                     )}
                     {job.runner === "hf_cloud" &&
@@ -363,7 +411,7 @@ const TrainingJobDialog: React.FC<{
                           rel="noreferrer"
                           className="text-xs text-primary hover:underline"
                         >
-                          View on Hub ↗
+                          {t("training.jobDialog.viewOnHub")}
                         </a>
                       )}
                     {job.wandb_run_url && (
@@ -373,7 +421,7 @@ const TrainingJobDialog: React.FC<{
                         rel="noreferrer"
                         className="text-xs text-primary hover:underline"
                       >
-                        View on W&B ↗
+                        {t("training.jobDialog.viewOnWandb")}
                       </a>
                     )}
                   </div>
@@ -387,14 +435,30 @@ const TrainingJobDialog: React.FC<{
                       state, so a stopped run read "interrupted" here while the
                       card behind the dialog called it something else. */}
                   <p className="text-xs text-muted-foreground">
-                    {jobStateLabel(job.state)}
+                    {/* A queued run's label carries its live position, the
+                        same wording as the card badge. */}
+                    {isQueued && (job.queue_position ?? 0) > 0
+                      ? t("jobs.jobState.queuedAt", {
+                          position: job.queue_position ?? 0,
+                        })
+                      : jobStateLabel(job.state)}
                     {job.error_message ? ` — ${job.error_message}` : ""}
                   </p>
                 </div>
               </div>
               {isRunning ? (
                 <Button onClick={handleStop} variant="destructive" size="sm">
-                  <Square className="mr-2 h-4 w-4" /> Stop
+                  <Square className="mr-2 h-4 w-4" /> {t("training.jobDialog.stop")}
+                </Button>
+              ) : isQueued ? (
+                <Button
+                  onClick={handleCancelQueued}
+                  variant="outline"
+                  size="sm"
+                  className="border-warn/50 text-warn hover:bg-warn/10"
+                >
+                  <XCircle className="mr-2 h-4 w-4" />{" "}
+                  {t("training.jobDialog.cancelQueued")}
                 </Button>
               ) : (
                 <Button
@@ -403,7 +467,7 @@ const TrainingJobDialog: React.FC<{
                   size="sm"
                   className="text-muted-foreground hover:text-foreground"
                 >
-                  <Trash2 className="mr-2 h-4 w-4" /> Delete
+                  <Trash2 className="mr-2 h-4 w-4" /> {t("training.jobDialog.delete")}
                 </Button>
               )}
             </div>
@@ -434,10 +498,10 @@ const TrainingJobDialog: React.FC<{
               formatTime={formatTime}
             />
             <div className="flex items-center gap-3 rounded-md border border-border bg-card p-4">
-              <span className="eyebrow">Run inference</span>
+              <span className={eyebrow}>{t("training.jobDialog.runInference")}</span>
               {checkpoints.length === 0 ? (
                 <span className="text-xs text-muted-foreground">
-                  No checkpoints yet — wait for the first save.
+                  {t("training.jobDialog.noCheckpoints")}
                 </span>
               ) : (
                 <>
@@ -472,7 +536,7 @@ const TrainingJobDialog: React.FC<{
                     size="sm"
                   >
                     <Play className="mr-2 h-4 w-4" />
-                    Run on robot
+                    {t("training.jobDialog.runOnRobot")}
                   </Button>
                 </>
               )}

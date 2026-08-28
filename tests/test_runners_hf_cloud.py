@@ -924,10 +924,10 @@ def test_ensure_dataset_on_hub_refills_an_existing_but_empty_repo(tmp_path, monk
     _local_dataset(tmp_path, monkeypatch, "pick")
 
     pushed = []
-    monkeypatch.setattr("makermodslab.runners.hf_cloud.hub_repo_exists", lambda *a, **k: True)
-    monkeypatch.setattr("makermodslab.runners.hf_cloud.hub_copy_has_data", lambda *a, **k: False)
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_repo_exists", lambda *a, **k: True)
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_copy_has_data", lambda *a, **k: False)
     monkeypatch.setattr(
-        "makermodslab.runners.hf_cloud.push_dataset_to_hub",
+        "makermodslab.runners._dataset.push_dataset_to_hub",
         lambda local, **k: pushed.append(local) or "alice/pick",
     )
 
@@ -940,10 +940,10 @@ def test_ensure_dataset_on_hub_skips_a_populated_repo(tmp_path, monkeypatch) -> 
     _local_dataset(tmp_path, monkeypatch, "pick")
 
     pushed = []
-    monkeypatch.setattr("makermodslab.runners.hf_cloud.hub_repo_exists", lambda *a, **k: True)
-    monkeypatch.setattr("makermodslab.runners.hf_cloud.hub_copy_has_data", lambda *a, **k: True)
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_repo_exists", lambda *a, **k: True)
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_copy_has_data", lambda *a, **k: True)
     monkeypatch.setattr(
-        "makermodslab.runners.hf_cloud.push_dataset_to_hub",
+        "makermodslab.runners._dataset.push_dataset_to_hub",
         lambda local, **k: pushed.append(local) or "alice/pick",
     )
 
@@ -958,9 +958,9 @@ def test_ensure_dataset_on_hub_leaves_the_hub_alone_when_it_cannot_tell(tmp_path
     _local_dataset(tmp_path, monkeypatch, "pick")
 
     pushed = []
-    monkeypatch.setattr("makermodslab.runners.hf_cloud.hub_repo_exists", lambda *a, **k: None)
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_repo_exists", lambda *a, **k: None)
     monkeypatch.setattr(
-        "makermodslab.runners.hf_cloud.push_dataset_to_hub",
+        "makermodslab.runners._dataset.push_dataset_to_hub",
         lambda local, **k: pushed.append(local) or "alice/pick",
     )
 

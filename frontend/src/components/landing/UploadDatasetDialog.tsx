@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Loader2, Upload as UploadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,6 +34,7 @@ const UploadDatasetDialog: React.FC<{
   children: React.ReactNode;
   align?: "start" | "center" | "end";
 }> = ({ repoId, start, children, align = "end" }) => {
+  const { t } = useTranslation();
   const { toast } = useToast();
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [isPrivate, setIsPrivate] = useState(false);
@@ -49,7 +51,8 @@ const UploadDatasetDialog: React.FC<{
       const error = await start(tags, isPrivate);
       if (error) {
         toast({
-          title: "Upload failed",
+          // `error` is the start refusal — backend prose, kept verbatim.
+          title: t("landing.uploadDataset.failedTitle"),
           description: error,
           variant: "destructive",
         });
@@ -59,8 +62,8 @@ const UploadDatasetDialog: React.FC<{
       // "Uploading…" state and toasts on completion.
       setPopoverOpen(false);
       toast({
-        title: "Upload started",
-        description: `${repoId} is uploading to the Hub in the background.`,
+        title: t("landing.uploadDataset.startedTitle"),
+        description: t("landing.uploadDataset.startedBody", { repoId }),
       });
     } finally {
       setStarting(false);
@@ -92,7 +95,7 @@ const UploadDatasetDialog: React.FC<{
               id={`hub-upload-visibility-${repoId}`}
               className="font-normal text-muted-foreground"
             >
-              Visibility
+              {t("landing.uploadDataset.visibility")}
             </Label>
             <VisibilityToggle
               value={isPrivate}
@@ -101,8 +104,8 @@ const UploadDatasetDialog: React.FC<{
             />
             <p className="leading-snug text-muted-foreground">
               {isPrivate
-                ? "Only you can see this dataset."
-                : "Anyone can see this dataset — recordings include your camera footage."}
+                ? t("landing.uploadDataset.privateNote")
+                : t("landing.uploadDataset.publicNote")}
             </p>
           </div>
           <div className="space-y-1">
@@ -110,7 +113,7 @@ const UploadDatasetDialog: React.FC<{
               htmlFor={`hub-upload-tags-${repoId}`}
               className="font-normal text-muted-foreground"
             >
-              Tags (optional, comma-separated)
+              {t("landing.uploadDataset.tagsLabel")}
             </Label>
             <Input
               id={`hub-upload-tags-${repoId}`}
@@ -129,12 +132,12 @@ const UploadDatasetDialog: React.FC<{
             {starting ? (
               <>
                 <Loader2 className="h-3 w-3 animate-spin" />
-                Starting…
+                {t("landing.uploadDataset.starting")}
               </>
             ) : (
               <>
                 <UploadIcon className="h-3 w-3" />
-                Upload to Hub
+                {t("landing.uploadDataset.submit")}
               </>
             )}
           </Button>

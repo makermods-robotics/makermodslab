@@ -1,5 +1,11 @@
 export interface TrainingConfig {
-  target: { runner: "local" | "hf_cloud"; flavor?: string };
+  // Where the run executes. "lan_node" carries the chosen peer's
+  // node_instance_id (required by the backend); "hf_cloud" carries the flavor.
+  target: {
+    runner: "local" | "hf_cloud" | "lan_node";
+    flavor?: string;
+    node_instance_id?: string;
+  };
 
   // Dataset configuration
   dataset_repo_id: string;
@@ -96,6 +102,12 @@ export const POLICY_TYPE_OPTIONS: {
 
 // Full display name for a policy type value; falls back to the raw value so
 // types coming from older job records still render something legible.
+//
+// Not localized, and deliberately not a `t`-taking function: `value` is a wire
+// identifier and every `display` above is a product/algorithm name (ACT,
+// SmolVLA, Diffusion Policy) that reads the same in every language. Callers
+// outside this directory (SkillCard, JobsDropdown, ModelInfoCard…) depend on
+// this plain signature.
 export function policyTypeDisplayName(value: string): string {
   return (
     POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.display ||
@@ -161,11 +173,13 @@ export interface ConfigComponentProps {
 // not the parent's. Saying "inherited" of a control showing a default would be
 // a fresh untruth — the lock's whole job is to stop the form claiming influence
 // it does not have.
-export const RESUME_INHERITED_NOTE =
-  "Rebuilt from the parent run's checkpoint — a resume continues the same experiment, so changing these here has no effect. To train with different settings, fine-tune from this checkpoint instead.";
+//
+// A translation KEY, not the copy: a module-level constant is evaluated at
+// import time, so a resolved string here would freeze whichever language
+// happened to load first. Call sites resolve it with their own `t`.
+export const RESUME_INHERITED_NOTE_KEY = "training.resumeInherited.note";
 
 // The same idea for a lone locked control that sits directly under the resume
 // banner (which already carries the full explanation) — repeating the whole
 // sentence beside every field reads as nagging.
-export const RESUME_INHERITED_SHORT =
-  "Rebuilt from the parent run's checkpoint.";
+export const RESUME_INHERITED_SHORT_KEY = "training.resumeInherited.short";

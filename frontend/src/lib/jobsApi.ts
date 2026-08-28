@@ -1,6 +1,16 @@
+import i18n from "@/i18n";
 import { ApiError, Fetcher, apiRequest } from "./apiClient";
 
-export type JobState = "running" | "done" | "failed" | "interrupted";
+// "queued" is LOCAL-ONLY: the run was accepted and validated, and waits for
+// the one local training slot (PR #83 — a busy slot queues, it never refuses).
+export type JobState = "queued" | "running" | "done" | "failed" | "interrupted";
+
+/** States a run can never leave — the record is history, so delete is safe to
+ * offer. The complement ("queued" / "running") is still doing (or about to do)
+ * work and takes Stop/Cancel instead. */
+export function isTerminalJobState(state: JobState): boolean {
+  return state === "done" || state === "failed" || state === "interrupted";
+}
 
 export interface TrainingMetrics {
   current_step: number;
@@ -76,8 +86,14 @@ export interface TrainingRequest {
   optimizer_weight_decay?: number;
   optimizer_grad_clip_norm?: number;
   use_policy_training_preset: boolean;
-  // Optional target for runner dispatch; omitted ⇒ local.
-  target?: { runner: "local" | "hf_cloud"; flavor?: string };
+  // Optional target for runner dispatch; omitted ⇒ local. "lan_node" routes
+  // the run to a registered peer and REQUIRES node_instance_id (the backend
+  // refuses it missing with 422 request.validation).
+  target?: {
+    runner: "local" | "hf_cloud" | "lan_node";
+    flavor?: string;
+    node_instance_id?: string;
+  };
   // HF Cloud only: optional override for the HF Jobs timeout, as a duration
   // string ("2h", "45m", "3h30m"). Omitted ⇒ backend falls back to its
   // default. The backend validates the format and ignores it for local runs.
@@ -100,6 +116,10 @@ export interface JobRecord {
   // hub repo id never change). Null/absent ⇒ show `name`.
   display_name?: string | null;
   state: JobState;
+  // 1-based position in the local training queue, DERIVED server-side per
+  // response (never trust a stale copy — anything ahead starting shifts it).
+  // 0 ⇒ not queued. Absent only on an older backend; treat as 0.
+  queue_position?: number;
   config: TrainingRequest;
   output_dir: string;
   started_at: number;
@@ -107,7 +127,12 @@ export interface JobRecord {
   exit_code: number | null;
   error_message: string | null;
   metrics: TrainingMetrics;
-  runner: "local" | "hf_cloud" | "imported";
+  runner: "local" | "hf_cloud" | "imported" | "lan_node";
+  // lan_node runs only: which peer executes the run. The id is the routing
+  // key; the URL is a snapshot of where the peer was when the run launched
+  // (it survives the node leaving the registry). Null/absent elsewhere.
+  node_instance_id?: string | null;
+  node_url?: string | null;
   hf_job_id: string | null;
   hf_flavor: string | null;
   hf_repo_id: string | null;
@@ -146,7 +171,7 @@ export async function listJobs(
   const body = await apiRequest<{ jobs: JobRecord[] }>(
     baseUrl,
     fetcher,
-    `/jobs?limit=${limit}`,
+    `/api/v1/jobs?limit=${limit}`,
     { signal, action: "List jobs" },
   );
   return body.jobs;
@@ -158,7 +183,7 @@ export async function getJob(
   id: string,
   signal?: AbortSignal,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}`, {
+  return apiRequest<JobRecord>(baseUrl, fetcher, `/api/v1/jobs/${id}`, {
     signal,
     action: "Get job",
   });
@@ -173,7 +198,7 @@ export async function getJobLogs(
   const body = await apiRequest<{ logs: LogLine[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${id}/logs`,
+    `/api/v1/jobs/${id}/logs`,
     { signal, action: "Get job logs" },
   );
   return body.logs;
@@ -188,7 +213,7 @@ export async function getJobLogFile(
   const body = await apiRequest<{ logs: LogLine[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${id}/log-file`,
+    `/api/v1/jobs/${id}/log-file`,
     { signal, action: "Get job log file" },
   );
   return body.logs;
@@ -203,7 +228,7 @@ export async function getJobMetricsHistory(
   const body = await apiRequest<{ points: MetricsHistoryPoint[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${id}/metrics-history`,
+    `/api/v1/jobs/${id}/metrics-history`,
     { signal, action: "Get job metrics history" },
   );
   return body.points;
@@ -217,7 +242,7 @@ export async function startTrainingJob(
   const { target, ...config } = request;
   const body = target ? { config, target } : config;
   try {
-    return await apiRequest<JobRecord>(baseUrl, fetcher, "/jobs/training", {
+    return await apiRequest<JobRecord>(baseUrl, fetcher, "/api/v1/jobs/training", {
       method: "POST",
       body,
       action: "Start training",
@@ -239,7 +264,10 @@ export async function startTrainingJob(
       e.status === 409 &&
       (e.detail ?? "").startsWith("Job already running")
     ) {
-      throw new Error("Another training is already running. Stop it first.");
+      // The substitute is OUR sentence, not the server's, so it is translated;
+      // every other refusal's `detail` is backend prose and passes through as
+      // the server wrote it.
+      throw new Error(i18n.t("jobs.errors.trainingAlreadyRunning"));
     }
     throw e;
   }
@@ -255,7 +283,7 @@ export async function importModel(
   source: string,
   name?: string,
 ): Promise<ImportModelResult> {
-  return apiRequest<ImportModelResult>(baseUrl, fetcher, "/jobs/import", {
+  return apiRequest<ImportModelResult>(baseUrl, fetcher, "/api/v1/jobs/import", {
     method: "POST",
     body: name ? { source, name } : { source },
     action: "Import model",
@@ -283,19 +311,32 @@ export function jobDisplayName(job: JobRecord): string {
  * those legitimately differ — but the WORDS have to agree, and they did not:
  * the card said "Interrupted" while the monitor dialog showed the raw wire
  * string for the same run.
+ *
+ * Holds translation KEY PATHS, not words. This map is built once at import
+ * time, so resolved copy here would freeze whichever language happened to load
+ * first and never follow a language switch; the components resolve these keys
+ * through `useTranslation()` at render time instead.
  */
-export const JOB_STATE_LABELS: Record<JobState, string> = {
-  running: "Running",
-  done: "Done",
-  failed: "Failed",
-  interrupted: "Stopped",
-};
+export const JOB_STATE_LABELS = {
+  queued: "jobs.jobState.queued",
+  running: "jobs.jobState.running",
+  done: "jobs.jobState.done",
+  failed: "jobs.jobState.failed",
+  interrupted: "jobs.jobState.interrupted",
+} as const satisfies Record<JobState, string>;
 
 /** `JOB_STATE_LABELS` for a state that may not be one — a state added by a
  * newer backend than this bundle falls back to the raw wire word rather than
- * rendering blank. */
+ * rendering blank.
+ *
+ * Resolves through the i18next instance rather than taking a `t`, so the
+ * signature stays what its non-component callers already pass. It is resolved
+ * per CALL (not at import), so the language in force at render time wins; a
+ * component that re-renders on language change — anything using
+ * `useTranslation()` — picks the new word up on the spot. */
 export function jobStateLabel(state: JobState): string {
-  return JOB_STATE_LABELS[state] ?? state;
+  const key = JOB_STATE_LABELS[state];
+  return key ? i18n.t(key) : state;
 }
 
 /** Set a job's display alias. Metadata-only — the job id, output dir, and
@@ -306,22 +347,75 @@ export async function renameJob(
   id: string,
   newName: string,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}/rename`, {
+  return apiRequest<JobRecord>(baseUrl, fetcher, `/api/v1/jobs/${id}/rename`, {
     method: "POST",
     body: { new_name: newName },
     action: "Rename job",
   });
 }
 
+/** Stop a running job — or cancel a queued one: they are the same request on
+ * the wire. `expectState` is the optimistic-concurrency precondition: pass the
+ * state the UI was showing when it drew the button, so a Cancel drawn against
+ * a stale queue can't SIGTERM a run the watchdog promoted in the meantime
+ * (the backend answers 409 job.state_changed instead). */
 export async function stopJob(
   baseUrl: string,
   fetcher: Fetcher,
   id: string,
+  expectState?: JobState,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}/stop`, {
-    method: "POST",
-    action: "Stop job",
-  });
+  const query = expectState
+    ? `?expect_state=${encodeURIComponent(expectState)}`
+    : "";
+  return apiRequest<JobRecord>(
+    baseUrl,
+    fetcher,
+    `/api/v1/jobs/${id}/stop${query}`,
+    {
+      method: "POST",
+      action: "Stop job",
+    },
+  );
+}
+
+/** The WHOLE local training queue, in the order it will run, each record
+ * annotated with its 1-based queue_position. Uncapped, unlike listJobs —
+ * the queue is the machine's plan, and reorder needs the full id list. */
+export async function listJobQueue(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<JobRecord[]> {
+  const body = await apiRequest<{ jobs: JobRecord[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/jobs/queue",
+    { signal, action: "List job queue" },
+  );
+  return body.jobs;
+}
+
+/** Set the order of the local training queue. `jobIds` must be the COMPLETE
+ * current queue (a partial list is refused); a list that no longer matches
+ * the live queue comes back 409 with code job.queue_stale — refetch and retry,
+ * nothing else clears it. Returns the queue in its new order. */
+export async function reorderJobQueue(
+  baseUrl: string,
+  fetcher: Fetcher,
+  jobIds: string[],
+): Promise<JobRecord[]> {
+  const body = await apiRequest<{ jobs: JobRecord[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/jobs/queue/reorder",
+    {
+      method: "POST",
+      body: { job_ids: jobIds },
+      action: "Reorder job queue",
+    },
+  );
+  return body.jobs;
 }
 
 export async function deleteJob(
@@ -329,7 +423,7 @@ export async function deleteJob(
   fetcher: Fetcher,
   id: string,
 ): Promise<void> {
-  await apiRequest<void>(baseUrl, fetcher, `/jobs/${id}`, {
+  await apiRequest<void>(baseUrl, fetcher, `/api/v1/jobs/${id}`, {
     method: "DELETE",
     action: "Delete job",
   });
@@ -380,7 +474,7 @@ export async function listRunnerHardware(
     return await apiRequest<RunnerHardwareResponse>(
       baseUrl,
       fetcher,
-      "/jobs/runners/hardware",
+      "/api/v1/jobs/runners/hardware",
       { signal, action: "List runner hardware" },
     );
   } catch (e) {
@@ -391,6 +485,10 @@ export async function listRunnerHardware(
 
 export interface HubJob {
   id: string;
+  // The run's name, derived Hub-side by _hub_job_run_name (submission label,
+  // else the --policy.repo_id slug in the job's argv). Null when neither is
+  // available — only then does the card fall back to the image name.
+  name: string | null;
   created_at: string | null;
   docker_image: string | null;
   space_id: string | null;
@@ -442,7 +540,7 @@ export async function deleteHubModel(
   await apiRequest<void>(
     baseUrl,
     fetcher,
-    `/jobs/hub/models/${repoId}`,
+    `/api/v1/jobs/hub/models/${repoId}`,
     { method: "DELETE", action: "Delete hub model" },
   );
 }
@@ -460,7 +558,7 @@ export async function dismissHubJob(
   await apiRequest<void>(
     baseUrl,
     fetcher,
-    `/jobs/hub/jobs/${encodeURIComponent(jobId)}/dismiss`,
+    `/api/v1/jobs/hub/jobs/${encodeURIComponent(jobId)}/dismiss`,
     { method: "POST", action: "Dismiss hub job" },
   );
 }
@@ -472,7 +570,7 @@ export async function listHubJobs(
 ): Promise<HubJobsResponse> {
   // Same graceful degradation as listRunnerHardware.
   try {
-    return await apiRequest<HubJobsResponse>(baseUrl, fetcher, "/jobs/hub", {
+    return await apiRequest<HubJobsResponse>(baseUrl, fetcher, "/api/v1/jobs/hub", {
       signal,
       action: "List hub jobs",
     });

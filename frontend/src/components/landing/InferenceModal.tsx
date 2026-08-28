@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
@@ -22,7 +23,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
-import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
+import { RobotRecord } from "@/hooks/useRobots";
+import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useInferenceSession } from "@/contexts/InferenceSessionContext";
@@ -32,7 +34,8 @@ import {
   getCheckpointPolicyConfig,
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
-import { startInference } from "@/lib/inferenceApi";
+import { startSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
@@ -65,12 +68,15 @@ const CameraThumbnail: React.FC<{
   uniqueId?: string;
   paused: boolean;
 }> = ({ cameraIndex, uniqueId, paused }) => {
+  const { t } = useTranslation();
   if (paused || cameraIndex === undefined) {
     return (
       <div className="w-32 h-24 bg-muted rounded border border-border flex flex-col items-center justify-center">
         <VideoOff className="w-5 h-5 text-muted-foreground mb-1" />
         <span className="text-[10px] text-muted-foreground">
-          {paused ? "Released" : "No preview"}
+          {paused
+            ? t("landing.inference.thumbnailReleased")
+            : t("landing.inference.thumbnailNoPreview")}
         </span>
       </div>
     );
@@ -163,6 +169,7 @@ const InferenceModal: React.FC<Props> = ({
   jobId,
   initialStep,
 }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { openInferenceSession } = useInferenceSession();
@@ -172,7 +179,7 @@ const InferenceModal: React.FC<Props> = ({
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
   // Inference engine A/B. "sync" is the server default and the historical
-  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
   // ACT temporal ensembling — see DeployPanel, which carries the same pair.
@@ -439,43 +446,47 @@ const InferenceModal: React.FC<Props> = ({
       }
     }
     try {
-      // The POST now returns immediately (it only validates cheaply, then the
+      // POST /api/v1/sessions returns as soon as the run is claimed (the
       // server downloads the model + preflights the arm in the background), so
       // this opens the inference dialog right away — the download and its
       // progress, any warn-but-allow arm finding, and any failure all surface
-      // there via /inference-status polling.
-      await startInference(baseUrl, fetchWithHeaders, {
-        follower_port: robot.follower_port,
-        follower_config: robot.follower_config,
-        policy_ref: selectedRef,
-        task,
-        camera_bindings: cameraBindingPayload,
-        camera_dims: cameraDimsPayload,
-        duration_s: durationS,
-        // Bimanual: forward the mode + right-arm follower so the server builds a
-        // `bi_so_follower` command staging both follower calibrations. In single
-        // mode the right_* fields are inert (mode defaults to "single"
-        // server-side). robot_name is the BiSO staging base id.
-        mode: robot.mode,
-        right_follower_port: robot.right_follower_port,
-        right_follower_config: robot.right_follower_config,
-        robot_name: robot.name,
-        // Forward the checkpoint's flat state width so the server enforces the
-        // same arm-count guard authoritatively (null when the checkpoint omits
-        // observation.state — the server then defers to its shape check).
-        checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-        inference_engine: inferenceEngine,
-        // ACT-only, and only while the switch is on — otherwise omitted so the
-        // checkpoint's own (ensembling-off) config stands.
-        temporal_ensemble_coeff:
-          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+      // there via /inference-status polling. The request carries the robot
+      // NAME plus policy-shaped options only — ports, configs, mode and the
+      // camera devices behind the bindings all resolve server-side from the
+      // saved record. The owner attaches the lease the dialog keeps renewed.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "inference",
+        robot: robot.name,
+        owner: tabOwnerId(),
+        options: {
+          policy_ref: selectedRef,
+          task,
+          camera_bindings: cameraBindingPayload,
+          camera_dims: cameraDimsPayload,
+          duration_s: durationS,
+          // Forward the checkpoint's flat state width so the server enforces
+          // the same arm-count guard authoritatively (omitted when the
+          // checkpoint lacks observation.state — the server then defers to
+          // its shape check).
+          checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+          inference_engine: inferenceEngine,
+          // ACT-only, and only while the switch is on — otherwise omitted so
+          // the checkpoint's own (ensembling-off) config stands.
+          temporal_ensemble_coeff:
+            isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+        },
       });
       onOpenChange(false);
-      openInferenceSession();
+      openInferenceSession(session.id);
     } catch (e) {
       toast({
-        title: "Couldn't start inference",
-        description: e instanceof Error ? e.message : String(e),
+        title: t("landing.inference.startFailedTitle"),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; everything else is the server's raw error text — not ours to
+        // translate.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof Error ? e.message : String(e)),
         variant: "destructive",
       });
       // Failure: bring the previews back so the user can adjust.
@@ -497,42 +508,57 @@ const InferenceModal: React.FC<Props> = ({
             </div>
           </div>
           <DialogTitle className="text-center text-2xl font-bold">
-            Configure Inference
+            {t("landing.inference.title")}
           </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-6 py-4">
           <DialogDescription className="text-base leading-relaxed text-center">
-            Pick a checkpoint and confirm hardware. The selected policy will
-            drive the follower autonomously for the configured duration.
+            {t("landing.inference.description")}
           </DialogDescription>
 
           <div className="space-y-4">
             <h3 className="text-lg font-semibold border-b border-border pb-2">
-              Robot Configuration
+              {t("landing.inference.robotSection")}
             </h3>
             {!robot ? (
               <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  Select and configure a robot on the Landing page first.
+                  {t("landing.inference.noRobot")}
                 </AlertDescription>
               </Alert>
             ) : !robot.follower_ready ? (
               <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
-                  Open Robot settings before running inference. (Inference only
-                  uses the follower arm — leader setup isn't needed.)
+                  {/* The robot name is DATA; {{gap}} is the localized
+                      setup-gap predicate (robot.setupGap.* in the catalog). */}
+                  <Trans
+                    i18nKey="landing.inference.followerNotReady"
+                    values={{
+                      name: robot.name,
+                      gap: formatRobotSetupGap(t, robot, "follower"),
+                    }}
+                    components={[<strong key="0" />]}
+                  />
                 </AlertDescription>
               </Alert>
             ) : (
               <div className="flex items-center gap-2 text-sm">
                 <CheckCircle className="w-4 h-4 text-ok" />
                 <span className="text-foreground">
-                  Running on <strong>{robot.name}</strong>
-                  {isBimanual ? " (bimanual — both followers)" : ""}
+                  {/* Two whole sentences rather than a translated suffix
+                      concatenated onto a translated stem. */}
+                  <Trans
+                    i18nKey={
+                      isBimanual
+                        ? "landing.inference.runningOnBimanual"
+                        : "landing.inference.runningOn"
+                    }
+                    values={{ name: robot.name }}
+                    components={[<strong key="0" />]}
+                  />
                 </span>
               </div>
             )}
@@ -540,13 +566,13 @@ const InferenceModal: React.FC<Props> = ({
 
           <div className="space-y-4">
             <h3 className="text-lg font-semibold border-b border-border pb-2">
-              Checkpoint
+              {t("landing.inference.checkpointSection")}
             </h3>
             {checkpoints.length === 0 ? (
               <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  No checkpoints available for this job yet.
+                  {t("landing.inference.noCheckpoints")}
                 </AlertDescription>
               </Alert>
             ) : (
@@ -564,23 +590,19 @@ const InferenceModal: React.FC<Props> = ({
               <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  {checkpointIsBimanual ? (
-                    <>
-                      This checkpoint was trained on a{" "}
-                      <strong>bimanual robot</strong> ({checkpointDim}-dim state,{" "}
-                      {checkpointArms} arms), but <strong>{robot?.name}</strong>{" "}
-                      is a single-arm robot. Pick a single-arm checkpoint, or
-                      select a bimanual robot on the Landing page.
-                    </>
-                  ) : (
-                    <>
-                      This checkpoint was trained on a{" "}
-                      <strong>single-arm robot</strong> ({checkpointDim}-dim
-                      state), but <strong>{robot?.name}</strong> is a bimanual
-                      robot. Pick a bimanual checkpoint, or select a single-arm
-                      robot on the Landing page.
-                    </>
-                  )}
+                  <Trans
+                    i18nKey={
+                      checkpointIsBimanual
+                        ? "landing.inference.mismatchBimanual"
+                        : "landing.inference.mismatchSingle"
+                    }
+                    values={{
+                      dim: checkpointDim,
+                      arms: checkpointArms,
+                      name: robot?.name,
+                    }}
+                    components={[<strong key="0" />, <strong key="1" />]}
+                  />
                 </AlertDescription>
               </Alert>
             ) : null}
@@ -588,28 +610,33 @@ const InferenceModal: React.FC<Props> = ({
 
           <div className="space-y-4">
             <h3 className="text-lg font-semibold border-b border-border pb-2">
-              Run parameters
+              {t("landing.inference.paramsSection")}
             </h3>
             {policyConfig?.requires_task ? (
               <div className="space-y-2">
                 <Label htmlFor="task" className="text-sm font-medium text-muted-foreground">
-                  Task description
+                  {t("landing.inference.taskLabel")}
                 </Label>
                 <Input
                   id="task"
                   value={task}
                   onChange={(e) => setTask(e.target.value)}
-                  placeholder="e.g., pick up the red block"
+                  placeholder={t("landing.inference.taskPlaceholder")}
                   className=""
                 />
                 <p className="text-xs text-muted-foreground">
-                  This policy is language-conditioned ({policyConfig.policy_type}).
+                  {/* The policy type is the checkpoint's own id — data. */}
+                  {t("landing.inference.languageConditioned", {
+                    // Renders empty when the checkpoint omits the type —
+                    // exactly what the bare JSX interpolation did.
+                    policyType: policyConfig.policy_type ?? "",
+                  })}
                 </p>
               </div>
             ) : null}
             <div className="space-y-2">
               <Label htmlFor="durationS" className="text-sm font-medium text-muted-foreground">
-                Max duration (seconds)
+                {t("landing.inference.durationLabel")}
               </Label>
               <NumberInput
                 id="durationS"
@@ -626,7 +653,7 @@ const InferenceModal: React.FC<Props> = ({
                 htmlFor="inference-engine"
                 className="text-sm font-medium text-muted-foreground"
               >
-                Inference engine
+                {t("landing.inference.engineLabel")}
               </Label>
               <Select
                 value={inferenceEngine}
@@ -636,47 +663,51 @@ const InferenceModal: React.FC<Props> = ({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="sync">Sync (default)</SelectItem>
+                  {/* The submitted values stay "sync"/"rtc" — only the
+                      labels are display text. */}
+                  <SelectItem value="sync">
+                    {t("landing.inference.engineSync")}
+                  </SelectItem>
                   <SelectItem value="rtc">
-                    RTC — experimental, smoother control
+                    {t("landing.inference.engineRtc")}
                   </SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
                 {inferenceEngine === "rtc"
-                  ? "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result."
-                  : "One policy forward per control step. The arm pauses briefly between action chunks."}
+                  ? t("landing.inference.engineRtcHint")
+                  : t("landing.inference.engineSyncHint")}
               </p>
             </div>
           </div>
 
           <div className="space-y-4">
             <h3 className="text-lg font-semibold border-b border-border pb-2">
-              Cameras
+              {t("landing.inference.camerasSection")}
             </h3>
             {policyConfigLoading ? (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                Reading policy config…
+                {t("landing.inference.policyConfigLoading")}
               </div>
             ) : policyConfigError ? (
               <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  Couldn't load policy config: {policyConfigError}
+                  {/* The message half is the raw error — kept verbatim. */}
+                  {t("landing.inference.policyConfigError", {
+                    message: policyConfigError,
+                  })}
                 </AlertDescription>
               </Alert>
             ) : !policyConfig ? null : cameraMap.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                This policy doesn't use cameras.
+                {t("landing.inference.noCameras")}
               </p>
             ) : (
               <div className="space-y-3">
                 <p className="text-xs text-muted-foreground">
-                  Bind one of this robot's cameras to each name the policy was
-                  trained with. Which camera and how it's opened come from the
-                  robot (edit in Robot settings); the capture resolution comes
-                  from the checkpoint.
+                  {t("landing.inference.bindHint")}
                 </p>
                 {cameraMap.map((m) => {
                   const dims = policyConfig.image_features[m.feature];
@@ -692,20 +723,25 @@ const InferenceModal: React.FC<Props> = ({
                           {m.display}
                         </Label>
                         <p className="text-xs text-muted-foreground">
-                          Captures at {dims.width}×{dims.height} — the policy's
-                          resolution
+                          {t("landing.inference.capturesAt", {
+                            width: dims.width,
+                            height: dims.height,
+                          })}
                         </p>
                         {boundCamera &&
                         (boundCamera.width !== dims.width ||
                           boundCamera.height !== dims.height) ? (
                           <p className="text-xs text-muted-foreground">
-                            ({boundCamera.name} is set to {boundCamera.width}×
-                            {boundCamera.height} in Robot settings)
+                            {t("landing.inference.robotCameraResolution", {
+                              name: boundCamera.name,
+                              width: boundCamera.width,
+                              height: boundCamera.height,
+                            })}
                           </p>
                         ) : null}
                         {boundCamera && !connected ? (
                           <p className="text-xs text-destructive">
-                            Disconnected — reconnect it before starting
+                            {t("landing.inference.disconnected")}
                           </p>
                         ) : null}
                       </div>
@@ -714,13 +750,14 @@ const InferenceModal: React.FC<Props> = ({
                         onValueChange={(v) => onCameraBindingChange(m.requestKey, v)}
                       >
                         <SelectTrigger className="w-56">
-                          <SelectValue placeholder="Select a camera" />
+                          <SelectValue
+                            placeholder={t("landing.inference.selectCamera")}
+                          />
                         </SelectTrigger>
                         <SelectContent>
                           {robotCameras.length === 0 ? (
                             <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                              This robot has no cameras — add them in Robot
-                              settings
+                              {t("landing.inference.noRobotCameras")}
                             </div>
                           ) : (
                             robotCameras.map((cam) => (
@@ -758,11 +795,13 @@ const InferenceModal: React.FC<Props> = ({
             <AdvancedSection
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}
-              summary="Temporal ensembling for ACT"
+              summary={t("landing.inference.advancedSummary")}
             >
               <div className="space-y-6">
                 <section className="space-y-3">
-                  <h4 className="eyebrow">Action selection</h4>
+                  <h4 className="eyebrow">
+                    {t("landing.inference.actionSelection")}
+                  </h4>
                   <div className="flex items-center gap-3">
                     <Switch
                       id="temporal-ensemble"
@@ -771,19 +810,16 @@ const InferenceModal: React.FC<Props> = ({
                       className="data-[state=checked]:bg-primary"
                     />
                     <Label htmlFor="temporal-ensemble">
-                      Temporal ensembling
+                      {t("landing.inference.temporalEnsemble")}
                     </Label>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Averages the overlapping action chunks the policy predicts
-                    at each step instead of executing one chunk open-loop —
-                    smoother motion, but the policy runs every control step, so
-                    it is slower.
+                    {t("landing.inference.temporalEnsembleHint")}
                   </p>
                   {temporalEnsemble ? (
                     <div className="space-y-2">
                       <Label htmlFor="temporal-ensemble-coeff">
-                        Ensemble coefficient
+                        {t("landing.inference.coeffLabel")}
                       </Label>
                       <NumberInput
                         id="temporal-ensemble-coeff"
@@ -792,7 +828,9 @@ const InferenceModal: React.FC<Props> = ({
                         min={0}
                         value={temporalEnsembleCoeff}
                         onChange={setTemporalEnsembleCoeff}
-                        placeholder={`${DEFAULT_TEMPORAL_ENSEMBLE_COEFF} (ACT paper default)`}
+                        placeholder={t("landing.inference.coeffPlaceholder", {
+                          coeff: DEFAULT_TEMPORAL_ENSEMBLE_COEFF,
+                        })}
                         aria-invalid={temporalEnsembleInvalid}
                         className={cn(
                           "w-40",
@@ -801,13 +839,13 @@ const InferenceModal: React.FC<Props> = ({
                       />
                       {temporalEnsembleInvalid ? (
                         <p className="text-xs text-destructive">
-                          Enter a number greater than 0.
+                          {t("landing.inference.coeffInvalid")}
                         </p>
                       ) : (
                         <p className="text-xs text-muted-foreground">
-                          Weights are exp(-coeff × age): higher favours the
-                          newest prediction, lower averages more evenly. The
-                          ACT paper uses {DEFAULT_TEMPORAL_ENSEMBLE_COEFF}.
+                          {t("landing.inference.coeffHint", {
+                            coeff: DEFAULT_TEMPORAL_ENSEMBLE_COEFF,
+                          })}
                         </p>
                       )}
                     </div>
@@ -824,14 +862,16 @@ const InferenceModal: React.FC<Props> = ({
               className="w-full sm:w-auto px-10 py-6 text-lg disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Play className="w-5 h-5 mr-2" />
-              {submitting ? "Starting…" : "Start Inference"}
+              {submitting
+                ? t("landing.inference.starting")
+                : t("landing.inference.start")}
             </Button>
             <Button
               onClick={() => onOpenChange(false)}
               variant="outline"
               className="w-full sm:w-auto px-10 py-6 text-lg"
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
           </div>
         </div>

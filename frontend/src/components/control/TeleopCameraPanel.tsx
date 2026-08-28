@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -18,6 +19,7 @@ import CameraFeed from "./CameraFeed";
  * device that wasn't deliberately added to the robot.
  */
 const TeleopCameraPanel: React.FC = () => {
+  const { t } = useTranslation();
   const [enabled, setEnabled] = useState(false);
   // Bumped by the retry button to remount the feeds (a fresh getUserMedia
   // attempt) — useful if a camera was unplugged and reconnected.
@@ -49,8 +51,8 @@ const TeleopCameraPanel: React.FC = () => {
               size="icon"
               onClick={() => setReloadKey((k) => k + 1)}
               className="h-9 w-9 text-muted-foreground hover:text-foreground flex-shrink-0"
-              title="Retry camera feeds (e.g. after reconnecting a camera)"
-              aria-label="Retry camera feeds"
+              title={t("shared.camera.retryTitle")}
+              aria-label={t("shared.camera.retry")}
             >
               <RefreshCw className="w-4 h-4" />
             </Button>
@@ -81,8 +83,8 @@ const TeleopCameraPanel: React.FC = () => {
         ) : (
           <p className="text-sm text-muted-foreground">
             {robotsLoading
-              ? "Loading robot..."
-              : "No cameras configured for this robot. Add them during calibration to see live feeds here."}
+              ? t("shared.camera.loadingRobot")
+              : t("shared.camera.none")}
           </p>
         )
       ) : (

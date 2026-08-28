@@ -27,9 +27,11 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
 from lerobot.utils.errors import DeviceNotConnectedError
 
+from .api_errors import ErrorCode
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
+from .session_events import notify_session_changed
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
@@ -792,6 +794,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        replay as _replay,
         rollout as _rollout,
         wiggle as _wiggle,
     )
@@ -804,7 +807,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
     with _state_lock:
         if teleoperation_active:
-            return {"success": False, "message": "Teleoperation is already active"}
+            return {
+                "success": False,
+                "message": "Teleoperation is already active",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+            }
         if teleoperation_thread is not None and teleoperation_thread.is_alive():
             # A stopped session's worker is still releasing the arms (grace was
             # cut short above but the cleanup hasn't finished yet).
@@ -812,19 +819,52 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 "success": False,
                 "message": "The arms from the previous session are still being released. "
                 "Try again in a few seconds.",
+                "code": ErrorCode.ROBOT_BUSY_RELEASING,
             }
         if _record.recording_active:
-            return {"success": False, "message": "Recording is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Recording is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_RECORDING,
+            }
         if _rollout.inference_active:
-            return {"success": False, "message": "Inference is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+            }
         if _calibrate.calibration_is_active():
-            return {"success": False, "message": "Calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
+            }
         if _auto_calibrate.auto_calibration_is_active():
-            return {"success": False, "message": "Auto-calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+            }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+            }
+        if _replay.replay_active:
+            return {
+                "success": False,
+                "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
+            }
+        # Lazy, because jobs imports this module back the same way.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
             }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
@@ -836,6 +876,10 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         last_session_error = None
         releasing = False
         _release_now.clear()
+
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client (any page, any remote UI) refetches the status endpoint.
+    notify_session_changed("teleoperation", True)
 
     robot = None
     teleop_device = None
@@ -1011,6 +1055,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     # stop (release-now) skips/aborts the return; error exits
                     # skip this — the bus may be gone, release ASAP.
                     releasing = True
+                    # Still energized and holding the ports — a phase of this
+                    # session, not idle yet (mirrors the status payload).
+                    notify_session_changed("teleoperation", True, phase="releasing")
                     _return_followers_to_rest(follower_rest_poses, _release_now)
                 # Belt and braces: disable torque explicitly before disconnect.
                 # disconnect() disables torque too, but if it fails partway the
@@ -1035,6 +1082,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 releasing = False
                 current_robot = None
                 current_teleop = None
+                # Final release: cleanup (including error paths) is done and
+                # the ports are free.
+                notify_session_changed("teleoperation", False)
 
         teleoperation_thread = threading.Thread(
             target=teleoperation_worker, name="teleoperation-worker", daemon=True
@@ -1073,6 +1123,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         teleoperation_active = False
         current_robot = None
         current_teleop = None
+        # The claim above already broadcast active=True; undo the hint now
+        # that the setup failure released everything.
+        notify_session_changed("teleoperation", False)
         logger.error(f"Failed to start teleoperation: {e}")
         # str(e) is already a user-facing message for the connection failures
         # raised above; the toast title supplies the "error starting" context.

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Plus, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,16 +28,27 @@ interface CreateRobotDialogProps {
   onCreateNew: (name: string, mode: RobotMode) => Promise<boolean>;
 }
 
-const MODE_OPTIONS: { value: RobotMode; label: string; description: string }[] = [
+/**
+ * The arm-layout options. `value` is LOGIC — it is what the form submits and
+ * what the backend stores, so it stays the literal "single"/"bimanual". Only
+ * the label/description halves are display, and they hold catalog KEYS rather
+ * than resolved copy: this array evaluates at import time, so a resolved string
+ * here would freeze whichever language happened to load first.
+ */
+const MODE_OPTIONS: {
+  value: RobotMode;
+  labelKey: string;
+  descriptionKey: string;
+}[] = [
   {
     value: "single",
-    label: "Single arm",
-    description: "One leader + one follower",
+    labelKey: "landing.createRobot.modes.single.label",
+    descriptionKey: "landing.createRobot.modes.single.description",
   },
   {
     value: "bimanual",
-    label: "Bimanual",
-    description: "Two leader/follower pairs (4 arms)",
+    labelKey: "landing.createRobot.modes.bimanual.label",
+    descriptionKey: "landing.createRobot.modes.bimanual.description",
   },
 ];
 
@@ -54,6 +66,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
   seedName,
   onCreateNew,
 }) => {
+  const { t } = useTranslation();
   const [newName, setNewName] = useState("");
   const [newMode, setNewMode] = useState<RobotMode>(defaultMode);
   const [creating, setCreating] = useState(false);
@@ -106,10 +119,9 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
     >
       <DialogContent className="bg-popover border-border sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Create a new robot</DialogTitle>
+          <DialogTitle>{t("landing.createRobot.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Choose a name and arm layout. The layout is fixed once created — a
-            bimanual rig is a separate robot.
+            {t("landing.createRobot.description")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -121,7 +133,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         >
           <div>
             <Label htmlFor="new-robot-name" className="text-foreground">
-              Name
+              {t("landing.createRobot.nameLabel")}
             </Label>
             <Input
               id="new-robot-name"
@@ -134,15 +146,17 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
             />
             {newNameExists && (
               <p className="mt-1 text-xs text-destructive">
-                A robot with this name already exists.
+                {t("landing.createRobot.duplicate")}
               </p>
             )}
           </div>
           <div>
-            <Label className="text-foreground">Arm layout</Label>
+            <Label className="text-foreground">
+              {t("landing.createRobot.armLayout")}
+            </Label>
             <div
               role="radiogroup"
-              aria-label="Arm layout"
+              aria-label={t("landing.createRobot.armLayout")}
               className="mt-1 grid grid-cols-2 gap-2"
             >
               {MODE_OPTIONS.map((opt) => {
@@ -163,12 +177,12 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-foreground">
-                        {opt.label}
+                        {t(opt.labelKey as never)}
                       </span>
                       {selected && <Check className="h-4 w-4 text-primary" />}
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">
-                      {opt.description}
+                      {t(opt.descriptionKey as never)}
                     </p>
                   </button>
                 );
@@ -181,16 +195,18 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={!canConfirm}>
               {creating ? (
                 <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Creating…
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />{" "}
+                  {t("landing.createRobot.submitting")}
                 </>
               ) : (
                 <>
-                  <Plus className="w-4 h-4 mr-2" /> Create
+                  <Plus className="w-4 h-4 mr-2" />{" "}
+                  {t("landing.createRobot.submit")}
                 </>
               )}
             </Button>

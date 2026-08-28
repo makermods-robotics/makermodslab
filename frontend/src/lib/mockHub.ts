@@ -266,10 +266,13 @@ const checkpointsByJob: Record<string, JobCheckpoint[]> = {
 
 const iso = (secAgo: number) => new Date((NOW - secAgo) * 1000).toISOString();
 
-/** Untracked Hub jobs (no local record): one live, two dead leftovers. */
+/** Untracked Hub jobs (no local record): one live, two dead leftovers.
+ * `name` covers the three cases the card titles by: a labelled job, one named
+ * from its argv, and one the Hub gives us nothing for (image-name fallback). */
 const hubJobs: HubJob[] = [
   {
     id: "mock-untracked-live",
+    name: "act_cube_grab_2026-08-10_14-02-11",
     created_at: iso(20 * 60),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -280,6 +283,7 @@ const hubJobs: HubJob[] = [
   },
   {
     id: "mock-untracked-done",
+    name: "smolvla_fold_towel_2026-08-08_09-31-40",
     created_at: iso(4 * D),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -290,6 +294,7 @@ const hubJobs: HubJob[] = [
   },
   {
     id: "mock-untracked-error",
+    name: null,
     created_at: iso(6 * D),
     docker_image: "huggingface/lerobot-gpu:latest",
     space_id: null,
@@ -423,7 +428,7 @@ export function mockHubResponse(
     return null;
   }
 
-  if (method === "GET" && path === "/hf-auth-status") {
+  if (method === "GET" && path === "/api/v1/hf-auth-status") {
     return json({
       authenticated: true,
       username: USER,
@@ -432,7 +437,7 @@ export function mockHubResponse(
     });
   }
 
-  if (method === "GET" && path === "/jobs/hub") {
+  if (method === "GET" && path === "/api/v1/jobs/hub") {
     return json({
       authenticated: true,
       jobs_permission: true,
@@ -441,7 +446,7 @@ export function mockHubResponse(
     });
   }
 
-  const dismiss = path.match(/^\/jobs\/hub\/jobs\/([^/]+)\/dismiss$/);
+  const dismiss = path.match(/^\/api\/v1\/jobs\/hub\/jobs\/([^/]+)\/dismiss$/);
   if (method === "POST" && dismiss) {
     const idx = hubJobs.findIndex(
       (h) => h.id === decodeURIComponent(dismiss[1]),
@@ -450,7 +455,7 @@ export function mockHubResponse(
     return json({ status: "dismissed" });
   }
 
-  const hubModelDelete = path.match(/^\/jobs\/hub\/models\/(.+)$/);
+  const hubModelDelete = path.match(/^\/api\/v1\/jobs\/hub\/models\/(.+)$/);
   if (method === "DELETE" && hubModelDelete) {
     const repo = decodeURIComponent(hubModelDelete[1]);
     const idx = hubModels.findIndex((m) => m.repo_id === repo);
@@ -458,11 +463,11 @@ export function mockHubResponse(
     return json(undefined, 204);
   }
 
-  if (method === "GET" && path === "/models") {
+  if (method === "GET" && path === "/api/v1/models") {
     return json(modelItems());
   }
 
-  if (method === "POST" && path === "/jobs/import") {
+  if (method === "POST" && path === "/api/v1/jobs/import") {
     let source = "";
     try {
       source = JSON.parse(String(init.body ?? "{}")).source ?? "";
@@ -476,11 +481,11 @@ export function mockHubResponse(
     return json({ ...importRepo(source), already_imported: existing });
   }
 
-  if (method === "GET" && path === "/jobs") {
+  if (method === "GET" && path === "/api/v1/jobs") {
     return json({ jobs });
   }
 
-  const jobRoute = path.match(/^\/jobs\/([^/]+)(?:\/(.*))?$/);
+  const jobRoute = path.match(/^\/api\/v1\/jobs\/([^/]+)(?:\/(.*))?$/);
   if (jobRoute) {
     const id = decodeURIComponent(jobRoute[1]);
     const rest = jobRoute[2] ?? "";

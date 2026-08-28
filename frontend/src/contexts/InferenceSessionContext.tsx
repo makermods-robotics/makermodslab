@@ -10,13 +10,16 @@ import InferenceSessionDialog from "@/components/inference/InferenceSessionDialo
 /**
  * Hosts the live-inference session dialog above the router — /inference is no
  * longer a route. Both launch flows (the studio Deploy panel and the legacy
- * InferenceModal) call `openInferenceSession()` right after POST
- * /inference/start succeeds; the dialog then owns status polling, the stop
- * flow, and the exit guard, and closing it lands back on whatever surface
+ * InferenceModal) call `openInferenceSession(sessionId)` right after POST
+ * /api/v1/sessions succeeds; the dialog then owns status polling, the lease
+ * heartbeat, and the stop flow, and closing it lands back on whatever surface
  * launched the run.
  */
 interface InferenceSessionContextValue {
-  openInferenceSession: () => void;
+  /** `sessionId` is the identity POST /api/v1/sessions returned — the dialog
+   * heartbeats its lease and stops it by id. */
+  openInferenceSession: (sessionId: string) => void;
+  sessionOpen: boolean;
 }
 
 const InferenceSessionContext =
@@ -26,19 +29,25 @@ export const InferenceSessionProvider: React.FC<{
   children: React.ReactNode;
 }> = ({ children }) => {
   const [sessionOpen, setSessionOpen] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
-  const openInferenceSession = useCallback(() => setSessionOpen(true), []);
+  const openInferenceSession = useCallback((id: string) => {
+    setSessionId(id);
+    setSessionOpen(true);
+  }, []);
   const handleExit = useCallback(() => setSessionOpen(false), []);
 
   const value = useMemo(
-    () => ({ openInferenceSession }),
-    [openInferenceSession],
+    () => ({ openInferenceSession, sessionOpen }),
+    [openInferenceSession, sessionOpen],
   );
 
   return (
     <InferenceSessionContext.Provider value={value}>
       {children}
-      {sessionOpen ? <InferenceSessionDialog onExit={handleExit} /> : null}
+      {sessionOpen ? (
+        <InferenceSessionDialog sessionId={sessionId} onExit={handleExit} />
+      ) : null}
     </InferenceSessionContext.Provider>
   );
 };

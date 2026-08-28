@@ -18,6 +18,7 @@ import os
 import platform
 import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import Literal
 
@@ -79,6 +80,17 @@ SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/save
 SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
 SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
 
+# Stable per-install identity, minted on first read. The node registry uses it
+# to recognize a peer across restarts and address changes (a machine's IP or
+# MagicDNS name can change; its instance id doesn't).
+INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.txt")
+
+# The node registry's saved peer list: [{"url": ..., "name": ...}, ...]. Only
+# url + name are persisted — identity (instance_id/version/capabilities) is
+# deliberately NOT: a peer is re-verified against its live /api/v1/health on
+# load/probe, so stale identity can never be served from disk.
+NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
+
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
 MAKERMODSLAB_TAG = "MakerModsLab"
@@ -115,6 +127,56 @@ def _atomic_write_text(path: str, content: str) -> None:
     with open(tmp, "w") as f:
         f.write(content)
     os.replace(tmp, path)
+
+
+def load_saved_nodes() -> list[dict[str, str | None]]:
+    """The saved peer rows from NODES_FILE, each ``{"url": str, "name": str|None}``.
+
+    Missing, corrupt, or wrong-shaped content yields [] (an empty registry is
+    always a safe starting point); rows without a string url are dropped.
+    """
+    try:
+        with open(NODES_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    rows: list[dict[str, str | None]] = []
+    for row in data:
+        if isinstance(row, dict) and isinstance(row.get("url"), str):
+            name = row.get("name")
+            rows.append({"url": row["url"], "name": name if isinstance(name, str) else None})
+    return rows
+
+
+def save_saved_nodes(rows: list[dict[str, str | None]]) -> None:
+    """Persist the peer rows (url + name only) to NODES_FILE atomically."""
+    _atomic_write_text(NODES_FILE, json.dumps(rows, indent=2))
+
+
+_instance_id_cache: str | None = None
+
+
+def get_instance_id() -> str:
+    """This install's stable identity: a 32-hex-char id, persisted on first use.
+
+    Cached after the first read; a wiped cache dir simply mints a new identity
+    (a fresh install IS a new node as far as peers are concerned).
+    """
+    global _instance_id_cache
+    if _instance_id_cache is not None:
+        return _instance_id_cache
+    try:
+        with open(INSTANCE_ID_FILE) as f:
+            stored = f.read().strip()
+    except OSError:
+        stored = ""
+    if not re.fullmatch(r"[0-9a-f]{32}", stored):
+        stored = uuid.uuid4().hex
+        _atomic_write_text(INSTANCE_ID_FILE, stored + "\n")
+    _instance_id_cache = stored
+    return stored
 
 
 def _port_file_for(robot_type: RobotSide) -> str:
@@ -326,6 +388,31 @@ def is_valid_robot_name(name: str) -> bool:
     if name.strip() != name:
         return False
     return not any(bad in name for bad in _INVALID_NAME_CHARS)
+
+
+# Display names for training runs (JobRecord.name / display_name). Long enough
+# for any sentence a card can render, short enough that a pasted document can't
+# become a "name" that bloats every listing response carrying it.
+JOB_NAME_MAX_LENGTH = 200
+
+
+def validate_job_name(name: str) -> str:
+    """Validate a training-run display name; returns the trimmed name.
+
+    THE shared validator for both paths that accept one — submit
+    (`TrainingRequest.job_name`, via JobRegistry.start) and
+    `JobRegistry.rename` — so what one path refuses the other can't store.
+    Raises ValueError with a user-facing message (both callers surface it as
+    HTTP 400). Deliberately a boundary check, not a pydantic model constraint:
+    legacy records persisted before validation existed must keep loading."""
+    trimmed = name.strip()
+    if not trimmed:
+        raise ValueError("Display name cannot be empty.")
+    if len(trimmed) > JOB_NAME_MAX_LENGTH:
+        raise ValueError(f"Display name is too long — keep it under {JOB_NAME_MAX_LENGTH} characters.")
+    if not is_valid_robot_name(trimmed):
+        raise ValueError("Invalid display name.")
+    return trimmed
 
 
 def _empty_record(name: str) -> dict:

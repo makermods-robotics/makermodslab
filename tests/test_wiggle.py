@@ -84,6 +84,15 @@ async def test_wiggle_gripper_blocked_when_auto_calibration_active(monkeypatch: 
     assert "Auto-calibration" in result["message"]
 
 
+async def test_wiggle_gripper_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makermodslab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "replay" in result["message"].lower()
+
+
 async def test_wiggle_gripper_clears_wiggle_active_after_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

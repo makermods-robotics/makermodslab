@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -120,6 +121,7 @@ const ModelCard: React.FC<Props> = ({
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const { openStudio } = useStudio();
 
   const isRunning = model.state === "running";
@@ -170,21 +172,23 @@ const ModelCard: React.FC<Props> = ({
   // Where the model came from — the header chip mirrors the dataset/job cards'
   // source badges (Imported / from Hub / Local / Cloud).
   const originLabel = isImported
-    ? "Imported"
+    ? t("jobs.location.imported")
     : model.runner === "hf_cloud"
-      ? "Cloud"
-      : "Local";
+      ? t("jobs.location.cloud")
+      : t("jobs.location.local");
   const OriginIcon = isImported
     ? Box
     : model.runner === "hf_cloud"
       ? Globe
       : HardDrive;
 
+  // One key per branch. `relativeTime` output is passed in pre-formatted —
+  // duration formatting is deliberately left exactly as it was.
   const subtitle = isImported
     ? importedSource
     : model.ended_at != null
-      ? `trained ${relativeTime(model.ended_at)}`
-      : `created ${relativeTime(model.started_at)}`;
+      ? t("jobs.modelCard.trained", { when: relativeTime(model.ended_at) })
+      : t("jobs.modelCard.created", { when: relativeTime(model.started_at) });
 
   // Checkpoints across the lineage (this model + the runs it descends from),
   // each tagged with its owning run so Run/Fine-tune/Download route to the
@@ -213,7 +217,7 @@ const ModelCard: React.FC<Props> = ({
   const doRename = async () => {
     const next = renameValue.trim();
     if (!next) {
-      setRenameError("Name cannot be empty.");
+      setRenameError(t("jobs.rename.empty"));
       return;
     }
     if (next === displayName) {
@@ -225,8 +229,12 @@ const ModelCard: React.FC<Props> = ({
     try {
       await renameJob(baseUrl, fetchWithHeaders, model.id, next);
       toast({
-        title: "Model renamed",
-        description: `"${displayName}" → "${next}".`,
+        title: t("jobs.rename.toastTitle"),
+        // Both names are user data — interpolated, never translated.
+        description: t("jobs.rename.toastDescription", {
+          from: displayName,
+          to: next,
+        }),
       });
       setRenameOpen(false);
       onRenamed?.();
@@ -238,6 +246,10 @@ const ModelCard: React.FC<Props> = ({
     }
   };
 
+  // The three window.confirm() questions below stay in ENGLISH on purpose: a
+  // native confirm draws its OK/Cancel from the BROWSER's locale, so a
+  // translated question over English buttons reads worse than an English one.
+  // Replacing them with AlertDialogs is a separate UX change.
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (isImported) {
@@ -356,10 +368,13 @@ const ModelCard: React.FC<Props> = ({
     if (selectedStep == null) return;
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/jobs/${selectedJob.id}/checkpoints/${selectedStep}/download`,
+        `${baseUrl}/api/v1/jobs/${selectedJob.id}/checkpoints/${selectedStep}/download`,
       );
       if (!res.ok) {
-        toast({ title: "Download failed", variant: "destructive" });
+        toast({
+          title: t("jobs.jobCard.downloadFailed"),
+          variant: "destructive",
+        });
         return;
       }
       const blob = await res.blob();
@@ -373,7 +388,7 @@ const ModelCard: React.FC<Props> = ({
       URL.revokeObjectURL(url);
     } catch (err) {
       toast({
-        title: "Download failed",
+        title: t("jobs.jobCard.downloadFailed"),
         description: String(err),
         variant: "destructive",
       });
@@ -390,14 +405,14 @@ const ModelCard: React.FC<Props> = ({
   const runEnabled = hasCheckpoints;
   const runReason = runEnabled
     ? undefined
-    : "No checkpoint available to run yet.";
+    : t("jobs.modelCard.reason.noCheckpointToRun");
 
   const finetuneEnabled = canFinetune;
   let finetuneReason: string | undefined;
   if (!finetuneEnabled) {
     if (isRunning)
-      finetuneReason = "Can't fine-tune while this run is still in progress.";
-    else finetuneReason = "No checkpoint to fine-tune from yet.";
+      finetuneReason = t("jobs.modelCard.reason.finetuneWhileRunning");
+    else finetuneReason = t("jobs.modelCard.reason.noCheckpointToFinetune");
   }
 
   // A hub-imported base whose weights live on the Hub, not on disk here.
@@ -416,20 +431,20 @@ const ModelCard: React.FC<Props> = ({
   let downloadReason: string | undefined;
   if (!downloadEnabled) {
     if (!hasCheckpoints) {
-      downloadReason = "No checkpoint available to download yet.";
+      downloadReason = t("jobs.modelCard.reason.noCheckpointToDownload");
     } else if (selectedIsHubImport) {
-      downloadReason =
-        "This model's weights live on the Hub, not on this machine.";
+      downloadReason = t("jobs.modelCard.reason.hubImportWeights");
     } else if (selectedJob.runner === "imported") {
       downloadReason = selectedJob.output_dir
-        ? `Imported from disk — the checkpoint is already at ${selectedJob.output_dir}`
-        : "Imported models aren't re-exported — open the original folder.";
+        ? // The path is data — interpolated, never translated.
+          t("jobs.modelCard.reason.importedFromDisk", {
+            path: selectedJob.output_dir,
+          })
+        : t("jobs.modelCard.reason.importedNoExport");
     } else if (selectedJob.runner === "hf_cloud") {
-      downloadReason =
-        "Cloud runs keep their checkpoints on the Hub, not on this machine.";
+      downloadReason = t("jobs.modelCard.reason.cloudCheckpoints");
     } else {
-      downloadReason =
-        "Only local training runs have a downloadable checkpoint.";
+      downloadReason = t("jobs.modelCard.reason.localOnly");
     }
   }
 
@@ -438,8 +453,9 @@ const ModelCard: React.FC<Props> = ({
   const selectorEnabled = hasCheckpoints && lineageCheckpoints.length > 1;
   let selectorReason: string | undefined;
   if (!selectorEnabled) {
-    if (!hasCheckpoints) selectorReason = "No checkpoints to choose from yet.";
-    else selectorReason = "Only one checkpoint — nothing to choose.";
+    if (!hasCheckpoints)
+      selectorReason = t("jobs.modelCard.reason.noCheckpointsToChoose");
+    else selectorReason = t("jobs.modelCard.reason.oneCheckpoint");
   }
 
   // Wraps a control so its disabled reason is reachable on hover. A natively
@@ -470,15 +486,17 @@ const ModelCard: React.FC<Props> = ({
   // ancestor), so the two halves of the ratio always belong together. Imported
   // models carry a step-0 sentinel and no target, so they get no row rather
   // than a dishonest "0 / 0".
+  // Only the LABELS are translated; every value beside them is data (policy
+  // type, dataset repo id) or a pre-formatted number left exactly as it was.
   const metaRows: Array<[string, string]> = [];
   if (model.config?.policy_type)
-    metaRows.push(["Policy", model.config.policy_type]);
+    metaRows.push([t("jobs.meta.policy"), model.config.policy_type]);
   // Imported pseudo-jobs carry the "(imported)" sentinel, not a real dataset.
   if (
     model.config?.dataset_repo_id &&
     model.config.dataset_repo_id !== "(imported)"
   )
-    metaRows.push(["Dataset", model.config.dataset_repo_id]);
+    metaRows.push([t("jobs.meta.dataset"), model.config.dataset_repo_id]);
   const stepTarget = selectedJob.config?.steps ?? 0;
   if (isImported) {
     // An import has no step TARGET to pair against: register_imported fills
@@ -491,10 +509,10 @@ const ModelCard: React.FC<Props> = ({
     // in the same style as a trained card's numerator; the row's own "Steps"
     // label is what keeps a lone number from reading as a total.
     if (selectedStep != null && selectedStep > 0)
-      metaRows.push(["Steps", selectedStep.toLocaleString()]);
+      metaRows.push([t("jobs.meta.steps"), selectedStep.toLocaleString()]);
   } else if (stepTarget > 0) {
     metaRows.push([
-      "Steps",
+      t("jobs.meta.steps"),
       selectedStep != null && selectedStep > 0
         ? `${selectedStep.toLocaleString()} / ${stepTarget.toLocaleString()}`
         : stepTarget.toLocaleString(),
@@ -520,10 +538,10 @@ const ModelCard: React.FC<Props> = ({
             {isHubImport ? (
               <div
                 className="flex items-center gap-1 text-[11px] font-medium text-info"
-                title="Imported from a Hugging Face Hub repo"
+                title={t("jobs.location.fromHubTitle")}
               >
                 <Upload className="w-3 h-3" />
-                from Hub
+                {t("jobs.location.fromHub")}
               </div>
             ) : null}
           </div>
@@ -533,8 +551,8 @@ const ModelCard: React.FC<Props> = ({
               size="icon"
               onClick={openRename}
               className="h-7 w-7 text-muted-foreground hover:text-foreground"
-              aria-label="Rename model"
-              title="Rename"
+              aria-label={t("jobs.actions.renameAria")}
+              title={t("jobs.actions.rename")}
             >
               <Pencil className="w-3.5 h-3.5" />
             </Button>
@@ -544,7 +562,7 @@ const ModelCard: React.FC<Props> = ({
                 size="icon"
                 asChild
                 className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                aria-label="Open Hub job page"
+                aria-label={t("jobs.actions.openHubJob")}
               >
                 <a
                   href={model.hf_job_url}
@@ -561,8 +579,8 @@ const ModelCard: React.FC<Props> = ({
               size="icon"
               onClick={handleDelete}
               className="h-7 w-7 text-muted-foreground hover:text-destructive"
-              aria-label="Delete model"
-              title="Remove"
+              aria-label={t("jobs.modelCard.deleteAria")}
+              title={t("jobs.modelCard.deleteTitle")}
             >
               <Trash2 className="w-3.5 h-3.5" />
             </Button>
@@ -686,7 +704,7 @@ const ModelCard: React.FC<Props> = ({
                 selectedRef={selectedRef}
                 onChange={(c) => setSelectedRef(c.ref)}
                 disabled={!selectorEnabled}
-                placeholder="No checkpoints"
+                placeholder={t("jobs.modelCard.checkpointPlaceholder")}
                 className="w-36"
                 // Same ambiguity as JobCard's resume row, same fix: this list
                 // merges a lineage, so "step 2000" can appear once per run and
@@ -707,8 +725,8 @@ const ModelCard: React.FC<Props> = ({
                 onClick={handleDownload}
                 disabled={!downloadEnabled}
                 className="h-7 w-7 shrink-0 p-0 border-border text-muted-foreground hover:bg-muted"
-                aria-label="Download this checkpoint"
-                title={downloadEnabled ? "Download this checkpoint" : undefined}
+                aria-label={t("jobs.actions.download")}
+                title={downloadEnabled ? t("jobs.actions.download") : undefined}
               >
                 <Download className="w-3.5 h-3.5" />
               </Button>,
@@ -731,9 +749,9 @@ const ModelCard: React.FC<Props> = ({
                 onClick={handlePlay}
                 disabled={!runEnabled}
                 className="h-8 w-full gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
-                aria-label="Run inference with this model"
+                aria-label={t("jobs.actions.runInferenceModel")}
               >
-                <Play className="w-3.5 h-3.5" /> Run
+                <Play className="w-3.5 h-3.5" /> {t("jobs.actions.run")}
               </Button>,
               "min-w-0 flex-1",
             )}
@@ -745,15 +763,13 @@ const ModelCard: React.FC<Props> = ({
                 onClick={handleFinetune}
                 disabled={!finetuneEnabled}
                 className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
-                aria-label="Fine-tune a new run from this model's weights"
-                title={
-                  finetuneEnabled
-                    ? "Fine-tune a new run from this model's weights"
-                    : undefined
-                }
+                // Same words on both, so one key rather than two that could
+                // drift apart.
+                aria-label={t("jobs.actions.fineTuneHint")}
+                title={finetuneEnabled ? t("jobs.actions.fineTuneHint") : undefined}
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                Fine-tune
+                {t("jobs.actions.fineTune")}
               </Button>,
               "shrink-0",
             )}
@@ -767,14 +783,26 @@ const ModelCard: React.FC<Props> = ({
           onClick={(e) => e.stopPropagation()}
         >
           <DialogHeader>
-            <DialogTitle>Rename model</DialogTitle>
+            <DialogTitle>{t("jobs.rename.title")}</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Sets a display name only — the underlying{" "}
-              {isImported && model.hf_repo_id ? "Hub repo" : "run"} (
-              <span className="font-mono text-muted-foreground">
-                {isImported ? importedSource : model.id}
-              </span>
-              ) is not moved or changed.
+              {/* One sentence with the identity embedded in it, not three
+                  concatenated fragments — <0/> is the mono span below and its
+                  contents (run id / repo id) are data. */}
+              <Trans
+                i18nKey="jobs.rename.description"
+                values={{
+                  target: t(
+                    isImported && model.hf_repo_id
+                      ? "jobs.rename.targetHubRepo"
+                      : "jobs.rename.targetRun",
+                  ),
+                }}
+                components={[
+                  <span key="0" className="font-mono text-muted-foreground">
+                    {isImported ? importedSource : model.id}
+                  </span>,
+                ]}
+              />
             </DialogDescription>
           </DialogHeader>
           <Input
@@ -790,7 +818,7 @@ const ModelCard: React.FC<Props> = ({
               }
             }}
             autoFocus
-            placeholder="New name"
+            placeholder={t("jobs.rename.placeholder")}
             className="bg-background border-input"
           />
           {renameError && (
@@ -802,7 +830,7 @@ const ModelCard: React.FC<Props> = ({
               className="border-border text-muted-foreground"
               onClick={() => setRenameOpen(false)}
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button
               className="bg-primary hover:bg-primary/90 text-primary-foreground"
@@ -813,7 +841,7 @@ const ModelCard: React.FC<Props> = ({
               }
               onClick={doRename}
             >
-              {renaming ? "Renaming…" : "Rename"}
+              {renaming ? t("jobs.rename.submitting") : t("jobs.rename.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>
