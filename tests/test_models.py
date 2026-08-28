@@ -35,14 +35,36 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_model_cache():
-    """Clear the module-global /models listing cache before and after each test
-    so a cached result from one test never leaks into another (the conftest
-    autouse fixture resets the datasets/jobs caches but not this one)."""
+    """Clear the module-global /models listing state before and after each test
+    so one test's result never leaks into another (the conftest autouse fixture
+    resets the datasets/jobs caches but not this one).
+
+    Wider than the public invalidation on purpose. `invalidate_model_listing_cache`
+    deliberately KEEPS the last-good Hub rows and the last fan-out outcome —
+    they are the fallback for a Hub outage, and registry mutations (which are
+    frequent) must not wipe the safety net. Across tests that same persistence
+    is contamination, so the fixture reaches past the public call and resets
+    them too."""
     import makermodslab.models as m
 
-    m.invalidate_model_listing_cache()
-    yield
-    m.invalidate_model_listing_cache()
+    def _reset() -> None:
+        m.invalidate_model_listing_cache()
+        m._hub_last_good = None
+        m._hub_last_good_auth = ""
+        m._hub_last_good_authors = ()
+        m._forgotten_hub_repos = {}
+        m._hub_outcome = {"authenticated": False, "authors": (), "answered": 0}
+
+    _reset()
+    # Signed OUT by default. The listing's identity key is the HF token, so
+    # without this every assertion about Hub reachability would depend on
+    # whether the person running the suite happens to have a token in their
+    # environment — the same machine-state coupling that made
+    # test_list_all_models_hub_rows_carry_policy_type flaky. A test that needs
+    # an identity patches `get_token` itself; the inner patch wins.
+    with patch("makermodslab.models.get_token", return_value=""):
+        yield
+    _reset()
 
 
 @pytest.fixture

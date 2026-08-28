@@ -1765,7 +1765,11 @@ def delete_hub_model(repo_id: str):
         raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
 
     # The listing changed — drop the cached /jobs/hub response so the removed
-    # repo doesn't linger until the TTL expires.
+    # repo doesn't linger until the TTL expires. The models/skills listing has
+    # its own Hub cache and its own last-good fallback, so it needs telling
+    # separately: without this the deleted repo survives the TTL AND, worse,
+    # persists as a retained "stale" row every time a later fan-out degrades.
+    model_browser.forget_hub_repo(repo_id)
     invalidate_hub_jobs_cache()
     return {"status": "success", "repo_id": repo_id}
 
