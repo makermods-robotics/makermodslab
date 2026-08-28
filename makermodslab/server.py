@@ -201,6 +201,7 @@ from .schemas.nodes import (
     NodeRemoveResponse,
 )
 from .schemas.sessions import (
+    CoachingCommandResponse,
     CurrentSessionResponse,
     SessionHeartbeatBody,
     SessionHeartbeatResponse,
@@ -587,6 +588,24 @@ class ConnectionManager:
             with contextlib.suppress(queue.Full):
                 self.broadcast_queue.put_nowait(event)
 
+    def notify_coaching_state(self, fields: dict[str, Any]) -> None:
+        """Push the coaching block the instant it changes, ahead of the poll.
+
+        Unlike `notify_jobs_changed` this carries the STATE rather than a
+        "refetch me" nudge, because the thing it carries is safety-relevant and
+        a refetch round-trip is most of the latency we are trying to remove:
+        the operator has to know who is holding the arm now, not after another
+        request. See rollout._on_coaching_state for the full argument.
+
+        Dropped silently with no clients — the dialog polls once a second and
+        reconciles itself, so a missed push costs a second, never correctness.
+        """
+        if self.is_running and self.active_connections:
+            with contextlib.suppress(queue.Full):
+                self.broadcast_queue.put_nowait(
+                    {"type": "coaching_state", "timestamp": time.time(), **fields}
+                )
+
     def notify_job_progress(self, snapshots: list[dict]) -> None:
         """Push a 'job_progress' event with per-running-job snapshots.
 
@@ -639,6 +658,10 @@ presence_publisher = presence.PresencePublisher(job_registry)
 job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
 session_events.set_notifier(manager.notify_session_changed)
+# Coaching phase changes reach the browser by push, not by poll — the banner
+# names who is holding the arm, and a second of lag there is a second of the
+# operator not knowing. See rollout._on_coaching_state.
+rollout_state.set_on_coaching_state(manager.notify_coaching_state)
 
 
 # Frontend policy_type -> lerobot registry name. In this lerobot pin the names
@@ -822,7 +845,9 @@ def _coaching_route(command: str):
     return result
 
 
-@router.post("/coaching-takeover")
+@v1_router.post(
+    "/coaching-takeover", response_model=CoachingCommandResponse, tags=["inference"]
+)
 def coaching_takeover():
     """Coaching mode only: take control from the policy and start recording.
 
@@ -832,13 +857,17 @@ def coaching_takeover():
     return _coaching_route(CMD_TAKEOVER)
 
 
-@router.post("/coaching-handback")
+@v1_router.post(
+    "/coaching-handback", response_model=CoachingCommandResponse, tags=["inference"]
+)
 def coaching_handback():
     """Coaching mode only: end the correction, SAVE it, and resume the policy."""
     return _coaching_route(CMD_HANDBACK)
 
 
-@router.post("/coaching-cancel")
+@v1_router.post(
+    "/coaching-cancel", response_model=CoachingCommandResponse, tags=["inference"]
+)
 def coaching_cancel():
     """Coaching mode only: end the correction and DISCARD it.
 
@@ -848,7 +877,9 @@ def coaching_cancel():
     return _coaching_route(CMD_CANCEL)
 
 
-@router.post("/coaching-hold")
+@v1_router.post(
+    "/coaching-hold", response_model=CoachingCommandResponse, tags=["inference"]
+)
 def coaching_hold():
     """Coaching mode only: freeze the policy without taking over.
 
@@ -858,13 +889,17 @@ def coaching_hold():
     return _coaching_route(CMD_HOLD)
 
 
-@router.post("/coaching-resume")
+@v1_router.post(
+    "/coaching-resume", response_model=CoachingCommandResponse, tags=["inference"]
+)
 def coaching_resume():
     """Coaching mode only: hand control back to the policy from a hold."""
     return _coaching_route(CMD_RESUME)
 
 
-@router.post("/coaching-reset")
+@v1_router.post(
+    "/coaching-reset", response_model=CoachingCommandResponse, tags=["inference"]
+)
 def coaching_reset():
     """Coaching mode only: end this ATTEMPT at the task and reset for the next.
 

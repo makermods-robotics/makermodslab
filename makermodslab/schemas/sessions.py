@@ -45,6 +45,7 @@ __all__ = [
     "AutoCalibrationArmOption",
     "AutoCalibrationOptions",
     "CalibrationOptions",
+    "CoachingCommandResponse",
     "CurrentSessionResponse",
     "EndedSessionInfo",
     "InferenceOptions",
@@ -295,6 +296,17 @@ class SessionStartResponse(BaseModel):
 class CurrentSessionResponse(BaseModel):
     session: SessionInfo | None
     last_ended: EndedSessionInfo | None
+
+
+class CoachingCommandResponse(BaseModel):
+    """The 200 body of the coaching control verbs (rollout.handle_coaching_command).
+
+    Only the ACCEPTED shape is modelled: a refusal carries its own status code
+    and is raised as an HTTPException by the route, so it never reaches here.
+    """
+
+    success: bool
+    message: str
 
 
 class SessionStopResponse(BaseModel):

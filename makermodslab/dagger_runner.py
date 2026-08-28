@@ -116,6 +116,8 @@ from lerobot.utils.utils import init_logging
 # "[TxRxResult] There is no status packet!". See makermodslab/bus_retry.py.
 from . import bus_retry  # noqa: F401
 from .dagger_protocol import (
+    CANCEL_REASON_OPERATOR,
+    CANCEL_REASON_TOO_SHORT,
     CMD_CANCEL,
     CMD_HANDBACK,
     CMD_HOLD,
@@ -667,7 +669,11 @@ class WebDAggerStrategy(DAggerStrategy):
                                 logger.info(
                                     "Correction discarded (%.1fs, %d frames)", seconds, correction_frames
                                 )
-                                _emit(EVENT_CORRECTION_CANCELLED)
+                                _emit(
+                                    EVENT_CORRECTION_CANCELLED,
+                                    f"reason={CANCEL_REASON_OPERATOR} frames={correction_frames} "
+                                    f"seconds={seconds:.1f}",
+                                )
                             elif correction_frames < _MIN_CORRECTION_FRAMES:
                                 # Too short to be a demonstration — a
                                 # double-press, or a hand-back inside a tick or
@@ -681,7 +687,17 @@ class WebDAggerStrategy(DAggerStrategy):
                                     "Discarded a %d-frame correction (too short to be deliberate)",
                                     correction_frames,
                                 )
-                                _emit(EVENT_CORRECTION_CANCELLED)
+                                # `reason` is what lets the UI tell the operator
+                                # their work was binned. The operator asked for
+                                # the branch above; they did NOT ask for this
+                                # one, and a silent discard here is how a
+                                # deliberate quick nudge disappears without a
+                                # trace. See CANCEL_REASON_TOO_SHORT.
+                                _emit(
+                                    EVENT_CORRECTION_CANCELLED,
+                                    f"reason={CANCEL_REASON_TOO_SHORT} frames={correction_frames} "
+                                    f"seconds={seconds:.1f} minimum={_MIN_CORRECTION_FRAMES}",
+                                )
                             else:
                                 with self._episode_lock, _watchdog(_SAVE_WATCHDOG_S, "save_episode"):
                                     dataset.save_episode()

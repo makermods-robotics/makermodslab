@@ -18,6 +18,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   CoachingPhase,
+  CoachingState,
   EpisodeResult,
   InferenceStatus,
   InferenceLogOwner,
@@ -42,6 +43,8 @@ import { useUnloadWarning } from "@/hooks/useUnloadWarning";
 import { ApiError } from "@/lib/apiClient";
 import { stopSession } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
+import { useCoachingStateSignal } from "@/hooks/useCoachingStateSignal";
+import { useCoachingCues } from "@/hooks/useCoachingCues";
 
 const POLL_MS = 1000;
 
@@ -265,6 +268,10 @@ const InferenceSessionDialog: React.FC<{
   // (the preflight runs server-side in the background), not the start response.
   // Toast it once when first seen so it isn't repeated on every poll.
   const warnedRef = useRef(false);
+  // The Escape-moved notice fires once per mount, not once per press: an
+  // operator jabbing Escape because nothing happened must not be answered with
+  // a stack of identical toasts.
+  const escapeHintShownRef = useRef(false);
 
   // Safety net: a policy must never keep driving the arm with nobody
   // watching. That guarantee is server-side now — while the run is live
@@ -526,6 +533,68 @@ const InferenceSessionDialog: React.FC<{
   const coachLive =
     coachMode && status?.inference_active === true && status?.rollout_started_at != null;
 
+  // Coaching state arrives by PUSH as well as by poll. The poll below stays
+  // exactly as it was and remains the reconciler — this only removes latency
+  // from the one signal where latency is a safety property. Merging rather
+  // than replacing keeps every non-coaching field (elapsed, log offsets, the
+  // hung-run watchdog's inputs) owned solely by the poll.
+  const applyCoachingState = useCallback((coaching: CoachingState) => {
+    setStatus((prev) => (prev == null ? prev : { ...prev, ...coaching }));
+  }, []);
+  useCoachingStateSignal(applyCoachingState, coachLive);
+
+  // --- Audio cues ----------------------------------------------------------
+  // The operator is watching the arm, not the screen. See useCoachingCues.
+  const playCue = useCoachingCues(coachLive);
+  const lastCuedPhaseRef = useRef<CoachingPhase | null>(null);
+  const lastCuedSavedRef = useRef<number | null>(null);
+  const lastCuedAlignRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!coachLive) {
+      // Reset on session end so the next session's first phase cues rather
+      // than being swallowed as "no change".
+      lastCuedPhaseRef.current = null;
+      lastCuedSavedRef.current = null;
+      lastCuedAlignRef.current = null;
+      return;
+    }
+    // Control changed hands. These two are the cues that matter most: they say
+    // who is holding the arm, which is the thing the operator cannot safely be
+    // wrong about and the thing the screen is worst at telling them.
+    if (coachPhase !== lastCuedPhaseRef.current) {
+      const previous = lastCuedPhaseRef.current;
+      lastCuedPhaseRef.current = coachPhase;
+      if (coachPhase === "correcting") playCue("granted");
+      else if (previous === "correcting" && coachPhase != null) playCue("handback");
+    }
+  }, [coachLive, coachPhase, playCue]);
+
+  useEffect(() => {
+    if (!coachLive) return;
+    const saved = status?.corrections_saved ?? 0;
+    // First observation of a session establishes the baseline rather than
+    // firing — a dialog reopened mid-session must not replay the tally.
+    if (lastCuedSavedRef.current == null) {
+      lastCuedSavedRef.current = saved;
+      return;
+    }
+    if (saved > lastCuedSavedRef.current) playCue("saved");
+    lastCuedSavedRef.current = saved;
+  }, [coachLive, status?.corrections_saved, playCue]);
+
+  useEffect(() => {
+    if (!coachLive) return;
+    const notice = status?.align_error ?? null;
+    if (notice && notice !== lastCuedAlignRef.current) {
+      // Covers both notices that land in this slot: a refused takeover and a
+      // correction binned for being too short. Both mean "your last takeover
+      // produced nothing", which the operator will otherwise not notice at all.
+      playCue(notice.includes("discarded") ? "discarded" : "refused");
+    }
+    lastCuedAlignRef.current = notice;
+  }, [coachLive, status?.align_error, playCue]);
+
   // One helper for all five controls: send, and let the next poll (≤1s) render
   // the result. Nothing is optimistically applied to `coachPhase` — the runner
   // owns the phase, and a browser that painted "you're driving" a beat before
@@ -722,22 +791,47 @@ const InferenceSessionDialog: React.FC<{
         if (!coachBusy) handleCoachReset();
         return;
       }
-      if (e.key === "Escape") {
-        // Always swallowed, and always sent — never gated on `coachPhase`.
+      if (e.key === "Backspace" || e.key === "Delete") {
+        // The destructive verb, on the destructive key — the SAME gesture
+        // RecordingSessionDialog uses for re-record, which is the same
+        // semantic ("throw away what I just recorded"). It used to live on
+        // Escape, where it meant the exact opposite of Escape next door
+        // (finish and KEEP). Same app, same modal shape, same operator, same
+        // hands: that inconsistency was going to cost somebody a good
+        // correction eventually.
         //
-        // The phase here is up to a poll stale, and during a handover the
-        // runner is genuinely PAUSED for ~2s, so gating on "correcting" left
-        // discard dead for 1-3s after a takeover: precisely the window in
-        // which a takeover goes wrong. The runner's `_translate` no-ops a
-        // CANCEL that doesn't apply, which is the same policy every other
-        // coaching command already follows.
+        // Always sent, never gated on `coachPhase`. The phase here is up to a
+        // poll stale and during a handover the runner is genuinely PAUSED for
+        // ~2s, so gating on "correcting" left discard dead for 1-3s after a
+        // takeover — precisely the window in which a takeover goes wrong. The
+        // runner's `_translate` no-ops a CANCEL that doesn't apply, which is
+        // the policy every other coaching command already follows.
         //
-        // preventDefault/stopPropagation regardless, so an Escape can never
-        // fall through to StudioOverlay and close the studio out from under a
-        // live session.
+        // preventDefault also stops Backspace acting as browser back-nav.
         e.preventDefault();
         e.stopPropagation();
         if (!coachBusy) handleCoachDiscard();
+        return;
+      }
+      if (e.key === "Escape") {
+        // Swallowed and INERT while a session is live.
+        //
+        // Swallowed because an Escape reaching StudioOverlay would close the
+        // studio out from under a running policy. Inert because it used to
+        // discard, and an operator carrying that muscle memory has to be told
+        // it moved rather than silently discovering it did nothing — so the
+        // first Escape of a session explains itself once and then stays quiet.
+        e.preventDefault();
+        e.stopPropagation();
+        if (!escapeHintShownRef.current) {
+          escapeHintShownRef.current = true;
+          toast({
+            title: "Escape no longer discards",
+            description:
+              "Backspace or Delete discards the correction in progress, matching the recording dialog. Escape is held back so it can't close the studio mid-session.",
+            duration: 8000,
+          });
+        }
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -750,6 +844,7 @@ const InferenceSessionDialog: React.FC<{
     handleCoachHoldToggle,
     handleCoachDiscard,
     handleCoachReset,
+    toast,
   ]);
 
   // Dismissal is blocked while the run is (or may still be) live — before the

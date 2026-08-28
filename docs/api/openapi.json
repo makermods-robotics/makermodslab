@@ -384,6 +384,25 @@
         "title": "CheckpointPolicyConfigResponse",
         "type": "object"
       },
+      "CoachingCommandResponse": {
+        "description": "The 200 body of the coaching control verbs (rollout.handle_coaching_command).\n\nOnly the ACCEPTED shape is modelled: a refusal carries its own status code\nand is raised as an HTTPException by the route, so it never reaches here.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "CoachingCommandResponse",
+        "type": "object"
+      },
       "CurrentSessionResponse": {
         "properties": {
           "last_ended": {
@@ -1650,6 +1669,16 @@
             ],
             "title": "Checkpoint State Dim"
           },
+          "coaching": {
+            "default": false,
+            "title": "Coaching",
+            "type": "boolean"
+          },
+          "coaching_dataset_name": {
+            "default": "",
+            "title": "Coaching Dataset Name",
+            "type": "string"
+          },
           "duration_s": {
             "default": 60,
             "title": "Duration S",
@@ -1677,6 +1706,16 @@
             "title": "Inference Engine",
             "type": "string"
           },
+          "leader_config": {
+            "default": "",
+            "title": "Leader Config",
+            "type": "string"
+          },
+          "leader_port": {
+            "default": "",
+            "title": "Leader Port",
+            "type": "string"
+          },
           "mode": {
             "default": "single",
             "title": "Mode",
@@ -1696,6 +1735,16 @@
             "title": "Right Follower Port",
             "type": "string"
           },
+          "right_leader_config": {
+            "default": "",
+            "title": "Right Leader Config",
+            "type": "string"
+          },
+          "right_leader_port": {
+            "default": "",
+            "title": "Right Leader Port",
+            "type": "string"
+          },
           "robot_name": {
             "default": "",
             "title": "Robot Name",
@@ -1705,6 +1754,11 @@
             "default": false,
             "title": "Skip Identity Check",
             "type": "boolean"
+          },
+          "target_corrections": {
+            "default": 10,
+            "title": "Target Corrections",
+            "type": "integer"
           },
           "task": {
             "default": "",
@@ -2249,6 +2303,14 @@
       },
       "MergeRequest": {
         "properties": {
+          "drop_features": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Drop Features",
+            "type": "array"
+          },
           "output_repo_id": {
             "title": "Output Repo Id",
             "type": "string"
@@ -5495,6 +5557,138 @@
           }
         },
         "summary": "Camera Preview Stream"
+      }
+    },
+    "/api/v1/coaching-cancel": {
+      "post": {
+        "description": "Coaching mode only: end the correction and DISCARD it.\n\nThe fumbled-takeover escape. Upstream lerobot saves every correction\nunconditionally, which makes a botched takeover permanent training data;\nthis drops the buffer instead and parks in the held state.",
+        "operationId": "coaching_cancel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Cancel",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-handback": {
+      "post": {
+        "description": "Coaching mode only: end the correction, SAVE it, and resume the policy.",
+        "operationId": "coaching_handback",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Handback",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-hold": {
+      "post": {
+        "description": "Coaching mode only: freeze the policy without taking over.\n\nThe arm holds its pose and nothing is recorded — for when the operator needs\na moment to decide, or to reposition the scene, without committing to a\ncorrection.",
+        "operationId": "coaching_hold",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Hold",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-reset": {
+      "post": {
+        "description": "Coaching mode only: end this ATTEMPT at the task and reset for the next.\n\nCorrections-only DAgger has no task-episode concept — an \"episode\" there is\none takeover — so this is what tells the session that the cube is finally in\nthe tray. The policy stops, the follower eases back to the pose captured at\nconnect, and the session parks so the scene can be rearranged. Nothing is\nwritten to the dataset: corrections are the only thing ever recorded.\n\nRefused mid-correction; hand back or discard first.",
+        "operationId": "coaching_reset",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Reset",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-resume": {
+      "post": {
+        "description": "Coaching mode only: hand control back to the policy from a hold.",
+        "operationId": "coaching_resume",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Resume",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-takeover": {
+      "post": {
+        "description": "Coaching mode only: take control from the policy and start recording.\n\nOne press covers the whole handover — the policy pauses, an actuated leader\nis driven to the follower's pose so the operator picks up an arm already\nwhere the robot is, and only then does the correction begin recording.",
+        "operationId": "coaching_takeover",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Takeover",
+        "tags": [
+          "inference"
+        ]
       }
     },
     "/api/v1/complete-calibration-step": {

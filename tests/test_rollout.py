@@ -21,6 +21,7 @@ branches here — the parts that matter for safety."""
 
 from __future__ import annotations
 
+import contextlib
 import io
 import threading
 from pathlib import Path
@@ -3879,6 +3880,145 @@ def test_signal_group_declines_a_process_without_a_pid() -> None:
     assert rollout._signal_group(object(), 15) is False
 
 
+# --- The happy path, against real processes ----------------------------------
+#
+# Everything above pins a REFUSAL. The behaviour those refusals exist to protect
+# — one killpg reaping the runner AND the children it forked — was only ever
+# exercised on the station, and only in coaching mode, even though all three
+# session shapes (single run, eval, coaching) now route their force-kills
+# through `_terminate_tree`. The bug it fixes is not subtle but it is invisible
+# from the parent: `Popen.kill()` returns cleanly while `LeRobotDataset`'s image
+# writers keep running and keep /dev/video* open, so the NEXT session is the one
+# that fails. That is worth a real fork to test.
+#
+# Deliberately real subprocesses rather than fakes: a fake cannot show that the
+# GRANDCHILD died, which is the entire point.
+
+_FORK_AND_WAIT = (
+    # Spawn a grandchild that would outlive us, announce its pid, then idle.
+    # `sys.stdout.flush` matters — the parent reads the pid before signalling.
+    "import subprocess, sys, time; "
+    "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); "
+    "print(kid.pid, flush=True); "
+    "time.sleep(300)"
+)
+
+
+def _alive(pid: int) -> bool:
+    """True while the pid exists and has not been reaped."""
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "getpgid"), reason="posix process groups only")
+def test_terminate_tree_reaps_the_grandchild_the_runner_forked() -> None:
+    """The orphaned-image-writer bug, reproduced and fixed in one test.
+
+    Spawns a process that forks a child of its own, exactly as the runner does,
+    then force-kills it the way a teardown does. Both must go."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from makermodslab import rollout
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _FORK_AND_WAIT],
+        stdout=subprocess.PIPE,
+        text=True,
+        # The same flag `_spawn_rollout_process` passes. Without it the two
+        # processes share OUR group and `_signal_group` correctly refuses.
+        start_new_session=True,
+    )
+    try:
+        grandchild = int(proc.stdout.readline().strip())
+        assert _alive(grandchild)
+        # Precondition for the whole mechanism: the runner leads its own group.
+        assert os.getpgid(proc.pid) != os.getpgid(0)
+
+        rollout._terminate_tree(proc, timeout=5.0)
+
+        assert proc.poll() is not None, "the runner itself survived _terminate_tree"
+        # SIGKILL delivery is asynchronous; give the grandchild a moment to go.
+        deadline = time.monotonic() + 5.0
+        while _alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(grandchild), (
+            "the forked grandchild survived _terminate_tree — this is the orphaned "
+            "image-writer bug that wedged the cameras for the next session"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "getpgid"), reason="posix process groups only")
+def test_terminate_tree_returns_promptly_for_an_already_dead_process() -> None:
+    """Teardown runs on paths where the runner exited on its own — the common
+    case, in fact, since QUIT is tried before the force-kill. It must not spend
+    the escalation timeout discovering that."""
+    import subprocess
+    import sys
+    import time
+
+    from makermodslab import rollout
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    proc.wait(timeout=10)
+
+    started = time.monotonic()
+    rollout._terminate_tree(proc, timeout=5.0)
+    assert time.monotonic() - started < 2.0, "_terminate_tree waited on a corpse"
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "getpgid"), reason="posix process groups only")
+def test_terminate_tree_escalates_to_sigkill_when_sigterm_is_ignored() -> None:
+    """A runner wedged in a blocking serial read is the reason the SIGKILL leg
+    exists — the >60s hand-back that started the whole encoding investigation
+    left a process at 0% CPU that SIGTERM did not shift."""
+    import signal
+    import subprocess
+    import sys
+
+    from makermodslab import rollout
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(300)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        rollout._terminate_tree(proc, timeout=1.0)
+        assert proc.poll() is not None, "a SIGTERM-ignoring runner survived _terminate_tree"
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+
 def test_reset_is_ignored_mid_correction_but_arms_from_the_other_phases() -> None:
     """RESET must not silently decide the fate of frames already in the buffer.
 
@@ -3947,3 +4087,150 @@ def test_coaching_start_accepts_a_leader_calibration_that_does_exist(monkeypatch
     result = rollout.handle_start_inference(_coaching_request(leader_config="None"))
     # Gets PAST the calibration gate and fails on the next check instead.
     assert "calibration" not in result["message"]
+
+
+# --- Discards: who did it decides whether the operator hears about it --------
+
+
+def test_operator_pressed_discard_stays_silent(monkeypatch) -> None:
+    """They asked for it. The count not moving is the whole feedback, and a
+    banner here would be nagging the person about their own button press."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_cancelled({"reason": "operator", "frames": "120", "seconds": "4.0"})
+    assert session.align_error is None
+    assert session.corrections_saved == 0
+
+
+def test_too_short_discard_tells_the_operator_their_work_was_binned(monkeypatch) -> None:
+    """The regression this exists for: a deliberate quick nudge used to vanish
+    with nothing on screen. The operator did not press anything — the frame
+    floor decided — so they can only discover it by counting episodes later."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_cancelled(
+        {"reason": "too_short", "frames": "7", "seconds": "0.2", "minimum": "10"}
+    )
+    assert session.align_error is not None
+    # Names the numbers, not just "discarded" — the operator has to be able to
+    # work out how much longer to hold it.
+    assert "7 frames" in session.align_error
+    assert "10-frame" in session.align_error
+    assert "longer" in session.align_error
+
+
+def test_a_cancel_without_a_reason_is_treated_as_the_operator(monkeypatch) -> None:
+    """Forwards-compatibility with a runner older than this field: silence is
+    the safe default, since the noisy branch accuses the system of eating work
+    the operator may well have discarded deliberately."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_cancelled({})
+    assert session.align_error is None
+
+
+def test_the_too_short_notice_clears_on_the_next_phase_change(monkeypatch) -> None:
+    """It reads as "your last takeover", not as session history — same contract
+    as the alignment refusal it shares the slot with."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_cancelled({"reason": "too_short", "frames": "3", "minimum": "10"})
+    assert session.align_error is not None
+    rollout._on_dagger_phase("correcting")
+    assert session.align_error is None
+
+
+# --- The push channel --------------------------------------------------------
+#
+# The banner naming who holds the arm used to reach the operator on a 1 Hz poll,
+# which meant up to half of the ~2s handover window could pass before the words
+# "don't fight it" could possibly have been read. These pin that every state
+# change pushes, and that the push can never be the thing that breaks a session.
+
+
+def _capture_pushes(monkeypatch) -> list[dict]:
+    from makermodslab import rollout
+
+    pushes: list[dict] = []
+    monkeypatch.setattr(rollout, "_on_coaching_state", pushes.append)
+    return pushes
+
+
+def test_a_phase_change_pushes_immediately(monkeypatch) -> None:
+    """The whole point. A poll would deliver this up to a second later."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    pushes = _capture_pushes(monkeypatch)
+    rollout._on_dagger_phase("handing_over")
+    assert len(pushes) == 1
+    assert pushes[0]["coaching_phase"] == "handing_over"
+
+
+def test_every_coaching_handler_pushes(monkeypatch) -> None:
+    """Not just the phase: a saved correction, a refused takeover and an attempt
+    reset all change what the operator is being told, and all of them used to
+    wait for the poll."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    pushes = _capture_pushes(monkeypatch)
+    rollout._on_correction_saved({"n": "1", "frames": "90", "seconds": "3.0"})
+    rollout._on_correction_cancelled({"reason": "too_short", "frames": "4", "minimum": "10"})
+    rollout._on_align_required({"max_delta": "40", "joints": "shoulder_pan:40"})
+    rollout._on_attempt_reset({"n": "2"})
+    assert len(pushes) == 4
+    assert pushes[0]["corrections_saved"] == 1
+    assert pushes[1]["align_error"] is not None
+    assert pushes[3]["attempts"] == 2
+
+
+def test_the_push_carries_the_same_shape_the_poll_does(monkeypatch) -> None:
+    """One shape for the frontend to understand. If these diverged, the browser
+    would have to merge two different objects and decide which wins."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    pushes = _capture_pushes(monkeypatch)
+    rollout._on_dagger_phase("correcting")
+    assert pushes[0].keys() == rollout._coach_fields(session).keys()
+
+
+def test_a_failing_push_never_takes_the_session_down(monkeypatch) -> None:
+    """It runs on the runner's stdout pump. A websocket that has gone away must
+    not stop the pump reading the runner, or the session goes blind entirely —
+    strictly worse than the lag this feature exists to remove."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+
+    def _explode(_fields):
+        raise RuntimeError("websocket is gone")
+
+    monkeypatch.setattr(rollout, "_on_coaching_state", _explode)
+    rollout._on_dagger_phase("correcting")  # must not raise
+    assert session.phase == "correcting"
+
+
+def test_no_push_wired_is_fine(monkeypatch) -> None:
+    """The default. Tests and any embedding without a websocket still work; the
+    poll is the reconciler, not an optimisation."""
+    from makermodslab import rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_on_coaching_state", None)
+    rollout._on_dagger_phase("correcting")
+    assert session.phase == "correcting"

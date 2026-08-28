@@ -221,6 +221,15 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        # Coaching (DAgger) controls. Born versioned: the flat mount was frozen
+        # before coaching landed, so these five verbs plus the attempt reset
+        # exist only under /api/v1.
+        "POST /api/v1/coaching-takeover",
+        "POST /api/v1/coaching-handback",
+        "POST /api/v1/coaching-cancel",
+        "POST /api/v1/coaching-hold",
+        "POST /api/v1/coaching-resume",
+        "POST /api/v1/coaching-reset",
         # Node registry (multi-node): static/manual peer source.
         "GET /api/v1/nodes/{instance_id}/jobs/queue",
         "DELETE /api/v1/nodes/{instance_id}",

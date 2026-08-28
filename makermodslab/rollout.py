@@ -62,6 +62,8 @@ from .api_errors import ErrorCode
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
 from .dagger_protocol import (
+    CANCEL_REASON_OPERATOR,
+    CANCEL_REASON_TOO_SHORT,
     CMD_QUIT as DAGGER_CMD_QUIT,
     COMMANDS as DAGGER_COMMANDS,
     EVENT_ALIGN_REQUIRED,
@@ -571,6 +573,47 @@ class _CoachSession:
 _coach_session: _CoachSession | None = None
 
 
+# Pushed to the browser the instant coaching state changes, instead of waiting
+# for its next poll. Wired to `ConnectionManager.notify_coaching_state` by
+# server.py, exactly as `JobRegistry.set_on_change` is; None when nothing has
+# wired it (tests, and any embedding that has no websocket).
+#
+# WHY THIS EXISTS. The coaching banner is the only thing in this app that tells
+# a person whether they or a robot is holding an arm, and it was reaching them
+# on a 1 Hz poll. The handover glide lasts about two seconds, so up to half of
+# the window in which the banner reads "the arm is moving — don't fight it"
+# could elapse before the operator could possibly have seen it. Every other
+# phase has the same problem in miniature: the operator looks up at the moment
+# they press the key, which is the moment the poll is most likely to be stale.
+#
+# The poll stays as the reconciler — a dropped or missed push heals within a
+# second, and the payload is the same `_coach_fields` block either way, so the
+# frontend has one shape to understand and no ordering to reason about.
+_on_coaching_state: Callable[[dict[str, Any]], None] | None = None
+
+
+def set_on_coaching_state(callback: Callable[[dict[str, Any]], None] | None) -> None:
+    """Register the websocket push for coaching state. See `_on_coaching_state`."""
+    global _on_coaching_state
+    _on_coaching_state = callback
+
+
+def _push_coaching_state() -> None:
+    """Send the current coaching block to the browser now.
+
+    Called at the end of every handler that mutates `_coach_session`. Runs on
+    the runner's stdout pump thread, so it must not block: the callback only
+    queues, and a failure here must never take the pump down — the poll would
+    still carry the state, just a second later."""
+    callback = _on_coaching_state
+    if callback is None:
+        return
+    with _state_lock:
+        fields = _coach_fields(_coach_session)
+    with contextlib.suppress(Exception):
+        callback(fields)
+
+
 def clamp_coaching_corrections(value: int | None) -> int:
     """Coerce a requested correction target into [1, MAX_COACHING_CORRECTIONS].
 
@@ -939,7 +982,7 @@ def _handle_dagger_line(line: str) -> None:
     elif event == EVENT_CORRECTION_SAVED:
         _on_correction_saved(parse_dagger_fields(payload))
     elif event == EVENT_CORRECTION_CANCELLED:
-        _on_correction_cancelled()
+        _on_correction_cancelled(parse_dagger_fields(payload))
     elif event == EVENT_ALIGN_REQUIRED:
         _on_align_required(parse_dagger_fields(payload))
     elif event == EVENT_ATTEMPT_RESET:
@@ -1009,6 +1052,9 @@ def _on_dagger_phase(phase: str) -> None:
             cs.awaiting_attempt = False
         if _inference_meta:
             _inference_meta["phase"] = app_phase
+    # Outside the lock: the push builds its payload by taking the lock again,
+    # and the callback runs arbitrary websocket code we do not want holding it.
+    _push_coaching_state()
 
 
 def _on_correction_saved(fields: dict[str, str]) -> None:
@@ -1029,15 +1075,49 @@ def _on_correction_saved(fields: dict[str, str]) -> None:
         saved = cs.corrections_saved
         target = cs.corrections_target
     logger.info("Correction %d/%d saved", saved, target)
+    _push_coaching_state()
 
 
-def _on_correction_cancelled() -> None:
-    """A correction was discarded — nothing to tally, but worth logging.
+def _on_correction_cancelled(fields: dict[str, str]) -> None:
+    """A correction was discarded. Whether the operator hears about it depends
+    entirely on WHO discarded it.
 
-    No status field of its own: the operator already knows (they pressed it),
-    and the count not moving is the feedback. Logged so a dataset with fewer
-    episodes than takeovers is explicable after the fact."""
-    logger.info("Correction discarded by the operator")
+    An operator-pressed discard stays silent: they know, they asked, and the
+    count not moving is the feedback. Telling them again would be nagging.
+
+    A `too_short` discard is the opposite case and used to be indistinguishable
+    from it — the operator took over, did something deliberate, handed back, and
+    the runner binned it under `_MIN_CORRECTION_FRAMES` with nothing on screen
+    to say so. They would only find out by counting episodes afterwards. That is
+    the discard worth interrupting for, and the quick corrective nudge it eats
+    is, per CR-DAgger (arXiv:2506.16685), among the most valuable data in the
+    session — so the message names the floor rather than just apologising, and
+    tells them what to do differently.
+
+    Reuses `align_error`'s field rather than adding a second notice slot: both
+    are "your last takeover produced nothing, here is why", they can never be
+    true at the same moment, and one banner is one thing for the operator to
+    look at. Cleared on the next phase change, like the other."""
+    reason = fields.get("reason", CANCEL_REASON_OPERATOR)
+    frames = fields.get("frames", "?")
+    if reason != CANCEL_REASON_TOO_SHORT:
+        logger.info("Correction discarded by the operator")
+        _push_coaching_state()
+        return
+    seconds = fields.get("seconds", "?")
+    minimum = fields.get("minimum")
+    floor = f"the {minimum}-frame minimum" if minimum else "the minimum length"
+    message = (
+        f"That correction was discarded — {frames} frames ({seconds}s) is below {floor}, "
+        "so saving it would have broken the dataset. Nothing was kept. Hold the "
+        "takeover a moment longer next time."
+    )
+    with _state_lock:
+        cs = _coach_session
+        if cs is not None:
+            cs.align_error = message
+    logger.warning("Correction discarded as too short (%s frames)", frames)
+    _push_coaching_state()
 
 
 def _on_align_required(fields: dict[str, str]) -> None:
@@ -1057,6 +1137,7 @@ def _on_align_required(fields: dict[str, str]) -> None:
         if cs is not None:
             cs.align_error = message
     logger.warning(message)
+    _push_coaching_state()
 
 
 def _on_attempt_reset(fields: dict[str, str]) -> None:
@@ -1070,6 +1151,7 @@ def _on_attempt_reset(fields: dict[str, str]) -> None:
         cs.awaiting_attempt = True
         n = cs.attempts
     logger.info("Attempt %d reset — arm is home", n)
+    _push_coaching_state()
 
 
 def _on_dagger_error(message: str) -> None:

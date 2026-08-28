@@ -95,6 +95,27 @@ EVENT_PHASE = "PHASE"
 EVENT_CORRECTION_SAVED = "CORRECTION_SAVED"
 EVENT_CORRECTION_CANCELLED = "CORRECTION_CANCELLED"
 EVENT_ALIGN_REQUIRED = "ALIGN_REQUIRED"
+
+# `CORRECTION_CANCELLED reason=` values. A discard has two very different
+# causes and the operator needs to be able to tell them apart:
+#
+#   * `operator` — they pressed discard. They already know; the count not
+#     moving is feedback enough, and saying more would be nagging.
+#   * `too_short` — the runner binned it under `_MIN_CORRECTION_FRAMES`. The
+#     operator did NOT ask for this. They took over, did something they meant,
+#     handed back, and their work went in the bin with nothing on screen to say
+#     so. That is the one case that MUST be surfaced.
+#
+# The distinction is not cosmetic. The correction literature (CR-DAgger,
+# arXiv:2506.16685) finds that the frames right after an intervention starts
+# are the *most* valuable in the episode — "sampling denser right after
+# intervention starts leads to more reactive and accurate corrections" — so a
+# quick, deliberate nudge is exactly the data we most want and exactly what the
+# frame floor throws away. Discarding is still correct (a one-frame episode
+# breaks lerobot's stats aggregation and takes the session down with it), but
+# it has to be loud.
+CANCEL_REASON_OPERATOR = "operator"
+CANCEL_REASON_TOO_SHORT = "too_short"
 # One attempt at the task ended and the arm is back at its start pose. Carries
 # the running attempt count so the UI can show "attempt 4" without keeping its
 # own tally that a dropped event would desynchronise.

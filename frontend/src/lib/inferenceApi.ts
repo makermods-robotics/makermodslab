@@ -158,6 +158,23 @@ export interface InferenceStatus {
   align_error?: string | null;
 }
 
+// The coaching block on its own, as pushed over the websocket the instant it
+// changes (see useCoachingStateSignal). Deliberately a subset of
+// InferenceStatus rather than a parallel type: the backend builds both from the
+// same `_coach_fields`, so a divergence here would be a bug in one of them.
+export type CoachingState = Pick<
+  InferenceStatus,
+  | "coaching"
+  | "coaching_phase"
+  | "corrections_saved"
+  | "attempts"
+  | "awaiting_attempt"
+  | "corrections_target"
+  | "correction_seconds"
+  | "coaching_dataset"
+  | "align_error"
+>;
+
 // Kind-agnostic fallback stop. The session dialog stops by session id
 // (lib/sessionApi.ts stopSession); this endpoint remains for surfaces that
 // know only "an inference run is active" (DeployPanel's Stop button) — stops
@@ -223,7 +240,7 @@ export async function coachingTakeover(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-takeover", {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-takeover", {
     method: "POST",
     action: "Take over",
   });
@@ -234,7 +251,7 @@ export async function coachingHandback(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-handback", {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-handback", {
     method: "POST",
     action: "Hand back",
   });
@@ -247,7 +264,7 @@ export async function coachingCancel(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-cancel", {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-cancel", {
     method: "POST",
     action: "Discard correction",
   });
@@ -259,7 +276,7 @@ export async function coachingHold(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-hold", {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-hold", {
     method: "POST",
     action: "Hold",
   });
@@ -270,7 +287,7 @@ export async function coachingResume(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-resume", {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-resume", {
     method: "POST",
     action: "Resume policy",
   });
@@ -285,7 +302,7 @@ export async function coachingReset(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/coaching-reset", {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-reset", {
     method: "POST",
     action: "Reset for next attempt",
   });
