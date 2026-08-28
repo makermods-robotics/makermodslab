@@ -80,6 +80,11 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.process import ProcessSignalHandler
 from lerobot.utils.utils import init_logging
 
+# Imported for its SIDE EFFECT: a non-zero sync_read retry default for this
+# process. Without it a single dropped serial reply — routine when arm
+# adapters share a USB bus with streaming cameras — kills the session with
+# "[TxRxResult] There is no status packet!". See makermodslab/bus_retry.py.
+from . import bus_retry  # noqa: F401
 from .eval_protocol import (
     CMD_EPISODE,
     CMD_QUIT,

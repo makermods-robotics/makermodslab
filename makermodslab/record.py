@@ -26,13 +26,13 @@ from pydantic import BaseModel
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.configs.video import RGBEncoderConfig
 from lerobot.datasets import LeRobotDataset
-from lerobot.motors.motors_bus import MotorsBus
 
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .api_errors import ErrorCode
 from .arm_identity import ArmIdentityError, verify_devices
+from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
 from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
@@ -71,32 +71,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_FOURCC = "MJPG"
 
 # --- Motor bus read retries ----------------------------------------------------
-# lerobot's SO-10x follower/leader call bus.sync_read("Present_Position") with
-# the default num_retry=0, so a single missed reply kills the whole recording
-# session ("[TxRxResult] There is no status packet!"). Replies do get missed:
-# on hosts where the arm serial adapters share a USB bus with streaming
-# cameras (e.g. the Jetson rig, cameras and CH34x adapters on the same hubs),
-# isochronous camera traffic occasionally delays a bulk serial reply past the
-# packet timeout. Position reads are idempotent, and a retry costs only the
-# packet timeout (single-digit ms at 1 Mbps) *when a read actually glitched* —
-# invisible at a 30 Hz loop. Patch the class-level default (process-wide);
-# an explicit num_retry from any caller still wins.
-_BUS_SYNC_READ_RETRIES = 2
-_original_sync_read = MotorsBus.sync_read
-
+# Moved to makermodslab/bus_retry.py so the two subprocess runners (eval and
+# coaching) get it too — importing it is what applies the patch, and they were
+# each running with lerobot's zero-retry default and dying on a single dropped
+# packet. Imported for that side effect; the constant is re-exported because
+# tests and readers looked for it here.
 # Robot-connect attempts before giving up on transient camera turbulence (see
 # the retry loop below and connect_retry_attempt above).
 _CONNECT_ATTEMPTS = 3
 
-
-def _sync_read_with_default_retries(
-    self, data_name, motors=None, *, normalize=True, num_retry=_BUS_SYNC_READ_RETRIES
-):
-    return _original_sync_read(self, data_name, motors, normalize=normalize, num_retry=num_retry)
-
-
-if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":  # idempotent under --reload
-    MotorsBus.sync_read = _sync_read_with_default_retries
 
 # --- Recording log capture (bounded ring buffer) ------------------------------
 # The record flow logs progress through the Python `logger` rather than a

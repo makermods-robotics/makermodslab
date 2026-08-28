@@ -361,3 +361,33 @@ def test_minimum_correction_length_is_above_the_one_frame_crash() -> None:
 
     assert _MIN_CORRECTION_FRAMES > 1
     assert _MIN_CORRECTION_FRAMES < 30
+
+
+def test_the_runner_applies_the_bus_read_retry_patch() -> None:
+    """The crash that killed four of the station's sessions.
+
+    lerobot reads Present_Position with num_retry=0, so ONE dropped serial
+    reply ends the session with "[TxRxResult] There is no status packet!".
+    record.py has patched that for years — but it runs inside the FastAPI
+    server, and a monkeypatch only affects the interpreter that ran it. The
+    coaching runner is a separate process, so it inherited the zero-retry
+    default. Coaching surfaced it because it reads TWO buses per tick while
+    cameras stream, which is exactly the contended-USB case the patch exists
+    for."""
+    import makermodslab.dagger_runner  # noqa: F401  (importing applies it)
+    from lerobot.motors.motors_bus import MotorsBus
+
+    assert MotorsBus.sync_read.__name__ == "_sync_read_with_default_retries"
+
+
+def test_the_retry_patch_is_idempotent() -> None:
+    """Re-importing must not make the saved original point at the patch and
+    recurse — the server re-imports its modules under uvicorn --reload."""
+    import importlib
+
+    from lerobot.motors.motors_bus import MotorsBus
+    from makermodslab import bus_retry
+
+    importlib.reload(bus_retry)
+    assert MotorsBus.sync_read.__name__ == "_sync_read_with_default_retries"
+    assert bus_retry.BUS_SYNC_READ_RETRIES >= 1
