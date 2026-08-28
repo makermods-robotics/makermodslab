@@ -1,5 +1,5 @@
 import { Fetcher, apiRequest } from "./apiClient";
-import { JobRecord } from "./jobsApi";
+import { JobRecord, JobState, LogLine } from "./jobsApi";
 
 /** One entry of GET /api/v1/nodes (NodeEntry in makermodslab/schemas/nodes.py).
  *
@@ -96,6 +96,85 @@ export async function getNodeQueue(
     { signal, action: "Get node queue" },
   );
   return body.jobs;
+}
+
+/** One run on the peer, through the drill-in proxy (the peer's own
+ * GET /api/v1/jobs/{job_id}, verbatim). 404 node.not_found for an unknown
+ * node; 502 node.unreachable for ANY failure to read the peer — its own 404
+ * for an unknown job included. */
+export async function getNodeJob(
+  baseUrl: string,
+  fetcher: Fetcher,
+  instanceId: string,
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<JobRecord> {
+  return apiRequest<JobRecord>(
+    baseUrl,
+    fetcher,
+    `/api/v1/nodes/${encodeURIComponent(instanceId)}/jobs/${encodeURIComponent(jobId)}`,
+    { signal, action: "Get node job" },
+  );
+}
+
+/** The peer run's live log tail. The peer drains its runner's queue per call,
+ * so this is inherently incremental — each call returns only the lines that
+ * arrived since the last one. Append, never replace. */
+export async function getNodeJobLogs(
+  baseUrl: string,
+  fetcher: Fetcher,
+  instanceId: string,
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<LogLine[]> {
+  const body = await apiRequest<{ logs: LogLine[] }>(
+    baseUrl,
+    fetcher,
+    `/api/v1/nodes/${encodeURIComponent(instanceId)}/jobs/${encodeURIComponent(jobId)}/logs`,
+    { signal, action: "Get node job logs" },
+  );
+  return body.logs;
+}
+
+/** Stop/cancel a run on the peer, forwarded server-to-server. `expectState`
+ * is the same optimistic-concurrency precondition as the local stop: pass the
+ * state the UI drew the button against. The peer's own coded refusals (409
+ * job.state_changed / job.has_queued_dependents, 404 job.not_found) come back
+ * with THEIR status and code — branch on `code`, never the prose; only
+ * transport failure reads 502 node.unreachable. */
+export async function stopNodeJob(
+  baseUrl: string,
+  fetcher: Fetcher,
+  instanceId: string,
+  jobId: string,
+  expectState?: JobState,
+): Promise<JobRecord> {
+  const query = expectState
+    ? `?expect_state=${encodeURIComponent(expectState)}`
+    : "";
+  return apiRequest<JobRecord>(
+    baseUrl,
+    fetcher,
+    `/api/v1/nodes/${encodeURIComponent(instanceId)}/jobs/${encodeURIComponent(jobId)}/stop${query}`,
+    { method: "POST", action: "Stop node job" },
+  );
+}
+
+/** Delete a terminal run on the peer (its output directory there included).
+ * Same passthrough stance as the stop: the peer's coded refusals keep their
+ * status and code. */
+export async function deleteNodeJob(
+  baseUrl: string,
+  fetcher: Fetcher,
+  instanceId: string,
+  jobId: string,
+): Promise<void> {
+  await apiRequest<void>(
+    baseUrl,
+    fetcher,
+    `/api/v1/nodes/${encodeURIComponent(instanceId)}/jobs/${encodeURIComponent(jobId)}`,
+    { method: "DELETE", action: "Delete node job" },
+  );
 }
 
 /** A node the Compute selector can offer a training to: reachable, verified

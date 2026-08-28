@@ -34,17 +34,19 @@ const hubTime = (h: HubJob) =>
 const jobEntryKey = (j: JobRecord) => `job:${j.id}`;
 const hubEntryKey = (h: HubJob) => `hub:${h.id}`;
 
-/** Where a job runs: everything, this machine, or Hugging Face cloud/Hub. */
-type JobsFilter = "all" | "local" | "online";
+/** Where a job runs: everything, this machine, or somewhere else — Hugging
+ * Face cloud/Hub runs and runs offloaded to a LAN node are both Remote. */
+type JobsFilter = "all" | "local" | "remote";
 
-/** `key` is LOGIC — it is what the list filters on and never changes. `label`
- * is a translation KEY, not a word: this array is built at import time, so a
- * resolved label would freeze whichever language loaded first. It is resolved
- * where the toolbar is rendered. */
+/** `key` is LOGIC — it is what the list filters on and never changes (pure
+ * component state, nothing persists it, so the old "online" key could be
+ * renamed with the label). `label` is a translation KEY, not a word: this
+ * array is built at import time, so a resolved label would freeze whichever
+ * language loaded first. It is resolved where the toolbar is rendered. */
 const FILTERS = [
   { key: "all", label: "jobs.jobsLibrary.filters.all" },
   { key: "local", label: "jobs.jobsLibrary.filters.local" },
-  { key: "online", label: "jobs.jobsLibrary.filters.online" },
+  { key: "remote", label: "jobs.jobsLibrary.filters.remote" },
 ] as const satisfies ReadonlyArray<{ key: JobsFilter; label: string }>;
 
 interface JobsLibraryProps {
@@ -72,6 +74,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const {
     localJobs,
     trackedCloudJobs,
+    lanNodeJobs,
     untrackedHubJobs,
     supersededIds,
     ancestorsOf,
@@ -114,8 +117,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     [query],
   );
 
-  const showLocal = filter !== "online";
-  const showOnline = filter !== "local";
+  const showLocal = filter !== "remote";
+  const showRemote = filter !== "local";
 
   // Match on the display alias as well as the original name, so a renamed
   // model is findable by either.
@@ -128,25 +131,29 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
         : [],
     [localJobs, matchesQuery, showLocal],
   );
-  const filteredCloud = useMemo(
+  // The Remote side of the split: cloud runs AND runs offloaded to a LAN
+  // node — a lan_node record lives in this registry but executes elsewhere,
+  // which is what this filter asks about. toEntries re-sorts, so the
+  // concatenation order carries no meaning.
+  const filteredRemote = useMemo(
     () =>
-      showOnline
-        ? trackedCloudJobs.filter(
+      showRemote
+        ? [...trackedCloudJobs, ...lanNodeJobs].filter(
             (j) => matchesQuery(j.name) || matchesQuery(j.display_name),
           )
         : [],
-    [trackedCloudJobs, matchesQuery, showOnline],
+    [trackedCloudJobs, lanNodeJobs, matchesQuery, showRemote],
   );
   const filteredHub = useMemo(
     () =>
-      showOnline
+      showRemote
         ? untrackedHubJobs.filter(
             (h) =>
               matchesQuery(h.name) ||
               matchesQuery(h.docker_image ?? h.space_id ?? h.id),
           )
         : [],
-    [untrackedHubJobs, matchesQuery, showOnline],
+    [untrackedHubJobs, matchesQuery, showRemote],
   );
 
   // Active = running, or the CHAIN has a checkpoint (see isJobActive) — which
@@ -209,10 +216,10 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
   const trackedRuns = useMemo(
     () =>
-      [...filteredLocal, ...filteredCloud].filter(
+      [...filteredLocal, ...filteredRemote].filter(
         (j) => !supersededIds.has(j.id),
       ),
-    [filteredLocal, filteredCloud, supersededIds],
+    [filteredLocal, filteredRemote, supersededIds],
   );
   const activeEntries = useMemo(
     () =>
@@ -344,8 +351,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
     ? t("jobs.jobsLibrary.empty.search")
     : filter === "local"
       ? t("jobs.jobsLibrary.empty.local")
-      : filter === "online"
-        ? t("jobs.jobsLibrary.empty.online")
+      : filter === "remote"
+        ? t("jobs.jobsLibrary.empty.remote")
         : t("jobs.jobsLibrary.empty.none");
 
   // First run: nothing anywhere, before any filter or search narrows anything
@@ -358,6 +365,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const isEmpty =
     localJobs.length === 0 &&
     trackedCloudJobs.length === 0 &&
+    lanNodeJobs.length === 0 &&
     untrackedHubJobs.length === 0;
 
   // The one thing worth saying on a first run that the instruction can't: why
@@ -365,7 +373,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   // A whole second sentence, not a fragment: it is rendered after the
   // instruction with a space between them, so neither half depends on the
   // other's word order.
-  const emptyHint = !showOnline
+  const emptyHint = !showRemote
     ? null
     : hubError
       ? null
@@ -421,13 +429,13 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               {t("jobs.jobsLibrary.localError", { error })}
             </p>
           ) : null}
-          {showOnline && hubError ? (
+          {showRemote && hubError ? (
             <p className="text-sm text-destructive">
               {t("jobs.jobsLibrary.cloudError", { error: hubError })}
             </p>
           ) : null}
           {!isEmpty &&
-          showOnline &&
+          showRemote &&
           !hubError &&
           !hubAuthenticated &&
           trackedCloudJobs.length === 0 ? (
@@ -435,7 +443,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               {t("jobs.jobsLibrary.signIn")}
             </p>
           ) : null}
-          {!isEmpty && showOnline && hubAuthenticated && !hubJobsPermission ? (
+          {!isEmpty && showRemote && hubAuthenticated && !hubJobsPermission ? (
             <p className="text-sm text-warn">
               {/* One phrase with the scope name embedded — <0/> is the code
                   element below, and "job.read" is an API scope name, never
@@ -448,8 +456,8 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
           ) : null}
 
           {/* The run picker, then the selected run's detail card. Local and
-              online runs share one list, newest-first inside their launched-by
-              group; each row's Local/Cloud chip says where it runs.
+              remote runs share one list, newest-first inside their launched-by
+              group; each row's Local/Cloud/node chip says where it runs.
 
               The block is held at the libraries' one reserved height (GRID_H —
               the same measurement the dataset and model grids floor themselves

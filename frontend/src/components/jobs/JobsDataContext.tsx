@@ -34,6 +34,10 @@ interface JobsDataValue {
   jobs: JobRecord[];
   localJobs: JobRecord[];
   trackedCloudJobs: JobRecord[];
+  /** Runs this registry offloaded to a LAN peer (`runner: "lan_node"`) — the
+   * record lives here, the training runs THERE. Remote, like the cloud runs,
+   * in every view that splits by where a run executes. */
+  lanNodeJobs: JobRecord[];
   importedJobs: JobRecord[];
   /** Hub jobs with no mirroring local record. */
   untrackedHubJobs: HubJob[];
@@ -380,6 +384,10 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     () => jobs.filter((j) => j.runner === "hf_cloud"),
     [jobs],
   );
+  const lanNodeJobs = useMemo(
+    () => jobs.filter((j) => j.runner === "lan_node"),
+    [jobs],
+  );
   const importedJobs = useMemo(
     () => jobs.filter((j) => j.runner === "imported"),
     [jobs],
@@ -514,6 +522,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       jobs,
       localJobs,
       trackedCloudJobs,
+      lanNodeJobs,
       importedJobs,
       untrackedHubJobs,
       untrackedHubModels,
@@ -537,6 +546,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       jobs,
       localJobs,
       trackedCloudJobs,
+      lanNodeJobs,
       importedJobs,
       untrackedHubJobs,
       untrackedHubModels,

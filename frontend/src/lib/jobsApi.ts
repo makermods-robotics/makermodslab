@@ -5,6 +5,13 @@ import { ApiError, Fetcher, apiRequest } from "./apiClient";
 // the one local training slot (PR #83 — a busy slot queues, it never refuses).
 export type JobState = "queued" | "running" | "done" | "failed" | "interrupted";
 
+/** States a run can never leave — the record is history, so delete is safe to
+ * offer. The complement ("queued" / "running") is still doing (or about to do)
+ * work and takes Stop/Cancel instead. */
+export function isTerminalJobState(state: JobState): boolean {
+  return state === "done" || state === "failed" || state === "interrupted";
+}
+
 export interface TrainingMetrics {
   current_step: number;
   total_steps: number;

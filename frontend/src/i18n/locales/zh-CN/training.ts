@@ -133,6 +133,24 @@ export default {
         "任务在 <0>{{name}}</0> 上运行；数据集经 Hub 同步 —— 该数据集会先上传到你的 HF 账号，再由 <1>{{name}}</1> 从那里拉取。",
       goneBody: "该节点已不在注册表中。请改选其他算力目标 —— 否则启动会被拒绝。",
     },
+    // 节点上单次运行的详情对话框（NodeJobDialog）。运行名、编号与日志行都是
+    // 数据，原样渲染；状态标签复用 jobs.jobState，停止/删除提示复用 jobs.jobsData。
+    nodeJob: {
+      // 一整句；<0> 包裹节点的显示名（数据）。
+      onNode: "在 <0>{{name}}</0> 上运行 —— 由本服务器远程驱动。",
+      logsLabel: "实时日志",
+      logsEmpty: "自打开此对话框以来还没有新的日志。",
+      stop: "停止",
+      stopping: "正在停止…",
+      delete: "删除",
+      deleting: "正在删除…",
+      // 代理返回编码 502（node.unreachable）时用我们自己的句子；其余未编码的
+      // 拒绝原样显示服务器文案。
+      unreachable: "无法连接 —— 暂时联系不上该节点。",
+      // 可点击的运行中行 / 排队芯片上的悬停文字。
+      openRunning: "查看此运行的详情",
+      openQueued: "查看此排队中的运行",
+    },
     resumeRunnerHint: "默认沿用这次运行原先的执行位置 —— 也可以切换到别处继续。",
     deviceLabel: "设备",
     deviceAuto: "自动（有 GPU 就用 GPU）",

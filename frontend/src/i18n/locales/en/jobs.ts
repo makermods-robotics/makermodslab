@@ -253,12 +253,14 @@ export default {
     filters: {
       all: "All",
       local: "Local",
-      online: "Online",
+      // Everything that executes off this machine: Hugging Face cloud/Hub
+      // runs and runs offloaded to a LAN node.
+      remote: "Remote",
     },
     empty: {
       search: "No jobs match your search.",
       local: "No local jobs.",
-      online: "No online jobs.",
+      remote: "No remote jobs.",
       none: "No training jobs yet.",
     },
     firstRun: "No training jobs yet. Start one above.",

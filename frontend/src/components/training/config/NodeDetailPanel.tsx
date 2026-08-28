@@ -5,6 +5,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { JobRecord, jobDisplayName } from "@/lib/jobsApi";
 import { NodeEntry, getNodeJobs, getNodeQueue, nodeDisplayName } from "@/lib/nodesApi";
 import { relativeTimeAgo } from "@/lib/relativeTime";
+import NodeJobDialog from "./NodeJobDialog";
 
 interface NodeDetailPanelProps {
   /** The registry entry for the selected node — null when it has LEFT the
@@ -24,7 +25,9 @@ type Workload =
   | {
       kind: "ok";
       running: JobRecord | null;
-      queuedCount: number;
+      /** The peer's EXACT queue records — already fetched for the count, and
+       * kept whole so each entry can open the drill-in dialog. */
+      queued: JobRecord[];
     };
 
 const WORKLOAD_POLL_MS = 15_000;
@@ -45,6 +48,13 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [workload, setWorkload] = useState<Workload>({ kind: "loading" });
+  // The run whose drill-in dialog is open, null when none. Kept as the full
+  // record so the dialog opens instantly on what this panel already showed;
+  // the dialog then polls its own fresher copy.
+  const [openJob, setOpenJob] = useState<JobRecord | null>(null);
+  // Bumped when the dialog stopped/deleted something, so the workload line
+  // catches up without waiting out the 15s poll.
+  const [changeToken, setChangeToken] = useState(0);
 
   const reachable = node != null && node.status === "ok";
 
@@ -54,7 +64,7 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
     setWorkload({ kind: "loading" });
     const fetchWorkload = () => {
       // Two reads: the jobs page for the running run, the queue endpoint for
-      // an EXACT queued count — the jobs page is limited and can undercount.
+      // the EXACT queue — the jobs page is limited and can undercount.
       Promise.all([
         getNodeJobs(baseUrl, fetchWithHeaders, instanceId),
         getNodeQueue(baseUrl, fetchWithHeaders, instanceId),
@@ -64,7 +74,7 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
           setWorkload({
             kind: "ok",
             running: jobs.find((j) => j.state === "running") ?? null,
-            queuedCount: queue.length,
+            queued: queue,
           });
         })
         .catch(() => {
@@ -78,7 +88,7 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [baseUrl, fetchWithHeaders, instanceId, reachable, refreshToken]);
+  }, [baseUrl, fetchWithHeaders, instanceId, reachable, refreshToken, changeToken]);
 
   const name = node ? nodeDisplayName(node) : instanceId.slice(0, 8);
 
@@ -153,7 +163,14 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
         ) : (
           <span className="text-muted-foreground">
             {running ? (
-              <span className="text-foreground">
+              // The whole running line opens the drill-in dialog for that
+              // run — same words as before, now a button.
+              <button
+                type="button"
+                onClick={() => setOpenJob(running)}
+                title={t("training.target.nodeJob.openRunning")}
+                className="text-left text-foreground underline decoration-dotted underline-offset-2 hover:text-info"
+              >
                 {runningPct != null
                   ? t("training.target.detail.workloadRunningPct", {
                       // The run's name is data; the percent is pre-formatted.
@@ -163,22 +180,44 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
                   : t("training.target.detail.workloadRunning", {
                       name: jobDisplayName(running),
                     })}
-              </span>
+              </button>
             ) : (
               t("training.target.detail.workloadIdle")
             )}
-            {workload.queuedCount > 0 ? (
+            {workload.queued.length > 0 ? (
               <span>
                 {" · "}
                 {t("training.target.detail.workloadQueued", {
                   // Named `total`, not `count`: a plain figure, no plural pick.
-                  total: workload.queuedCount,
+                  total: workload.queued.length,
                 })}
               </span>
             ) : null}
           </span>
         )}
       </div>
+
+      {/* The queued runs themselves — the records are already here for the
+          count, so each gets a chip that opens the same drill-in dialog. */}
+      {workload.kind === "ok" && workload.queued.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {workload.queued.map((q) => (
+            <button
+              key={q.id}
+              type="button"
+              onClick={() => setOpenJob(q)}
+              title={t("training.target.nodeJob.openQueued")}
+              className="rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground hover:border-ring/50 hover:text-foreground"
+            >
+              {/* Run number + name — both data, rendered verbatim. */}
+              {q.job_number > 0 ? (
+                <span className="mr-1 font-mono">#{q.job_number}</span>
+              ) : null}
+              {jobDisplayName(q)}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <p className="text-xs text-muted-foreground">
         {/* One whole sentence; <0>/<1> wrap the node's name (data). */}
@@ -191,6 +230,23 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
           ]}
         />
       </p>
+
+      {/* Drill-in dialog for the clicked run. Keyed by run id so switching
+          runs remounts it with fresh state; it polls its own record + log
+          tail through the same server-to-server proxies. */}
+      {openJob ? (
+        <NodeJobDialog
+          key={openJob.id}
+          open
+          onOpenChange={(o) => {
+            if (!o) setOpenJob(null);
+          }}
+          instanceId={instanceId}
+          nodeName={name}
+          job={openJob}
+          onChanged={() => setChangeToken((v) => v + 1)}
+        />
+      ) : null}
     </div>
   );
 };

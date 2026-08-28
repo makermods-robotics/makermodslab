@@ -173,6 +173,26 @@ export default {
       goneBody:
         "This node is no longer in the registry. Pick another compute target — starting the run would be refused.",
     },
+    // The drill-in dialog for one run ON a peer node (NodeJobDialog). Run
+    // names, numbers and log lines are data, rendered verbatim; the state
+    // labels come from jobs.jobState, and the stop/delete toasts reuse
+    // jobs.jobsData so a peer run reads exactly like a local one.
+    nodeJob: {
+      // One whole sentence; <0> wraps the node's display name (data).
+      onNode: "Runs on <0>{{name}}</0> — driven server-to-server from here.",
+      logsLabel: "Live log tail",
+      logsEmpty: "No log lines since this dialog opened.",
+      stop: "Stop",
+      stopping: "Stopping…",
+      delete: "Delete",
+      deleting: "Deleting…",
+      // Our sentence for the proxy's coded 502 (node.unreachable); every
+      // uncoded refusal shows the server's own prose verbatim.
+      unreachable: "Unreachable — couldn't reach this node just now.",
+      // Hover text on the clickable running line / queued chips.
+      openRunning: "View this run's details",
+      openQueued: "View this queued run",
+    },
     resumeRunnerHint:
       "Defaults to the runner this run started on — switch it to continue somewhere else.",
     deviceLabel: "Device",

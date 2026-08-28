@@ -192,12 +192,13 @@ export default {
     filters: {
       all: "全部",
       local: "本地",
-      online: "在线",
+      // 在本机之外执行的运行：Hugging Face 云端/Hub 任务和转派到局域网节点的运行。
+      remote: "远程",
     },
     empty: {
       search: "没有符合搜索条件的任务。",
       local: "没有本地任务。",
-      online: "没有在线任务。",
+      remote: "没有远程任务。",
       none: "还没有训练任务。",
     },
     firstRun: "还没有训练任务。在上方开始一次训练吧。",
