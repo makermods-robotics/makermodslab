@@ -138,6 +138,7 @@ export default {
     nodeGone: "No longer registered",
     nodeGoneTitle:
       "This node has left the registry. Pick another target, or starting will be refused.",
+    refreshNodes: "Refresh nodes",
     addNode: {
       button: "Add node…",
       title: "Register another MakerMods Lab server by URL",

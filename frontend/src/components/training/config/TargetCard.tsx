@@ -64,6 +64,13 @@ const TargetCard: React.FC<TargetCardProps> = ({
   const { t } = useTranslation();
   const target = config.target;
   const { nodes, loading: nodesLoading, refresh: refreshNodes } = useNodes();
+  // Manual refresh: bump the token so NodeDetailPanel refetches the workload
+  // in the same gesture as the registry refetch.
+  const [nodesRefreshToken, setNodesRefreshToken] = React.useState(0);
+  const refreshNodesAndWorkload = React.useCallback(() => {
+    refreshNodes();
+    setNodesRefreshToken((v) => v + 1);
+  }, [refreshNodes]);
 
   const selectedNode =
     target.runner === "lan_node" && target.node_instance_id
@@ -104,6 +111,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
           nodesLoading={nodesLoading}
           onSelect={(next) => updateConfig("target", next)}
           onNodeAdded={() => void refreshNodes()}
+          onRefresh={refreshNodesAndWorkload}
         />
         <p className="text-xs text-muted-foreground">
           {resumeLocked
@@ -180,6 +188,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
         <NodeDetailPanel
           node={selectedNode}
           instanceId={target.node_instance_id}
+          refreshToken={nodesRefreshToken}
         />
       ) : null}
     </section>

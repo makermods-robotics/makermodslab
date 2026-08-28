@@ -12,7 +12,7 @@ describe("relativeTimeAgo", () => {
   });
 
   it("renders seconds under a minute", () => {
-    expect(relativeTimeAgo(now - 12_000, now)).toBe("12s ago");
+    expect(relativeTimeAgo(now - 12_000, now)).toBe("just now");
   });
 
   it("renders minutes under an hour", () => {
@@ -28,6 +28,6 @@ describe("relativeTimeAgo", () => {
   });
 
   it("clamps a future timestamp to zero", () => {
-    expect(relativeTimeAgo(now + 60_000, now)).toBe("0s ago");
+    expect(relativeTimeAgo(now + 60_000, now)).toBe("just now");
   });
 });

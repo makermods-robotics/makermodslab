@@ -10,7 +10,10 @@
 export function relativeTimeAgo(epochMs: number, nowMs: number = Date.now()): string {
   if (!epochMs) return "—";
   const diff = Math.max(0, (nowMs - epochMs) / 1000);
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  // Coarse on purpose: the underlying timestamp refreshes on a 15-30s poll,
+  // so seconds-precision would imply live monitoring the data doesn't have
+  // (and made every re-render visibly "tick").
+  if (diff < 60) return "just now";
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;

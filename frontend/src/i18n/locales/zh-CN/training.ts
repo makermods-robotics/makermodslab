@@ -106,6 +106,7 @@ export default {
     nodeVersion: "makermodslab v{{version}}",
     nodeGone: "已不在注册表中",
     nodeGoneTitle: "该节点已离开注册表。请改选其他目标，否则启动会被拒绝。",
+    refreshNodes: "刷新节点",
     addNode: {
       button: "添加节点…",
       title: "按 URL 注册另一台 MakerMods Lab 服务器",

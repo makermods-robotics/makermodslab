@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Plus } from "lucide-react";
+import { Loader2, Plus, RefreshCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { useEyebrowClass } from "@/hooks/useEyebrowClass";
 import { ApiError } from "@/lib/apiClient";
@@ -26,6 +26,8 @@ interface ComputeSelectorProps {
   onSelect: (target: Target) => void;
   /** Fired after a successful Add so the owner can refetch the registry. */
   onNodeAdded: (node: NodeEntry) => void;
+  /** Manual refetch of the registry AND the selected node's workload. */
+  onRefresh: () => void;
 }
 
 /** The little radio glyph. Purely presentational — the row is the control. */
@@ -156,6 +158,7 @@ const ComputeSelector: React.FC<ComputeSelectorProps> = ({
   nodesLoading,
   onSelect,
   onNodeAdded,
+  onRefresh,
 }) => {
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -349,6 +352,15 @@ const ComputeSelector: React.FC<ComputeSelectorProps> = ({
         <span className={eyebrow}>
           {t("training.target.lanNodes")}
         </span>
+        <button
+          type="button"
+          onClick={onRefresh}
+          title={t("training.target.refreshNodes")}
+          aria-label={t("training.target.refreshNodes")}
+          className="flex items-center rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+        >
+          <RefreshCw className="h-3 w-3" />
+        </button>
         <button
           type="button"
           onClick={() => {

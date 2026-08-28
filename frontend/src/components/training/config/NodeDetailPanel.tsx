@@ -12,6 +12,8 @@ interface NodeDetailPanelProps {
   node: NodeEntry | null;
   /** The selected instance id, which outlives the entry. */
   instanceId: string;
+  /** Bump to force an immediate workload refetch (the manual refresh button). */
+  refreshToken?: number;
 }
 
 /** The selected node's workload, read through the server-to-server proxy.
@@ -38,6 +40,7 @@ const WORKLOAD_POLL_MS = 15_000;
 const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
   node,
   instanceId,
+  refreshToken,
 }) => {
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -75,7 +78,7 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [baseUrl, fetchWithHeaders, instanceId, reachable]);
+  }, [baseUrl, fetchWithHeaders, instanceId, reachable, refreshToken]);
 
   const name = node ? nodeDisplayName(node) : instanceId.slice(0, 8);
 
