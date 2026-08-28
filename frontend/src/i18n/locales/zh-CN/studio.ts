@@ -232,6 +232,11 @@ export default {
       label: "任务描述",
       placeholder: "例如：拿起红色方块",
       hint: "该策略以语言为条件（{{policyType}}）。",
+      // 当任务描述是从该检查点自己的训练数据集自动填入时，追加在 hint 之后。
+      // 前面的空格由调用方补上。
+      prefilled: "已根据它训练所用的数据集自动填入。",
+      multiTaskHint_other:
+        "它的训练数据集里有 {{count}} 个任务，按出现次数从多到少排列 — 请选择你要执行的那个：",
     },
     duration: {
       label: "最长时长（秒）",

@@ -110,6 +110,9 @@ export default {
     // selected.
     run: "Run on {{robot}}",
     robotFallback: "robot",
+    // Between run and fine-tune, because that is the real order: fine-tuning
+    // needs data the operator does not have yet, and coaching is how they get it.
+    coach: "Coach it — fix what it gets wrong",
     fineTune: "Fine-tune this skill",
     // The API exposes no like count and no like action, so this is a static
     // placeholder, not a button.

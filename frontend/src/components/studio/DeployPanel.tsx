@@ -47,6 +47,7 @@ import {
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { JobRecord, getJob, jobDisplayName } from "@/lib/jobsApi";
+import { getDatasetInfo } from "@/lib/replayApi";
 import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
 import { importSourceForModel } from "@/lib/inferenceLaunch";
@@ -384,6 +385,12 @@ const DeployPanel: React.FC = () => {
   // record each takeover as training data. See StartInferenceRequest.coaching.
   const [targetCorrections, setTargetCorrections] = useState(10);
   const [coachDatasetName, setCoachDatasetName] = useState("");
+  // Task strings from the dataset this checkpoint was trained on. A
+  // language-conditioned policy is steered by this string, and a wrong one
+  // doesn't fail loudly — it just makes the policy worse in ways that look
+  // like the policy being bad. So a single unambiguous task is filled in, and
+  // several are offered as choices rather than guessed between.
+  const [datasetTasks, setDatasetTasks] = useState<string[]>([]);
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
@@ -831,6 +838,47 @@ const DeployPanel: React.FC = () => {
     !checkingExtra &&
     !inferenceActive;
 
+  // Prefill the task from the dataset the selected checkpoint was trained on.
+  // Typing it by hand means retyping a sentence that already exists, and a
+  // typo'd task is invisible until the policy underperforms.
+  useEffect(() => {
+    const repoId = selectedJob?.config?.dataset_repo_id;
+    if (!repoId || repoId === "(imported)") {
+      setDatasetTasks([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await getDatasetInfo(baseUrl, fetchWithHeaders, repoId);
+        if (cancelled) return;
+        // Most-represented task first: if the operator has to choose, the one
+        // the policy saw most is the likeliest answer and should be nearest.
+        const tasks = [...(info.tasks ?? [])]
+          .sort((a, b) => b.num_episodes - a.num_episodes)
+          .map((t) => t.task)
+          .filter(Boolean);
+        setDatasetTasks(tasks);
+        // Only auto-fill when there is exactly one, and never over something
+        // the user has already typed.
+        setTask((current) => (current.trim() === "" && tasks.length === 1 ? tasks[0] : current));
+      } catch {
+        // A Hub-only or missing dataset simply has no tasks to offer; the
+        // field stays as the user left it.
+        if (!cancelled) setDatasetTasks([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedJob, baseUrl, fetchWithHeaders]);
+
+  // A prefill may name the run mode — that is how "Policy failing? Coach it"
+  // lands the user in coaching without them having to know the control exists.
+  useEffect(() => {
+    if (deployPrefill?.mode) setRunMode(deployPrefill.mode);
+  }, [deployPrefill]);
+
   const handleStart = async () => {
     if (
       !robot ||
@@ -1180,6 +1228,13 @@ const DeployPanel: React.FC = () => {
             )}
           </RobotStatus>
 
+          {/* Run mode. ABOVE the checkpoint and OUTSIDE the policy-config
+              guard, deliberately: it decides what every control below it
+              means, and it used to be the fourth field down and to vanish
+              entirely while a checkpoint's config was still loading. It has no
+              dependency on that config. ------------------------------------ */}
+          <RunModeChooser value={runMode} onChange={setRunMode} />
+
           {/* Checkpoint ------------------------------------------------------- */}
           <div className="space-y-2">
             <Label htmlFor="deploy-checkpoint">
@@ -1248,10 +1303,38 @@ const DeployPanel: React.FC = () => {
                     {t("studio.deploy.task.hint", {
                       policyType: policyConfig.policy_type ?? "",
                     })}
+                    {datasetTasks.length === 1 && task === datasetTasks[0]
+                      ? ` ${t("studio.deploy.task.prefilled")}`
+                      : ""}
                   </p>
+                  {datasetTasks.length > 1 && (
+                    <div className="space-y-1">
+                      <p className="text-xs text-muted-foreground">
+                        {t("studio.deploy.task.multiTaskHint", {
+                          count: datasetTasks.length,
+                        })}
+                      </p>
+                      <div className="flex flex-wrap gap-1">
+                        {datasetTasks.map((t) => (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => setTask(t)}
+                            className={cn(
+                              "rounded border px-2 py-0.5 text-xs transition-colors",
+                              task === t
+                                ? "border-primary bg-primary/10"
+                                : "border-border hover:bg-muted",
+                            )}
+                          >
+                            {t}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : null}
-              <RunModeChooser value={runMode} onChange={setRunMode} />
               {runMode !== "coach" ? (
                 <div className="space-y-2">
                   <Label htmlFor="deploy-duration">

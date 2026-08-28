@@ -310,6 +310,13 @@ export default {
       placeholder: "e.g., pick up the red block",
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
       hint: "This policy is language-conditioned ({{policyType}}).",
+      // Appended to `hint` when the task was auto-filled from the checkpoint's
+      // own training dataset. Leading space is added by the caller.
+      prefilled: "Filled in from the dataset it was trained on.",
+      multiTaskHint_one:
+        "Its training dataset has {{count}} task — pick the one you're running:",
+      multiTaskHint_other:
+        "Its training dataset has {{count}} tasks, most common first — pick the one you're running:",
     },
     duration: {
       label: "Max duration (s)",

@@ -49,6 +49,11 @@ export interface DeployPrefill {
   source: "job" | "hub";
   id: string;
   step?: number;
+  /** Which run mode to open on. Carried so a bad result can hand the user
+   * straight into coaching ("Policy failing? Coach it") instead of leaving
+   * them to find a control they may not know exists. Omitted ⇒ the panel
+   * keeps whatever mode it was already on. */
+  mode?: "single" | "eval" | "coach";
 }
 
 /** Pre-fills the Train panel: fine-tune base, resume seed, and/or a

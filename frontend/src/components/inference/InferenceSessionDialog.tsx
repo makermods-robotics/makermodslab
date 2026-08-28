@@ -6,12 +6,14 @@ import {
   Loader2,
   Pause,
   Play,
+  GraduationCap,
   RotateCcw,
   Square,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
+import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -216,6 +218,7 @@ const InferenceSessionDialog: React.FC<{
   onExit: () => void;
 }> = ({ sessionId, onExit }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { openStudio, deployPrefill } = useStudio();
   const { toast } = useToast();
   const { t } = useTranslation();
   const [status, setStatus] = useState<InferenceStatus | null>(null);
@@ -1280,9 +1283,33 @@ const InferenceSessionDialog: React.FC<{
 
             {isFinished ? (
               <div className="space-y-2">
+                {/* The moment the operator KNOWS the policy is imperfect is the
+                    moment they watch it finish — and until now every one of
+                    those moments dead-ended in a Close button. Coaching stops
+                    being a mode you have to already know about and becomes the
+                    obvious next move after a bad result. Not offered on a
+                    coaching run's own summary, which has its own follow-ups. */}
+                {!coachMode && deployPrefill && (
+                  <Button
+                    onClick={() => {
+                      // No markHandled(): the exit guard it notified was
+                      // retired with the move to a server-side lease.
+                      onExit();
+                      openStudio("deploy", { deploy: { ...deployPrefill, mode: "coach" } });
+                    }}
+                    className="w-full font-semibold py-6 text-lg"
+                  >
+                    <GraduationCap className="w-5 h-5 mr-2" />
+                    {evalMode && accuracy != null && accuracy < 1
+                      ? t("inference.coach.offerWithGap", {
+                          percent: Math.round((1 - accuracy) * 100),
+                        })
+                      : t("inference.coach.offer")}
+                  </Button>
+                )}
                 <Button
                   onClick={onExit}
-                  variant="secondary"
+                  variant={!coachMode && deployPrefill ? "outline" : "secondary"}
                   className="w-full font-semibold py-6 text-lg"
                 >
                   {t("inference.button.close")}

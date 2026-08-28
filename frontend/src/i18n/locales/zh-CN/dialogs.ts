@@ -73,6 +73,9 @@ export default {
     notTrained: "尚未训练 — 该技能仍在开发中。",
     run: "在 {{robot}} 上运行",
     robotFallback: "机械臂",
+    // 放在 “运行” 与 “微调” 之间，因为真实顺序就是如此：微调需要操作者手上
+    // 还没有的数据，而指导正是获得这些数据的方式。
+    coach: "指导它 — 修好它做错的地方",
     fineTune: "微调该技能",
     likesUnavailable: "暂无点赞数据",
     viewOnHub: "在 HF Hub 上查看",

@@ -94,6 +94,10 @@ export default {
     resume: "Let the policy continue",
     ending: "Ending…",
     endSession: "End session & keep corrections",
+    // The handoff offered on a terminal session screen. {{percent}} is the
+    // share the evaluation got wrong — a number, so no plural form.
+    offer: "Policy failing? Coach it",
+    offerWithGap: "Coach it — fix the {{percent}}% it got wrong",
     reset: "Task done — reset for next attempt",
     startAttempt: "Start attempt {{attempt}}",
     takeOverInstead: "Take over instead",

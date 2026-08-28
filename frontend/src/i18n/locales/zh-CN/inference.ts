@@ -89,6 +89,10 @@ export default {
     resume: "让策略继续",
     ending: "正在结束…",
     endSession: "结束会话并保留纠正数据",
+    // 在会话结束页提供的后续入口。{{percent}} 是评测中做错的比例，
+    // 是数字，因此没有复数形式。
+    offer: "策略表现不佳？来指导它",
+    offerWithGap: "指导它 — 修好它做错的那 {{percent}}%",
     reset: "任务完成 — 复位以开始下一次尝试",
     startAttempt: "开始第 {{attempt}} 次尝试",
     takeOverInstead: "改为接管",
