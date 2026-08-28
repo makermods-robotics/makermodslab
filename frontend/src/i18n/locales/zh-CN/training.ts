@@ -89,9 +89,14 @@ export default {
       "本次训练在哪里执行。界面始终留在这台服务器上 —— 任务由节点运行，服务器到服务器驱动。",
     lanNodes: "局域网节点",
     nodesLoading: "正在查找节点…",
-    // "Tailscale" 是产品名。
+    // "Tailscale" 是产品名。仅在已注册 tailscale 发现源时显示——
+    // 否则这句话承诺的发现永远不会发生（那种情况用 nodesEmptyNoDiscovery）。
     nodesEmpty:
       "还没有节点 —— 通过 Tailscale 发现的其他 MakerMods Lab 服务器会出现在这里，也可以按 URL 添加。",
+    // <0> 包裹字面 CLI 参数 --discover-tailscale：数据，等宽字体原样呈现，
+    // 不翻译。
+    nodesEmptyNoDiscovery:
+      "还没有节点 —— 可按 URL 添加另一台 MakerMods Lab 服务器。以 <0>--discover-tailscale</0> 启动服务器可在 tailnet 上自动发现节点。",
     viaTailscale: "经 Tailscale",
     verifying: "验证中…",
     verifyingTitle: "已发现 —— 等待验证握手确认。",

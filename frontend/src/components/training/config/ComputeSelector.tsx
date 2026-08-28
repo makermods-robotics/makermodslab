@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { Loader2, Plus, RefreshCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { useEyebrowClass } from "@/hooks/useEyebrowClass";
@@ -22,6 +22,10 @@ interface ComputeSelectorProps {
   target: Target;
   /** The raw registry listing (self entry included — filtered here). */
   nodes: NodeEntry[];
+  /** The server's registered discovery-source ids (listing `sources`) — []
+   * when it was started without --discover-tailscale. Decides which empty
+   * state is honest: "discovered via Tailscale" only when that can happen. */
+  sources: string[];
   nodesLoading: boolean;
   onSelect: (target: Target) => void;
   /** Fired after a successful Add so the owner can refetch the registry. */
@@ -155,6 +159,7 @@ const Chip: React.FC<{
 const ComputeSelector: React.FC<ComputeSelectorProps> = ({
   target,
   nodes,
+  sources,
   nodesLoading,
   onSelect,
   onNodeAdded,
@@ -384,7 +389,17 @@ const ComputeSelector: React.FC<ComputeSelectorProps> = ({
         </div>
       ) : peers.length === 0 && !selectedGone ? (
         <div className="bg-background px-3 py-2.5 text-xs text-muted-foreground">
-          {t("training.target.nodesEmpty")}
+          {sources.includes("tailscale") ? (
+            t("training.target.nodesEmpty")
+          ) : (
+            // No discovery source registered: promising "discovered via
+            // Tailscale" would be a lie. Say how to actually get nodes; the
+            // flag is a CLI literal (data) in a mono slot.
+            <Trans
+              i18nKey="training.target.nodesEmptyNoDiscovery"
+              components={[<span key="0" className="font-mono" />]}
+            />
+          )}
         </div>
       ) : (
         <>

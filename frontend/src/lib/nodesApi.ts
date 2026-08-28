@@ -31,18 +31,29 @@ export interface NodeEntry {
   last_verified_at: number | null;
 }
 
+/** GET /api/v1/nodes: the entries plus `sources` — the discovery-source ids
+ * the server has registered (["tailscale"] when it was started with
+ * --discover-tailscale, [] otherwise), so the UI can tell "no peers found"
+ * apart from "discovery is off". */
+export interface NodeListing {
+  nodes: NodeEntry[];
+  sources: string[];
+}
+
 export async function listNodes(
   baseUrl: string,
   fetcher: Fetcher,
-  signal?: AbortSignal,
-): Promise<NodeEntry[]> {
-  const body = await apiRequest<{ nodes: NodeEntry[] }>(
+  options: { force?: boolean; signal?: AbortSignal } = {},
+): Promise<NodeListing> {
+  // ?force=true is the manual-refresh contract: the server bypasses its TTL
+  // for this one pass — discovery runs now, every entry is probed now. The
+  // background poll stays un-forced so it rides the server's own cadence.
+  return apiRequest<NodeListing>(
     baseUrl,
     fetcher,
-    "/api/v1/nodes",
-    { signal, action: "List nodes" },
+    `/api/v1/nodes${options.force ? "?force=true" : ""}`,
+    { signal: options.signal, action: "List nodes" },
   );
-  return body.nodes;
 }
 
 /** Verify-and-register a peer by URL. Coded refusals: 409 node.self /

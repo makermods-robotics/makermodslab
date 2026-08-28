@@ -25,6 +25,7 @@ evicted), removal, and the url+name persistence round-trip.
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 import httpx
@@ -474,16 +475,20 @@ TAILNET_B_URL = "http://100.64.0.8:8000"
 
 class FakeSource:
     """A programmable NodeSource: mutate `candidates` between passes to model
-    peers joining and leaving the tailnet. Counts discover() calls so tests can
-    assert the TTL actually gates re-discovery."""
+    peers joining and leaving the tailnet, or set `outage` to model a source
+    that cannot answer (raises — the transient path). Counts discover() calls
+    so tests can assert the TTL actually gates re-discovery."""
 
     def __init__(self, source_id: str = "tailscale", candidates: list | None = None) -> None:
         self.source_id = source_id
         self.candidates = candidates or []
         self.discover_calls = 0
+        self.outage: Exception | None = None
 
     def discover(self):
         self.discover_calls += 1
+        if self.outage is not None:
+            raise self.outage
         return list(self.candidates)
 
 
@@ -649,17 +654,128 @@ def test_candidate_answering_as_self_is_dropped(registry, network, clock, local_
     assert registry.list_nodes() == []
 
 
-def test_source_error_is_an_empty_discovery_never_fatal(registry, network, clock):
-    class ExplodingSource:
-        source_id = "tailscale"
-
-        def discover(self):
-            raise RuntimeError("boom")
-
+def test_source_outage_is_never_fatal_and_logged_once_per_outage(registry, network, clock, caplog):
+    """A raising source is an OUTAGE, never fatal: the list call succeeds,
+    and the failure is logged once per outage (re-armed by a recovery), not
+    once per list()."""
     registry.add(PEER_A_URL)
-    registry.register_source(ExplodingSource())
-    [node] = registry.list_nodes()
+    source = FakeSource()
+    source.outage = RuntimeError("boom")
+    registry.register_source(source)
+    with caplog.at_level(logging.WARNING, logger="makermodslab.nodes"):
+        [node] = registry.list_nodes()
+        clock.advance(15.1)
+        registry.list_nodes()
     assert node.status == "ok"
+    assert len([r for r in caplog.records if "boom" in r.getMessage()]) == 1
+
+    source.outage = None  # recovery re-arms the log for the NEXT outage
+    clock.advance(15.1)
+    registry.list_nodes()
+    source.outage = RuntimeError("boom again")
+    clock.advance(15.1)
+    with caplog.at_level(logging.WARNING, logger="makermodslab.nodes"):
+        registry.list_nodes()
+    assert any("boom again" in r.getMessage() for r in caplog.records)
+
+
+def test_source_outage_keeps_a_down_discovered_peer(registry, network, clock):
+    """Eviction's gone-from-discovery half needs a DEFINITIVE answer. While
+    the source is in outage, a discovered peer that also stops answering is
+    kept `unreachable` — never evicted on a guess. (Contrast with
+    test_discovered_peer_gone_from_source_and_dead_is_evicted, where the
+    source really answered 'no peers'.)"""
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    source = _tailnet_source(TAILNET_A_URL)
+    registry.register_source(source)
+    registry.list_nodes()
+
+    source.outage = RuntimeError("tailscaled hiccup")
+    network.down.add(TAILNET_A_URL)
+    clock.advance(15.1)
+    [node] = registry.list_nodes()
+    assert node.status == "unreachable"
+    assert node.instance_id == PEER_A_ID
+
+    # The outage ends and the source reports the peer gone for real: the
+    # definitive answer plus the failing probe now evict it.
+    source.outage = None
+    source.candidates = []
+    clock.advance(15.1)
+    assert registry.list_nodes() == []
+
+
+# ---------------------------------------------------------------------------
+# force=True: the manual-refresh contract — this pass bypasses the TTL
+# ---------------------------------------------------------------------------
+
+
+def test_force_bypasses_the_probe_ttl(registry, network, clock):
+    registry.add(PEER_A_URL)
+    registry.list_nodes()
+    clock.advance(1.0)  # well inside the TTL: a plain list would not re-probe
+    registry.list_nodes()
+    assert network.probes[PEER_A_URL] == 1
+    registry.list_nodes(force=True)
+    assert network.probes[PEER_A_URL] == 2
+
+
+def test_force_bypasses_the_discovery_ttl(registry, network, clock):
+    source = _tailnet_source()
+    registry.register_source(source)
+    registry.list_nodes()
+    clock.advance(1.0)
+    registry.list_nodes(force=True)
+    assert source.discover_calls == 2
+
+
+def test_forced_pass_with_tailnet_down_clears_discovered_entries(registry, network, clock):
+    """The user turns tailscale OFF and clicks refresh: the source's clean
+    'no peers' answer plus failing probes clear every discovered entry in ONE
+    forced pass — no TTL wait, no stale rows."""
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    source = _tailnet_source(TAILNET_A_URL)
+    registry.register_source(source)
+    assert len(registry.list_nodes()) == 1
+
+    source.candidates = []
+    network.down.add(TAILNET_A_URL)
+    clock.advance(1.0)  # inside the TTL — only force gets a fresh answer now
+    assert registry.list_nodes(force=True) == []
+
+
+def test_manual_promoted_entry_survives_a_tailnet_down_forced_pass(registry, network, clock):
+    """A discovered peer the user adopted by hand is manual — a forced pass
+    with the tailnet gone marks it unreachable but never evicts it."""
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    source = _tailnet_source(TAILNET_A_URL)
+    registry.register_source(source)
+    registry.list_nodes()
+    registry.add(TAILNET_A_URL, name="bench")  # promotion
+
+    source.candidates = []
+    network.down.add(TAILNET_A_URL)
+    clock.advance(1.0)
+    [node] = registry.list_nodes(force=True)
+    assert node.source == "manual"
+    assert node.status == "unreachable"
+    assert node.name == "bench"
+
+
+def test_force_still_caps_unverified_candidate_probes(local_identity, nodes_file, network, clock):
+    """force re-probes every KNOWN entry, but the discovery probe cap still
+    bounds unverified candidates — a manual refresh must not storm a big
+    tailnet either."""
+    from makermodslab.nodes import NodeRegistry
+
+    network.peers[TAILNET_A_URL] = _health_doc(PEER_A_ID)
+    network.peers[TAILNET_B_URL] = _health_doc(PEER_B_ID)
+    registry = NodeRegistry(clock=clock, transport=network.transport(), discovery_probe_cap=1)
+    registry.register_source(_tailnet_source(TAILNET_A_URL, TAILNET_B_URL))
+    first, second = registry.list_nodes(force=True)
+    assert first.status == "ok"
+    assert second.status == "pending"
+    assert TAILNET_B_URL not in network.probes  # capped out of this pass too
 
 
 def test_manual_add_promotes_a_discovered_entry(registry, network, clock, nodes_file):
@@ -819,6 +935,28 @@ def test_get_nodes_marks_unverified_candidates_pending(
     verified = next(n for n in nodes_body if n["url"] == TAILNET_A_URL)
     assert verified["status"] == "ok"
     assert verified["instance_id"] == PEER_A_ID
+
+
+def test_get_nodes_reports_registered_source_ids(client, api_registry):
+    """Additive `sources`: the registered discovery-source ids, so the UI can
+    say whether tailnet discovery is even on. [] when nothing is registered
+    (the default — discovery is opt-in)."""
+    assert client.get("/api/v1/nodes").json()["sources"] == []
+    api_registry.register_source(_tailnet_source())
+    assert client.get("/api/v1/nodes").json()["sources"] == ["tailscale"]
+
+
+def test_get_nodes_force_probes_now(client, api_registry, network, clock):
+    """?force=true is the manual-refresh contract: THIS pass runs discovery
+    and probes every entry now, TTL notwithstanding. Without it the fresh
+    handshake from the add is still trusted."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    clock.advance(1.0)  # inside the TTL
+    [_, peer] = client.get("/api/v1/nodes").json()["nodes"]
+    assert peer["status"] == "ok"  # un-forced: the add's handshake is fresh
+    [_, peer] = client.get("/api/v1/nodes?force=true").json()["nodes"]
+    assert peer["status"] == "unreachable"
 
 
 def test_get_nodes_reports_wall_clock_last_seen(client, api_registry, wall_clock):

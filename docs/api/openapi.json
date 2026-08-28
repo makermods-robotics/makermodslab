@@ -2823,7 +2823,7 @@
         "type": "object"
       },
       "NodeListResponse": {
-        "description": "server.py list_nodes — the self entry first, then registered peers.",
+        "description": "server.py list_nodes — the self entry first, then registered peers.\n\n`sources` (additive) is the list of registered discovery-source ids —\n[\"tailscale\"] when the server was started with --discover-tailscale, []\notherwise — so a client can tell \"no peers found\" apart from \"discovery\nis not even on\" instead of promising discovery that will never happen.",
         "properties": {
           "nodes": {
             "items": {
@@ -2831,10 +2831,18 @@
             },
             "title": "Nodes",
             "type": "array"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sources",
+            "type": "array"
           }
         },
         "required": [
-          "nodes"
+          "nodes",
+          "sources"
         ],
         "title": "NodeListResponse",
         "type": "object"
@@ -7078,8 +7086,20 @@
     },
     "/api/v1/nodes": {
       "get": {
-        "description": "All known nodes: this server first (is_self=true, built from the same\nhealth fields the handshake reads, so clients render one uniform list),\nthen every registered peer. Peers whose last probe is older than the TTL\nare re-verified inline; a peer that fails re-verification is reported\n`unreachable` but kept until explicitly removed.",
+        "description": "All known nodes: this server first (is_self=true, built from the same\nhealth fields the handshake reads, so clients render one uniform list),\nthen every registered peer. Peers whose last probe is older than the TTL\nare re-verified inline; a peer that fails re-verification is reported\n`unreachable` but kept until explicitly removed. `sources` names the\nregistered discovery sources, so a client can tell \"no peers\" apart from\n\"discovery is off\". ?force=true is the manual-refresh contract: this one\npass bypasses the TTL — discovery runs now and every known entry is\nprobed now — so a refresh button answers with the world as it is, not as\nit was up to TTL seconds ago.",
         "operationId": "list_nodes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7090,6 +7110,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Nodes",

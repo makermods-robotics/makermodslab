@@ -35,7 +35,15 @@ capabilities — and the registry never trusts anything else:
   `discovery_probe_cap` unverified candidates are probed per pass. Discovered
   entries dedupe against manual entries and each other on verified
   instance_id (the manual record, name included, wins), and are evicted only
-  when they BOTH leave their source's latest discovery AND fail liveness.
+  when they BOTH leave their source's latest DEFINITIVE discovery AND fail
+  liveness. A source that cannot answer raises (NodeSourceOutageError by
+  convention): an OUTAGE, logged once per outage — the registry keeps that
+  source's last known discovery set, so nothing is evicted on a guess.
+- **force is the manual-refresh contract**: ``list_nodes(force=True)``
+  (GET /api/v1/nodes?force=true) bypasses the TTL for THIS pass — discovery
+  runs now and every known entry is probed now (`discovery_probe_cap` still
+  bounds unverified candidates), so a refresh button reflects the world as it
+  is, not as it was up to TTL seconds ago.
 - **Persistence is url + name only, manual entries only**
   (utils/config.NODES_FILE): identity is re-verified live on load/probe,
   never served stale from disk, and sources never touch nodes.json.
@@ -107,14 +115,23 @@ class NodeSource(Protocol):
     `source_id` labels the entries it produces (the wire `source` field);
     `discover()` returns the CURRENT candidate set — the registry calls it on
     the TTL cadence and diffs successive answers, so a source holds no state
-    about what it reported before. discover() should swallow its own failure
-    modes and return [] (the registry also guards, so a raising source is
-    logged and treated as an empty discovery, never fatal).
+    about what it reported before. The return value is a DEFINITIVE answer:
+    [] means "there really are no peers" and makes this source's absent
+    entries evict-eligible. A source that cannot answer right now must raise
+    instead (NodeSourceOutageError by convention; any exception is treated
+    the same, never fatal) — the registry logs the outage and keeps the
+    source's last known discovery set.
     """
 
     source_id: str
 
     def discover(self) -> list[DiscoveredPeer]: ...
+
+
+class NodeSourceOutageError(RuntimeError):
+    """A discovery source could not produce an answer (transient: timeout,
+    broken output, daemon not answering). Distinct from a definitive empty
+    discovery — on an outage the registry evicts nothing."""
 
 
 class NodeError(Exception):
@@ -221,6 +238,9 @@ class NodeRegistry:
         # "still discovered" half of the eviction rule).
         self._last_discovery_at: dict[str, float] = {}
         self._latest_discovery: dict[str, set[str]] = {}
+        # Sources currently in outage whose failure has been logged — one
+        # line per outage, re-armed by the next successful discover().
+        self._source_outage_logged: set[str] = set()
         # Discovered urls that answered with OUR instance_id: our own tailnet
         # address, remembered so re-discovery doesn't re-probe ourselves.
         self._self_urls: set[str] = set()
@@ -232,6 +252,12 @@ class NodeRegistry:
             if any(s.source_id == source.source_id for s in self._sources):
                 raise ValueError(f"a node source with source_id {source.source_id!r} is already registered")
             self._sources.append(source)
+
+    def source_ids(self) -> list[str]:
+        """The registered discovery-source ids, in registration order — the
+        wire `sources` field, so clients can say whether discovery is even on."""
+        with self._lock:
+            return [s.source_id for s in self._sources]
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -520,25 +546,35 @@ class NodeRegistry:
         self._apply_handshake(peer, doc)
         return True
 
-    def _run_discovery(self) -> None:
-        """Ask each source (whose last run is older than the TTL) for its
-        current candidates and adopt the new urls as `pending` entries.
+    def _run_discovery(self, force: bool = False) -> None:
+        """Ask each source (whose last run is older than the TTL; every
+        source when `force`) for its current candidates and adopt the new
+        urls as `pending` entries.
 
         Candidates dedupe on url at this stage (identity-level dedupe needs a
-        handshake and happens in _probe_and_integrate); a raising source is an
-        empty discovery, logged, never fatal.
+        handshake and happens in _probe_and_integrate). A raising source is
+        an OUTAGE, logged once per outage, never fatal: its last known
+        discovery set stays in place, so the gone-from-discovery half of
+        eviction is skipped for its entries until it answers again.
         """
         for source in self._sources:
             now = self._clock()
             last = self._last_discovery_at.get(source.source_id)
-            if last is not None and now - last < self._ttl:
+            if not force and last is not None and now - last < self._ttl:
                 continue
             self._last_discovery_at[source.source_id] = now
             try:
                 candidates = source.discover()
             except Exception as exc:
-                logger.info("node source %r discovery failed (treated as empty): %s", source.source_id, exc)
-                candidates = []
+                if source.source_id not in self._source_outage_logged:
+                    logger.warning(
+                        "node source %r discovery outage (keeping its known peers): %s",
+                        source.source_id,
+                        exc,
+                    )
+                    self._source_outage_logged.add(source.source_id)
+                continue
+            self._source_outage_logged.discard(source.source_id)
             urls: set[str] = set()
             for candidate in candidates:
                 try:
@@ -558,18 +594,20 @@ class NodeRegistry:
                 )
             self._latest_discovery[source.source_id] = urls
 
-    def _probe_due_peers(self) -> None:
+    def _probe_due_peers(self, force: bool = False) -> None:
         """Re-probe entries whose last probe is older than the TTL
-        (never-probed entries — fresh loads and new candidates — probe now).
+        (never-probed entries — fresh loads and new candidates — probe now;
+        EVERY entry probes now when `force`).
 
         At most `discovery_probe_cap` UNVERIFIED discovered candidates are
-        probed per pass; the rest stay `pending` for later passes. Verified
-        peers — manual or discovered — always re-probe on the TTL, as before.
+        probed per pass — forced or not; the rest stay `pending` for later
+        passes. Verified peers — manual or discovered — always re-probe on
+        the TTL, as before.
         """
         budget = self._discovery_probe_cap
         for peer in list(self._peers):
             now = self._clock()
-            if peer.last_probe_at is not None and now - peer.last_probe_at < self._ttl:
+            if not force and peer.last_probe_at is not None and now - peer.last_probe_at < self._ttl:
                 continue
             if peer.source != MANUAL_SOURCE and peer.instance_id is None:
                 if budget <= 0:
@@ -592,14 +630,20 @@ class NodeRegistry:
             or p.url in self._latest_discovery.get(p.source, set())
         ]
 
-    def list_nodes(self) -> list[PeerNode]:
+    def list_nodes(self, force: bool = False) -> list[PeerNode]:
         """Current peer table: run due discovery, probe due entries (TTL-gated,
         unverified-candidate probes capped), evict lost discovered peers. A
-        failed re-probe marks an entry unreachable and keeps it."""
+        failed re-probe marks an entry unreachable and keeps it.
+
+        `force` is the manual-refresh contract: this ONE pass ignores the TTL
+        — discovery runs now, every known entry is probed now (the cap still
+        bounds unverified candidates) — so with the local tailnet gone a
+        forced pass clears the discovered entries instead of waiting out the
+        poll cadence."""
         with self._lock:
             self._ensure_loaded()
-            self._run_discovery()
-            self._probe_due_peers()
+            self._run_discovery(force=force)
+            self._probe_due_peers(force=force)
             self._evict_lost_discovered()
             return [replace(p) for p in self._peers]
 
@@ -624,10 +668,17 @@ def register_sources_from_env(registry: NodeRegistry | None = None) -> None:
 register_sources_from_env()
 
 
-def handle_list_nodes() -> list[dict[str, Any]]:
+def handle_list_nodes(force: bool = False) -> list[dict[str, Any]]:
     """Peer entries for GET /api/v1/nodes (the caller prepends the self entry,
-    built from the same health fields the handshake reads)."""
-    return [peer.to_dict() for peer in node_registry.list_nodes()]
+    built from the same health fields the handshake reads). `force` is the
+    route's ?force=true — the manual-refresh pass that bypasses the TTL."""
+    return [peer.to_dict() for peer in node_registry.list_nodes(force=force)]
+
+
+def handle_list_node_sources() -> list[str]:
+    """The wire `sources` field: registered discovery-source ids (e.g.
+    ["tailscale"] when --discover-tailscale was on; [] otherwise)."""
+    return node_registry.source_ids()
 
 
 def handle_add_node(url: str, name: str | None = None) -> dict[str, Any]:

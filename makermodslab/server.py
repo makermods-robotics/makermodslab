@@ -95,6 +95,7 @@ from .nodes import (
     handle_get_node_job_logs,
     handle_get_node_jobs,
     handle_get_node_queue,
+    handle_list_node_sources,
     handle_list_nodes,
     handle_remove_node,
     handle_stop_node_job,
@@ -875,12 +876,17 @@ class AddNodeBody(BaseModel):
 
 
 @v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
-def list_nodes():
+def list_nodes(force: bool = False):
     """All known nodes: this server first (is_self=true, built from the same
     health fields the handshake reads, so clients render one uniform list),
     then every registered peer. Peers whose last probe is older than the TTL
     are re-verified inline; a peer that fails re-verification is reported
-    `unreachable` but kept until explicitly removed."""
+    `unreachable` but kept until explicitly removed. `sources` names the
+    registered discovery sources, so a client can tell "no peers" apart from
+    "discovery is off". ?force=true is the manual-refresh contract: this one
+    pass bypasses the TTL — discovery runs now and every known entry is
+    probed now — so a refresh button answers with the world as it is, not as
+    it was up to TTL seconds ago."""
     health = health_check()
     self_entry = {
         "url": None,  # a server doesn't know its own external address
@@ -894,7 +900,10 @@ def list_nodes():
         "is_self": True,
         "source": "manual",  # intrinsic, like a hand-added peer — never discovered
     }
-    return {"nodes": [self_entry, *handle_list_nodes()]}
+    return {
+        "nodes": [self_entry, *handle_list_nodes(force=force)],
+        "sources": handle_list_node_sources(),
+    }
 
 
 @v1_router.post("/nodes", response_model=NodeEntry, tags=["nodes"])

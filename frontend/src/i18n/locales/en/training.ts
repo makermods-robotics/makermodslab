@@ -119,9 +119,15 @@ export default {
       "Where this run executes. The interface stays on this server — a node runs the job, driven server-to-server.",
     lanNodes: "LAN nodes",
     nodesLoading: "Looking for nodes…",
-    // "Tailscale" is a product name.
+    // "Tailscale" is a product name. Shown only while a tailscale discovery
+    // source is registered — otherwise the sentence would promise discovery
+    // that will never happen (nodesEmptyNoDiscovery covers that case).
     nodesEmpty:
       "No nodes yet — other MakerMods Lab servers appear here when discovered via Tailscale, or add one by URL.",
+    // <0> wraps the literal CLI flag --discover-tailscale: data, rendered
+    // verbatim in a mono span, never translated.
+    nodesEmptyNoDiscovery:
+      "No nodes yet — add another MakerMods Lab server by URL. Starting the server with <0>--discover-tailscale</0> finds them over your tailnet automatically.",
     viaTailscale: "via tailscale",
     verifying: "Verifying…",
     verifyingTitle: "Discovered — waiting for the verify handshake to confirm it.",

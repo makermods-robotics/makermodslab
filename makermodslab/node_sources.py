@@ -21,9 +21,16 @@ Lab nodes, and the registry's verify handshake is what separates the ones
 that are (its short timeout and non-node rejection make the wrong guesses
 cheap). Opt-in via the launcher's --discover-tailscale flag.
 
-Every failure mode — no tailscale binary, daemon stopped or logged out,
-malformed output — is an EMPTY discovery logged once at INFO per outage,
-never an exception: the tailnet being absent must not degrade the server.
+Failure modes are TRI-STATE, because the registry evicts on what a source
+answers. A missing binary, a backend that is not "Running" (stopped, logged
+out, NeedsLogin), or a clean run with no peers is a DEFINITIVE empty answer —
+discover() returns [] and the registry may evict what that contradicts (the
+first two warn once per outage: --discover-tailscale is an explicit opt-in,
+so its silent absence is exactly what a user debugs). A timeout, a non-zero
+exit, or malformed output is a TRANSIENT outage — discover() raises
+nodes.NodeSourceOutageError and the registry keeps what it knows instead of
+evicting on a guess. Either way the tailnet being absent never degrades the
+server.
 """
 
 from __future__ import annotations
@@ -37,7 +44,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 
-from .nodes import DiscoveredPeer
+from .nodes import DiscoveredPeer, NodeSourceOutageError
 
 logger = logging.getLogger(__name__)
 
@@ -113,24 +120,43 @@ class TailscaleSource:
     def discover(self) -> list[DiscoveredPeer]:
         """Current candidates: each online peer's tailnet IPv4 at our port.
 
-        Any failure is an empty discovery; the first failure of an outage logs
-        at WARNING (--discover-tailscale is an explicit opt-in, so its silent
-        absence is exactly what a user debugs), and a successful run re-arms
-        that log for the next outage.
+        Tri-state (see the module docstring): a missing binary or a backend
+        that is not "Running" is a DEFINITIVE empty answer — [] — warned once
+        per outage (--discover-tailscale is an explicit opt-in, so its silent
+        absence is exactly what a user debugs); a run that failed to produce a
+        parseable status (timeout, non-zero exit, garbage output) raises
+        NodeSourceOutageError — no answer, not an empty one. A definitive
+        answer, peers or none, re-arms the warning for the next outage.
         """
         try:
-            doc = json.loads(self._runner())
-            state = doc.get("BackendState") if isinstance(doc, dict) else None
-            if state != "Running":
-                raise RuntimeError(f"tailscale backend state is {state!r}, not 'Running'")
-            candidates = self._parse_peers(doc.get("Peer") or {})
-        except Exception as exc:
-            if not self._outage_logged:
-                logger.warning("tailscale discovery unavailable (continuing without it): %s", exc)
-                self._outage_logged = True
-            return []
+            output = self._runner()
+        except FileNotFoundError as exc:
+            return self._definitive_empty(exc)  # not installed: nothing to discover
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise NodeSourceOutageError(f"tailscale status did not answer: {exc}") from exc
+        try:
+            doc = json.loads(output)
+        except ValueError as exc:
+            raise NodeSourceOutageError(f"tailscale status output is not JSON: {exc}") from exc
+        if not isinstance(doc, dict):
+            raise NodeSourceOutageError(
+                f"tailscale status answered {type(doc).__name__}, not a status document"
+            )
+        state = doc.get("BackendState")
+        if state != "Running":
+            # Stopped / logged out / NeedsLogin: the daemon ANSWERED, and in
+            # this state it can see no peer — a real empty tailnet.
+            return self._definitive_empty(f"tailscale backend state is {state!r}, not 'Running'")
+        candidates = self._parse_peers(doc.get("Peer") or {})
         self._outage_logged = False
         return candidates
+
+    def _definitive_empty(self, why: object) -> list[DiscoveredPeer]:
+        """An authoritative "no peers", warned once per outage."""
+        if not self._outage_logged:
+            logger.warning("tailscale discovery unavailable (continuing without it): %s", why)
+            self._outage_logged = True
+        return []
 
     def _parse_peers(self, peer_map: dict) -> list[DiscoveredPeer]:
         candidates: list[DiscoveredPeer] = []

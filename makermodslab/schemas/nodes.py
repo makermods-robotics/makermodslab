@@ -66,9 +66,16 @@ class NodeEntry(BaseModel):
 
 
 class NodeListResponse(BaseModel):
-    """server.py list_nodes — the self entry first, then registered peers."""
+    """server.py list_nodes — the self entry first, then registered peers.
+
+    `sources` (additive) is the list of registered discovery-source ids —
+    ["tailscale"] when the server was started with --discover-tailscale, []
+    otherwise — so a client can tell "no peers found" apart from "discovery
+    is not even on" instead of promising discovery that will never happen.
+    """
 
     nodes: list[NodeEntry]
+    sources: list[str]
 
 
 class NodeRemoveResponse(BaseModel):

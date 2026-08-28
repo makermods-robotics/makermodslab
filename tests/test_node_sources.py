@@ -16,9 +16,12 @@
 
 The source only produces CANDIDATES — bare urls at this app's backend port on
 peers' tailnet IPv4s — and the registry's verify handshake remains the single
-trust path. Every failure mode (no binary, logged out, malformed output) is an
-EMPTY discovery logged once at INFO, never an exception: tailscale being
-absent must not degrade a server that never asked for it beyond a log line.
+trust path. Failure modes are TRI-STATE: a missing binary, a backend that is
+not Running, and a clean run with no peers are DEFINITIVE empty answers
+(return [], evict-eligible; the first two warn once per outage — the flag is
+an explicit opt-in); a timeout, a non-zero exit, or malformed output is a
+TRANSIENT outage (NodeSourceOutageError) — the registry keeps what it knows
+rather than evicting on a guess. Either way the server never degrades.
 """
 
 from __future__ import annotations
@@ -134,13 +137,17 @@ def test_peer_missing_optional_fields_is_tolerated():
     assert candidate.name is None
 
 
-def test_not_logged_in_is_empty_discovery(caplog: pytest.LogCaptureFixture):
+def test_not_logged_in_is_a_definitive_empty_discovery(caplog: pytest.LogCaptureFixture):
+    """A backend that is not Running (logged out, stopped) cannot see ANY
+    peer: a real empty answer — never a raise — warned once per outage."""
     with caplog.at_level(logging.INFO):
         assert _source(_status_doc({}, backend_state="NeedsLogin")).discover() == []
-    assert "NeedsLogin" in caplog.text
+    needs_login = [r for r in caplog.records if "NeedsLogin" in r.getMessage()]
+    assert len(needs_login) == 1
+    assert needs_login[0].levelno == logging.WARNING
 
 
-def test_stopped_backend_is_empty_discovery():
+def test_stopped_backend_is_a_definitive_empty_discovery():
     assert _source(_status_doc({}, backend_state="Stopped")).discover() == []
 
 
@@ -164,13 +171,24 @@ def test_missing_binary_is_empty_discovery_logged_once_at_warning(caplog: pytest
     assert failure_logs[0].levelno == logging.WARNING
 
 
-def test_malformed_output_is_empty_discovery():
-    assert _source("flagrant nonsense {").discover() == []
+def test_malformed_output_is_a_transient_outage():
+    """Garbage from a CLI that RAN is not an answer about the tailnet — the
+    source raises so the registry keeps its entries instead of evicting."""
+    from makermodslab.nodes import NodeSourceOutageError
+
+    with pytest.raises(NodeSourceOutageError):
+        _source("flagrant nonsense {").discover()
+    with pytest.raises(NodeSourceOutageError):
+        _source(json.dumps(["not", "a", "status", "dict"])).discover()
 
 
-def test_subprocess_failures_are_empty_discovery():
-    assert _source(subprocess.CalledProcessError(1, ["tailscale", "status", "--json"])).discover() == []
-    assert _source(subprocess.TimeoutExpired(["tailscale", "status", "--json"], 5)).discover() == []
+def test_subprocess_failures_are_transient_outages():
+    from makermodslab.nodes import NodeSourceOutageError
+
+    with pytest.raises(NodeSourceOutageError):
+        _source(subprocess.CalledProcessError(1, ["tailscale", "status", "--json"])).discover()
+    with pytest.raises(NodeSourceOutageError):
+        _source(subprocess.TimeoutExpired(["tailscale", "status", "--json"], 5)).discover()
 
 
 def test_failure_log_rearms_after_a_successful_discovery(caplog: pytest.LogCaptureFixture):

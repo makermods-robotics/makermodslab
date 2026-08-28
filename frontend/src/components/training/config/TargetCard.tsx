@@ -63,14 +63,21 @@ const TargetCard: React.FC<TargetCardProps> = ({
 }) => {
   const { t } = useTranslation();
   const target = config.target;
-  const { nodes, loading: nodesLoading, refresh: refreshNodes } = useNodes();
-  // Manual refresh: bump the token so NodeDetailPanel refetches the workload
-  // in the same gesture as the registry refetch.
+  const {
+    nodes,
+    sources: nodeSources,
+    loading: nodesLoading,
+    refresh: refreshNodes,
+    forceRefresh: forceRefreshNodes,
+  } = useNodes();
+  // Manual refresh: a FORCED registry pass (the server probes everything now,
+  // TTL notwithstanding) plus a token bump so NodeDetailPanel refetches the
+  // workload in the same gesture.
   const [nodesRefreshToken, setNodesRefreshToken] = React.useState(0);
   const refreshNodesAndWorkload = React.useCallback(() => {
-    refreshNodes();
+    forceRefreshNodes();
     setNodesRefreshToken((v) => v + 1);
-  }, [refreshNodes]);
+  }, [forceRefreshNodes]);
 
   const selectedNode =
     target.runner === "lan_node" && target.node_instance_id
@@ -108,6 +115,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
         <ComputeSelector
           target={target}
           nodes={nodes}
+          sources={nodeSources}
           nodesLoading={nodesLoading}
           onSelect={(next) => updateConfig("target", next)}
           onNodeAdded={() => void refreshNodes()}
