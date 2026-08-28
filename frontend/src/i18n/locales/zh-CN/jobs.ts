@@ -228,6 +228,7 @@ export default {
     noMatch: "没有匹配的模型。",
     filters: {
       all: "全部",
+      trained: "已训练",
       imported: "已导入",
       uploaded: "已上传",
     },
