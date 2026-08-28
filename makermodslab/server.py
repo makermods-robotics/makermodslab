@@ -1445,7 +1445,10 @@ def _hub_job_stage(ji) -> str:
 
 
 # Mirrors _RUN_LABEL in runners/hf_cloud.py — the label a submitted job carries.
-_HUB_RUN_LABEL = "makermodslab.run"
+# The dotted form is what jobs submitted before the tag-charset fix carry; the
+# Hub rejects a '.' in a label key, so new jobs use the underscore.
+_HUB_RUN_LABEL = "makermodslab_run"
+_HUB_RUN_LABEL_LEGACY = "makermodslab.run"
 
 
 def _hub_job_run_name(ji) -> str | None:
@@ -1464,7 +1467,7 @@ def _hub_job_run_name(ji) -> str | None:
        labelling existed — the whole existing backlog.
     """
     labels = getattr(ji, "labels", None) or {}
-    labelled = labels.get(_HUB_RUN_LABEL)
+    labelled = labels.get(_HUB_RUN_LABEL) or labels.get(_HUB_RUN_LABEL_LEGACY)
     if isinstance(labelled, str) and labelled.strip():
         return labelled.strip()
 
