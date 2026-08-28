@@ -66,6 +66,8 @@ from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
+    _KNOWN_FOUNDATION_BASE_REPO_IDS,
+    CHECKPOINTS_STAGING_SUFFIX,
     DatasetNotOnHubError,
     JobAlreadyContinuedError,
     JobAlreadyRunningError,
@@ -74,6 +76,8 @@ from .jobs import (
     JobNotRunningError,
     JobTarget,
     _list_local_checkpoints,
+    hub_ref_repo_id,
+    hub_ref_step_label,
     job_registry,
 )
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
@@ -1494,6 +1498,52 @@ _HUB_RUN_LABEL = "makermodslab_run"
 _HUB_RUN_LABEL_LEGACY = "makermodslab.run"
 
 
+def _hub_job_argv(ji) -> list:
+    """A Hub job's argv as one flat list, POSITIONS PRESERVED.
+
+    `arguments` is where the Hub splits argv for some submission paths; ours
+    rides entirely in `command`. Both are scanned so neither shape is missed.
+
+    Non-string tokens are deliberately NOT dropped. Removing them would close
+    the gap they leave and make two tokens adjacent that never were, so
+    `--policy.type` followed by a non-string would read the token after it as
+    its value. They are left in place and rejected by `_argv_value` instead.
+    """
+    return [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
+
+
+def _argv_value(argv: list, flag: str) -> str | None:
+    """The value of `--flag value` or `--flag=value` in argv; None if absent.
+
+    Both spellings occur in the same command line: build_training_command
+    (train.py) emits the space form for most flags but the '=' form for
+    `--config_path` / `--policy.pretrained_path`, where lerobot's own
+    pre-parser only accepts '='. Empty and whitespace-only values read as
+    absent — an empty flag value carries no more information than no flag.
+
+    A space-form value that is itself option-shaped is rejected. A dangling
+    `--policy.pretrained_path` immediately before `--resume true` would
+    otherwise yield the base model "--resume", and with it a confident
+    "Fine-tune" chip on a run that is nothing of the kind. No value we look for
+    can legitimately begin with "--": they are repo ids, policy names and step
+    counts.
+    """
+    prefix = flag + "="
+    for i, tok in enumerate(argv):
+        if not isinstance(tok, str):
+            continue
+        value = None
+        if tok == flag and i + 1 < len(argv):
+            nxt = argv[i + 1]
+            if isinstance(nxt, str) and not nxt.startswith("--"):
+                value = nxt
+        elif tok.startswith(prefix):
+            value = tok[len(prefix) :]
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
 def _hub_job_run_name(ji) -> str | None:
     """The training run's name for a Hub job, or None when it can't be derived.
 
@@ -1514,21 +1564,95 @@ def _hub_job_run_name(ji) -> str | None:
     if isinstance(labelled, str) and labelled.strip():
         return labelled.strip()
 
-    # `arguments` is where the Hub splits argv for some submission paths; ours
-    # rides entirely in `command`. Scan both so neither shape is missed.
-    argv = [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
-    for i, tok in enumerate(argv):
-        if not isinstance(tok, str):
-            continue
-        repo_id = None
-        if tok == "--policy.repo_id" and i + 1 < len(argv):
-            repo_id = argv[i + 1]
-        elif tok.startswith("--policy.repo_id="):
-            repo_id = tok.split("=", 1)[1]
-        # The slug after the namespace is the run id the library titles by.
-        if isinstance(repo_id, str) and repo_id.strip():
-            return repo_id.strip().rsplit("/", 1)[-1]
-    return None
+    repo_id = _argv_value(_hub_job_argv(ji), "--policy.repo_id")
+    # The slug after the namespace is the run id the library titles by.
+    return repo_id.rsplit("/", 1)[-1] if repo_id else None
+
+
+def _hub_job_provenance(ji) -> dict:
+    """What a Hub job started FROM, read off its own argv.
+
+    Four kinds, so a card can say what a run IS at a glance:
+
+      * `finetune`   — fresh optimizer from a base checkpoint the user chose.
+      * `foundation` — fresh optimizer from the public foundation checkpoint a
+                       VLA policy defaults to. NOT a fine-tune in the sense the
+                       user means: JobRegistry.start pins
+                       `policy_pretrained_path` to lerobot/smolvla_base (and the
+                       pi0 family's equivalents) for ANY such run that names no
+                       starting point, so treating a bare `--policy.pretrained_path`
+                       as a fine-tune would mislabel every from-scratch VLA run.
+      * `resume`     — a continuation of an earlier run.
+      * `scratch`    — random weights.
+
+    Read from argv rather than from Hub labels because a label cannot carry a
+    repo id at all: the Hub validates label keys and values under its `tags`
+    rules (alphanumeric, '-', '_', '=' — see _RUN_LABEL in runners/hf_cloud.py),
+    and every repo id contains a '/'. argv also covers the whole existing
+    backlog, and is what actually ran.
+
+    `--config_path` is deliberately NOT consulted. On a cloud continuation it
+    holds a CONTAINER path ("/tmp/makermodslab/train/checkpoints/.../train_config.json",
+    set in runners/hf_cloud.py) that names nothing the user could recognize. The
+    real source rides in the wrapper's own `--resume-from=<repo>@checkpoints/<step>`
+    directive, which is part of the submitted command and so visible here.
+
+    Absent facts are omitted rather than guessed: build_training_command's
+    resume branch emits neither `--dataset.repo_id` nor `--policy.type` (lerobot
+    reconstructs both from the checkpoint config), so a continuation simply has
+    no value for them.
+    """
+    argv = _hub_job_argv(ji)
+    out: dict[str, object] = {
+        "kind": "scratch",
+        "base_ref": None,
+        "base_repo": None,
+        "base_step": None,
+        "base_job_id": None,
+        "dataset_repo_id": _argv_value(argv, "--dataset.repo_id"),
+        "policy_type": _argv_value(argv, "--policy.type"),
+        "steps": _argv_value(argv, "--steps"),
+    }
+
+    pretrained = _argv_value(argv, "--policy.pretrained_path")
+    resume_from = _argv_value(argv, "--resume-from")
+
+    if resume_from:
+        out["kind"] = "resume"
+        out["base_ref"] = resume_from
+    elif pretrained:
+        # A run whose base is one of the public foundation checkpoints was
+        # defaulted there, not pointed there by the user.
+        out["kind"] = "foundation" if pretrained in _KNOWN_FOUNDATION_BASE_REPO_IDS else "finetune"
+        out["base_ref"] = pretrained
+    elif (_argv_value(argv, "--resume") or "").lower() == "true":
+        # Submitted before the wrapper carried --resume-from; we know it
+        # continued something but not what.
+        out["kind"] = "resume"
+
+    base_ref = out["base_ref"]
+    if isinstance(base_ref, str):
+        # hub_ref_* fall back to the whole ref when it isn't step-suffixed, so a
+        # plain repo id passes through as its own repo with no step.
+        repo = hub_ref_repo_id(base_ref)
+        step = hub_ref_step_label(base_ref)
+        if step == base_ref and "@checkpoints/" in base_ref:
+            # hub_ref_* only split a DIGIT step dir, but hf_cloud can emit
+            # "<repo>@checkpoints/last". Without this the whole raw ref would
+            # land in base_repo and be rendered at the user (R2).
+            repo, _, step = base_ref.partition("@checkpoints/")
+        out["base_repo"] = repo
+        out["base_step"] = step if step != base_ref else None
+        # A "<user>/<job id>_checkpoints" base is a STAGING repo holding a local
+        # run's uploaded checkpoint (checkpoints_staging_repo_id in jobs.py).
+        # The job id inside it is the thing a person recognizes; the repo id is
+        # plumbing. Recovered here, next to the rule that mints it, rather than
+        # sniffed for in the frontend.
+        slug = repo.rsplit("/", 1)[-1]
+        if slug.endswith(CHECKPOINTS_STAGING_SUFFIX):
+            out["base_job_id"] = slug[: -len(CHECKPOINTS_STAGING_SUFFIX)]
+
+    return out
 
 
 # Errors a per-author Hub model listing may raise that must degrade to "empty for
@@ -1737,6 +1861,11 @@ def list_hub_jobs():
                 "status": ({"stage": ji.status.stage, "message": ji.status.message} if ji.status else None),
                 "owner": ji.owner.name if ji.owner else None,
                 "url": ji.url,
+                # What the run started from, parsed off its own argv. Every
+                # cloud run ships the same image and flavor, so without this a
+                # card launched from another machine has almost nothing on it
+                # that distinguishes one run from the next.
+                **_hub_job_provenance(ji),
             }
             for ji in jobs
         ],

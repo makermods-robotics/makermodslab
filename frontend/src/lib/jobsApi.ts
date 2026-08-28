@@ -418,6 +418,88 @@ export interface HubJob {
   status: { stage: string; message: string | null } | null;
   owner: string | null;
   url: string;
+  // What the run started from, parsed backend-side off the job's own argv (see
+  // _hub_job_provenance). All optional: a job submitted by something other than
+  // MakerMods Lab carries argv we can't read, and the card simply omits the rows.
+  kind?: RunKind;
+  base_ref?: string | null;
+  base_repo?: string | null;
+  base_step?: string | null;
+  // Set only when the base is a "<user>/<job id>_checkpoints" STAGING repo: the
+  // originating local run's job id, which is what a person recognizes.
+  base_job_id?: string | null;
+  dataset_repo_id?: string | null;
+  policy_type?: string | null;
+  steps?: string | null;
+}
+
+/** What a run started from.
+ *
+ * `foundation` is NOT `finetune`: the VLA policies (smolvla, pi0, pi05,
+ * pi0_fast) default their starting point to a public foundation checkpoint when
+ * the user picks none, so `--policy.pretrained_path` is present on every such
+ * run — including the ones a user launched from scratch. Only a base the user
+ * actually chose is a fine-tune. */
+export type RunKind = "scratch" | "foundation" | "finetune" | "resume";
+
+/** How a base checkpoint should read on a card, or null when there is nothing
+ * to say. Pure and shared so the local and Hub cards can't drift apart.
+ *
+ * Never returns a raw "<repo>@checkpoints/<step>" ref: that string is plumbing
+ * (see checkpoints_staging_repo_id in jobs.py) and means nothing to a user. */
+/** The public foundation checkpoints the VLA policies default to.
+ *
+ * Mirrors _POLICY_FOUNDATION_BASE_REPO_ID in makermodslab/jobs.py. A run sitting on
+ * one of these was defaulted there by the backend because the user picked no
+ * starting point — so it is NOT a fine-tune, and must not be chipped as one. */
+export const FOUNDATION_BASE_REPO_IDS = new Set([
+  "lerobot/smolvla_base",
+  "lerobot/pi0_base",
+  "lerobot/pi05_base",
+  "lerobot/pi0fast-base",
+]);
+
+/** Split a `policy_pretrained_path` into the pieces formatBaseModel renders.
+ *
+ * Four shapes reach this, in the order the backend can produce them:
+ *   * "<repo>@checkpoints/<step>" — a step-suffixed Hub ref
+ *   * "<user>/<job id>_checkpoints@..." — a staging repo; the job id is the
+ *     recognizable half (see checkpoints_staging_repo_id in jobs.py)
+ *   * a bare repo id — passes through
+ *   * an absolute local directory — reduced to its last meaningful segment,
+ *     because a full "/home/…/outputs/train/…/pretrained_model" is noise
+ */
+export function splitCheckpointRef(path?: string | null): {
+  base_job_id?: string | null;
+  base_repo?: string | null;
+  base_step?: string | null;
+} {
+  if (!path) return {};
+  const ref = path.match(/^(.+)@checkpoints\/(\d+)$/);
+  const repo = ref ? ref[1] : path.replace(/@root$/, "");
+  const step = ref ? ref[2] : null;
+  if (repo.startsWith("/")) {
+    // A local directory. lerobot's checkpoints end in "<step>/pretrained_model",
+    // so the step above the leaf is the part worth showing.
+    const parts = repo.replace(/\/+$/, "").split("/");
+    const leaf = parts[parts.length - 1];
+    const name = leaf === "pretrained_model" ? parts[parts.length - 2] : leaf;
+    return { base_repo: name ?? repo, base_step: step };
+  }
+  const slug = repo.split("/").pop() ?? repo;
+  return slug.endsWith("_checkpoints")
+    ? { base_job_id: slug.slice(0, -"_checkpoints".length), base_step: step }
+    : { base_repo: repo, base_step: step };
+}
+
+export function formatBaseModel(source: {
+  base_job_id?: string | null;
+  base_repo?: string | null;
+  base_step?: string | null;
+}): string | null {
+  const name = source.base_job_id || source.base_repo;
+  if (!name) return null;
+  return source.base_step ? `${name} @ step ${Number(source.base_step)}` : name;
 }
 
 // Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,
