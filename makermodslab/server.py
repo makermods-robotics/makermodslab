@@ -28,7 +28,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -38,7 +38,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -83,6 +83,7 @@ from .jobs import (
     JobTarget,
     QueueChangedError,
     _list_local_checkpoints,
+    hub_ref_repo_id,
     job_registry,
 )
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
@@ -1694,6 +1695,28 @@ def _is_finished_run(job_id: str) -> bool:
         return False
 
 
+def _wire_job_record(record: JobRecord) -> JobRecord:
+    """The wire view of a JobRecord: `output_dir` relative to the training
+    output root.
+
+    A run's output_dir is `<output_root>/<id>/run` — an absolute path into
+    this machine's home directory, shipped verbatim in every /jobs response
+    (and, under `--lan`, to everyone on the network; the delete route already
+    scrubs the same path from its error bodies for exactly this reason). No
+    consumer needs the prefix: the frontend uses output_dir for display and
+    search only, and the LanNodeJobRunner discards it. An IMPORTED record's
+    output_dir is the user's own import path — data, not a leak — and it
+    lives outside the root, so the prefix test leaves it (and any legacy
+    out-of-root record) untouched. Registry-internal callers keep the
+    absolute form: this wraps route returns only, on the copies the registry
+    read paths already hand out."""
+    out = record.output_dir or ""
+    root = str(job_registry._output_root)
+    if out == root or out.startswith(root + os.sep):
+        return record.model_copy(update={"output_dir": os.path.relpath(out, root)})
+    return record
+
+
 @router.post("/jobs/training", status_code=201, response_model=JobRecord, tags=["jobs"])
 async def create_training_job(req: Request):
     # The body is parsed BY HAND (from_legacy accepts two shapes, which no
@@ -1871,7 +1894,7 @@ async def create_training_job(req: Request):
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return record
+    return _wire_job_record(record)
 
 
 class ImportModelRequest(BaseModel):
@@ -1895,15 +1918,15 @@ def import_model(body: ImportModelRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if existing is not None and existing.id == record.id:
-        payload = record.model_dump(mode="json")
+        payload = _wire_job_record(record).model_dump(mode="json")
         payload["already_imported"] = True
         return JSONResponse(status_code=200, content=payload)
-    return record
+    return _wire_job_record(record)
 
 
 @router.get("/jobs", response_model=JobListResponse, tags=["jobs"])
 def list_jobs(limit: int = 10):
-    return {"jobs": job_registry.list(limit=limit)}
+    return {"jobs": [_wire_job_record(r) for r in job_registry.list(limit=limit)]}
 
 
 # A MakerMods Lab cloud-training run repo is named "<policy>_<namespace>_<dataset>_<ts>"
@@ -2229,6 +2252,29 @@ def delete_hub_model(repo_id: str):
             ),
         )
 
+    # A QUEUED local run may be holding a deferred ref to exactly this repo:
+    # a fine-tune's base checkpoint (queued_hub_ref) or a cloud parent's
+    # checkpoint a continuation downloads at promotion (queued_resume_ref) —
+    # both frequently under the user's own namespace (staging repos, their
+    # own cloud runs' output repos). Deleting the repo now fails that run
+    # hours later with a download error nobody could tie to this click. Same
+    # refusal family as every other queued-dependency guard.
+    queued_readers = sorted(
+        r.id
+        for r in job_registry.list_queue()
+        if repo_id in {hub_ref_repo_id(ref) for ref in (r.queued_hub_ref, r.queued_resume_ref) if ref}
+    )
+    if queued_readers:
+        waiting = ", ".join(repr(qid) for qid in queued_readers[:10])
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Repo {repo_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel them first, or wait for them to finish."
+            ),
+            code=ErrorCode.JOB_HAS_QUEUED_DEPENDENTS,
+        )
+
     api = shared_hf_api()
     try:
         # missing_ok=True: a repo that's already gone (404) is a no-op success,
@@ -2289,15 +2335,17 @@ def list_job_queue():
     the runs at the HEAD of the line and made every reorder a 409, since
     `reorder_queue` requires the whole list.
     """
-    return {"jobs": job_registry.list_queue()}
+    return {"jobs": [_wire_job_record(r) for r in job_registry.list_queue()]}
 
 
 @router.get("/jobs/{job_id}", response_model=JobRecord, tags=["jobs"])
 def get_job(job_id: str):
     try:
-        return job_registry.get(job_id)
+        return _wire_job_record(job_registry.get(job_id))
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
 
 
 @router.get("/jobs/{job_id}/logs", response_model=JobLogsResponse, tags=["jobs"])
@@ -2305,7 +2353,9 @@ def get_job_logs(job_id: str):
     try:
         logs = job_registry.drain_logs(job_id)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     return {"logs": logs}
 
 
@@ -2316,7 +2366,9 @@ def get_job_log_file(job_id: str):
     try:
         logs = job_registry.read_persisted_logs(job_id)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     # Best-effort drain so the frontend doesn't double-display.
     with contextlib.suppress(JobNotFoundError):
         job_registry.drain_logs(job_id)
@@ -2331,7 +2383,9 @@ def get_job_metrics_history(job_id: str):
     try:
         points = job_registry.read_metrics_history(job_id)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     return {"points": points}
 
 
@@ -2341,7 +2395,9 @@ def get_job_checkpoints(job_id: str):
     try:
         return {"checkpoints": job_registry.list_checkpoints(job_id)}
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
 
 
 @router.get(
@@ -2357,7 +2413,9 @@ def get_checkpoint_policy_config(job_id: str, step: int):
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -2435,9 +2493,11 @@ def rename_job(job_id: str, body: RenameJobBody):
     display-only and need not be unique.
     """
     try:
-        return job_registry.rename(job_id, body.new_name)
+        return _wire_job_record(job_registry.rename(job_id, body.new_name))
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2451,7 +2511,10 @@ class ReorderQueueRequest(BaseModel):
     # thousands waiting. Unbounded, a 20k-id body was validated INSIDE the
     # registry lock (freezing every /jobs* request behind the set math) and came
     # back as a 360 KB error detail echoing every bad id. 422 here costs neither.
-    job_ids: list[str] = Field(max_length=512)
+    # Each ID is bounded too: capping only the count left 512 × multi-KB
+    # strings building megabyte 400s out of echoed input (generated ids top out
+    # around 150 chars — see jobs._NAMED_ID_MAX_CHARS, the render-side backstop).
+    job_ids: list[Annotated[str, StringConstraints(max_length=200)]] = Field(max_length=512)
 
 
 # NEW surface → v1_router (see the /jobs/queue GET above). Declared before
@@ -2469,7 +2532,7 @@ def reorder_job_queue(body: ReorderQueueRequest):
     request stale (409).
     """
     try:
-        return {"jobs": job_registry.reorder_queue(body.job_ids)}
+        return {"jobs": [_wire_job_record(r) for r in job_registry.reorder_queue(body.job_ids)]}
     except ValueError as exc:
         # The request itself is wrong — an id that names no run at all, or one
         # listed twice. 400, not the 409 below: retrying it unchanged can never
@@ -2516,9 +2579,11 @@ def stop_job(job_id: str, expect_state: JobState | None = None):
     advertises the real member set instead of "any string".
     """
     try:
-        return job_registry.stop(job_id, expect_state=expect_state)
+        return _wire_job_record(job_registry.stop(job_id, expect_state=expect_state))
     except JobNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+        raise ApiError(
+            status_code=404, detail=f"Job {job_id!r} not found", code=ErrorCode.JOB_NOT_FOUND
+        ) from exc
     except JobStateChangedError as exc:
         raise ApiError(
             status_code=409,
@@ -2529,7 +2594,11 @@ def stop_job(job_id: str, expect_state: JobState | None = None):
             code=ErrorCode.JOB_STATE_CHANGED,
         ) from exc
     except JobNotRunningError as exc:
-        raise HTTPException(status_code=409, detail=f"Job {job_id!r} is neither running nor queued") from exc
+        raise ApiError(
+            status_code=409,
+            detail=f"Job {job_id!r} is neither running nor queued",
+            code=ErrorCode.JOB_NOT_RUNNING,
+        ) from exc
     # Cancelling a QUEUED run removes its record, so it carries the same two
     # refusals as DELETE. Stopping a running run does not — it leaves a record
     # behind — so these can only fire on the cancel path.

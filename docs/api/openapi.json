@@ -3147,6 +3147,7 @@
         "properties": {
           "job_ids": {
             "items": {
+              "maxLength": 200,
               "type": "string"
             },
             "maxItems": 512,

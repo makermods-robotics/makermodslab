@@ -2393,3 +2393,44 @@ def test_delete_local_model_names_the_queued_finetune_instead_of_502ing(registry
     # untouched.
     assert "src_run" in registry._records
     assert (registry._output_root / "src_run").exists()
+
+
+def test_delete_downloaded_model_refuses_when_a_queued_run_reads_it(registry, tmp_lerobot_home: Path) -> None:
+    """The downloaded/imported branch of delete_local_model checked only the
+    live-inference guard (_model_in_use) — a QUEUED run whose frozen
+    policy_pretrained_path points inside the store dir sailed past it, and the
+    rmtree pulled the base out from under a run that fails at launch, hours
+    later, with a path nobody could tie to this click. Same guard, same 409 +
+    job.has_queued_dependents as every other queued-dependency refusal."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
+
+    model_dir = _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/base")
+    registry._records["queued_ft"] = JobRecord(
+        id="queued_ft",
+        name="queued_ft",
+        state="queued",
+        config=TrainingRequest(
+            dataset_repo_id="user/pick",
+            policy_pretrained_path=str(model_dir.resolve()),
+        ),
+        output_dir=str(registry._output_root / "queued_ft" / "run"),
+        started_at=1.0,
+        runner="local",
+        queue_seq=10,
+    )
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("user/base")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.has_queued_dependents"
+    assert "queued_ft" in ei.value.message
+    assert model_dir.exists(), "the refusal must leave the checkpoint on disk"
+
+    # Without the dependent, the delete works exactly as before.
+    del registry._records["queued_ft"]
+    result = delete_local_model("user/base")
+    assert result["deleted"] is True
+    assert not model_dir.exists()

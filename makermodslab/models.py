@@ -1316,6 +1316,22 @@ def _model_in_use(target_dir: Path) -> str | None:
     return None
 
 
+def _queued_runs_reading_dir(target_dir: Path) -> list[str]:
+    """Ids of QUEUED runs whose frozen `policy_pretrained_path` points at (or
+    inside) `target_dir`. The downloaded-model twin of the registry's
+    `_queued_dependents_of` path-containment leg: that one guards a REGISTRY
+    RECORD's output dir; this guards a store dir that has no record. Compared
+    on the resolved path with a separator-suffixed prefix so a sibling like
+    `<root>/base-old` never matches `<root>/base`."""
+    target = str(target_dir.resolve()).rstrip("/")
+    out: list[str] = []
+    for record in job_registry.list_queue():
+        pretrained = record.config.policy_pretrained_path or ""
+        if pretrained == target or pretrained.startswith(target + "/"):
+            out.append(record.id)
+    return sorted(out)
+
+
 def delete_local_model(model_id: str) -> dict[str, Any]:
     """Delete a local model's LOCAL files — a training run's output dir, or a
     downloaded/imported checkpoint's dir in the local models dir.
@@ -1348,6 +1364,21 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
         in_use = _model_in_use(model_dir)
         if in_use is not None:
             raise ModelError(409, in_use) from None
+        # The store-dir twin of the registry's `_queued_dependents_of`: a
+        # QUEUED run whose frozen policy_pretrained_path points inside this
+        # dir will read it at launch — the live-inference guard above can't
+        # see that, and the registry's guard only covers registry records, so
+        # the rmtree below pulled the base out from under a run that failed
+        # hours later with a path nobody could tie to this click.
+        queued_readers = _queued_runs_reading_dir(model_dir)
+        if queued_readers:
+            waiting = ", ".join(repr(qid) for qid in queued_readers)
+            raise ModelError(
+                409,
+                f"Model {model_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel them first, or wait for them to finish.",
+                code=str(ErrorCode.JOB_HAS_QUEUED_DEPENDENTS),
+            ) from None
         try:
             shutil.rmtree(model_dir)
         except OSError as rm_exc:

@@ -42,7 +42,7 @@ from tqdm.auto import tqdm as _base_tqdm
 
 from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
 from .train import TrainingRequest
-from .utils.config import is_valid_robot_name
+from .utils.config import validate_job_name
 from .utils.errors import is_out_of_memory
 from .utils.hf_auth import LOGIN_COMMAND, cached_whoami, hf_hub_offline, shared_hf_api
 from .utils.naming import (
@@ -2706,17 +2706,28 @@ def ancestor_ids_of(records: Mapping[str, JobRecord], job_id: str) -> list[str]:
 
 
 _NAMED_IDS_LIMIT = 10
+# Longest id worth echoing whole. Generated ids run ~150 chars at the extreme
+# (policy type + a full repo-id slug + timestamp); anything past this is not a
+# job id, it is payload, and an error body must not read it back.
+_NAMED_ID_MAX_CHARS = 200
 
 
 def _name_some(ids: builtins.list[str]) -> str:
-    """Render ids for an error message, naming at most `_NAMED_IDS_LIMIT`.
+    """Render ids for an error message, naming at most `_NAMED_IDS_LIMIT`,
+    each truncated to `_NAMED_ID_MAX_CHARS`.
 
     An error body exists to tell a human which id to fix; echoing every one of
     a caller-sized list instead produced a 360 KB response that helps nobody and
-    is the caller's own input read back. The count still gives them the scale of
-    what they sent.
+    is the caller's own input read back. Capping the COUNT alone still let ten
+    multi-KB strings build a megabyte 400, so each id is bounded too (the
+    reorder endpoint refuses oversized ids at validation; this is the backstop
+    for every other caller). The count still gives them the scale of what they
+    sent.
     """
-    shown = ", ".join(repr(i) for i in ids[:_NAMED_IDS_LIMIT])
+    shown = ", ".join(
+        repr(i if len(i) <= _NAMED_ID_MAX_CHARS else i[:_NAMED_ID_MAX_CHARS] + "…")
+        for i in ids[:_NAMED_IDS_LIMIT]
+    )
     extra = len(ids) - _NAMED_IDS_LIMIT
     return f"{shown} and {extra} more" if extra > 0 else shown
 
@@ -3187,8 +3198,32 @@ class JobRegistry:
         self._annotate_queue(record, self._queue_positions(snapshot))
         return record
 
+    def local_dataset_in_use(self, repo_id: str) -> bool:
+        """True when a RUNNING or QUEUED local run trains on `repo_id`.
+
+        The exact answer `datasets._dataset_in_use` needs before letting a
+        dataset be renamed or deleted. It used to derive this from
+        `list(limit=200)` — a PAGE — so an active run past the 200th record
+        was invisible and its dataset could be pulled out from under it. One
+        snapshot under the lock, then a plain scan; queued counts because a
+        queued run was validated against this dataset at submit and nothing
+        re-downloads at launch."""
+        with self._lock:
+            records = list(self._records.values())
+        return any(
+            r.state in ("running", "queued") and r.runner == "local" and r.config.dataset_repo_id == repo_id
+            for r in records
+        )
+
     def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
         target = target or JobTarget()
+        # The submit half of the shared display-name rule (rename is the other
+        # half): a blank/absent job_name still means "derive a name below", but
+        # a non-blank one must pass the same character and length checks a
+        # rename would — the two paths write the same fields, and this one
+        # accepted anything. ValueError → this endpoint's ordinary 400.
+        if config.job_name is not None and config.job_name.strip():
+            config.job_name = validate_job_name(config.job_name)
         if target.runner == "hf_cloud" and not target.flavor:
             raise ValueError("flavor is required when runner is hf_cloud")
         if target.runner == "lan_node":
@@ -4640,14 +4675,11 @@ class JobRegistry:
         back to `name` when unset.
 
         Aliases are display-only, so uniqueness is NOT enforced (unlike
-        calibration/robot renames, where the name is a file key). The same
-        is_valid-style guard is applied for consistency (rejects path-ish
-        characters); trimmed; empty ⇒ ValueError (→ HTTP 400)."""
-        name = new_name.strip()
-        if not name:
-            raise ValueError("Display name cannot be empty.")
-        if not is_valid_robot_name(name):
-            raise ValueError("Invalid display name.")
+        calibration/robot renames, where the name is a file key). Validation
+        (trim, non-empty, path-ish characters, length cap) is the SHARED
+        `validate_job_name` — the same rule `start` applies to a submitted
+        `job_name`, so what one path refuses the other can't store."""
+        name = validate_job_name(new_name)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
@@ -5533,7 +5565,28 @@ class JobRegistry:
         unverifiable base is logged as such.
         """
         config = record.config
-        if not config.policy_pretrained_path or config.resume:
+        if config.resume:
+            # A RESUME carries no pretrained path to re-verify — what it froze
+            # at submit is `config_path`, the checkpoint's train_config.json a
+            # local→local continuation hands the trainer. The registry's own
+            # delete/cancel guards (`_queued_dependents_of`) protect that file
+            # from registry-mediated removal, but not from the DISK changing
+            # under a run that waited hours: a checkpoint pruned by hand, an
+            # unmounted external volume. Unchecked, the trainer died at launch
+            # with a raw path-not-found traceback nobody could tie to the
+            # cause; refuse cleanly with the path named instead. A missing
+            # file is definitive (unlike the Hub reads below there is no
+            # transient-network excuse for a local stat), so this refusal
+            # doesn't launch-anyway. Cloud-parent resumes carry a
+            # queued_resume_ref and no config_path yet — nothing to check.
+            if config.config_path and not os.path.isfile(config.config_path):
+                return (
+                    f"The checkpoint this continuation was queued to resume from is gone: "
+                    f"{config.config_path} no longer exists. It was there when the run was "
+                    "queued; something removed it while the run waited."
+                )
+            return None
+        if not config.policy_pretrained_path:
             return None
         try:
             _check_pretrained_policy_type(config.policy_pretrained_path, config.policy_type)
@@ -5658,6 +5711,14 @@ class JobRegistry:
         that record `failed`, and the next tick tries the one behind it.
         """
         # -- phase 1: pick the head --------------------------------------
+        # A shutdown means NO new promotion, including from a drain already in
+        # flight — `shutdown()` exists precisely so the queue can't spawn a
+        # detached trainer while the server is going away, and stopping only
+        # the next tick left this call free to do exactly that. Re-checked
+        # again before phase 3, because phase 2 is the network-long window a
+        # shutdown most plausibly lands in.
+        if self._stop_watchdog.is_set():
+            return
         # Asked BEFORE the lock: it reads other modules' globals and must not
         # widen this lock's reach. Waiting rather than failing — the run keeps
         # its place and the next tick tries again.
@@ -5698,6 +5759,11 @@ class JobRegistry:
         busy_with = self._robot_busy()
         if busy_with is not None:
             logger.debug("Holding the training queue: %s started using the robot", busy_with)
+            return
+        # The shutdown twin of the re-check above — see phase 1. A stop event
+        # set during the slow phase must hold the promotion, not just the next
+        # tick's.
+        if self._stop_watchdog.is_set():
             return
 
         # -- phase 3: promote and launch ----------------------------------

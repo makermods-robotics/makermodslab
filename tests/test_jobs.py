@@ -7676,12 +7676,14 @@ def test_a_queued_run_protects_its_dataset(monkeypatch, tmp_path) -> None:
     launch — so renaming or deleting it here surfaced hours later as a bare
     exit code with nothing tying it to the action that caused it."""
     import makermodslab.datasets as datasets_mod
-    from makermodslab.jobs import job_registry
+    import makermodslab.jobs as jobs_mod
 
     reg = _quiet_registry(tmp_path)
     record = _inject_queued(reg, "waiting", seq=10)
     record.config.dataset_repo_id = "user/ds"
-    monkeypatch.setattr(job_registry, "list", lambda limit=10: [record])
+    # _dataset_in_use asks the registry directly (local_dataset_in_use), so
+    # swap the singleton for this real registry holding the queued record.
+    monkeypatch.setattr(jobs_mod, "job_registry", reg)
 
     blocked = datasets_mod._dataset_in_use("user/ds")
 
@@ -8363,3 +8365,260 @@ def test_the_robot_mutex_is_rechecked_after_slow_validation(monkeypatch, tmp_pat
     monkeypatch.setattr(reg, "_robot_busy", lambda: None)
     reg._drain_queue()
     assert reg.get("w").state == "running"
+
+
+def test_error_bodies_stay_bounded_however_long_the_ids(client, monkeypatch) -> None:
+    """Two halves of one bound. _name_some already caps how MANY ids an error
+    names (10), but each id was echoed whole — 512 ids × a multi-KB string
+    still built megabyte 400 bodies out of the caller's own input. So: the
+    reorder body now refuses oversized ids at validation (422, before the
+    registry lock), and _name_some truncates what it echoes as defense for
+    every other path."""
+    from makermodslab.jobs import _name_some
+
+    # Validation half: an oversized id never reaches the registry — it is a
+    # 422 with the app-wide code, not the registry's 400 echoing it back as a
+    # "job id" in prose. (FastAPI's 422 detail echoes the offending INPUT per
+    # its standard shape — that is request-bounded and app-wide, not this
+    # endpoint's amplification.)
+    huge = "x" * 5000
+    resp = client.post("/api/v1/jobs/queue/reorder", json={"job_ids": [huge]})
+    assert resp.status_code == 422, resp.status_code
+    body = resp.json()
+    assert body["code"] == "request.validation"
+    assert body["detail"][0]["type"] == "string_too_long"
+
+    # Echo half: even fed pathological ids, the rendering stays bounded.
+    rendered = _name_some(["y" * 300_000 for _ in range(50)])
+    assert len(rendered) < 3_000
+
+
+def test_job_name_is_validated_and_capped_on_both_paths(monkeypatch, tmp_path) -> None:
+    """rename() always validated its alias (path-ish characters refused) but
+    create (start's `config.job_name`) took it raw and unbounded — the same
+    string lands in the same `name`/`display_name` fields either way, so a
+    path-shaped or multi-KB name was refusable on one path and storable on
+    the other. One shared validator now covers both, with a length cap rename
+    never had. Validated at the BOUNDARIES (start/rename), deliberately not
+    on the model: a model constraint would make `_load_from_disk` drop every
+    legacy record whose never-validated name breaks the new rule."""
+    from makermodslab.jobs import JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    _inject_running_local(reg)  # keep the slot busy: submits queue, nothing launches
+
+    def _submit(name):
+        return reg.start(TrainingRequest(dataset_repo_id="user/ds", job_name=name), JobTarget(runner="local"))
+
+    # Create path: refuses what rename refuses, plus the new cap.
+    for bad in ("a/b", "a\\b", "has..dots", "x" * 300):
+        with pytest.raises(ValueError):
+            _submit(bad)
+    assert [r for r in reg._records.values() if r.state == "queued"] == [], "a refused submit left a record"
+
+    # The friendly shapes still work, including "unset" (blank ⇒ derived name).
+    named = _submit("Bench arm, run 2")
+    assert named.name == "Bench arm, run 2"
+    derived = _submit("   ")
+    assert derived.name == "ACT · user/ds"
+
+    # Rename path: same validator, so the cap holds there too.
+    with pytest.raises(ValueError):
+        reg.rename(named.id, "x" * 300)
+    with pytest.raises(ValueError):
+        reg.rename(named.id, "a/b")
+    assert reg.rename(named.id, "Bench arm").display_name == "Bench arm"
+
+
+def test_stop_and_get_refusals_carry_job_codes(client, monkeypatch) -> None:
+    """The queue-era refusals on these routes got codes (job.state_changed,
+    job.has_queued_dependents…) while the pre-existing ones stayed bare
+    HTTPExceptions — so an SDK could dispatch on the new failure modes but had
+    to string-match the old ones. Wire the existing codes through."""
+    from makermodslab.jobs import JobRecord, JobRegistry, job_registry
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(JobRegistry, "_drain_queue", lambda self: None)
+
+    def _code_of(resp):
+        return resp.json().get("code")
+
+    # 404s: unknown id, on the GET family and stop alike.
+    assert _code_of(client.get("/jobs/ghost")) == "job.not_found"
+    assert _code_of(client.get("/jobs/ghost/logs")) == "job.not_found"
+    assert _code_of(client.get("/jobs/ghost/log-file")) == "job.not_found"
+    assert _code_of(client.get("/jobs/ghost/metrics-history")) == "job.not_found"
+    assert _code_of(client.get("/jobs/ghost/checkpoints")) == "job.not_found"
+    assert _code_of(client.post("/jobs/ghost/stop")) == "job.not_found"
+    assert _code_of(client.post("/jobs/ghost/rename", json={"new_name": "x"})) == "job.not_found"
+
+    # 409: stop on a run that is neither running nor queued.
+    record = JobRecord(
+        id="already-done",
+        name="already-done",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds"),
+        output_dir="",
+        started_at=0.0,
+        runner="local",
+    )
+    original = dict(job_registry._records)
+    try:
+        job_registry._records["already-done"] = record
+        resp = client.post("/jobs/already-done/stop")
+        assert resp.status_code == 409
+        assert _code_of(resp) == "job.not_running"
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
+
+
+def test_wire_records_do_not_leak_the_host_output_root(client, monkeypatch, tmp_path) -> None:
+    """A JobRecord's output_dir is `<output_root>/<id>/run` — an absolute path
+    into this machine's home directory, shipped verbatim in every /jobs
+    response (and, under --lan, to everyone on the network). The frontend
+    never needs the prefix (verified: display/search only, and the
+    LanNodeJobRunner discards output_dir outright), so wire responses carry
+    the OUTPUT-ROOT-RELATIVE form. An imported record's output_dir is the
+    user's own import path — data, not a leak — and passes through unchanged."""
+    from makermodslab.jobs import JobRecord, JobRegistry, job_registry
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(JobRegistry, "_drain_queue", lambda self: None)
+    root = job_registry._output_root
+
+    local = JobRecord(
+        id="local-run",
+        name="local-run",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds"),
+        output_dir=str(root / "local-run" / "run"),
+        started_at=1.0,
+        runner="local",
+    )
+    imported = JobRecord(
+        id="imported-run",
+        name="imported-run",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)"),
+        output_dir="/Users/someone/models/act_thing",
+        started_at=2.0,
+        runner="imported",
+    )
+    original = dict(job_registry._records)
+    try:
+        job_registry._records.update({"local-run": local, "imported-run": imported})
+
+        got = client.get("/jobs/local-run").json()
+        assert got["output_dir"] == "local-run/run", got["output_dir"]
+
+        listed = {j["id"]: j["output_dir"] for j in client.get("/jobs?limit=50").json()["jobs"]}
+        assert listed["local-run"] == "local-run/run"
+        assert listed["imported-run"] == "/Users/someone/models/act_thing"
+
+        # The registry itself still holds the absolute path — internal
+        # consumers (checkpoint scans, delete's sandbox check) depend on it.
+        assert job_registry._records["local-run"].output_dir == str(root / "local-run" / "run")
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
+
+
+def test_shutdown_stops_an_in_flight_drain_between_phases(monkeypatch, tmp_path) -> None:
+    """shutdown() exists so the queue can't promote a NEW detached trainer
+    while the server is going away — but it only stopped the NEXT tick. A
+    drain already past phase 1 sailed through promotion even when shutdown
+    landed during phase 2's (network-long) validation, spawning exactly the
+    orphan the method documents itself as preventing. The drain now re-checks
+    the stop event before promoting."""
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+    _inject_queued(reg, "w", seq=10)
+
+    def _shutdown_mid_validation(record):
+        reg.shutdown()
+        return None
+
+    monkeypatch.setattr(reg, "_queued_launch_refusal", _shutdown_mid_validation)
+
+    reg._drain_queue()
+
+    assert reg.get("w").state == "queued", "a shutdown mid-drain still promoted a run"
+
+
+def test_a_queued_resume_missing_its_frozen_config_path_fails_cleanly(monkeypatch, tmp_path) -> None:
+    """Fine-tunes are re-validated at promotion (_queued_launch_refusal), but
+    a RESUME was launched on nothing but its frozen config_path — the file a
+    local resume froze at submit time. The registry's delete guards protect it
+    from registry-mediated deletes, but not from the disk changing under a
+    run that waited hours (a checkpoint pruned by hand, an external volume
+    unmounted); the trainer then died with a raw path-not-found traceback
+    nobody could tie to the cause. Promotion now checks the file exists and
+    fails the run with the path named."""
+    reg = _quiet_registry(tmp_path)
+    _fake_local_runner(monkeypatch)
+
+    gone = tmp_path / "gone" / "train_config.json"
+    rec = _inject_queued(reg, "cont", seq=10)
+    rec.config = rec.config.model_copy(
+        update={"resume": True, "resume_from_job_id": "src", "config_path": str(gone)}
+    )
+
+    reg._drain_queue()
+
+    failed = reg.get("cont")
+    assert failed.state == "failed"
+    assert failed.error_message is not None
+    assert str(gone) in failed.error_message
+
+    # An intact config_path launches exactly as before.
+    present = tmp_path / "here" / "train_config.json"
+    present.parent.mkdir(parents=True)
+    present.write_text("{}")
+    rec2 = _inject_queued(reg, "cont2", seq=20)
+    rec2.config = rec2.config.model_copy(
+        update={"resume": True, "resume_from_job_id": "src", "config_path": str(present)}
+    )
+    reg._drain_queue()
+    assert reg.get("cont2").state == "running"
+
+
+def test_hub_model_delete_refuses_while_a_queued_run_will_read_it(client, monkeypatch, tmp_path) -> None:
+    """DELETE /jobs/hub/models/{repo_id} destroys weights on the Hub — and a
+    QUEUED run may be holding a deferred ref to exactly that repo: a
+    fine-tune's base (queued_hub_ref) or a cloud parent's checkpoint a
+    continuation will download at promotion (queued_resume_ref). Nothing
+    checked, so the cleanup card could delete the repo out from under a run
+    that fails hours later. Same 409 + job.has_queued_dependents the other
+    dependency guards speak; the Hub call never happens."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRegistry, job_registry
+
+    monkeypatch.setattr(JobRegistry, "_drain_queue", lambda self: None)
+    fake_api = MagicMock()
+    monkeypatch.setattr("makermodslab.server.shared_hf_api", lambda: fake_api)
+    monkeypatch.setattr("makermodslab.server.cached_whoami", lambda: {"name": "user"})
+
+    original = dict(job_registry._records)
+    try:
+        job_registry._records.clear()
+        rec = _inject_queued(job_registry, "queued-ft", seq=10)
+        rec.queued_hub_ref = "user/base-model@checkpoints/005000"
+
+        resp = client.delete("/jobs/hub/models/user/base-model")
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["code"] == "job.has_queued_dependents"
+        assert "queued-ft" in body["detail"]
+        fake_api.delete_repo.assert_not_called()
+
+        # A repo no queued run references still deletes as before.
+        resp = client.delete("/jobs/hub/models/user/unrelated")
+        assert resp.status_code == 200, resp.text
+        fake_api.delete_repo.assert_called_once()
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)

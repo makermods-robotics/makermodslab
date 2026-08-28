@@ -713,15 +713,17 @@ def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
     _make_dataset(tmp_lerobot_home, "makermods/train_ds", episodes=1)
 
     # _dataset_in_use imports job_registry from .jobs lazily (datasets<->record
-    # cycle), so patch it at its source module.
+    # cycle), so patch it at its source module. The registry answers via
+    # local_dataset_in_use (exact scan; matching covered by
+    # test_dataset_in_use_sees_every_active_run_not_a_page).
     from makermodslab import jobs
 
-    job = MagicMock()
-    job.state = "running"
-    job.runner = "local"
-    job.config.dataset_repo_id = "makermods/train_ds"
     with (
-        patch.object(jobs.job_registry, "list", return_value=[job]),
+        patch.object(
+            jobs.job_registry,
+            "local_dataset_in_use",
+            side_effect=lambda repo_id: repo_id == "makermods/train_ds",
+        ),
         pytest.raises(DatasetRenameError) as exc,
     ):
         rename_local_dataset("makermods/train_ds", "renamed")
@@ -2938,3 +2940,47 @@ def test_get_hub_dataset_info_caches_under_the_resolved_id(tmp_path: Path) -> No
     # The upload path holds the bare id; the sweep must still find the entry.
     ds.invalidate_hub_dataset_info("pick")
     assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path) -> None:
+    """_dataset_in_use scanned `job_registry.list(limit=200)` — a PAGE — so an
+    active local run past the 200th record was invisible and its dataset
+    could be renamed or deleted out from under it. The check now asks the
+    registry exactly (one snapshot under the lock), so no depth of queue or
+    history can hide a consumer."""
+    from unittest.mock import patch as _patch
+
+    from makermodslab import jobs
+    from makermodslab.datasets import _dataset_in_use
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    with _patch.object(JobRegistry, "_start_watchdog", lambda self: None):
+        reg = JobRegistry(tmp_lerobot_home / "outputs" / "train")
+
+    # 201 queued runs on other datasets ahead of the one that matters.
+    for i in range(201):
+        reg._records[f"q{i:03d}"] = JobRecord(
+            id=f"q{i:03d}",
+            name=f"q{i:03d}",
+            state="queued",
+            config=TrainingRequest(dataset_repo_id="user/other"),
+            output_dir=str(reg._output_root / f"q{i:03d}" / "run"),
+            started_at=float(i),
+            runner="local",
+            queue_seq=i + 1,
+        )
+    reg._records["target"] = JobRecord(
+        id="target",
+        name="target",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/held"),
+        output_dir=str(reg._output_root / "target" / "run"),
+        started_at=999.0,
+        runner="local",
+        queue_seq=999,
+    )
+
+    with _patch.object(jobs, "job_registry", reg):
+        assert _dataset_in_use("user/held") is not None
+        assert _dataset_in_use("user/untouched") is None
