@@ -41,6 +41,11 @@ export default {
     resume: {
       // {{name}} is the parent run's name — data, rendered verbatim.
       titleFromStep: "Continuing “{{name}}” from step {{step}}",
+      // Shown only when the total differs from the parent run's. lerobot
+      // rebuilds the LR schedule from the new total, so the rate jumps at the
+      // resume point instead of continuing to decay.
+      lrSeam:
+        "Total steps differ from the original run ({{from}} → {{to}}). LeRobot rebuilds the learning-rate schedule from the new total, so the rate can jump back up at the resume point instead of continuing to decay. Keep {{from}} for an unbroken schedule.",
       titleFromLatest: "Continuing “{{name}}” from its latest checkpoint",
       // <0> emphasises the "Steps" control by name. {{steps}} is the
       // pre-formatted prefill. One complete sentence per runner, because the

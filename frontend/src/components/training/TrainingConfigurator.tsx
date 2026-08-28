@@ -39,6 +39,19 @@ import { getDatasetInfo } from "@/lib/replayApi";
 
 // Passed by the "Continue" button on a completed local job, or the "Resume"
 // button on a cloud run that ended before its step target.
+// Policies whose lerobot preset returns NO LR scheduler — a constant learning
+// rate, so changing the step total cannot produce a schedule seam and the
+// warning below would be a plain falsehood. Taken from
+// `get_scheduler_preset() -> None` across the pinned lerobot v0.6.0's
+// `policies/*/configuration_*.py`. If lerobot adds another such policy this
+// list goes stale in the safe-ish direction: a warning that does not apply.
+const POLICIES_WITHOUT_LR_SCHEDULE = new Set([
+  "act",
+  "tdmpc",
+  "fastwam",
+  "gaussian_actor",
+]);
+
 export type ResumeSeed = {
   // The run being CONTINUED — the lineage edge. Always the leaf the user
   // clicked, never the checkpoint's owner, so chains stay linear (see
@@ -800,6 +813,26 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               components={[<span key="0" className="font-medium" />]}
             />
           </p>
+          {/* The LR-schedule seam. lerobot's schedulers are LambdaLR objects
+              whose horizon is captured in a closure over `cfg.steps`, and
+              LambdaLR.state_dict() stores `lr_lambdas: [None]` for plain
+              functions — so resuming REBUILDS the schedule from the new total
+              and restores only the step counter, never the horizon. Change the
+              total and the learning rate jumps at the resume point instead of
+              continuing to decay. (Measured on the SmolVLA preset: a parent
+              targeting 1,500 resumed at 5,000 gives a 32x higher LR at the
+              seam.) Keeping the parent's total is continuous, so this warns
+              only when the number actually differs. */}
+          {resumeSeed.sourceSteps > 0 &&
+          config.steps !== resumeSeed.sourceSteps &&
+          !POLICIES_WITHOUT_LR_SCHEDULE.has(resumeSeed.policyType) ? (
+            <p className="mt-2 text-warn">
+              {t("training.configurator.resume.lrSeam", {
+                from: resumeSeed.sourceSteps.toLocaleString(),
+                to: config.steps.toLocaleString(),
+              })}
+            </p>
+          ) : null}
           {isCloud ? (
             <p className="mt-1 text-muted-foreground">
               {/* The timeout is an HF-Jobs duration string — wire format, so
