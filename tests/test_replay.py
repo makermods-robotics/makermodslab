@@ -361,7 +361,7 @@ def test_ensure_uncapped_clears_a_surviving_speed_cap(monkeypatch) -> None:
     monkeypatch.setattr(
         replay,
         "clear_goal_velocity",
-        lambda robot, label: (
+        lambda robot, side, label: (
             robot.bus.sync_write("Goal_Velocity", dict.fromkeys(robot.bus.motors, 0), normalize=False) or []
         ),
     )
@@ -380,7 +380,7 @@ def test_ensure_uncapped_retries_when_the_cap_survives(monkeypatch) -> None:
     monkeypatch.setattr(
         replay,
         "clear_goal_velocity",
-        lambda robot, label: robot.bus.sync_write("Goal_Velocity", {}, normalize=False) or [],
+        lambda robot, side, label: robot.bus.sync_write("Goal_Velocity", {}, normalize=False) or [],
     )
 
     replay._ensure_uncapped(_CapRobot(bus), "follower arm")
@@ -402,7 +402,7 @@ def test_ensure_uncapped_survives_an_unreadable_bus(monkeypatch) -> None:
         def sync_write(self, reg, values, normalize=True):
             pass
 
-    monkeypatch.setattr(replay, "clear_goal_velocity", lambda robot, label: [])
+    monkeypatch.setattr(replay, "clear_goal_velocity", lambda robot, side, label: [])
     replay._ensure_uncapped(_CapRobot(_Dead()), "follower arm")  # must not raise
 
 
