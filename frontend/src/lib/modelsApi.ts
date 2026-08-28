@@ -44,6 +44,75 @@ export async function getModels(
   });
 }
 
+/** Where a skill's weights came from, as opposed to where they live now
+ * (`source`). This is what the library filters on. */
+export type SkillOrigin =
+  | "trained-local"
+  | "trained-cloud"
+  | "imported"
+  | "downloaded"
+  | "hub-untracked";
+
+/** Whether the weights can be loaded. "unverified" is a Hub-backed row the
+ * server deliberately did NOT probe — confirming each one is a serial round
+ * trip, so the claim is settled by the download the deploy path runs anyway. */
+export type SkillWeights = "ready" | "unverified" | "none";
+
+/** One row of GET /skills. A ModelItem plus the facts that decide whether it
+ * can actually be run, and the job that runs it. */
+export interface SkillItem extends ModelItem {
+  origin: SkillOrigin;
+  weights: SkillWeights;
+  /** Terminal state of the run behind it, when there is one. "failed" rows are
+   * listed and runnable — the weights exist — but must be badged. */
+  state: string | null;
+  /** The run that represents this one's resume chain; non-null means this row
+   * is a link, not a skill, and `deployable` is false. */
+  superseded_by: string | null;
+  /** Derived server-side, never stored: weights are loadable AND nothing
+   * supersedes it. */
+  deployable: boolean;
+  /** The registry record that deploys this row, stamped by the server. Null for
+   * a row no run tracks (a bare Hub repo, a scanned directory) — those still go
+   * through the lazy import on pick. */
+  job_id: string | null;
+  /** Set on a Hub row served from the last complete listing because this
+   * refresh could not reach the Hub. */
+  stale?: boolean;
+}
+
+/** Reachability of the Hub half of the listing. Without this an outage and an
+ * empty shelf are the same screen. */
+export interface SkillsHubStatus {
+  ok: boolean;
+  authenticated: boolean;
+  degraded: boolean;
+  /** Some rows are being served from the last complete listing. */
+  stale_rows: boolean;
+}
+
+export interface SkillsEnvelope {
+  skills: SkillItem[];
+  hub: SkillsHubStatus;
+}
+
+/** GET /skills — every trained policy, each saying whether it can run.
+ *
+ * The deployable projection of the same build /models serves. Both the deploy
+ * picker and the models library read THIS, so they cannot disagree about what a
+ * skill is; /models stays the wider artifact listing the fine-tune base picker
+ * needs. */
+export async function getSkills(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<SkillsEnvelope> {
+  return apiRequest<SkillsEnvelope>(baseUrl, fetcher, "/skills", {
+    signal,
+    action: "List skills",
+  });
+}
+
 /** Detail view of one model. Adds `size_bytes` (null for a Hub-only model,
  * which isn't on disk) on top of the listing fields. */
 export interface ModelInfo extends ModelItem {

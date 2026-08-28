@@ -1719,6 +1719,161 @@ def list_all_models() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Skills — the deployable projection.
+# ---------------------------------------------------------------------------
+#
+# /models answers "what can I fine-tune FROM"; /skills answers "what can I run
+# ON THE ROBOT". They were one endpoint feeding two surfaces that then filtered
+# it differently — the deploy picker by usable-checkpoint, the models library by
+# runner type — which is why the two lists disagreed about what a skill is.
+# There is now one definition, here, and both surfaces read it.
+
+
+def _weights_state(row: dict[str, Any]) -> str:
+    """Whether this row's weights can be loaded: ready | unverified | none.
+
+    "unverified" is the deliberate one. A Hub-backed row is NOT probed to
+    confirm the push landed — doing that per row is a serial, un-deadlined
+    round-trip each, on a listing that already fans out per author. The claim
+    is made from the record and settled at selection, by the download the deploy
+    path performs anyway: loudly, once, and only for the row the user picked."""
+    path = row.get("path")
+    if path:
+        # A PATH is not weights. `_final_checkpoint_dir` accepts a checkpoint dir
+        # on the strength of its config.json alone (that is the registry's
+        # "a checkpoint exists" question), while loading needs
+        # model.safetensors or an adapter pair. A run killed mid-save leaves
+        # exactly the first without the second, and calling that "ready" would
+        # offer a skill that cannot start.
+        return "ready" if _has_loadable_weights(Path(path)) else "none"
+    if row.get("hf_repo_id"):
+        return "unverified"
+    return "none"
+
+
+def _explained_rows(
+    known_ids: set[str], known_paths: set[str], known_repos: set[str]
+) -> list[dict[str, Any]]:
+    """Runs the /models listing omits, returned WITH the reason they were omitted.
+
+    Two kinds, and the picker was silent about both:
+
+      * SUPERSEDED — a run another run resumed. The chain collapses to its tip,
+        which is right, but "my run finished and it is not in the list" deserves
+        "it is represented by <tip>", not an absence.
+      * FAILED WITH WEIGHTS — excluded from /models on the principle that a
+        confirmed non-zero exit should not sit next to real models. The Train
+        panel's own card has always ignored that principle (its Run row gates on
+        having a checkpoint, not on state), so the rule was enforced in one
+        panel and contradicted in the next. An OOM at step 90k with a good 80k
+        checkpoint is a usable skill; it is listed, carrying `state: "failed"`
+        so the UI can badge it rather than pretend it succeeded.
+
+      * BROKEN IMPORT — an import is a POINTER, so the directory it names can be
+        moved, emptied or deleted afterwards. The listing drops it (offering a
+        path that fails at load is worse than omitting it), but dropping it from
+        the LIBRARY too would leave a registered record the user can no longer
+        see, and therefore can no longer delete. It is listed with
+        `weights: "none"`, which keeps it out of the picker and visible where it
+        can be cleaned up.
+
+    Rows already produced by the merge are skipped THREE ways — by id, by
+    resolved path, and by repo id. The last matters because a failed local run
+    that was pushed to the Hub already reaches the merge as a repo-keyed row: its
+    id there is the repo, its path is null, so neither of the other two checks
+    can see it and the run would be listed twice."""
+    out: list[dict[str, Any]] = []
+    for record in job_registry.list(limit=_LOCAL_MODEL_SCAN_LIMIT, with_checkpoints=False):
+        if record.runner == "imported":
+            # Only the ones list_imported_models could not build a row for; the
+            # healthy ones are already in the merge.
+            if record.id in known_ids or (record.hf_repo_id or "").lower() in known_repos:
+                continue
+            if _imported_model_summary(record) is not None:
+                continue
+            out.append(
+                {
+                    "id": record.id,
+                    "name": record.display_name or record.name,
+                    "policy_type": None,
+                    "dataset": None,
+                    "steps": None,
+                    "target_steps": None,
+                    "state": record.state,
+                    "path": None,
+                    "last_modified": _epoch_iso(record.ended_at or record.started_at),
+                    "hf_repo_id": None,
+                    "source": "local",
+                    "origin": "imported",
+                    "job_id": record.id,
+                    "superseded_by": None,
+                }
+            )
+            continue
+
+        if record.runner != "local" or record.state not in ("done", "interrupted", "failed"):
+            continue
+        # A leaf that reached a clean terminal state is already in the merge.
+        if not record.child_ids and record.state != "failed":
+            continue
+        pretrained_dir = _final_checkpoint_dir(record)
+        if pretrained_dir is None:
+            continue
+        row = _local_model_summary(record, pretrained_dir)
+        if row["id"] in known_ids or row["path"] in known_paths:
+            continue
+        if (record.hf_repo_id or "").lower() in known_repos:
+            continue
+        row["superseded_by"] = record.child_ids[0] if record.child_ids else None
+        out.append(row)
+    return out
+
+
+def list_skills() -> dict[str, Any]:
+    """The /skills envelope: every trained policy, each saying whether it can run.
+
+    A projection of the same merged build /models uses, plus the rows that build
+    deliberately drops (see _explained_rows), annotated with:
+
+      * `weights`      — ready | unverified | none
+      * `superseded_by` — the run that represents this one's chain, or None
+      * `deployable`   — weights are loadable AND nothing supersedes it
+
+    `deployable` is DERIVED, never stored: a checkpoint dir can be deleted and a
+    resume can land at any time, so a persisted flag would rot with no writer
+    nearby. That is the same reason `checkpoint_count` and `child_ids` are
+    computed on read in the registry.
+
+    The envelope carries the Hub half's status so the UI can tell "the Hub was
+    unreachable" from "you own nothing" — the two states that used to render
+    identically, as an empty list."""
+    rows, hub_status = _cached_build()
+
+    known_ids = {row["id"] for row in rows}
+    known_paths = {row["path"] for row in rows if row.get("path")}
+    known_repos = {(row.get("hf_repo_id") or "").lower() for row in rows}
+    known_repos.discard("")
+    hidden = get_hidden_models()
+    extra = [row for row in _explained_rows(known_ids, known_paths, known_repos) if row["id"] not in hidden]
+
+    skills: list[dict[str, Any]] = []
+    for row in [*rows, *extra]:
+        weights = _weights_state(row)
+        superseded_by = row.get("superseded_by")
+        skills.append(
+            {
+                **row,
+                "weights": weights,
+                "superseded_by": superseded_by,
+                "deployable": weights != "none" and superseded_by is None,
+            }
+        )
+
+    skills.sort(key=lambda m: m.get("last_modified") or "", reverse=True)
+    return {"skills": skills, "hub": hub_status}
+
+
+# ---------------------------------------------------------------------------
 # Per-model info card.
 # ---------------------------------------------------------------------------
 

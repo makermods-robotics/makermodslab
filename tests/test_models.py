@@ -1114,6 +1114,1014 @@ def test_models_delete_endpoint(client, registry) -> None:
 
 
 # ---------------------------------------------------------------------------
+# list_imported_models — registered pointer imports as a listing source.
+# ---------------------------------------------------------------------------
+
+
+def _seed_import(
+    registry,
+    job_id: str,
+    *,
+    output_dir: Any = "",
+    hf_repo_id: str | None = None,
+    name: str | None = None,
+    started_at: float = 900.0,
+):
+    """Register an `imported` pointer record the way jobs.register_imported does:
+    a resolved local dir in output_dir, OR a repo id in hf_repo_id, never both,
+    and a placeholder config ("(imported)" dataset, "model" policy type)."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    record = JobRecord(
+        id=job_id,
+        name=name or job_id,
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type="model"),
+        output_dir=str(output_dir),
+        started_at=started_at,
+        ended_at=started_at,
+        runner="imported",
+        hf_repo_id=hf_repo_id,
+    )
+    registry._records[job_id] = record
+    return record
+
+
+def _listing(hub_rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    from makermodslab.models import list_all_models
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows or []):
+            stack.enter_context(cm)
+        return list_all_models()
+
+
+def test_list_all_models_lists_a_disk_pointer_import(registry, tmp_lerobot_home, tmp_path) -> None:
+    """An import stores a POINTER, not a copy: an arbitrary output_dir and no
+    repo. Such a record is not a `local` run (so list_local_models skips it on
+    the runner gate), owns no Hub repo (so list_hub_models never sees it), and
+    was never copied into the local models store (so the downloaded scan never
+    walks it). It fell through all three, and /models did not list it at all
+    while /jobs did — the models library and the deploy picker disagreeing
+    permanently, with no TTL involved."""
+    ckpt = _make_model_checkpoint(tmp_path / "elsewhere", "my_policy", shape="tree")
+    _seed_import(registry, "act_imported", output_dir=ckpt, name="Sock folding")
+
+    row = next(r for r in _listing() if r["id"] == "act_imported")
+    assert row["name"] == "Sock folding"
+    assert row["source"] == "local"
+    # Detail is read off the checkpoint, never off the placeholder config.
+    assert row["policy_type"] == "act"
+    assert row["dataset"] is None
+    assert row["path"].endswith("pretrained_model")
+
+
+def test_list_all_models_lists_a_foreign_hub_pointer_import(registry, tmp_lerobot_home) -> None:
+    """The other pointer shape: a repo in someone else's namespace. list_hub_models
+    fans out over the USER's own authors, so a foreign repo never appears there
+    however healthy the Hub is. Stamped from the record — the row exists without
+    a single Hub call, which is what keeps this source off the /models latency
+    path."""
+    _seed_import(registry, "smolvla_imported", hf_repo_id="someone/smolvla_dishes")
+
+    row = next(r for r in _listing() if r["id"] == "someone/smolvla_dishes")
+    assert row["source"] == "hub"
+    assert row["hf_repo_id"] == "someone/smolvla_dishes"
+    assert row["path"] is None
+    # "model" is register_imported's fallback, not a policy — inferred from the
+    # repo name instead of surfaced as if it were a fact.
+    assert row["policy_type"] == "smolvla"
+
+
+def test_list_all_models_import_does_not_duplicate_its_own_hub_row(registry, tmp_lerobot_home) -> None:
+    """A repo the user owns is already listed by the Hub half. Re-adding it under
+    the import's key would offer one set of weights twice, under two ids that
+    both work. Matched case-insensitively, the rule jobs.find_imported dedups
+    on — HF repo ids are practically unique across casing."""
+    _seed_import(registry, "act_imported", hf_repo_id="Makermods/ACT_Pick")
+
+    hub_rows = [{"repo_id": "makermods/act_pick", "last_modified": None, "private": False}]
+    ids = [r["id"] for r in _listing(hub_rows)]
+    assert ids.count("makermods/act_pick") == 1
+    assert "Makermods/ACT_Pick" not in ids
+
+
+def test_list_all_models_import_of_an_owned_repo_keeps_its_job_id(registry, tmp_lerobot_home) -> None:
+    """Importing a repo the user already owns dedupes the ROW away — correctly,
+    it is one set of weights — but the import is still the registry record that
+    tracks them. Without carrying its id onto the surviving row, every surface
+    keying on `job_id` (the models library does) silently lost a card it used to
+    show for exactly this shape of import."""
+    from makermodslab.models import list_all_models
+
+    _seed_import(registry, "smolvla_imported", hf_repo_id="me/act_pick")
+    hub_rows = [{"repo_id": "me/act_pick", "last_modified": None, "private": False}]
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    rows = [r for r in result if (r.get("hf_repo_id") or "") == "me/act_pick"]
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == "smolvla_imported"
+
+
+def test_list_all_models_a_training_run_outranks_an_import_for_the_job_id(registry, tmp_lerobot_home) -> None:
+    """When both a real run and an import point at one repo, the run wins the
+    slot: it trained the weights, while the import's config is a placeholder."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "real_run", repo_id="me/act_pick", state="done")
+    _seed_import(registry, "smolvla_imported", hf_repo_id="me/act_pick")
+    hub_rows = [{"repo_id": "me/act_pick", "last_modified": None, "private": False}]
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["id"] == "me/act_pick")
+    assert row["job_id"] == "real_run"
+    assert row["origin"] == "trained-cloud"
+
+
+def test_list_all_models_import_does_not_duplicate_a_pin_across_casing(registry, tmp_lerobot_home) -> None:
+    """An import stores whatever casing the user pasted; a pin is keyed by the
+    casing it was saved under. The pin fold matches EXACTLY, so folding imports
+    in first left the pin unmatched and the listing showed one repo twice —
+    which is why imports fold in after the pins, compared case-insensitively."""
+    from makermodslab.models import list_all_models
+
+    _seed_import(registry, "act_imported", hf_repo_id="Acme/Policy")
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("makermodslab.models.list_hub_models", return_value=[]))
+        stack.enter_context(
+            patch("makermodslab.models.get_saved_custom_models", return_value=["acme/policy"])
+        )
+        stack.enter_context(patch("makermodslab.models.get_hidden_models", return_value=set()))
+        stack.enter_context(patch("makermodslab.jobs.shared_hf_api", return_value=_NoHubFiles()))
+        result = list_all_models()
+
+    repos = [(r.get("hf_repo_id") or "").lower() for r in result]
+    assert repos.count("acme/policy") == 1
+
+
+def test_list_all_models_import_does_not_resurrect_a_hidden_repo_across_casing(
+    registry, tmp_lerobot_home
+) -> None:
+    """ "Removed from list" is filtered by exact key. Without a case-insensitive
+    check in the imported fold, hiding "Acme/Policy" and then importing
+    "acme/policy" walks the hidden repo straight back into the picker — the
+    user's removal silently undone by an unrelated action."""
+    from makermodslab.models import list_all_models
+
+    _seed_import(registry, "act_imported", hf_repo_id="acme/policy")
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("makermodslab.models.list_hub_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_saved_custom_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_hidden_models", return_value={"Acme/Policy"}))
+        stack.enter_context(patch("makermodslab.jobs.shared_hf_api", return_value=_NoHubFiles()))
+        result = list_all_models()
+
+    assert [r for r in result if (r.get("hf_repo_id") or "").lower() == "acme/policy"] == []
+
+
+def test_list_all_models_import_of_a_run_output_dir_is_not_a_second_row(registry, tmp_lerobot_home) -> None:
+    """Nothing stops an import being registered against a completed run's own
+    output dir. Both sources then resolve the SAME pretrained_model dir, so
+    without a path check the listing offers one checkpoint twice under two
+    working ids — the precise duplication this whole change exists to remove."""
+    _seed_run(registry, "act_pick_2026", policy_type="act", dataset="user/pick", steps=250)
+    run_dir = registry._output_root / "act_pick_2026" / "run"
+    _seed_import(registry, "act_imported", output_dir=run_dir)
+
+    result = _listing()
+    paths = [r["path"] for r in result if r["path"]]
+    assert len(paths) == len(set(paths))
+    assert "act_imported" not in [r["id"] for r in result]
+
+
+def test_list_all_models_drops_an_import_whose_directory_lost_its_weights(
+    registry, tmp_lerobot_home, tmp_path
+) -> None:
+    """The import is a pointer, so the directory it names can be moved, emptied
+    or deleted afterwards. Offering a path that fails at load is worse than
+    omitting it — the same rule the downloaded scan applies to a partial
+    download."""
+    gone = tmp_path / "moved_away"
+    gone.mkdir()
+    _seed_import(registry, "act_imported", output_dir=gone)
+
+    assert "act_imported" not in [r["id"] for r in _listing()]
+
+
+def test_list_all_models_skips_a_superseded_import(registry, tmp_lerobot_home, tmp_path) -> None:
+    """One skill per resume chain, represented by its tip — the same rule
+    list_local_models applies, applied here so a chain cannot re-enter the
+    listing through its imported root."""
+    ckpt = _make_model_checkpoint(tmp_path / "elsewhere", "base_policy", shape="tree")
+    _seed_import(registry, "act_imported", output_dir=ckpt)
+    _seed_run(registry, "act_continued", policy_type="act")
+    registry._records["act_continued"].config.resume_from_job_id = "act_imported"
+
+    assert "act_imported" not in [r["id"] for r in _listing()]
+
+
+class _CountingHubApi:
+    """HfApi stand-in that RECORDS repo listings instead of performing them.
+
+    Counting, not raising: `_list_hub_checkpoints` wraps its `list_repo_files`
+    call in `except Exception: return []` (a repo may legitimately not exist
+    yet, mid-training), so an exploding stub is swallowed and proves exactly
+    nothing — a test built on one passes whether or not the Hub was reached.
+    The call log is the only honest evidence."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def list_repo_files(self, repo_id, repo_type):
+        self.calls.append(repo_id)
+        return []
+
+
+def test_list_all_models_never_probes_the_hub_for_checkpoint_counts(registry, tmp_lerobot_home) -> None:
+    """The listing scans the registry three times (runs, imports, repo naming).
+    `JobRegistry.list` stamps `checkpoint_count` on every record it returns, and
+    for a cloud or imported-hub record that count is a Hub round-trip — serial,
+    and with no deadline of its own. So a user with N cloud runs was paying up
+    to N blocking round-trips on any /models call that arrived with a cold 30s
+    cache, for a field the listing never reads.
+
+    All three scans now opt out, so a cold cache costs the listing nothing. The
+    seeded records cover both shapes that used to probe: a cloud run and an
+    imported Hub pointer."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "cloud_run", repo_id="user/act_cloud_2026-01-01_10-00-00")
+    _seed_import(registry, "smolvla_imported", hf_repo_id="someone/smolvla_dishes")
+    _seed_run(registry, "act_local", policy_type="act")
+
+    api = _CountingHubApi()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("makermodslab.models.list_hub_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_saved_custom_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_hidden_models", return_value=set()))
+        stack.enter_context(patch("makermodslab.jobs.shared_hf_api", return_value=api))
+        result = list_all_models()
+
+    assert api.calls == []
+    # ...and the rows those scans exist to produce are still here, so this is a
+    # test about not paying for an unread field, not about not scanning.
+    ids = {r["id"] for r in result}
+    assert "act_local" in ids
+    assert "someone/smolvla_dishes" in ids
+
+
+# ---------------------------------------------------------------------------
+# _hub_listing — degraded-Hub status and last-good retention.
+# ---------------------------------------------------------------------------
+
+
+def _hub_call(
+    rows: list[dict[str, Any]],
+    *,
+    authors: tuple[str, ...],
+    answered: int,
+    authenticated: bool = True,
+):
+    """A list_hub_models stand-in that also reports how the fan-out went.
+
+    The real function records its outcome on the way out; a patched one has to
+    do the same or _hub_listing cannot tell a complete listing from a degraded
+    one."""
+    import makermodslab.models as m
+
+    def _call():
+        m._record_hub_outcome(authenticated=authenticated, authors=authors, answered=answered)
+        return rows
+
+    return _call
+
+
+def _row(repo_id: str) -> dict[str, Any]:
+    return {"repo_id": repo_id, "last_modified": None, "private": False}
+
+
+def test_hub_listing_retains_rows_a_degraded_fan_out_dropped() -> None:
+    """A Hub blip used to delete the user's models from the screen: the fan-out
+    swallowed the failure, returned fewer rows, and the UI rendered that as the
+    truth. The rows are kept, flagged stale, and the status says it is degraded."""
+    import makermodslab.models as m
+
+    with patch(
+        "makermodslab.models.list_hub_models",
+        side_effect=_hub_call([_row("me/act_a")], authors=("me",), answered=1),
+    ):
+        rows, status = m._hub_listing()
+    assert [r["repo_id"] for r in rows] == ["me/act_a"]
+    assert status["ok"] is True
+
+    m.invalidate_model_listing_cache()
+    with patch("makermodslab.models.list_hub_models", side_effect=_hub_call([], authors=("me",), answered=0)):
+        rows, status = m._hub_listing()
+
+    assert [r["repo_id"] for r in rows] == ["me/act_a"]
+    assert rows[0]["stale"] is True
+    assert status["ok"] is False
+    assert status["degraded"] is True
+    assert status["stale_rows"] is True
+
+
+def test_hub_listing_does_not_serve_one_accounts_repos_to_another() -> None:
+    """The fallback is keyed to the identity its rows were listed for. A stale
+    listing is a tolerable degradation; someone else's listing is not."""
+    import makermodslab.models as m
+
+    with (
+        patch("makermodslab.models.get_token", return_value="alice-token"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([_row("alice/act_a")], authors=("alice",), answered=1),
+        ),
+    ):
+        m._hub_listing()
+
+    m.invalidate_model_listing_cache()
+    with (
+        patch("makermodslab.models.get_token", return_value="bob-token"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([], authors=("bob",), answered=0),
+        ),
+    ):
+        rows, status = m._hub_listing()
+
+    assert rows == []
+    assert status["degraded"] is True
+    assert status["stale_rows"] is False
+
+
+# ---------------------------------------------------------------------------
+# list_cloud_models — cloud runs are not gated on the Hub listing.
+# ---------------------------------------------------------------------------
+
+
+def test_list_all_models_lists_a_finished_cloud_run_before_the_hub_does(registry, tmp_lerobot_home) -> None:
+    """The cloud gap. A cloud run entered the listing ONLY via list_hub_models,
+    so a run that had finished, been recorded done, and had its repo pushed did
+    not exist as a skill until the per-author fan-out happened to return that
+    repo — while the Train panel already showed it finished. The registry knows
+    the run ended and which repo it published to; that is enough to list it."""
+    from makermodslab.models import list_all_models
+
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_done", repo_id=repo, state="done")
+
+    # The Hub returns NOTHING — the push may still be settling, or the fan-out
+    # may have been cut short.
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["id"] == repo)
+    assert row["origin"] == "trained-cloud"
+    assert row["job_id"] == "cloud_done"
+    assert row["dataset"] == "makermods/eraser"
+
+
+def test_list_skills_marks_a_registry_stamped_cloud_run_unverified(registry, tmp_lerobot_home) -> None:
+    """Listing it is a claim about the RUN, not about the bytes. Nothing was
+    probed, so the row says so — and is still offered, because the download the
+    deploy path runs anyway is what settles it, loudly and once."""
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_done", repo_id=repo, state="done")
+
+    row = next(r for r in _skills()["skills"] if r["id"] == repo)
+    assert row["weights"] == "unverified"
+    assert row["deployable"] is True
+
+
+def test_list_all_models_cloud_row_does_not_duplicate_its_hub_row(registry, tmp_lerobot_home) -> None:
+    """Once the Hub DOES return the repo, the registry-stamped row must step
+    aside — the Hub listing adds detail (privacy, real last-modified) to a row
+    whose existence it no longer gates, rather than producing a second one."""
+    from makermodslab.models import list_all_models
+
+    # Deliberately different casing on the two sides: the runner stores whatever
+    # repo id it was configured with, the Hub returns its canonical spelling, and
+    # HF repo ids are unique case-insensitively. An exact compare here lists one
+    # repo twice.
+    repo = "Me/ACT_Cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_done", repo_id=repo, state="done")
+    hub_rows = [{"repo_id": "me/act_cloud_2026-01-01_10-00-00", "last_modified": None, "private": True}]
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    rows = [r for r in result if (r.get("hf_repo_id") or "").lower() == repo.lower()]
+    assert len(rows) == 1
+    assert rows[0]["private"] is True
+    assert rows[0]["job_id"] == "cloud_done"
+    assert rows[0]["origin"] == "trained-cloud"
+
+
+def test_list_all_models_skips_a_cloud_run_that_is_still_training(registry, tmp_lerobot_home) -> None:
+    """Only terminal runs. A running job's repo may hold nothing yet, and the
+    Train panel is where a run in progress belongs."""
+    from makermodslab.models import list_all_models
+
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_running", repo_id=repo, state="running")
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        assert repo not in {r["id"] for r in list_all_models()}
+
+
+def test_list_all_models_skips_a_superseded_cloud_run(registry, tmp_lerobot_home) -> None:
+    """One skill per resume chain. A cloud resume republishes into run #1's
+    repo, so without this the chain would list under a link rather than its
+    tip."""
+    from makermodslab.models import list_all_models
+
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_parent", repo_id=repo, state="done", started_at=100.0)
+    _seed_cloud_run(registry, "cloud_tip", repo_id=repo, state="running", started_at=200.0)
+    registry._records["cloud_tip"].config.resume_from_job_id = "cloud_parent"
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        assert repo not in {r["id"] for r in list_all_models()}
+
+
+def test_list_all_models_does_not_resurrect_a_hidden_cloud_repo(registry, tmp_lerobot_home) -> None:
+    """ "Removed from list" survives the new source: the fold consults the hidden
+    set itself, because it runs before the listing's own exact-key filter."""
+    from makermodslab.models import list_all_models
+
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_done", repo_id=repo, state="done")
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("makermodslab.models.list_hub_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_saved_custom_models", return_value=[]))
+        # Hidden under the casing the user hid it with, published under another.
+        stack.enter_context(
+            patch("makermodslab.models.get_hidden_models", return_value={"Me/ACT_Cloud_2026-01-01_10-00-00"})
+        )
+        stack.enter_context(patch("makermodslab.jobs.shared_hf_api", return_value=_NoHubFiles()))
+        result = list_all_models()
+
+    assert repo not in {r["id"] for r in result}
+
+
+def _cloud_ids(hub_rows: list[dict[str, Any]] | None = None) -> set[str]:
+    from makermodslab.models import invalidate_model_listing_cache, list_all_models
+
+    # Each call is a fresh build: the merged listing is cached, and these tests
+    # deliberately ask the same question twice with different Hub answers.
+    invalidate_model_listing_cache()
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows or []):
+            stack.enter_context(cm)
+        return {r["id"] for r in list_all_models()}
+
+
+def test_list_all_models_lists_an_interrupted_cloud_run_that_trained(registry, tmp_lerobot_home) -> None:
+    """Pins the STATE TUPLE, which nothing else did. Both reviewers found the
+    same escape: mutate the gate to `state == "done"` and every other cloud test
+    still passed while interrupted tips silently vanished."""
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_stopped", repo_id=repo, state="interrupted")
+    registry._records["cloud_stopped"].metrics.current_step = 4000
+
+    assert repo in _cloud_ids()
+
+
+def test_list_all_models_skips_an_interrupted_cloud_run_that_never_stepped(
+    registry, tmp_lerobot_home
+) -> None:
+    """The evidence gate. `hf_repo_id` is stamped at SUBMIT and the cloud wrapper
+    creates the repo before training starts, so the repo existing proves nothing
+    — a run stopped before its first step pushed nothing, and offering it would
+    be a picker entry that fails only when the user tries to run it."""
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_stillborn", repo_id=repo, state="interrupted")
+    registry._records["cloud_stillborn"].metrics.current_step = 0
+
+    assert repo not in _cloud_ids()
+
+
+def test_list_all_models_does_not_registry_stamp_a_failed_cloud_run(registry, tmp_lerobot_home) -> None:
+    """A failed LOCAL run never enters /models at all, and reaches /skills only
+    after its weights are verified on disk. Nothing equivalent is checkable for
+    a cloud run without the Hub call this source exists to avoid, so `failed`
+    gets no registry shortcut — it still appears the moment the Hub listing
+    returns its repo."""
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_failed", repo_id=repo, state="failed")
+    registry._records["cloud_failed"].metrics.current_step = 9000
+
+    assert repo not in _cloud_ids()
+    # ...but the Hub returning it is still enough.
+    assert repo in _cloud_ids([{"repo_id": repo, "last_modified": None, "private": False}])
+
+
+def test_list_all_models_cloud_chain_row_carries_the_tips_job_id(registry, tmp_lerobot_home) -> None:
+    """A realistic chain through the fold, which no test covered. A cloud resume
+    republishes into run #1's repo, so both links name one repo and the ranking
+    has to elect the tip — otherwise the row deploys an earlier link than the
+    one that finished."""
+    from makermodslab.models import list_all_models
+
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "link_1", repo_id=repo, state="interrupted", started_at=100.0)
+    registry._records["link_1"].metrics.current_step = 1500
+    _seed_cloud_run(registry, "link_2_tip", repo_id=repo, state="done", started_at=200.0)
+    registry._records["link_2_tip"].config.resume_from_job_id = "link_1"
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    rows = [r for r in result if (r.get("hf_repo_id") or "") == repo]
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == "link_2_tip"
+
+
+def test_list_all_models_elects_the_tip_when_a_done_parent_has_a_child(registry, tmp_lerobot_home) -> None:
+    """Leaf-first ranking, which nothing else exercises.
+
+    `JobRegistry.start` refuses to resume a "done" run, so within a chain the
+    done record IS the tip and the done/leaf rules agree — this state is only
+    reachable from a registry written by an older version or edited by hand.
+    Without leaf-first the done parent is elected, then dropped by the leaf
+    filter in list_cloud_models, and the chain vanishes from the listing
+    entirely rather than falling through to its tip."""
+    from makermodslab.models import list_all_models
+
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "done_parent", repo_id=repo, state="done", started_at=100.0)
+    _seed_cloud_run(registry, "real_tip", repo_id=repo, state="interrupted", started_at=200.0)
+    registry._records["real_tip"].metrics.current_step = 7000
+    registry._records["real_tip"].config.resume_from_job_id = "done_parent"
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if (r.get("hf_repo_id") or "") == repo)
+    assert row["job_id"] == "real_tip"
+
+
+def test_hub_listing_labels_rows_with_the_identity_they_were_fetched_under() -> None:
+    """Capturing the identity BEFORE the fan-out and filing the result under it
+    is a race: sign out of Alice and into Bob while the fetch is in flight and
+    Bob's repos get stored under Alice's key, to be handed back to Alice on her
+    next visit. The credentials in play when the rows were produced are the
+    honest label."""
+    import makermodslab.models as m
+
+    # "alice" for the pre-fetch read, "bob" for every read after: the switch
+    # lands while the fan-out is running.
+    reads = {"n": 0}
+
+    def switching_token():
+        reads["n"] += 1
+        return "alice-token" if reads["n"] == 1 else "bob-token"
+
+    with (
+        patch("makermodslab.models.get_token", side_effect=switching_token),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([_row("bob/act_b")], authors=("bob",), answered=1),
+        ),
+    ):
+        rows, _ = m._hub_listing()
+    assert [r["repo_id"] for r in rows] == ["bob/act_b"]
+
+    # Alice comes back. The cache is warm and inside its TTL, but it belongs to
+    # Bob — she must get her own listing, not his.
+    with (
+        patch("makermodslab.models.get_token", return_value="alice-token"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([_row("alice/act_a")], authors=("alice",), answered=1),
+        ),
+    ):
+        rows, _ = m._hub_listing()
+
+    assert [r["repo_id"] for r in rows] == ["alice/act_a"]
+
+
+def test_list_skills_marks_a_cloud_repo_continued_by_a_local_run_superseded(
+    registry, tmp_lerobot_home
+) -> None:
+    """The reachable superseded case, which the earlier test missed by building
+    an API-impossible one (resuming a `done` run is refused outright).
+
+    A CLOUD run continued by a LOCAL one keeps the repo on the parent — the
+    local child has none of its own. So once the Hub returns that repo it lands
+    beside the local tip's row: two picker entries for one trained model. The
+    repo row has to say it is a chain link."""
+    repo = "me/act_cloud_2026-01-01_10-00-00"
+    _seed_cloud_run(registry, "cloud_parent", repo_id=repo, state="interrupted", started_at=100.0)
+    registry._records["cloud_parent"].metrics.current_step = 1500
+    _seed_run(registry, "local_tip", policy_type="act", ended_at=900.0)
+    registry._records["local_tip"].config.resume_from_job_id = "cloud_parent"
+
+    skills = _skills([{"repo_id": repo, "last_modified": None, "private": False}])["skills"]
+
+    repo_row = next(r for r in skills if r["id"] == repo)
+    assert repo_row["superseded_by"] == "local_tip"
+    assert repo_row["deployable"] is False
+    # The local tip is the one that runs.
+    assert next(r for r in skills if r["id"] == "local_tip")["deployable"] is True
+
+
+def test_hub_listing_survives_a_whoami_blip_without_wiping_the_fallback() -> None:
+    """`cached_whoami` swallows transport failures and returns None, so a token
+    holder whose identity check blips looked exactly like a signed-out user.
+    That was worse than the bug this fallback exists to fix: every Hub row
+    vanished, the status still claimed `ok`, and the last-good listing was
+    overwritten with the empty result — destroying the safety net precisely when
+    it was needed."""
+    import makermodslab.models as m
+
+    with (
+        patch("makermodslab.models.get_token", return_value="tok"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([_row("me/act_a")], authors=("me",), answered=1),
+        ),
+    ):
+        m._hub_listing()
+
+    m.invalidate_model_listing_cache()
+    # Token still present; whoami failed, so the listing reports unauthenticated
+    # with no authors and returns nothing.
+    with (
+        patch("makermodslab.models.get_token", return_value="tok"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([], authenticated=False, authors=(), answered=0),
+        ),
+    ):
+        rows, status = m._hub_listing()
+
+    assert [r["repo_id"] for r in rows] == ["me/act_a"]
+    assert rows[0]["stale"] is True
+    assert status["ok"] is False
+    assert m._hub_last_good, "the fallback must survive the blip that needed it"
+
+
+def test_forget_hub_repo_is_not_undone_by_a_fetch_already_in_flight() -> None:
+    """The delete clears the fallback, but a fan-out that STARTED before it
+    finishes afterwards holding pre-deletion data — and would write the deleted
+    repo straight back in. Modelled exactly: the delete lands mid-fetch, and the
+    listing still reports the repo because it read the Hub before it happened."""
+    import makermodslab.models as m
+
+    def listing_that_is_overtaken_by_a_delete():
+        # Happens while the fan-out is in flight.
+        m.forget_hub_repo("me/act_gone")
+        m._record_hub_outcome(authenticated=True, authors=("me",), answered=1)
+        return [_row("me/act_gone"), _row("me/act_kept")]
+
+    with (
+        patch("makermodslab.models.get_token", return_value="tok"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=listing_that_is_overtaken_by_a_delete,
+        ),
+    ):
+        rows, _ = m._hub_listing()
+
+    assert [r["repo_id"] for r in rows] == ["me/act_kept"]
+    assert [r["repo_id"] for r in (m._hub_last_good or [])] == ["me/act_kept"]
+
+
+def test_forget_hub_repo_is_retired_when_the_repo_comes_back() -> None:
+    """The tombstone is not permanent. A listing that BEGAN after the delete and
+    still returns the repo is evidence it exists again — recreated, or the Hub
+    was eventually consistent — so the row is honoured rather than suppressed
+    forever."""
+    import makermodslab.models as m
+
+    m.forget_hub_repo("me/act_gone")
+
+    with (
+        patch("makermodslab.models.get_token", return_value="tok"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([_row("me/act_gone")], authors=("me",), answered=1),
+        ),
+    ):
+        rows, _ = m._hub_listing()
+
+    assert [r["repo_id"] for r in rows] == ["me/act_gone"]
+    assert "me/act_gone" not in m._forgotten_hub_repos
+
+
+def test_list_all_models_hidden_repo_does_not_return_under_another_casing(registry, tmp_lerobot_home) -> None:
+    """Hiding stores whatever casing the UI had; the Hub returns its canonical
+    one. An exact-only final filter let the repo walk straight back in."""
+    from makermodslab.models import list_all_models
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "makermodslab.models.list_hub_models",
+                return_value=[{"repo_id": "me/act_pick", "last_modified": None, "private": False}],
+            )
+        )
+        stack.enter_context(patch("makermodslab.models.get_saved_custom_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_hidden_models", return_value={"Me/ACT_Pick"}))
+        stack.enter_context(patch("makermodslab.jobs.shared_hf_api", return_value=_NoHubFiles()))
+        result = list_all_models()
+
+    assert [r for r in result if (r.get("hf_repo_id") or "").lower() == "me/act_pick"] == []
+
+
+# ---------------------------------------------------------------------------
+# list_skills — the deployable projection.
+# ---------------------------------------------------------------------------
+
+
+def _skills(hub_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    from makermodslab.models import list_skills
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows or []):
+            stack.enter_context(cm)
+        return list_skills()
+
+
+def test_list_skills_marks_a_local_run_deployable(registry, tmp_lerobot_home) -> None:
+    """The baseline: a completed local run with weights on disk is deployable,
+    carries the job id that deploys it, and says where it came from."""
+    _seed_run(registry, "act_pick_2026", policy_type="act", dataset="user/pick", steps=250)
+
+    row = next(r for r in _skills()["skills"] if r["id"] == "act_pick_2026")
+    assert row["deployable"] is True
+    assert row["weights"] == "ready"
+    assert row["origin"] == "trained-local"
+    assert row["job_id"] == "act_pick_2026"
+    assert row["superseded_by"] is None
+
+
+def test_list_skills_lists_a_failed_run_that_saved_weights(registry, tmp_lerobot_home) -> None:
+    """/models excludes a failed run on principle. The Train panel's card has
+    always run one anyway (its Run row gates on having a checkpoint, not on
+    state), so the principle was enforced in one panel and contradicted in the
+    next. An OOM at step 90k with a good 80k checkpoint is a usable skill: it is
+    listed and deployable, and keeps `state: "failed"` so the UI can badge it."""
+    from makermodslab.models import list_all_models
+
+    _seed_run(registry, "act_oom", policy_type="act", state="failed")
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        assert "act_oom" not in {r["id"] for r in list_all_models()}
+
+    row = next(r for r in _skills()["skills"] if r["id"] == "act_oom")
+    assert row["state"] == "failed"
+    assert row["deployable"] is True
+    assert row["weights"] == "ready"
+
+
+def test_list_skills_explains_a_superseded_run_instead_of_hiding_it(registry, tmp_lerobot_home) -> None:
+    """A resumed run collapses into its chain's tip, which is right — but the
+    picker simply omitted it, so "my run finished and it is not in the list" had
+    no answer. It is listed, not deployable, and names the run that represents
+    it."""
+    _seed_run(registry, "act_parent", policy_type="act")
+    _seed_run(registry, "act_tip", policy_type="act")
+    registry._records["act_tip"].config.resume_from_job_id = "act_parent"
+
+    skills = _skills()["skills"]
+    parent = next(r for r in skills if r["id"] == "act_parent")
+    assert parent["superseded_by"] == "act_tip"
+    assert parent["deployable"] is False
+    # The tip still stands for the chain and is the one that runs.
+    assert next(r for r in skills if r["id"] == "act_tip")["deployable"] is True
+
+
+def test_list_skills_keeps_a_broken_import_visible_but_unrunnable(
+    registry, tmp_lerobot_home, tmp_path
+) -> None:
+    """An import is a pointer, so its directory can be moved or emptied later.
+    The listing drops such a row rather than offer a path that fails at load —
+    but dropping it from the LIBRARY too would leave a registered record the
+    user can see nowhere and therefore delete nowhere. It is listed with no
+    weights: out of the picker, still cleanable."""
+    gone = tmp_path / "moved_away"
+    gone.mkdir()
+    _seed_import(registry, "act_imported", output_dir=gone, name="Old import")
+
+    row = next(r for r in _skills()["skills"] if r["id"] == "act_imported")
+    assert row["weights"] == "none"
+    assert row["deployable"] is False
+    assert row["origin"] == "imported"
+    assert row["name"] == "Old import"
+
+
+def test_list_skills_marks_a_hub_only_row_unverified_not_ready(registry, tmp_lerobot_home) -> None:
+    """A Hub repo is never probed at listing time to confirm its push landed —
+    that is a serial round-trip per row. It claims `unverified`, and the
+    download the deploy path runs anyway settles it."""
+    hub_rows = [{"repo_id": "user/act_sock_2026-01-01_10-00-00", "last_modified": None, "private": False}]
+    row = next(r for r in _skills(hub_rows)["skills"] if r["id"] == hub_rows[0]["repo_id"])
+    assert row["weights"] == "unverified"
+    assert row["deployable"] is True
+    assert row["origin"] == "hub-untracked"
+
+
+def test_list_skills_reports_hub_reachability(registry, tmp_lerobot_home) -> None:
+    """The envelope's whole reason to exist: "the Hub was unreachable" and "you
+    own no skills" used to render identically, as an empty list."""
+    assert _skills()["hub"]["ok"] is True
+
+    from makermodslab.models import invalidate_model_listing_cache, list_skills
+
+    # The status rides the merged cache with the rows it describes — one build,
+    # one snapshot, so a row and the reachability claim about it can never come
+    # from different moments. Drop it to observe a second, different build.
+    invalidate_model_listing_cache()
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        stack.enter_context(
+            patch(
+                "makermodslab.models._hub_listing",
+                return_value=(
+                    [],
+                    {"ok": False, "authenticated": True, "degraded": True, "stale_rows": False},
+                ),
+            )
+        )
+        envelope = list_skills()
+
+    assert envelope["hub"]["ok"] is False
+    assert envelope["hub"]["degraded"] is True
+
+
+def test_list_skills_does_not_resurrect_a_hidden_superseded_run(registry, tmp_lerobot_home) -> None:
+    """The explained rows are folded in after the merge, so they bypass the
+    listing's own hidden filter and have to honour it themselves."""
+    _seed_run(registry, "act_parent", policy_type="act")
+    _seed_run(registry, "act_tip", policy_type="act")
+    registry._records["act_tip"].config.resume_from_job_id = "act_parent"
+
+    from makermodslab.models import list_skills
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("makermodslab.models.list_hub_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_saved_custom_models", return_value=[]))
+        stack.enter_context(patch("makermodslab.models.get_hidden_models", return_value={"act_parent"}))
+        stack.enter_context(patch("makermodslab.jobs.shared_hf_api", return_value=_NoHubFiles()))
+        skills = list_skills()["skills"]
+
+    assert "act_parent" not in {r["id"] for r in skills}
+
+
+def test_hub_listing_cache_hit_does_not_serve_another_accounts_rows() -> None:
+    """The identity check has to sit on the cache-HIT path too. Guarding only
+    the last-good fallback still left a 45s window in which signing out of one
+    account and into another showed the previous account's repos."""
+    import makermodslab.models as m
+
+    with (
+        patch("makermodslab.models.get_token", return_value="alice-token"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([_row("alice/act_a")], authors=("alice",), answered=1),
+        ),
+    ):
+        rows, _ = m._hub_listing()
+    assert [r["repo_id"] for r in rows] == ["alice/act_a"]
+
+    # No invalidation: the cache is warm and well inside its TTL. Only the
+    # credentials changed, which is what an account switch IS.
+    with (
+        patch("makermodslab.models.get_token", return_value="bob-token"),
+        patch(
+            "makermodslab.models.list_hub_models",
+            side_effect=_hub_call([_row("bob/act_b")], authors=("bob",), answered=1),
+        ),
+    ):
+        rows, _ = m._hub_listing()
+
+    assert [r["repo_id"] for r in rows] == ["bob/act_b"]
+
+
+def test_forget_hub_repo_drops_it_from_the_last_good_fallback() -> None:
+    """Retention is a net for rows we failed to SEE. A repo the user deleted is
+    not one of those: leaving it in the fallback resurrects it on every later
+    degraded fan-out, forever."""
+    import makermodslab.models as m
+
+    with patch(
+        "makermodslab.models.list_hub_models",
+        side_effect=_hub_call([_row("me/act_a"), _row("me/act_b")], authors=("me",), answered=1),
+    ):
+        m._hub_listing()
+
+    m.forget_hub_repo("me/act_a")
+
+    with patch(
+        "makermodslab.models.list_hub_models",
+        side_effect=_hub_call([], authors=("me",), answered=0),
+    ):
+        rows, status = m._hub_listing()
+
+    assert [r["repo_id"] for r in rows] == ["me/act_b"]
+    assert status["degraded"] is True
+
+
+def test_list_all_models_newest_run_owns_a_shared_repo_row(registry, tmp_lerobot_home) -> None:
+    """Several local runs can publish to one repo. The collapse overwrites
+    unconditionally and `local` is newest-first, so without a first-claim guard
+    the OLDEST run processed last would end up owning the row — and `job_id`
+    would name a run the listing does not mean."""
+    from makermodslab.models import list_all_models
+
+    repo = "me/act_shared"
+    _seed_run(registry, "act_old", policy_type="act", hf_repo_id=repo, ended_at=100.0)
+    _seed_run(registry, "act_new", policy_type="act", hf_repo_id=repo, ended_at=900.0)
+
+    hub_rows = [{"repo_id": repo, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r.get("hf_repo_id") == repo and r["source"] == "both")
+    assert row["job_id"] == "act_new"
+
+
+def test_list_skills_will_not_call_a_config_only_checkpoint_ready(registry, tmp_lerobot_home) -> None:
+    """A path is not weights. The registry accepts a checkpoint dir on its
+    config.json alone, but loading needs model.safetensors — a run killed
+    mid-save leaves exactly the first without the second, and calling that
+    deployable offers a skill that cannot start."""
+    pretrained = _seed_run(registry, "act_halfsaved", policy_type="act", state="failed")
+    (pretrained / "model.safetensors").unlink()
+
+    row = next(r for r in _skills()["skills"] if r["id"] == "act_halfsaved")
+    assert row["weights"] == "none"
+    assert row["deployable"] is False
+
+
+def test_list_skills_does_not_list_a_pushed_failed_run_twice(registry, tmp_lerobot_home) -> None:
+    """A failed run that was pushed already reaches the merge as a repo-keyed
+    row — id is the repo, path is null — so neither the id nor the path check
+    can see it, and it came back a second time as an explained row."""
+    repo = "me/act_failed"
+    _seed_run(registry, "act_failed", policy_type="act", state="failed", hf_repo_id=repo)
+
+    hub_rows = [{"repo_id": repo, "last_modified": None, "private": False}]
+    skills = _skills(hub_rows)["skills"]
+
+    assert len([r for r in skills if r.get("hf_repo_id") == repo]) == 1
+    assert "act_failed" not in {r["id"] for r in skills}
+
+
+def test_list_all_models_import_deduped_by_path_keeps_its_job_id(registry, tmp_lerobot_home) -> None:
+    """The other way an import's row is deduped away: it points AT a checkpoint
+    the downloaded-model scan already found, so the path check drops it. That
+    scanned row carries no job_id of its own, so unless the import's id is
+    stamped onto it the record becomes unreachable — and the library, which
+    keys on job_id, loses a card it used to show."""
+    from makermodslab.models import list_all_models
+
+    ckpt = _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
+    _seed_import(registry, "act_imported", output_dir=ckpt)
+
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing([]):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    rows = [r for r in result if r.get("path") == str(ckpt)]
+    assert len(rows) == 1, "one checkpoint, one row"
+    assert rows[0]["job_id"] == "act_imported"
+
+
+# ---------------------------------------------------------------------------
 # Downloaded / imported local models — the local models dir scan + probe.
 # ---------------------------------------------------------------------------
 
@@ -2119,20 +3127,33 @@ def test_invalidate_model_hub_info_forces_refetch() -> None:
     assert fake_api.model_info.call_count == 2
 
 
-def test_list_all_models_hub_rows_carry_policy_type(registry) -> None:
+def test_list_all_models_hub_rows_carry_policy_type(registry, tmp_lerobot_home) -> None:
+    """A hub row's policy type survives the merge into the listing.
+
+    Sandboxed like every other list_all_models test: patching only
+    list_hub_models left the pin/hidden files and the downloaded-model scan
+    pointed at the DEVELOPER'S real ~/.cache, so the assertion passed or failed
+    according to what the person running it happened to have pinned. It also
+    asserted on result[0], which is a claim about sort order, not about policy
+    types — the row is now selected by the repo it belongs to."""
     from makermodslab.models import list_all_models
 
+    repo_id = "user/act_sock_2026-01-01_10-00-00"
     hub_rows = [
         {
-            "repo_id": "user/act_sock_2026-01-01_10-00-00",
+            "repo_id": repo_id,
             "last_modified": None,
             "private": False,
             "policy_type": "act",
         },
     ]
-    with patch("makermodslab.models.list_hub_models", return_value=hub_rows):
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
         result = list_all_models()
-    assert result[0]["policy_type"] == "act"
+
+    row = next(r for r in result if r["id"] == repo_id)
+    assert row["policy_type"] == "act"
 
 
 def test_list_all_models_local_type_wins_on_both_collapse(registry, tmp_lerobot_home: Path) -> None:

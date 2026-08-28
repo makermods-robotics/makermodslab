@@ -426,7 +426,33 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-job_registry.set_on_change(manager.notify_jobs_changed)
+
+
+def _on_jobs_changed() -> None:
+    """Registry-change fan-out: drop the models listing cache, THEN announce.
+
+    A run reaching a terminal state changes what `/models` lists — that is the
+    moment it becomes a deployable skill — but no MODEL mutation ran, so until
+    now nothing invalidated the listing cache. The picker stayed up to
+    `_LISTING_CACHE_TTL_S` (45s) stale while the jobs-driven library, which
+    reads the registry directly over a WS push, was already current. That gap
+    is the transient half of "the two skill lists disagree". Registry renames
+    had the same shape: `rename` fires this hook, but no route invalidated the
+    listing, so the picker showed a run's old name for up to a TTL.
+
+    Two placement details, both load-bearing:
+
+      * Invalidation runs BEFORE the broadcast. Clients refetch on the event,
+        so announcing first races a cache this call exists to drop.
+      * Invalidation runs OUTSIDE `notify_jobs_changed`'s "are any clients
+        connected?" guard. The broadcast is pointless with nobody listening;
+        the cache drop is not — the next plain HTTP GET still wants the truth.
+    """
+    model_browser.invalidate_model_listing_cache()
+    manager.notify_jobs_changed()
+
+
+job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
 
 
@@ -1070,6 +1096,23 @@ def models_list():
     Each entry carries a `source` field: "local", "hub", or "both" (a local run
     that was also pushed to the Hub). Mirrors GET /datasets."""
     return model_browser.list_all_models()
+
+
+@app.get("/skills")
+def skills_list():
+    """Every trained policy, each saying whether it can actually run.
+
+    The deployable projection of the same merged build `/models` serves, so the
+    deploy picker and the models library can no longer disagree about what a
+    skill is — they were reading two different endpoints (`/models` and the
+    `/jobs` registry) and filtering them on two different rules.
+
+    Envelope, not a bare array: `{skills, hub}`. `hub` reports whether the Hub
+    half was reachable, because "the Hub is down" and "you own no skills" used
+    to render identically as an empty list. Each row carries `weights`
+    (ready/unverified/none), `superseded_by`, `deployable`, `origin` and the
+    `job_id` that deploys it."""
+    return model_browser.list_skills()
 
 
 @app.get("/models/info")

@@ -35,6 +35,7 @@ BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0
 
 REQUIRED_PATHS = {
     "/health",
+    "/skills",
     "/move-arm",
     "/stop-teleoperation",
     "/teleoperation-status",
@@ -275,6 +276,30 @@ def test_health_endpoint_returns_200_with_json_object(client: TestClient) -> Non
     response = client.get("/health")
     assert response.status_code == 200
     assert isinstance(response.json(), dict)
+
+
+def test_skills_endpoint_returns_an_envelope_not_a_bare_array(client: TestClient) -> None:
+    """/skills answers with {skills, hub}, deliberately unlike /models' array.
+
+    The envelope exists so a caller can tell "the Hub was unreachable" from
+    "you own no skills" — two states that used to reach the UI as the same empty
+    list, which made an outage read as the user's models having been deleted."""
+    from unittest.mock import patch
+
+    with patch(
+        "makermodslab.models.list_skills",
+        return_value={
+            "skills": [],
+            "hub": {"ok": False, "authenticated": True, "degraded": True, "stale_rows": True},
+        },
+    ):
+        response = client.get("/skills")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["skills"] == []
+    assert body["hub"]["ok"] is False
+    assert body["hub"]["degraded"] is True
 
 
 def test_unknown_route_returns_404(client: TestClient) -> None:
