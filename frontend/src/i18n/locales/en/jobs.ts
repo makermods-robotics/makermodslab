@@ -73,6 +73,42 @@ export default {
     // Shown in the Base row when a fine-tune's source could not be named.
     unknownBase: "an uploaded checkpoint",
   },
+  // Local runs on the user's OTHER devices. This machine can only watch them —
+  // there is no channel to another machine — so the wording never implies an
+  // action is available here.
+  remote: {
+    groupLabel: "Other devices",
+    noneYet: "No other devices are sharing runs yet.",
+    // Run state as reported by the owning device. `unknown` is not a backend
+    // state: it is what a run becomes once its device stops reporting.
+    state: {
+      running: "Running",
+      done: "Done",
+      failed: "Failed",
+      interrupted: "Stopped",
+      unknown: "Status unknown",
+    },
+    // {{when}} is a pre-formatted relative duration ("40m ago").
+    lastSeen: "Last seen {{when}} — status unknown",
+    presumedStopped: "Not heard from recently — presumed stopped",
+    // {{device}} is the device's own label — data, shown verbatim. State-neutral
+    // on purpose: this line renders under finished and unknown runs too, and
+    // "Running on X" under a run that finished an hour ago is simply wrong.
+    manageThere: "On {{device}} · manage it there",
+    forget: "Forget this device",
+    forgetTitle: "Remove this device from the list. The device itself is unaffected.",
+    forgotten: "Device removed from the list",
+    sharing: "Share this device's runs",
+    sharingHint:
+      "Publishes this device's run names and progress to a private repo on your Hugging Face account, so your other devices can see them.",
+    // {{repo}} is the repo id — data.
+    announced: "Sharing this device's runs via {{repo}}",
+    disabled: {
+      offline: "Sharing is off: Hugging Face is in offline mode.",
+      forbidden:
+        "Sharing is off: your Hugging Face token cannot write to the Hub.",
+    },
+  },
   // Card action controls, shared between the job card, the model card and the
   // Hub model card. Where an aria-label and a title carry the same words they
   // share one key rather than two that could drift.

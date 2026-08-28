@@ -68,6 +68,23 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
     monkeypatch.setattr(cfg, "DISMISSED_HUB_JOBS_FILE", str(cache / "dismissed_hub_jobs.json"))
+    # Cross-device presence: this device's id and its sharing settings. Patched
+    # on `presence` as WELL as on `cfg` because presence.py imports the two
+    # constants by value (`from .utils.config import DEVICE_ID_FILE`), so
+    # redirecting only the config module would leave the real ~/.cache paths in
+    # place — and a test would then mint a device id into the developer's home
+    # directory, or read their real "sharing off" setting and diverge from CI.
+    from makermodslab import presence as presence_mod
+
+    monkeypatch.setattr(cfg, "DEVICE_ID_FILE", str(cache / "device_id.txt"))
+    monkeypatch.setattr(cfg, "PRESENCE_SETTINGS_FILE", str(cache / "presence.json"))
+    monkeypatch.setattr(presence_mod, "DEVICE_ID_FILE", str(cache / "device_id.txt"))
+    monkeypatch.setattr(presence_mod, "PRESENCE_SETTINGS_FILE", str(cache / "presence.json"))
+    # The device id is cached for the life of the PROCESS (so an unwritable file
+    # can't hand out a fresh uuid per call). Drop it around each test, or every
+    # case after the first would keep whichever id the first one minted, in the
+    # first one's now-deleted tmp dir.
+    presence_mod.reset_device_id_cache()
     # The pinned ("saved custom") and hidden repo-id lists. These leak the
     # HARDEST of the lot: every merged /datasets and /models listing folds them
     # in, so on a developer machine whose real saved_custom_models.json has
@@ -124,6 +141,32 @@ def _reset_module_caches() -> None:
             _mgr.repo_id = None
             _mgr.message = None
             _mgr.error = None
+
+
+@pytest.fixture(autouse=True)
+def _inert_presence_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the cross-device presence writer out of the test suite entirely.
+
+    `TestClient(app)` fires the app's startup hooks, which start the presence
+    thread; every registry mutation then calls `mark_dirty()` and wakes it into
+    a real `create_repo` + `upload_file` against whatever Hugging Face token the
+    machine running the tests happens to have. That is a network call — and a
+    Hub WRITE — from a unit test, and it made the suite roughly five times
+    slower on a developer machine that is signed in.
+
+    Patching the two entry points is enough: with `start` inert no thread
+    exists, and with `mark_dirty` inert nothing would wake it anyway. Tests that
+    want the publisher exercise its pure helpers directly (test_presence.py).
+    """
+    from makermodslab import presence as presence_mod, server as server_mod
+
+    monkeypatch.setattr(server_mod.presence_publisher, "start", lambda: None)
+    monkeypatch.setattr(server_mod.presence_publisher, "mark_dirty", lambda: None)
+    monkeypatch.setattr(server_mod.presence_publisher, "stop", lambda **kw: None)
+    # The reader is equally a Hub call; individual tests opt back in by patching
+    # it with their own fake.
+    monkeypatch.setattr(presence_mod, "read_board", lambda **kw: [])
+    presence_mod.reset_device_id_cache()
 
 
 @pytest.fixture(autouse=True)

@@ -79,6 +79,17 @@ SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/save
 SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
 SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
 
+# This machine's identity in the cross-device presence repo (see presence.py).
+# A uuid4 minted once and kept forever: it is what lets a device recognize its
+# OWN presence file and skip it, so its local runs aren't also listed back to it
+# as somebody else's.
+DEVICE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/device_id.txt")
+
+# Per-device presence settings (JSON: {"enabled": bool, "label": str}).
+# Publishing is on by default; this file exists so a machine can be turned off
+# individually, and so a user-chosen device label survives a restart.
+PRESENCE_SETTINGS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/presence.json")
+
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
 MAKERMODSLAB_TAG = "MakerModsLab"
