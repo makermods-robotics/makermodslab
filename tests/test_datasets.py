@@ -2956,7 +2956,7 @@ def test_hub_copy_has_data_false_when_the_repo_is_empty() -> None:
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
-    fake_api.list_repo_files.return_value = [".gitattributes", "README.md"]
+    fake_api.get_paths_info.return_value = []
     with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
         assert ds.hub_copy_has_data("alice/pick") is False
 
@@ -2966,7 +2966,7 @@ def test_hub_copy_has_data_true_when_the_dataset_is_there() -> None:
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
-    fake_api.list_repo_files.return_value = ["README.md", "meta/info.json", "data/chunk-000/file-000.parquet"]
+    fake_api.get_paths_info.return_value = [MagicMock()]
     with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
         assert ds.hub_copy_has_data("alice/pick") is True
 
@@ -2977,7 +2977,7 @@ def test_hub_copy_has_data_returns_none_when_the_listing_fails() -> None:
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
-    fake_api.list_repo_files.side_effect = OSError("connection failed")
+    fake_api.get_paths_info.side_effect = OSError("connection failed")
     with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
         assert ds.hub_copy_has_data("alice/pick") is None
 
@@ -2990,7 +2990,7 @@ def test_get_hub_status_flags_an_empty_hub_repo_with_a_local_copy() -> None:
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = True
-    fake_api.list_repo_files.return_value = ["README.md"]
+    fake_api.get_paths_info.return_value = []
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
@@ -3017,7 +3017,7 @@ def test_get_hub_status_makes_no_emptiness_claim_without_a_local_copy() -> None:
 
     assert result["status"] == "on_hub"
     assert result["hub_has_data"] is None
-    fake_api.list_repo_files.assert_not_called()
+    fake_api.get_paths_info.assert_not_called()
 
 
 def test_get_hub_status_emptiness_claim_survives_the_status_cache_hit() -> None:
@@ -3028,7 +3028,7 @@ def test_get_hub_status_emptiness_claim_survives_the_status_cache_hit() -> None:
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = True
-    fake_api.list_repo_files.return_value = ["README.md"]
+    fake_api.get_paths_info.return_value = []
     with (
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
@@ -3047,7 +3047,7 @@ def test_invalidate_hub_status_drops_the_emptiness_answer_too() -> None:
 
     _clear_hub_status_cache()
     ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
-    ds._HUB_HAS_DATA_CACHE["alice/pick"] = False
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, None)
 
     ds.invalidate_hub_status("pick")
 
@@ -3068,7 +3068,7 @@ def test_push_dataset_to_hub_invalidates_the_cached_hub_facts() -> None:
     _clear_hub_status_cache()
     _clear_hub_dataset_info_cache()
     ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
-    ds._HUB_HAS_DATA_CACHE["alice/pick"] = False
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, None)
     ds._HUB_DATASET_INFO_CACHE["alice/pick"] = {"total_episodes": 0}
 
     fake_dataset = MagicMock(num_episodes=25)
@@ -3083,6 +3083,89 @@ def test_push_dataset_to_hub_invalidates_the_cached_hub_facts() -> None:
     assert ds._HUB_STATUS_CACHE == {}
     assert ds._HUB_HAS_DATA_CACHE == {}
     assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+def test_hub_copy_has_data_fresh_bypasses_the_memo() -> None:
+    """A caller deciding whether to WRITE (the runners' push-if-absent) must
+    see the Hub, not a memo — a stale True would skip the refill and send the
+    remote job at an empty repo."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (True, None)
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = []
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick", fresh=True) is False
+    fake_api.get_paths_info.assert_called_once()
+
+
+def test_hub_copy_has_data_empty_answer_expires() -> None:
+    """"Empty" can be falsified from OUTSIDE the app (huggingface-cli, the Hub
+    web UI), with no invalidation hook, so a cached False must re-check after
+    its TTL instead of warning — or refusing — for the process lifetime."""
+    import time as _time
+
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, _time.monotonic() - 1.0)
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = [MagicMock()]
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+
+
+def test_hub_copy_has_data_positive_answer_is_served_from_the_memo() -> None:
+    """Only in-app flows change "has data", and they invalidate — so True is
+    stable and never re-pays the probe."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (True, None)
+    fake_api = MagicMock()
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+    fake_api.get_paths_info.assert_not_called()
+
+
+def test_hub_copy_has_data_loses_the_race_against_an_invalidation() -> None:
+    """A probe that straddles a concurrent push's invalidation must NOT write
+    its answer back: it was computed against the pre-push repo, and storing it
+    after the invalidation would resurrect exactly the stale "empty" claim the
+    invalidation removed — permanently, since only another push drops it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+
+    def _push_finishes_mid_probe(*args, **kwargs):
+        ds.invalidate_hub_status("alice/pick")
+        return []
+
+    fake_api.get_paths_info.side_effect = _push_finishes_mid_probe
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        # This call's own answer stands (it describes the repo it saw)...
+        assert ds.hub_copy_has_data("alice/pick") is False
+    # ...but it must not outlive the invalidation that raced it.
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_invalidate_hub_status_drops_a_mis_cased_namespaced_entry() -> None:
+    """Entries are keyed by the CANONICAL casing the resolver produced; the
+    upload path may hold the local spelling ("MyOrg/pick"). A case-sensitive
+    pop would miss the entry and leave a stale "empty" claim serving for the
+    process lifetime."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["myorg/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["myorg/pick"] = (False, None)
+
+    ds.invalidate_hub_status("MyOrg/pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
 
 
 def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path) -> None:

@@ -58,12 +58,14 @@ def ensure_dataset_on_hub(local_repo_id: str, hub_repo_id: str, log: Callable[[s
     was enough to skip the push, so the remote job would then die resolving
     a dataset with no files in it. Refilling it is the whole remedy and
     needs nothing from the user, so it happens silently rather than as a
-    refusal they'd have to act on.
+    refusal they'd have to act on. The emptiness read is ``fresh=True`` for
+    the same reason existence is uncached: a memo is wrong for a caller
+    about to decide whether to WRITE.
     """
     exists = hub_repo_exists(hub_repo_id)
     if exists is None:
         return
-    if exists and hub_copy_has_data(hub_repo_id) is not False:
+    if exists and hub_copy_has_data(hub_repo_id, fresh=True) is not False:
         return
 
     cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
