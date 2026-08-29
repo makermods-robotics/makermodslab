@@ -1263,7 +1263,7 @@
         "type": "object"
       },
       "HubJobItem": {
-        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).",
+        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).\n\nThe trailing four are the run's identity, recovered from the job's own argv\nby _hub_job_identity so a run launched on another machine reads like a\ntracked one. Each is independently nullable and for a real reason: a RESUMED\ncloud run carries `--config_path` instead of `--policy.type` /\n`--dataset.repo_id`, so it reports a repo and a step target with no policy\nor dataset. They are decoration on a listing — never identity — so a row\nthat answers none of them still renders.",
         "properties": {
           "created_at": {
             "anyOf": [
@@ -1275,6 +1275,17 @@
               }
             ],
             "title": "Created At"
+          },
+          "dataset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset"
           },
           "docker_image": {
             "anyOf": [
@@ -1297,6 +1308,17 @@
               }
             ],
             "title": "Flavor"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
           },
           "id": {
             "title": "Id",
@@ -1324,6 +1346,17 @@
             ],
             "title": "Owner"
           },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
           "space_id": {
             "anyOf": [
               {
@@ -1345,6 +1378,17 @@
               }
             ]
           },
+          "total_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Steps"
+          },
           "url": {
             "title": "Url",
             "type": "string"
@@ -1359,7 +1403,11 @@
           "flavor",
           "status",
           "owner",
-          "url"
+          "url",
+          "policy_type",
+          "dataset",
+          "total_steps",
+          "hf_repo_id"
         ],
         "title": "HubJobItem",
         "type": "object"

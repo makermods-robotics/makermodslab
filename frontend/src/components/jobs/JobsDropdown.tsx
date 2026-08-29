@@ -203,10 +203,22 @@ function describeEntry(entry: JobsEntry, t: Translate): Described {
           color: "text-muted-foreground",
           Icon: HelpCircle,
         };
-    // A Hub-only job is named by its image/space, never by the "{POLICY} · {ds}"
-    // shape, and nothing here knows what policy it trains — so no peel and no
-    // chip.
+    // The run name the backend derived (submission label, else the
+    // --policy.repo_id slug), exactly as HubJobCard titles the same job. The
+    // image is the LAST resort and was previously the first: every cloud run
+    // uses one image, so leading with it made every untracked job on the
+    // account read as "huggingface/lerobot-gpu:latest" — including, on a second
+    // machine signed into the same HF account, every run that machine had
+    // launched itself.
+    // NOT peeled with runTaskTitle, deliberately: that peels the display shape
+    // "{POLICY} · {ns}/{task}", and a Hub name is the run SLUG
+    // ("act_cube_grab_2026-08-10_14-02-11") — no separator, so the peel is a
+    // no-op on it. Shortening a slug means re-deriving models.py's
+    // _run_identity_name here, i.e. a second copy of a naming rule that would
+    // be free to disagree with the first; the whole slug is what HubJobCard
+    // has always titled by, so row and card now read the same.
     const hubName =
+      job.name ??
       job.docker_image ??
       job.space_id ??
       t("jobs.hubJob.fallbackTitle", { id: job.id.slice(0, 12) });
@@ -216,8 +228,15 @@ function describeEntry(entry: JobsEntry, t: Translate): Described {
       // A Hub-only job has no local record, so it has no run number — the
       // sequence numbers this registry's own runs. 0 renders nothing.
       number: 0,
-      policyLabel: null,
-      policyTitle: "",
+      // Read off the job's argv Hub-side, like the name. Null for a resumed
+      // run (whose argv names a config_path, not a policy), and the column
+      // stays reserved so those rows still align.
+      policyLabel: job.policy_type
+        ? policyTypeShortLabel(job.policy_type)
+        : null,
+      policyTitle: job.policy_type
+        ? policyTypeDisplayName(job.policy_type)
+        : "",
       present,
       when: relativeTime(entry.time),
       // The flavor is the Hub's own hardware name — data.
