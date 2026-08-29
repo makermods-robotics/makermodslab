@@ -1287,8 +1287,20 @@ def _job_with(**attrs):
 
 def test_hub_job_run_name_prefers_submission_label() -> None:
     job = _job_with(
-        labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"},
+        labels={"makermodslab_run": "act_cube_2026-08-01_12-00-00"},
         command=["python", "-c", "…", "--", "--policy.repo_id", "makermods/other_name"],
+    )
+    assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
+
+
+def test_hub_job_run_name_still_reads_the_legacy_dotted_label() -> None:
+    """The dotted key was renamed because the Hub started rejecting a
+    "key=value" tag containing a dot. Every job submitted before that rename
+    still carries it, and dropping the read would un-name the whole existing
+    cloud backlog in the jobs UI."""
+    job = _job_with(
+        labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"},
+        command=["python", "-c", "…"],
     )
     assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
 

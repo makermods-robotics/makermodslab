@@ -1761,8 +1761,11 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
-# Mirrors _RUN_LABEL in runners/hf_cloud.py — the label a submitted job carries.
-_HUB_RUN_LABEL = "makermodslab.run"
+# Mirrors _RUN_LABEL + _LEGACY_RUN_LABELS in runners/hf_cloud.py — the label a
+# submitted job carries, newest first. The dotted key is read but never
+# written: the Hub now rejects a "key=value" tag containing a dot, so it was
+# renamed, and every job submitted before that still carries the old one.
+_HUB_RUN_LABELS = ("makermodslab_run", "makermodslab.run")
 
 
 def _hub_job_run_name(ji) -> str | None:
@@ -1775,15 +1778,16 @@ def _hub_job_run_name(ji) -> str | None:
     record, and the name has to come off the Hub instead.
 
     Two sources, preferred first:
-    1. The `makermodslab.run` label hf_cloud stamps at submission.
+    1. The run label hf_cloud stamps at submission (either spelling).
     2. `--policy.repo_id` in the job's own argv. Every cloud run publishes to
        "<user>/<run slug>", so this recovers a name for jobs submitted before
        labelling existed — the whole existing backlog.
     """
     labels = getattr(ji, "labels", None) or {}
-    labelled = labels.get(_HUB_RUN_LABEL)
-    if isinstance(labelled, str) and labelled.strip():
-        return labelled.strip()
+    for key in _HUB_RUN_LABELS:
+        labelled = labels.get(key)
+        if isinstance(labelled, str) and labelled.strip():
+            return labelled.strip()
 
     # `arguments` is where the Hub splits argv for some submission paths; ours
     # rides entirely in `command`. Scan both so neither shape is missed.
