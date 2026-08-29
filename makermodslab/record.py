@@ -41,6 +41,11 @@ from .datasets import (
     invalidate_hub_status,
     push_dataset_to_hub,
 )
+from .maker_rest_pose import (
+    capture_maker_pose,
+    maker_follower_arms,
+    return_maker_arms_to_rest,
+)
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
 from .session_events import notify_session_changed
@@ -1932,14 +1937,19 @@ def record_with_web_events(
     # follower buses), NEVER the human-held leader. The gripper is excluded: at
     # stop time it may be holding an object, and returning it to its (likely
     # open) starting width would drop the object mid-return.
-    follower_rest_poses = (
-        [
+    # Both arm types are driven back to this pose on a normal stop; only the
+    # mechanism differs by bus (see teleoperate's matching branch and
+    # maker_rest_pose.py). A Maker arm has no brakes, so releasing torque
+    # wherever the last episode ended would drop it.
+    if feetech:
+        follower_rest_poses = [
             (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
             for bus in _device_buses(robot)
         ]
-        if feetech
-        else []
-    )
+        maker_rest_poses = []
+    else:
+        follower_rest_poses = []
+        maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -2194,6 +2204,7 @@ def record_with_web_events(
                 # release hint once cleanup is done).
                 notify_session_changed("recording", True, phase="releasing")
                 _return_followers_to_rest(follower_rest_poses, _release_now)
+                return_maker_arms_to_rest(maker_rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.

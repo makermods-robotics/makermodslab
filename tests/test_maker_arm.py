@@ -446,124 +446,183 @@ def test_replay_still_refuses_a_bimanual_robot_of_either_arm_type(
         assert "Bimanual replay" in result["message"]
 
 
-def test_maker_ease_in_arrives_once_every_joint_is_within_tolerance() -> None:
-    """The ease-in must walk the arm to frame 0 BEFORE playback starts.
+class _MakerArmDouble:
+    """Minimal stand-in for a MakerFollower: get_observation + send_action.
 
-    Playback is paced against a wall clock and drops frames it has fallen
-    behind on, so starting the loop while the arm is still slewing would make
-    the episode begin partway through, from whatever pose the arm reached.
+    `converges_to` is the standing error the joint holds — a real MIT
+    position-controlled joint settles a few degrees short of its target under
+    load and stays there, which is the behaviour the return has to tolerate.
     """
-    from makermodslab.replay import _ease_in_maker
 
-    class _Arm:
-        def __init__(self):
-            self.pos = {"shoulder_pan": 0.0, "gripper": 0.0}
-            self.sent = 0
+    def __init__(self, start: dict[str, float], converges_to: float = 0.0, frozen: bool = False):
+        self.pos = dict(start)
+        self.converges_to = converges_to
+        self.frozen = frozen
+        self.sent: list[dict[str, float]] = []
 
-        def send_action(self, action):
-            # Converge a little each call, like a real slow initial sync.
-            self.sent += 1
-            for motor in self.pos:
-                target = action[f"{motor}.pos"]
-                self.pos[motor] += (target - self.pos[motor]) * 0.5
+    def get_observation(self):
+        return {f"{m}.pos": v for m, v in self.pos.items()}
 
-        def get_observation(self):
-            return {f"{m}.pos": v for m, v in self.pos.items()}
+    def send_action(self, action):
+        self.sent.append(dict(action))
+        if self.frozen:
+            return
+        for key, target in action.items():
+            motor = key.removesuffix(".pos")
+            if motor not in self.pos:
+                continue
+            holdable = target - self.converges_to
+            self.pos[motor] += (holdable - self.pos[motor]) * 0.5
 
-    arm = _Arm()
-    arrived, reason = _ease_in_maker(arm, {"shoulder_pan.pos": 20.0, "gripper.pos": -10.0}, lambda: False)
+
+def test_maker_return_walks_the_arm_back_to_its_start_pose() -> None:
+    """The core of the fix: a Maker arm must be DRIVEN back before torque is
+    cut. It has no brakes, so releasing it anywhere but near its resting pose
+    drops the whole arm under gravity."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 40.0, "wrist_flex": -25.0})
+    arrived, reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0, "wrist_flex": 0.0})
 
     assert arrived is True
-    assert reason == ""
-    assert arm.sent > 1  # it actually drove the arm rather than declaring victory
+    assert reason in ("", "settled")
+    assert abs(arm.pos["shoulder_pan"]) <= 2.0
+    assert abs(arm.pos["wrist_flex"]) <= 2.0
 
 
-def test_maker_ease_in_accepts_a_converged_arm_that_holds_a_standing_error() -> None:
-    """Measured on the real arm: wrist_flex settles ~3 deg from its target and
-    stays there, because a position-controlled joint holds a standing error
-    proportional to its load. A bare tolerance check waits for that to reach
-    zero, which never happens — so a healthy arm failed every ease-in.
+def test_maker_return_is_rate_bounded_not_a_single_jump() -> None:
+    """A synced Maker arm goes wherever it is pointed as fast as its gains
+    allow, so the motion has to be shaped by interpolating the setpoint. A
+    single send of the final target would snap the arm across its whole range.
     """
-    from makermodslab.replay import _ease_in_maker
+    from makermodslab.maker_rest_pose import MAKER_RETURN_SPEED_DEG_S, return_maker_to_pose
 
-    class _CompliantArm:
-        """Converges to 3 deg away and holds — like the real wrist_flex."""
+    arm = _MakerArmDouble({"shoulder_pan": 90.0})
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0})
 
-        def __init__(self):
-            self.pos = 0.0
+    # 90 deg at the capped rate cannot be one step.
+    assert len(arm.sent) > 1
+    first = arm.sent[0]["shoulder_pan.pos"]
+    # The first commanded setpoint stays near the START, not the target.
+    assert first > 80.0, f"first setpoint {first} jumped toward the target"
+    # And no single step exceeds the rate cap.
+    steps = [s["shoulder_pan.pos"] for s in arm.sent]
+    biggest = max(abs(b - a) for a, b in zip(steps, steps[1:], strict=False))
+    assert biggest <= MAKER_RETURN_SPEED_DEG_S
 
-        def send_action(self, action):
-            # Asymptotes to 3 deg short of the target: the closest this joint's
-            # gains can hold it against its load.
-            holdable = action["wrist_flex.pos"] - 3.0
-            self.pos += (holdable - self.pos) * 0.5
 
-        def get_observation(self):
-            return {"wrist_flex.pos": self.pos}
+def test_maker_return_accepts_an_arm_that_holds_a_standing_error() -> None:
+    """Measured on the real arm: wrist_flex settles 3-5 deg from target and
+    stays. Waiting for zero would burn the ceiling on every healthy stop."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
 
-    arrived, reason = _ease_in_maker(_CompliantArm(), {"wrist_flex.pos": 30.0}, lambda: False)
+    arm = _MakerArmDouble({"wrist_flex": 30.0}, converges_to=4.0)
+    arrived, reason = return_maker_to_pose(arm, {"wrist_flex": 0.0})
 
     assert arrived is True
     assert reason == "settled"
 
 
-def test_maker_ease_in_still_fails_when_a_joint_converges_far_from_target() -> None:
-    """The other half: converging is only acceptable CLOSE to the target.
-    A joint that stops 40 deg away is obstructed or mis-posed, and starting
-    playback from there would lurch."""
-    from makermodslab.replay import _ease_in_maker
+def test_maker_return_fails_loudly_when_a_joint_is_obstructed() -> None:
+    """The other half: converging is only acceptable CLOSE to the target. A
+    joint that never moves is blocked, and that must be reported, not
+    swallowed."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
 
-    class _BlockedArm:
-        def send_action(self, action):
-            pass  # never moves — something is in the way
-
-        def get_observation(self):
-            return {"elbow_flex.pos": 0.0}
-
-    arrived, reason = _ease_in_maker(_BlockedArm(), {"elbow_flex.pos": 40.0}, lambda: False)
+    arm = _MakerArmDouble({"elbow_flex": 60.0}, frozen=True)
+    arrived, reason = return_maker_to_pose(arm, {"elbow_flex": 0.0}, ceiling_s=2.0)
 
     assert arrived is False
     assert "elbow_flex" in reason
 
 
-def test_maker_ease_in_reports_the_worst_joint_when_it_cannot_arrive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stuck joint must name itself, so the user sees which one to reposition."""
-    from makermodslab import replay
+def test_maker_return_aborts_promptly_on_a_second_stop() -> None:
+    """A second stop press cuts the courtesy return short — the arm is left
+    where it got to, which is still nearer the rest pose than where it began."""
+    import threading
 
-    monkeypatch.setattr(replay, "_MAKER_EASE_CEILING_S", 0.2)
+    from makermodslab.maker_rest_pose import return_maker_to_pose
 
-    class _StuckArm:
-        def send_action(self, action):
-            pass
+    abort = threading.Event()
+    abort.set()
+    arm = _MakerArmDouble({"shoulder_pan": 90.0})
 
-        def get_observation(self):
-            return {"shoulder_pan.pos": 0.0, "gripper.pos": 0.0}
-
-    arrived, reason = replay._ease_in_maker(
-        _StuckArm(), {"shoulder_pan.pos": 90.0, "gripper.pos": 1.0}, lambda: False
-    )
-
-    assert arrived is False
-    assert "shoulder_pan" in reason  # the WORST joint, not the first one
-
-
-def test_maker_ease_in_aborts_promptly_on_stop() -> None:
-    """A stop pressed during the ease-in must cut it short, not run the ceiling."""
-    from makermodslab.replay import _ease_in_maker
-
-    class _Arm:
-        def send_action(self, action):
-            pass
-
-        def get_observation(self):
-            return {"shoulder_pan.pos": 0.0}
-
-    arrived, reason = _ease_in_maker(_Arm(), {"shoulder_pan.pos": 90.0}, lambda: True)
+    arrived, reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0}, abort_event=abort)
 
     assert arrived is False
     assert reason == "cut-short"
+    assert arm.sent == []  # aborted before commanding anything
+
+
+def test_maker_return_never_raises_so_torque_release_is_never_skipped() -> None:
+    """This runs on teardown paths whose next act is cutting torque. An
+    exception escaping here would skip that and strand an energized arm."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    class _BrokenArm:
+        def get_observation(self):
+            raise RuntimeError("CAN bus died")
+
+        def send_action(self, action):
+            raise RuntimeError("CAN bus died")
+
+    arrived, reason = return_maker_to_pose(_BrokenArm(), {"shoulder_pan": 0.0})
+
+    assert arrived is False
+    assert reason  # a reason is always given, never an empty success
+
+
+def test_maker_capture_excludes_the_gripper_by_default() -> None:
+    """Same reason the SO-101 rest pose excludes it: at stop time the gripper
+    may be holding something, and returning it to its start width would drop
+    that object mid-return."""
+    from makermodslab.maker_rest_pose import capture_maker_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 1.0, "gripper": -50.0})
+
+    assert "gripper" not in capture_maker_pose(arm)
+    assert "gripper" in capture_maker_pose(arm, include_gripper=True)
+
+
+def test_maker_return_leaves_joints_absent_from_the_pose_alone() -> None:
+    """That exclusion only works if the return never commands what it was not
+    given — otherwise a held object is dropped anyway."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 30.0, "gripper": -50.0})
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0})
+
+    assert all("gripper.pos" not in sent for sent in arm.sent)
+    assert arm.pos["gripper"] == -50.0
+
+
+def test_bimanual_maker_arms_are_returned_concurrently() -> None:
+    """Two arms on separate CAN buses: returning them in series would take
+    twice as long and leave the second hanging under gravity meanwhile."""
+    from makermodslab.maker_rest_pose import return_maker_arms_to_rest
+
+    left = _MakerArmDouble({"shoulder_pan": 20.0})
+    right = _MakerArmDouble({"shoulder_pan": -20.0})
+
+    return_maker_arms_to_rest([(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})])
+
+    assert abs(left.pos["shoulder_pan"]) <= 2.0
+    assert abs(right.pos["shoulder_pan"]) <= 2.0
+
+
+def test_maker_follower_arms_finds_both_sides_of_a_bimanual_robot() -> None:
+    """A bimanual Maker follower is driven through its two sub-arms, whose
+    action keys are unprefixed — going through the wrapper would need
+    left_/right_ prefixes on every key."""
+    from makermodslab.maker_rest_pose import maker_follower_arms
+
+    class _Bi:
+        left_arm = object()
+        right_arm = object()
+
+    single = object()
+    assert [d for d, _ in maker_follower_arms(single)] == [single]
+    assert [d for d, _ in maker_follower_arms(_Bi())] == [_Bi.left_arm, _Bi.right_arm]
 
 
 def test_auto_calibration_refuses_a_maker_robot(tmp_lerobot_home: Path) -> None:

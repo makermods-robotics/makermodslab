@@ -32,6 +32,11 @@ from lerobot.utils.errors import DeviceNotConnectedError
 from .api_errors import ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
+from .maker_rest_pose import (
+    capture_maker_pose,
+    maker_follower_arms,
+    return_maker_arms_to_rest,
+)
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .session_events import notify_session_changed
@@ -1067,19 +1072,22 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # leader. The gripper is excluded: at stop time it may be holding an
         # object, and returning it to its (likely open) starting width would
         # drop the object mid-return.
-        # Feetech only: capture_rest_pose reads raw Present_Position ticks and
-        # the return writes Goal_Position/Goal_Velocity, none of which exist on
-        # a RobStride CAN bus. A Maker follower instead settles under gravity
-        # when torque drops, which its vendor documents as the safe state (and
-        # is why disable_torque_on_disconnect defaults to True).
-        follower_rest_poses = (
-            [
+        # Both arm types capture a start pose and are driven back to it on a
+        # normal stop — an arm has no brakes, so cutting torque anywhere but
+        # near its resting pose drops it under gravity. Only the MECHANISM
+        # differs: an SO-101 is eased home by a Feetech profile velocity
+        # (rest_pose.py), a Maker arm by interpolating its MIT setpoint
+        # (maker_rest_pose.py), because a RobStride joint has no
+        # Goal_Position/Goal_Velocity register to hand the motion off to.
+        if uses_feetech_bus(request.arm_type):
+            follower_rest_poses = [
                 (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
                 for bus in _device_buses(robot)
             ]
-            if uses_feetech_bus(request.arm_type)
-            else []
-        )
+            maker_rest_poses = []
+        else:
+            follower_rest_poses = []
+            maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
 
         # Stream the arms in the background; the worker owns disconnect so stop()
         # does not race the serial bus from the request thread.
@@ -1194,6 +1202,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     # session, not idle yet (mirrors the status payload).
                     notify_session_changed("teleoperation", True, phase="releasing")
                     _return_followers_to_rest(follower_rest_poses, _release_now)
+                    return_maker_arms_to_rest(maker_rest_poses, _release_now)
                 # Belt and braces: disable torque explicitly before disconnect.
                 # disconnect() disables torque too, but if it fails partway the
                 # error is swallowed here and the arm stays energized (rigid) —
