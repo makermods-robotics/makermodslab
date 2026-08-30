@@ -38,18 +38,27 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 # leader on FashionStar UART servos. The two share no bus protocol, no
 # calibration procedure and no port-detection method, so the arm type is the
 # discriminant every hardware path branches on.
-ArmType = Literal["so101", "maker"]
-ARM_TYPES: tuple[str, ...] = ("so101", "maker")
+ArmType = Literal["so101", "maker", "metal"]
+ARM_TYPES: tuple[str, ...] = ("so101", "maker", "metal")
 DEFAULT_ARM_TYPE = "so101"
 
 # lerobot derives a device's calibration directory from the device CLASS's
 # `name` attribute (Robot.__init__ / Teleoperator.__init__ ->
-# HF_LEROBOT_CALIBRATION/<robots|teleoperators>/<name>). These four constants
-# must therefore match those class names EXACTLY — "so_leader"/"so_follower"
-# for the SO-101 pair, "rebot_102_leader"/"maker_follower" for the Maker pair.
-# Renaming a device class upstream silently strands a whole library here.
+# HF_LEROBOT_CALIBRATION/<robots|teleoperators>/<name>). These constants must
+# therefore match those class names EXACTLY — "so_leader"/"so_follower" for
+# the SO-101 pair, "rebot_102_leader" for the Star Arm 102 leader, and
+# "maker_follower"/"metal_follower" for the CAN followers. Renaming a device
+# class upstream silently strands a whole library here.
+#
+# The LEADER path is shared by the Maker AND Metal arms: their leader presets
+# (`rebot_102_leader_maker` / `rebot_102_leader_metal`) are config-only
+# variants of the one RebotArm102Leader class, and the class name is what
+# picks the directory. That sharing is why default_slot_config_name below
+# mints per-arm-type ids — the two presets' zero POSES are different, so a
+# name collision would silently reuse the wrong zero.
 MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader")
 MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
+METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
 
 
 def normalize_arm_type(value: object) -> str:
@@ -74,13 +83,44 @@ def normalize_arm_type(value: object) -> str:
 
 
 def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
-    """The calibration library dir holding this arm type's LEADER configs."""
-    return MAKER_LEADER_CONFIG_PATH if normalize_arm_type(arm_type) == "maker" else LEADER_CONFIG_PATH
+    """The calibration library dir holding this arm type's LEADER configs.
+
+    Maker and Metal share one library (both leaders are the Star Arm 102 —
+    same device class, different joint-mapping preset); the per-arm-type
+    separation there is carried by the minted config NAMES instead
+    (default_slot_config_name).
+    """
+    if normalize_arm_type(arm_type) in ("maker", "metal"):
+        return MAKER_LEADER_CONFIG_PATH
+    return LEADER_CONFIG_PATH
 
 
 def follower_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
     """The calibration library dir holding this arm type's FOLLOWER configs."""
-    return MAKER_FOLLOWER_CONFIG_PATH if normalize_arm_type(arm_type) == "maker" else FOLLOWER_CONFIG_PATH
+    normalized = normalize_arm_type(arm_type)
+    if normalized == "maker":
+        return MAKER_FOLLOWER_CONFIG_PATH
+    if normalized == "metal":
+        return METAL_FOLLOWER_CONFIG_PATH
+    return FOLLOWER_CONFIG_PATH
+
+
+def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type: object) -> str:
+    """The default calibration id for a robot record's empty slot.
+
+    SO-101 keeps its historical defaults ("<name>", "<name>_<arm>" bimanual).
+    The CAN families mint the arm type into the name ("<name>_metal",
+    "<name>_metal_<arm>") because their Star-leader calibrations live in ONE
+    shared directory while the presets' zero poses differ — an unsuffixed
+    default would let a Maker robot and a Metal robot silently share a zero
+    that is wrong for one of them. Followers get the same suffix purely for
+    consistency (their libraries are already separate).
+
+    Only a default: a slot that already names a calibration keeps it.
+    """
+    normalized = normalize_arm_type(arm_type)
+    base = record_name if normalized == DEFAULT_ARM_TYPE else f"{record_name}_{normalized}"
+    return f"{base}_{arm}" if mode == "bimanual" else base
 
 
 # Define port storage path

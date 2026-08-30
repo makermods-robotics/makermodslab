@@ -74,7 +74,12 @@ from .schemas.sessions import (
     SessionStartBody,
     TeleoperationOptions,
 )
-from .utils.config import get_robot_record, is_robot_record_clean, is_valid_robot_name
+from .utils.config import (
+    default_slot_config_name,
+    get_robot_record,
+    is_robot_record_clean,
+    is_valid_robot_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -573,9 +578,10 @@ def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, co
     An explicit `port`/`config_file` in the options wins (calibration is the
     setup flow — see CalibrationOptions); otherwise the record's saved slot
     values, with the config falling back to the robot's default name for the
-    slot (the UI's own default: "<robot>_<arm>" bimanual, "<robot>" single).
-    No port anywhere → 400 robot.not_ready: you can't calibrate an arm whose
-    bus we can't open."""
+    slot ("<robot>"/"<robot>_<arm>" for SO-101; the CAN families mint the arm
+    type in — see default_slot_config_name for why the shared Star-leader
+    library makes that necessary). No port anywhere → 400 robot.not_ready:
+    you can't calibrate an arm whose bus we can't open."""
     port_field, config_field = _slot_fields(device_type, arm)
     resolved_port = port or record.get(port_field) or ""
     if not resolved_port:
@@ -586,7 +592,9 @@ def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, co
             "assign (or pass) a port before calibrating it.",
             code=ErrorCode.ROBOT_NOT_READY,
         )
-    default_name = f"{record['name']}_{arm}" if record.get("mode") == "bimanual" else record["name"]
+    default_name = default_slot_config_name(
+        record["name"], record.get("mode"), arm, record.get("arm_type")
+    )
     resolved_config = config_file or record.get(config_field) or default_name
     return resolved_port, resolved_config
 
@@ -594,23 +602,28 @@ def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, co
 def _build_calibration_request(record: dict, opts: CalibrationOptions):
     """Build the calibration request matching this robot's arm type.
 
-    The two request models are field-for-field identical on purpose — only the
+    The two request models share their common fields on purpose — only the
     class differs, and _dispatch_start reads that class to pick the manager.
+    The zero request additionally carries the record's arm_type: the flow
+    serves BOTH CAN families, and it decides which device configs to build,
+    which pose text to show, and which library the name-collision check reads.
     """
     from .arm_capabilities import uses_zero_calibration
     from .calibrate import CalibrationRequest
     from .zero_calibrate import ZeroCalibrationRequest
 
     port, config_file = _resolve_slot(record, opts.device_type, opts.arm, opts.port, opts.config_file)
-    model = ZeroCalibrationRequest if uses_zero_calibration(record["arm_type"]) else CalibrationRequest
-    return model(
-        device_type=opts.device_type,
-        port=port,
-        config_file=config_file,
-        robot_name=record["name"],
-        overwrite=opts.overwrite,
-        arm=opts.arm,
-    )
+    common = {
+        "device_type": opts.device_type,
+        "port": port,
+        "config_file": config_file,
+        "robot_name": record["name"],
+        "overwrite": opts.overwrite,
+        "arm": opts.arm,
+    }
+    if uses_zero_calibration(record["arm_type"]):
+        return ZeroCalibrationRequest(arm_type=record["arm_type"], **common)
+    return CalibrationRequest(**common)
 
 
 def _build_auto_calibration_request(record: dict, opts: AutoCalibrationOptions):
@@ -624,13 +637,13 @@ def _build_auto_calibration_request(record: dict, opts: AutoCalibrationOptions):
 
     if not supports_auto_calibration(record["arm_type"]):
         # The vendored autocal drives the arm under torque against its stops
-        # and writes Feetech EEPROM — there is no equivalent for a RobStride
-        # CAN arm, and none is needed: the Maker arm's limits are fixed
-        # constants, so calibrating it means setting zero (kind "calibration").
+        # and writes Feetech EEPROM — there is no equivalent for a CAN arm,
+        # and none is needed: the CAN arms' limits are fixed constants, so
+        # calibrating one means setting zero (kind "calibration").
         raise ApiError(
             status_code=400,
             detail=(
-                "The Maker arm has no automatic calibration — its joint limits are fixed. "
+                "This arm has no automatic calibration — its joint limits are fixed. "
                 "Run a zero-pose calibration instead."
             ),
             code=ErrorCode.ROBOT_NOT_READY,

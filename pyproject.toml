@@ -28,11 +28,12 @@ dependencies = [
     # a bisect.
     # Extras beyond the SO-101 set: `maker` = RobStride over CAN (python-can +
     # pyserial for the slcan transport, the only one that works on macOS);
-    # `rebot` = motorbridge, the FashionStar UART servo stack the Star Arm 102
-    # leader speaks. The Metal work adds `damiao` (its CAN follower stack) when
-    # it lands — never the fork's `metal` extra here, which drags in Pinocchio
-    # (`pin`, no Windows wheels) that only the optional gravity leader needs.
-    "lerobot[core_scripts,feetech,training,maker,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@b968c0c015e16699a225070f677dc644543707f0",
+    # `damiao` = the Metal arm's CAN follower stack (same python-can/pyserial
+    # underneath); `rebot` = motorbridge, the FashionStar UART servo stack the
+    # Star Arm 102 leader speaks. NEVER the fork's `metal` extra here — it
+    # drags in Pinocchio (`pin`, no Windows wheels) that only the
+    # not-yet-integrated gravity leader needs.
+    "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@b968c0c015e16699a225070f677dc644543707f0",
     # Windows-only: real DirectShow camera names for /available-cameras so the
     # frontend can match a camera to its browser deviceId (issues #12, #16).
     # Guarded by try/except at the call site, so its absence degrades gracefully.

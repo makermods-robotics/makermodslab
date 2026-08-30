@@ -19,7 +19,7 @@ have. Those predicates live here, once, rather than as `arm_type == "maker"`
 literals scattered across teleoperate/record/rollout/replay — a scattered
 check is a check somebody forgets to add to the next flow.
 
-The two arm types:
+The three arm types:
 
 * ``so101`` — SO-101 leader/follower. Feetech STS3215 smart servos on a USB
   serial bus. Registers are readable and writable (EEPROM + RAM), which is
@@ -27,6 +27,12 @@ The two arm types:
 * ``maker`` — Maker Arm v1. A 7-DOF RobStride follower on classic CAN (via an
   slcan adapter) driven by a Star Arm 102 (reBot 102) leader on FashionStar
   UART servos. Neither bus speaks the Feetech register protocol.
+* ``metal`` — Metal arm. A 7-DOF Damiao follower on classic CAN, driven by
+  the same Star Arm 102 leader with a Metal joint-mapping preset. Shares the
+  Maker arm's integration seams (zero-pose calibration, MIT-setpoint rest
+  return, no Feetech registers) with one hardware difference that matters
+  everywhere a bus is touched casually: the Damiao HANDSHAKE is the motor
+  enable command, so even a "read-only" ping energizes the arm.
 
 Import this instead of writing the comparison inline.
 """
@@ -34,10 +40,10 @@ Import this instead of writing the comparison inline.
 from .utils.config import normalize_arm_type
 
 # Flat proprioceptive width of ONE follower arm — one dim per joint. The SO-101
-# has 6; the Maker arm has 7 (6 joints plus its permanent RS00 gripper). This
-# is the number a bimanual robot doubles, and the number a trained checkpoint's
+# has 6; the CAN arms have 7 (6 joints plus a permanent gripper). This is the
+# number a bimanual robot doubles, and the number a trained checkpoint's
 # observation.state must match.
-_JOINTS_PER_ARM = {"so101": 6, "maker": 7}
+_JOINTS_PER_ARM = {"so101": 6, "maker": 7, "metal": 7}
 
 
 def joints_per_arm(arm_type: object) -> int:
@@ -61,8 +67,8 @@ def uses_feetech_bus(arm_type: object) -> bool:
     * ``identify`` / ``wiggle`` — port detection by watching (or driving)
       Present_Position on Feetech motor id 1.
 
-    A Maker session skips all of them; ``maker_ports`` provides the CAN/UART
-    port detection that replaces identify/wiggle.
+    A Maker or Metal session skips all of them; ``maker_ports`` provides the
+    CAN/UART port detection that replaces identify/wiggle.
     """
     return normalize_arm_type(arm_type) == "so101"
 
@@ -75,10 +81,11 @@ def supports_auto_calibration(arm_type: object) -> bool:
     EEPROM — a Feetech-specific procedure end to end (see the vendored script
     in ``vendor/feetech_autocal``).
 
-    The Maker arm needs no range sweep at all: its joint limits are fixed
-    constants in ``MakerFollowerConfig.joint_limits``, measured once against
-    the arm's mechanical stops. All its calibration has to establish is where
-    zero is, which is what ``zero_calibrate`` does — with torque OFF, by hand.
+    The CAN arms need no range sweep at all: their joint limits are fixed
+    constants (``MakerFollowerConfig.joint_limits`` /
+    ``MetalFollowerConfig.joint_limits``), measured once against the arms'
+    mechanical stops. All their calibration has to establish is where zero
+    is, which is what ``zero_calibrate`` does — with torque OFF, by hand.
     """
     return normalize_arm_type(arm_type) == "so101"
 
@@ -87,22 +94,24 @@ def uses_zero_calibration(arm_type: object) -> bool:
     """True when calibrating this arm type means setting a zero pose.
 
     The exact complement of ``supports_auto_calibration`` today, but they are
-    not the same question and will not stay complementary if a third arm type
-    arrives — keep them separate.
+    not the same question and need not stay complementary as arm types
+    arrive — keep them separate.
     """
-    return normalize_arm_type(arm_type) == "maker"
+    return normalize_arm_type(arm_type) in ("maker", "metal")
 
 
 def supports_dagger(arm_type: object) -> bool:
     """True when this arm type can run a DAgger / smooth-handover rollout.
 
-    Always False for the Maker arm, and it is a HARDWARE limit, not a policy
+    Always False for the CAN arms, and it is a HARDWARE limit, not a policy
     choice. DAgger hands control back and forth between the policy and a human
     on the leader, which requires the leader to be back-driven to the
     follower's pose when the policy has control. The Star Arm 102 leader that
-    drives a Maker arm has no motors in its joints at all — they are encoders
-    only. There is no actuator to drive it with, so a handover would silently
-    read a stale human pose.
+    drives a Maker or Metal arm has no motors in its joints at all — they are
+    encoders only. There is no actuator to drive it with, so a handover would
+    silently read a stale human pose. (The gravity-compensated metal_leader
+    COULD back-drive, but MakerMods Lab does not integrate it yet — this
+    becomes a per-leader question, not a per-arm-type one, if it ever does.)
 
     MakerMods Lab does not expose any rollout strategy other than ``base``
     (see rollout.py's ``--strategy.type=base``), so nothing consults this
@@ -113,11 +122,16 @@ def supports_dagger(arm_type: object) -> bool:
     return normalize_arm_type(arm_type) == "so101"
 
 
-# lerobot `RobotConfig` choice-registry keys that mean "this is a Maker arm".
-# Kept as a set of the REGISTERED type strings rather than an isinstance check
+# lerobot `RobotConfig` choice-registry keys, mapped to the arm type they
+# describe. Kept as REGISTERED type strings rather than an isinstance check
 # so this module never has to import the device classes (which would drag the
 # python-can / motorbridge stack into every import of it).
-_MAKER_ROBOT_TYPES = frozenset({"maker_follower", "bi_maker_follower"})
+_ROBOT_TYPE_TO_ARM_TYPE = {
+    "maker_follower": "maker",
+    "bi_maker_follower": "maker",
+    "metal_follower": "metal",
+    "bi_metal_follower": "metal",
+}
 
 
 def arm_type_of_robot_config(robot_config: object) -> str:
@@ -128,4 +142,4 @@ def arm_type_of_robot_config(robot_config: object) -> str:
     ``RecordConfig``), this reads the arm type back off the config instead of
     threading a parallel parameter that could drift out of agreement with it.
     """
-    return "maker" if getattr(robot_config, "type", None) in _MAKER_ROBOT_TYPES else "so101"
+    return _ROBOT_TYPE_TO_ARM_TYPE.get(getattr(robot_config, "type", None), "so101")

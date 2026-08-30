@@ -80,6 +80,25 @@ _SETTLE_SEC = 0.01
 _POSE_TIMEOUT_S = 15 * 60.0
 
 
+def zero_pose_instructions(arm_type: object) -> str:
+    """The physical zero pose to ask the user for, per CAN family.
+
+    The two poses are OPPOSITES on the gripper (Maker: fully open; Metal:
+    closed), so showing one family's text to the other zeroes the gripper at
+    the wrong end of its travel. Wording mirrors each family's own
+    ``calibrate()`` prompt in lerobot.
+    """
+    if arm_type == "metal":
+        return (
+            "Move the arm by hand to its ZERO POSE — standing upright, all "
+            "joints at 0 degrees, gripper closed — then confirm."
+        )
+    return (
+        "Move the arm by hand to its ZERO POSE — folded against the base, "
+        "gripper fully open — then confirm."
+    )
+
+
 @dataclass
 class ZeroCalibrationStatus:
     """Status of a zero-pose calibration run.
@@ -120,6 +139,11 @@ class ZeroCalibrationRequest:
     robot_name: str | None = None
     overwrite: bool = False
     arm: Literal["left", "right"] = "left"
+    # Which CAN family this run calibrates. Decides the device configs built
+    # in _connect, the zero-pose text shown to the user, and the library the
+    # name-collision check reads. Defaults to maker so a request built before
+    # the Metal arm existed is unchanged.
+    arm_type: Literal["maker", "metal"] = "maker"
 
 
 class ZeroCalibrationManager:
@@ -171,21 +195,28 @@ class ZeroCalibrationManager:
     def _read_positions(self) -> dict[str, float]:
         """Current joint angles in degrees, keyed by motor name.
 
-        Both device families expose a private raw-position reader with the same
-        name and the same contract (``{motor: degrees}``), which is what
-        lerobot's own ``calibrate()`` logs before zeroing. Using it keeps this
-        readout in the same units the zero is about to be taken in.
+        The Maker follower and the Star leader expose a private raw-position
+        reader with the same name and the same contract (``{motor: degrees}``),
+        which is what lerobot's own ``calibrate()`` logs before zeroing. The
+        Metal follower has no such reader, so fall back to the bus's plain
+        ``sync_read("Present_Position")`` — same units, same keys. Either way
+        this is a read on a torque-off bus; a failure is the caller's to skip.
         """
         reader = getattr(self.device, "_read_raw_positions", None)
-        if reader is None:
+        if reader is not None:
+            return {m: float(v) for m, v in reader().items()}
+        bus = getattr(self.device, "bus", None)
+        sync_read = getattr(bus, "sync_read", None)
+        if sync_read is None:
             return {}
-        return {m: float(v) for m, v in reader().items()}
+        return {m: float(v) for m, v in sync_read("Present_Position").items()}
 
     def _set_zero(self) -> None:
         """Tell the motors that where they are now is zero."""
         bus = self.device.bus
         if self._is_follower():
-            # RobStride over CAN: one broadcast zeroes every motor on the bus.
+            # CAN (RobStride and Damiao alike): one broadcast zeroes every
+            # motor on the bus.
             bus.set_zero_position()
             # Mirror what MakerFollower.calibrate() resets alongside the zero,
             # so the freshly zeroed arm is not still carrying the previous
@@ -231,6 +262,12 @@ class ZeroCalibrationManager:
 
         calibration: dict[str, MotorCalibration] = {}
         for motor_name, motor_id in ids.items():
+            # The two CAN followers disagree about the id field's shape:
+            # Maker motor_can_ids are plain ints, Metal's are (send, recv)
+            # tuples. MotorCalibration.id is an int, and lerobot's own
+            # MetalFollower.calibrate() stores the SEND id.
+            if isinstance(motor_id, tuple):
+                motor_id = motor_id[0]
             range_min, range_max = ranges.get(motor_name, default)
             calibration[motor_name] = MotorCalibration(
                 id=motor_id,
@@ -264,7 +301,7 @@ class ZeroCalibrationManager:
 
                 # Refuse to silently clobber an existing calibration of the
                 # same name — same contract as the SO-101 flow.
-                config_dir = calibration_dir_for_device(request.device_type, "maker")
+                config_dir = calibration_dir_for_device(request.device_type, request.arm_type)
                 if config_dir is not None and not request.overwrite:
                     stem = request.config_file.removesuffix(".json")
                     if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
@@ -360,10 +397,7 @@ class ZeroCalibrationManager:
                 status="awaiting_zero",
                 awaiting_pose=True,
                 step=1,
-                message=(
-                    "Move the arm by hand to its ZERO POSE — folded against the base, "
-                    "gripper fully open — then confirm."
-                ),
+                message=zero_pose_instructions(request.arm_type),
             )
             notify_session_changed("calibration", True, phase="awaiting_zero")
 
@@ -401,20 +435,30 @@ class ZeroCalibrationManager:
         from .utils.robot_factory import (  # local import: avoids a cycle at module load
             maker_follower_config,
             maker_leader_config,
+            metal_follower_config,
+            metal_leader_config,
         )
 
+        is_metal = request.arm_type == "metal"
         if request.device_type == "robot":
-            config = maker_follower_config(request.port, request.config_file)
+            builder = metal_follower_config if is_metal else maker_follower_config
+            config = builder(request.port, request.config_file)
             self.device = make_robot_from_config(config)
-            self._update_status(message="Connecting to the Maker follower arm...")
-            # NOT device.connect(): MakerFollower.connect() finishes by calling
-            # enable_torque(), which would lock the arm rigid exactly when the
-            # user needs to move it by hand. Open the bus directly and disable
-            # torque, which is what lerobot's own calibrate() does internally.
+            label = "Metal" if is_metal else "Maker"
+            self._update_status(message=f"Connecting to the {label} follower arm...")
+            # NOT device.connect(): both followers' connect() finishes by
+            # calling enable_torque(), which would lock the arm rigid exactly
+            # when the user needs to move it by hand. Open the bus directly
+            # and disable torque, which is what lerobot's own calibrate() does
+            # internally. The disable is not optional for Metal even here:
+            # the Damiao HANDSHAKE inside bus.connect() is itself the enable
+            # command, so the arm comes up energized and this write is what
+            # frees it for the user's hands.
             self.device.bus.connect()
             self.device.bus.disable_torque()
         else:
-            config = maker_leader_config(request.port, request.config_file)
+            builder = metal_leader_config if is_metal else maker_leader_config
+            config = builder(request.port, request.config_file)
             self.device = make_teleoperator_from_config(config)
             self._update_status(message="Connecting to the Star Arm 102 leader arm...")
             # The leader's bus is constructed inside connect(), so there is no

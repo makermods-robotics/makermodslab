@@ -72,7 +72,7 @@ def test_makermodslab_never_requests_a_dagger_rollout() -> None:
     assert "dagger" not in rollout_src.lower()
 
 
-@pytest.mark.parametrize("value", [None, "", "SO101", "metal", 7, object()])
+@pytest.mark.parametrize("value", [None, "", "SO101", "star", 7, object()])
 def test_unknown_arm_types_fall_back_to_so101(value: object) -> None:
     """A corrupted or future-dated record must never make a robot unopenable.
 

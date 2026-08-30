@@ -946,6 +946,10 @@ core-scripts = [
     { name = "torchcodec", version = "0.10.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'AMD64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'win32'" },
     { name = "torchcodec", version = "0.11.1", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'arm64' and sys_platform == 'linux')" },
 ]
+damiao = [
+    { name = "pyserial" },
+    { name = "python-can" },
+]
 feetech = [
     { name = "deepdiff" },
     { name = "feetech-servo-sdk" },
@@ -977,7 +981,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi", extra = ["standard"] },
-    { name = "lerobot", extra = ["core-scripts", "feetech", "maker", "rebot", "training"] },
+    { name = "lerobot", extra = ["core-scripts", "damiao", "feetech", "maker", "rebot", "training"] },
     { name = "psutil" },
     { name = "pygrabber", marker = "sys_platform == 'win32'" },
     { name = "uvicorn" },
@@ -1002,7 +1006,7 @@ test = [
 requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
-    { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=b968c0c015e16699a225070f677dc644543707f0" },
+    { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "damiao", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=b968c0c015e16699a225070f677dc644543707f0" },
     { name = "makermodslab", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },
     { name = "psutil", specifier = ">=5.9.0" },

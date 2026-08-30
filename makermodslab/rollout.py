@@ -105,7 +105,7 @@ logger = logging.getLogger(__name__)
 # against the SO-101's 6 is neither <= 6 nor a clean multiple of it, and the
 # guard would silently disable itself on exactly the mismatch it exists to
 # catch.
-_ARM_STATE_DIMS = {"so101": 6, "maker": 7}
+_ARM_STATE_DIMS = {"so101": 6, "maker": 7, "metal": 7}
 _SINGLE_ARM_STATE_DIM = _ARM_STATE_DIMS["so101"]
 
 
@@ -1221,13 +1221,16 @@ _ROBOT_CLI_TYPES = {
     ("so101", True): "bi_so_follower",
     ("maker", False): "maker_follower",
     ("maker", True): "bi_maker_follower",
+    ("metal", False): "metal_follower",
+    ("metal", True): "bi_metal_follower",
 }
 
 
 def _robot_cli_type(request: InferenceRequest) -> str:
     """The `--robot.type=` value for this request's arm type and layout."""
-    arm_type = request.arm_type if request.arm_type in ("so101", "maker") else "so101"
-    return _ROBOT_CLI_TYPES[(arm_type, request.mode == "bimanual")]
+    from .utils.config import normalize_arm_type
+
+    return _ROBOT_CLI_TYPES[(normalize_arm_type(request.arm_type), request.mode == "bimanual")]
 
 
 def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]:

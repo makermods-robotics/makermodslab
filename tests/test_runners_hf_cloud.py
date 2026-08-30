@@ -943,3 +943,16 @@ def test_a_conforming_job_id_is_still_labelled_and_named() -> None:
 
     assert kwargs["labels"] == {_RUN_LABEL: "act_cube_2026-08-01_12-00-00"}
     assert kwargs["name"] == "act_cube_2026-08-01_12-00-00"
+
+
+def test_cloud_lerobot_spec_drops_every_hardware_bus_extra() -> None:
+    """The container trains on GPUs with no arms attached: every motor-bus
+    extra is host-only, not just feetech. `maker`/`damiao` (CAN) and `rebot`
+    (FashionStar UART) pull python-can/motorbridge stacks the pod can't use —
+    dead weight per job at best, a platform-specific resolve failure at worst.
+    """
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
+
+    extras = _spec_extras(cloud_lerobot_spec("act"))
+    assert extras.isdisjoint({"feetech", "maker", "rebot", "damiao", "robstride", "metal"})
+    assert "training" in extras

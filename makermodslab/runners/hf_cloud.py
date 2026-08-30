@@ -95,9 +95,12 @@ _MAX_LABEL_LEN = 100
 # The wrapper therefore pip-installs the exact pin (below) before launching
 # the trainer, so container and host agree on the CLI surface.
 
-# Extras from the pyproject pin that only matter on the host machine (serial
-# motor buses). Dropped from the container install.
-_HOST_ONLY_EXTRAS = frozenset({"feetech"})
+# Extras from the pyproject pin that only matter on the host machine — every
+# motor-bus stack: feetech (SO-101 serial), maker/damiao/robstride/metal
+# (CAN), rebot (FashionStar UART). Dropped from the container install: the
+# training pod has no arms attached, so they are dead weight per job at best
+# and a platform-specific resolve failure at worst.
+_HOST_ONLY_EXTRAS = frozenset({"feetech", "maker", "damiao", "robstride", "metal", "rebot"})
 
 # policy_type -> lerobot extra that carries the policy's model dependencies
 # at the pinned ref (e.g. transformers for smolvla). Policies without an
