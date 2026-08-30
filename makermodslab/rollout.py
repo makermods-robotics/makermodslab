@@ -1315,7 +1315,7 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
         # Both preflights read/write Feetech registers by name and are skipped
         # wholesale on a Maker arm's CAN bus — see arm_capabilities.
         if not uses_feetech_bus(request.arm_type):
-            logger.info("Maker arm: skipping the Feetech identity + register preflights")
+            logger.info("CAN arm: skipping the Feetech identity + register preflights")
         elif request.skip_identity_check:
             logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
         else:
@@ -1347,7 +1347,7 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
         # A Maker follower stores its zero inside the RobStride motors and
         # writes homing_offset=0 for every joint, so the EEPROM fingerprint has
         # nothing to compare and the torque-limit register does not exist.
-        logger.info("Maker arm: skipping the Feetech identity + register preflights")
+        logger.info("CAN arm: skipping the Feetech identity + register preflights")
         return _single_robot_args(request, follower_id), identity_warnings
 
     if request.skip_identity_check:

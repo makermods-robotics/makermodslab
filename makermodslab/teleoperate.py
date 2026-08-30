@@ -40,7 +40,7 @@ from .maker_rest_pose import (
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .session_events import notify_session_changed
-from .torque import release_maker_torque
+from .torque import de_energize_can_device, release_maker_torque
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
@@ -830,15 +830,19 @@ def _connect_bimanual(request: TeleoperateRequest):
         raise
 
 
-def _connect_maker(request: TeleoperateRequest):
-    """Connect a Maker follower + Star Arm 102 leader pair (single or bimanual).
+def _can_family_label(request) -> str:
+    """Human name of a CAN request's follower family, for messages and logs."""
+    return "Metal" if getattr(request, "arm_type", None) == "metal" else "Maker"
 
-    Deliberately much shorter than the SO-101 path above, because the Maker
+
+def _connect_can(request: TeleoperateRequest):
+    """Connect a CAN follower (Maker or Metal) + Star Arm 102 leader pair.
+
+    Deliberately much shorter than the SO-101 path above, because the CAN
     devices' own ``connect()`` already does everything that path hand-rolls:
     it opens the bus, loads and registers the calibration, writes the MIT
-    follow gains, and enables torque — with a try/except that releases the
-    port if any step fails. Re-implementing that here would only add ways to
-    diverge from it.
+    follow gains, and enables torque. Re-implementing that here would only
+    add ways to diverge from it.
 
     ``calibrate=False`` is not optional. lerobot's default is True, and on an
     uncalibrated device that path calls ``calibrate()``, which blocks on
@@ -847,29 +851,40 @@ def _connect_maker(request: TeleoperateRequest):
     this point (``setup_calibration_files`` raises when it does not), so the
     flag only ever suppresses a prompt that should be unreachable.
 
+    A failed FOLLOWER connect runs ``de_energize_can_device`` before raising,
+    and it is load-bearing on Metal, not belt-and-braces: the Damiao
+    handshake IS the motor enable command sent motor by motor, so a handshake
+    that raises partway has energized the motors that DID answer while
+    ``is_connected`` still reads False — the state every register-era cleanup
+    helper skips. (MakerFollower.connect() also cleans up after itself;
+    MetalFollower.connect() does not, so the explicit release here is the
+    only one Metal gets.)
+
     None of the Feetech preflights run: see arm_capabilities.uses_feetech_bus.
     Returns (robot, teleop_device, warnings) to match _connect_bimanual.
     """
+    family = _can_family_label(request)
     if request.mode == "bimanual":
         robot_config, teleop_config = build_bimanual_configs(request)
     else:
         robot_config, teleop_config = build_single_configs(request)
 
     # lerobot's own factories rather than a hardcoded class per branch: the
-    # Maker leader has no device class of its own (the `_maker` variants are
-    # CONFIG-only presets that both resolve to RebotArm102Leader /
+    # CAN leaders have no device class of their own (the `_maker`/`_metal`
+    # variants are CONFIG-only presets that all resolve to RebotArm102Leader /
     # BiRebot102Leader), so dispatching on the registered `config.type` is the
     # only mapping guaranteed to stay correct if that changes upstream.
     robot = make_robot_from_config(robot_config)
     teleop_device = make_teleoperator_from_config(teleop_config)
 
     try:
-        logger.info("Connecting to Maker follower arm(s)...")
+        logger.info(f"Connecting to {family} follower arm(s)...")
         try:
             robot.connect(calibrate=False)
         except Exception as e:
+            de_energize_can_device(robot, f"{family} follower arm")
             raise RuntimeError(
-                f"Could not connect to the Maker follower arm on {request.follower_port}. "
+                f"Could not connect to the {family} follower arm on {request.follower_port}. "
                 "Check that the CAN adapter is plugged in, the arm is powered, and the "
                 "motors are in MIT mode, then try again."
             ) from e
@@ -883,14 +898,14 @@ def _connect_maker(request: TeleoperateRequest):
                 "Make sure it's plugged in and powered on, then try again."
             ) from e
 
-        logger.info("Successfully connected to the Maker arm pair")
+        logger.info(f"Successfully connected to the {family} arm pair")
         return robot, teleop_device, []
     except Exception as e:
         # Same contract as _connect_bimanual: stash the cleanup outcome on the
         # exception so the caller (which holds no device of its own yet) can
         # surface it as a warning instead of losing it.
         e.cleanup_error = _cleanup_after_setup_failure(
-            robot, teleop_device, "Maker follower arm", "Star 102 leader arm"
+            robot, teleop_device, f"{family} follower arm", "Star 102 leader arm"
         )
         raise
 
@@ -1005,7 +1020,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         )
 
         if not uses_feetech_bus(request.arm_type):
-            robot, teleop_device, identity_warnings = _connect_maker(request)
+            robot, teleop_device, identity_warnings = _connect_can(request)
         elif request.mode == "bimanual":
             robot, teleop_device, identity_warnings = _connect_bimanual(request)
         else:
@@ -1220,7 +1235,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     problems = force_disable_torque(robot, "follower arm")
                     problems += force_disable_torque(teleop_device, "leader arm")
                 else:
-                    problems = release_maker_torque(robot, "Maker follower arm")
+                    problems = release_maker_torque(robot, f"{_can_family_label(request)} follower arm")
                 for device, label in ((robot, "follower arm"), (teleop_device, "leader arm")):
                     error = _safe_disconnect(device, label)
                     if error:

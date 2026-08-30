@@ -195,6 +195,68 @@ def _release_leader_bus(bus) -> None:
         bus.close()
 
 
+def _open_metal_follower_bus(port: str):
+    """Open a Damiao CAN bus carrying just the shoulder-pan motor, and read it.
+
+    Same one-motor shape as the RobStride probe, with one honest difference
+    that callers must know: **this probe is not read-only**. The Damiao
+    handshake IS the motor enable command, so opening this bus energizes the
+    one motor on it for the probe's duration. Shoulder-pan is chosen for
+    exactly that reason — it is the base-rotation joint, the only one gravity
+    cannot move, so briefly holding it neither drops nor moves the arm. The
+    releaser then disables it explicitly before closing, leaving the arm as
+    it was found.
+
+    The Motor is built exactly the way ``MetalFollower.__init__`` builds its
+    own: (send, recv) = (0x01, 0x11) for shoulder-pan, model from lerobot's
+    Metal ``MOTOR_MODELS`` table, classic CAN at 1 Mbps over slcan.
+    """
+    from lerobot.motors import Motor, MotorNormMode
+    from lerobot.motors.damiao import DamiaoMotorsBus
+    from lerobot.robots.metal_follower.config_metal_follower import MetalFollowerConfigBase
+    from lerobot.robots.metal_follower.metal_follower import MOTOR_MODELS as METAL_MOTOR_MODELS
+
+    send_id, recv_id = MetalFollowerConfigBase(port=port).motor_can_ids["shoulder_pan"]
+    model = METAL_MOTOR_MODELS["shoulder_pan"]
+    motor = Motor(send_id, model, MotorNormMode.DEGREES)
+    motor.recv_id = recv_id
+    motor.motor_type_str = model
+
+    bus = DamiaoMotorsBus(
+        port=port,
+        motors={"shoulder_pan": motor},
+        can_interface="slcan",
+        use_can_fd=False,
+        bitrate=_CAN_BITRATE,
+        data_bitrate=None,
+    )
+    try:
+        bus.connect()  # handshake=True: pings (= enables) the one pan motor
+        angle = float(bus.read("Present_Position", "shoulder_pan"))
+    except Exception:
+        _release_metal_follower_bus(bus)
+        raise
+    return bus, angle
+
+
+def _release_metal_follower_bus(bus) -> None:
+    """Disable the probe-energized pan motor, then close the bus.
+
+    The MIRROR of the RobStride releaser: there the handshake never enables
+    torque so the release must never write a disable (it could drop an arm
+    another session holds); here the handshake DID enable, so the release
+    must undo it. Uses the shared de-energize helper — its reopen-if-dead
+    branch also covers a probe that died between handshake and read.
+    """
+    from .torque import de_energize_can_bus
+
+    de_energize_can_bus(bus, "port-probe pan motor")
+
+
+def _read_metal_follower_angle(bus) -> float:
+    return float(bus.read("Present_Position", "shoulder_pan"))
+
+
 def _read_leader_angle(bus) -> float:
     """Shoulder-pan angle in degrees from a FashionStar monitor frame.
 
@@ -216,8 +278,23 @@ _OPENERS = {
     "teleop": (_open_leader_bus, _release_leader_bus, _read_leader_angle),
 }
 
+_METAL_OPENERS = {
+    "robot": (_open_metal_follower_bus, _release_metal_follower_bus, _read_metal_follower_angle),
+    "teleop": (_open_leader_bus, _release_leader_bus, _read_leader_angle),
+}
 
-def _probe_sync(ports: list[str]) -> dict:
+
+def _openers_for(arm_type: str) -> dict:
+    """The per-device-type (opener, releaser, reader) triples for a family.
+
+    The leader row is identical (both CAN families use the Star Arm 102);
+    only the follower probe differs — RobStride vs Damiao frames, and the
+    read-only guarantee that goes with them (see _open_metal_follower_bus).
+    """
+    return _METAL_OPENERS if arm_type == "metal" else _OPENERS
+
+
+def _probe_sync(ports: list[str], arm_type: str = "maker") -> dict:
     """Classify each port by which protocol answers on it.
 
     Tries the LEADER (UART) probe first and the follower (CAN) probe second,
@@ -231,10 +308,11 @@ def _probe_sync(ports: list[str]) -> dict:
     leader_ports: list[str] = []
     unknown: list[str] = []
 
+    openers = _openers_for(arm_type)
     for port in ports:
         found = None
         for device_type in ("teleop", "robot"):
-            opener, releaser, _ = _OPENERS[device_type]
+            opener, releaser, _ = openers[device_type]
             try:
                 bus, _angle = opener(port)
             except Exception as e:
@@ -273,14 +351,16 @@ def _probe_message(follower_ports: list[str], leader_ports: list[str]) -> str:
     return "Found " + "; ".join(parts) + "."
 
 
-def _identify_sync(ports: list[str], device_type: str, timeout_s: float = _IDENTIFY_TIMEOUT_S) -> dict:
+def _identify_sync(
+    ports: list[str], device_type: str, arm_type: str = "maker", timeout_s: float = _IDENTIFY_TIMEOUT_S
+) -> dict:
     """Watch shoulder-pan on all `ports` of one device type until one swings.
 
     Blocking; run in a worker thread. Ports that fail to open are skipped
     (and reported), not fatal — one of them is usually the OTHER half of the
     rig, which speaks a protocol this opener does not.
     """
-    opener, releaser, reader = _OPENERS[device_type]
+    opener, releaser, reader = _openers_for(arm_type)[device_type]
     buses: dict[str, object] = {}
     skipped: list[str] = []
     try:
@@ -338,7 +418,7 @@ def _candidate_ports(ports: list[str] | None) -> list[str]:
     return list(dict.fromkeys(candidates))  # dedupe, keep order
 
 
-async def probe_maker_ports(ports: list[str] | None = None) -> dict:
+async def probe_maker_ports(ports: list[str] | None = None, arm_type: str = "maker") -> dict:
     """Identify which ports carry a Maker follower and which carry a leader.
 
     No user gesture needed — the two halves answer different protocols. Returns
@@ -357,7 +437,7 @@ async def probe_maker_ports(ports: list[str] | None = None) -> dict:
         }
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_probe_sync, candidates),
+            asyncio.to_thread(_probe_sync, candidates, arm_type),
             timeout=_PROBE_TIMEOUT_S * len(candidates) * 2 + 5.0,
         )
     except TimeoutError:
@@ -379,7 +459,9 @@ async def probe_maker_ports(ports: list[str] | None = None) -> dict:
         }
 
 
-async def identify_maker_arm_by_motion(device_type: str, ports: list[str] | None = None) -> dict:
+async def identify_maker_arm_by_motion(
+    device_type: str, ports: list[str] | None = None, arm_type: str = "maker"
+) -> dict:
     """Watch for a hand gesture to tell one Maker arm from its twin.
 
     ``device_type`` is "robot" (the CAN follower) or "teleop" (the UART
@@ -392,6 +474,22 @@ async def identify_maker_arm_by_motion(device_type: str, ports: list[str] | None
             "message": "device_type must be 'teleop' or 'robot'",
             "skipped": [],
         }
+    if arm_type == "metal" and device_type == "robot":
+        # Watching a Damiao follower means holding its bus open, and the
+        # handshake that opens it energizes the motors — the opposite of a
+        # hands-on identification gesture. Refuse plainly rather than
+        # energize behind the user's back. Single-arm rigs never need the
+        # gesture (the probe tells the ports apart by protocol), and the
+        # bimanual left/right case can identify by the LEADERS instead.
+        return {
+            "success": False,
+            "message": (
+                "Motion identification is not available for the Metal follower: opening its "
+                "bus would energize the motors mid-gesture. Identify by the leader arms "
+                "instead, or plug in one follower at a time and use the port probe."
+            ),
+            "skipped": [],
+        }
     candidates = _candidate_ports(ports)
     if not candidates:
         return {
@@ -401,7 +499,7 @@ async def identify_maker_arm_by_motion(device_type: str, ports: list[str] | None
         }
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_identify_sync, candidates, device_type),
+            asyncio.to_thread(_identify_sync, candidates, device_type, arm_type),
             timeout=_IDENTIFY_TIMEOUT_S + 5.0,
         )
     except TimeoutError:

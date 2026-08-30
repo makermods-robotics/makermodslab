@@ -592,9 +592,7 @@ def _resolve_slot(record: dict, device_type: str, arm: str, port: str | None, co
             "assign (or pass) a port before calibrating it.",
             code=ErrorCode.ROBOT_NOT_READY,
         )
-    default_name = default_slot_config_name(
-        record["name"], record.get("mode"), arm, record.get("arm_type")
-    )
+    default_name = default_slot_config_name(record["name"], record.get("mode"), arm, record.get("arm_type"))
     resolved_config = config_file or record.get(config_field) or default_name
     return resolved_port, resolved_config
 

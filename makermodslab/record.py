@@ -1923,12 +1923,12 @@ def record_with_web_events(
         _write_calibration(robot, "robot")
         _write_calibration(teleop, "teleop")
     else:
-        # The Maker devices' own connect() already registered their calibration
+        # The CAN devices' own connect() already registered their calibration
         # on the bus. Re-writing it here would also hit the Star 102 leader,
         # whose bus is a FashionStar handle with no write_calibration at all —
         # its zero is set by set_origin_point during calibration and lives in
         # the servos, not in a file the bus reloads.
-        logger.info("Maker arm: calibration registered by connect(); skipping the explicit write")
+        logger.info("CAN arm: calibration registered by connect(); skipping the explicit write")
 
     # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
     # follower only, never the human-held leader. Clears any torque cap a
@@ -2223,7 +2223,7 @@ def record_with_web_events(
                 force_disable_torque(robot, "robot")
                 force_disable_torque(teleop, "teleop")
             else:
-                release_maker_torque(robot, "Maker follower arm")
+                release_maker_torque(robot, "CAN follower arm")
             robot.disconnect()
             if teleop:
                 teleop.disconnect()

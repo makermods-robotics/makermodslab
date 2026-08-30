@@ -305,15 +305,17 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
     return response
 
 
-def _connect_maker_follower(request: ReplayRequest):
-    """Connect a Maker follower for replay.
+def _connect_can_follower(request: ReplayRequest):
+    """Connect a CAN follower (Maker or Metal) for replay.
 
-    Much shorter than the SO-101 path below because MakerFollower.connect()
-    already does everything that path hand-rolls — bus open, calibration load
-    and registration, MIT gain write, torque enable — with its own cleanup on
-    failure. `calibrate=False` for the same reason teleoperate._connect_maker
-    passes it: the default would drop an uncalibrated device into an
-    `input()`-blocked calibrate() and hang this thread forever.
+    Much shorter than the SO-101 path below because the CAN followers'
+    connect() already does everything that path hand-rolls — bus open,
+    calibration load and registration, MIT gain write, torque enable.
+    `calibrate=False` for the same reason teleoperate._connect_can passes it:
+    the default would drop an uncalibrated device into an `input()`-blocked
+    calibrate() and hang this thread forever. A failed connect is
+    de-energized explicitly — load-bearing on Metal, whose handshake IS the
+    motor enable command and whose connect() has no cleanup of its own.
 
     Connecting also RE-ARMS the arm's slow initial sync (`_synced = False`),
     which keeps the arm's own slow initial sync as a second safety net under
@@ -321,15 +323,20 @@ def _connect_maker_follower(request: ReplayRequest):
     """
     from lerobot.robots import make_robot_from_config
 
-    from .utils.robot_factory import maker_follower_config
+    from .torque import de_energize_can_device
+    from .utils.robot_factory import maker_follower_config, metal_follower_config
 
+    is_metal = request.arm_type == "metal"
+    family = "Metal" if is_metal else "Maker"
+    builder = metal_follower_config if is_metal else maker_follower_config
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
-    robot = make_robot_from_config(maker_follower_config(request.follower_port, follower_id))
+    robot = make_robot_from_config(builder(request.follower_port, follower_id))
     try:
         robot.connect(calibrate=False)
     except Exception as e:
+        de_energize_can_device(robot, f"{family} follower arm")
         raise RuntimeError(
-            f"Could not connect to the Maker follower arm on {request.follower_port}. "
+            f"Could not connect to the {family} follower arm on {request.follower_port}. "
             "Check that the CAN adapter is plugged in, the arm is powered, and the "
             "motors are in MIT mode, then try again."
         ) from e
@@ -347,7 +354,7 @@ def _connect_follower(request: ReplayRequest):
     Raises on a connection or hard identity-mismatch failure; the caller
     (handle_start_replay) is responsible for cleanup on that path."""
     if not uses_feetech_bus(request.arm_type):
-        return _connect_maker_follower(request)
+        return _connect_can_follower(request)
 
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
     robot = SO101Follower(SO101FollowerConfig(port=request.follower_port, id=follower_id))
@@ -640,14 +647,14 @@ def _replay_worker(
             except Exception as e:
                 logger.warning(f"Could not disconnect the follower after replay: {e}")
         else:
-            release_maker_torque(robot, "Maker follower arm")
+            release_maker_torque(robot, "CAN follower arm")
             try:
                 # disconnect() (not bus.disconnect(disable_torque=False)):
                 # MakerFollower.disconnect honours disable_torque_on_disconnect,
                 # and a torque-off settle is this arm's documented safe state.
                 robot.disconnect()
             except Exception as e:
-                logger.warning(f"Could not disconnect the Maker follower after replay: {e}")
+                logger.warning(f"Could not disconnect the CAN follower after replay: {e}")
         with _state_lock:
             replay_active = False
             if _replay_meta.get("phase") not in ("error",):

@@ -44,6 +44,7 @@ __all__ = [
     "InstallStatusResponse",
     "MakerIdentifyArmResponse",
     "MakerProbePortsResponse",
+    "ReleaseCanTorqueResponse",
     "PolicyExtraStatus",
     "PolicyOptimizerDefaultsResponse",
     "PolicyOptimizerPreset",
@@ -192,6 +193,18 @@ class MakerProbePortsResponse(BaseModel):
     leader_ports: list[str]
     unknown_ports: list[str]
     message: str
+
+
+class ReleaseCanTorqueResponse(BaseModel):
+    """can_recovery.handle_release_can_torque — the crash-recovery release.
+
+    `problems` is always present (empty on success) so a client can render
+    the loud per-bus alarms unconditionally.
+    """
+
+    success: bool
+    message: str
+    problems: list[str]
 
 
 class MakerIdentifyArmResponse(BaseModel):

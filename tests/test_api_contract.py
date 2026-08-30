@@ -234,6 +234,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # over UART, neither of which a Feetech bus can open.
         "POST /api/v1/maker/identify-arm",
         "POST /api/v1/maker/probe-ports",
+        # CAN crash recovery (can_recovery.py): de-energize a follower whose
+        # process died holding torque. Not a session (see the module
+        # docstring), and no flat mirror for the same only-shrinks reason.
+        "POST /api/v1/arms/release-torque",
         # Peer-job drill-in proxies: record + incremental log tail (GET, any
         # HTTP failure = node.unreachable) and forwarded stop/delete (the
         # peer's own coded refusals pass through with THEIR status and body).

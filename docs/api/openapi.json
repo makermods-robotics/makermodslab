@@ -2121,6 +2121,15 @@
       },
       "MakerIdentifyArmRequest": {
         "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
           "device_type": {
             "title": "Device Type",
             "type": "string"
@@ -2186,6 +2195,15 @@
       },
       "MakerProbePortsRequest": {
         "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
           "ports": {
             "anyOf": [
               {
@@ -3271,6 +3289,55 @@
           "single_task"
         ],
         "title": "RecordingRequest",
+        "type": "object"
+      },
+      "ReleaseCanTorqueRequest": {
+        "properties": {
+          "arm_type": {
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm_type",
+          "port"
+        ],
+        "title": "ReleaseCanTorqueRequest",
+        "type": "object"
+      },
+      "ReleaseCanTorqueResponse": {
+        "description": "can_recovery.handle_release_can_torque — the crash-recovery release.\n\n`problems` is always present (empty on success) so a client can render\nthe loud per-bus alarms unconditionally.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "problems"
+        ],
+        "title": "ReleaseCanTorqueResponse",
         "type": "object"
       },
       "RenameJobBody": {
@@ -4614,6 +4681,48 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/arms/release-torque": {
+      "post": {
+        "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
+        "operationId": "release_can_torque",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseCanTorqueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseCanTorqueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Can Torque",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/auto-calibration-batch-status": {
       "get": {
         "description": "Per-arm status + logs and overall counts for a batch auto-calibration.",
@@ -6881,7 +6990,7 @@
     },
     "/api/v1/maker/probe-ports": {
       "post": {
-        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nThe Maker rig's two halves speak different protocols on different adapters\n(RobStride over CAN vs FashionStar over UART), so unlike the SO-101 this\nneeds NO gesture from the user — asking each port which protocol answers is\nenough. Strictly read-only: no torque, no register writes, no zero set.",
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).",
         "operationId": "probe_maker_arm_ports",
         "requestBody": {
           "content": {

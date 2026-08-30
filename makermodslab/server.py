@@ -69,6 +69,7 @@ from .auto_calibrate import (
 from .calibrate import CalibrationRequest, calibration_manager
 from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
+from .can_recovery import ReleaseCanTorqueRequest, handle_release_can_torque
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -205,6 +206,7 @@ from .schemas.system import (
     MakerProbePortsResponse,
     PolicyExtraStatus,
     PolicyOptimizerDefaultsResponse,
+    ReleaseCanTorqueResponse,
     RobotPortResponse,
     SupplyVoltageResponse,
     UpdateResult,
@@ -3236,6 +3238,11 @@ class IdentifyArmRequest(BaseModel):
 class MakerProbePortsRequest(BaseModel):
     # Candidate ports to probe; empty/omitted = every detected serial port.
     ports: list[str] | None = None
+    # Which CAN family the follower probe should speak: "maker" (RobStride) or
+    # "metal" (Damiao). The leader probe is identical either way (both
+    # families use the Star Arm 102). Defaults to maker so a client that
+    # predates the Metal arm is unchanged.
+    arm_type: Literal["maker", "metal"] = "maker"
 
 
 class MakerIdentifyArmRequest(BaseModel):
@@ -3244,18 +3251,24 @@ class MakerIdentifyArmRequest(BaseModel):
     # caller must say which side it is asking about.
     device_type: str
     ports: list[str] | None = None
+    # See MakerProbePortsRequest. For "metal" the follower side is refused
+    # (opening a Damiao bus energizes it mid-gesture); the leader side works.
+    arm_type: Literal["maker", "metal"] = "maker"
 
 
 @v1_router.post("/maker/probe-ports", response_model=MakerProbePortsResponse, tags=["system"])
 async def probe_maker_arm_ports(request: MakerProbePortsRequest):
     """Find which ports carry a Maker follower and which carry its Star 102 leader.
 
-    The Maker rig's two halves speak different protocols on different adapters
-    (RobStride over CAN vs FashionStar over UART), so unlike the SO-101 this
-    needs NO gesture from the user — asking each port which protocol answers is
-    enough. Strictly read-only: no torque, no register writes, no zero set.
+    A CAN rig's two halves speak different protocols on different adapters
+    (RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101
+    this needs NO gesture from the user — asking each port which protocol
+    answers is enough. The maker probe is strictly read-only; the METAL
+    follower probe briefly enables the gravity-neutral base joint and disables
+    it again (the Damiao handshake is the enable command — see
+    maker_ports._open_metal_follower_bus).
     """
-    return await probe_maker_ports(request.ports)
+    return await probe_maker_ports(request.ports, request.arm_type)
 
 
 # exclude_none: success carries `port`, failure omits it entirely (never null),
@@ -3275,7 +3288,21 @@ async def identify_maker_arm(request: MakerIdentifyArmRequest):
     right. The user swings one arm's base and we report the port that saw it.
     Read-only — no motor writes.
     """
-    return await identify_maker_arm_by_motion(request.device_type, request.ports)
+    return await identify_maker_arm_by_motion(request.device_type, request.ports, request.arm_type)
+
+
+@v1_router.post("/arms/release-torque", response_model=ReleaseCanTorqueResponse, tags=["system"])
+async def release_can_torque(request: ReleaseCanTorqueRequest):
+    """De-energize a CAN follower after a crash left it holding torque.
+
+    A SIGKILL or power loss leaves Damiao motors rigid at their last command
+    with no session and no device object to clean up through. This reopens
+    the named bus WITHOUT the energizing handshake, broadcasts the disable,
+    and closes. Refused (409 session.held) while any live session holds the
+    hardware; not a session itself — no lease, no session events (see
+    can_recovery.py).
+    """
+    return await asyncio.to_thread(handle_release_can_torque, request)
 
 
 @router.post("/identify-arm")

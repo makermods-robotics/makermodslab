@@ -11,14 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Zero-pose calibration: the Maker arm's only calibration flow.
+"""Zero-pose calibration: the CAN arms' (Maker and Metal) only calibration flow.
 
 The SO-101 needs a range sweep — its Feetech servos know nothing about where
 the joint stops are, so ``calibrate.py`` walks the user through moving every
-joint end to end and records what it sees. The Maker arm needs nothing of the
-kind: its joint limits are fixed constants measured once against the arm's
-mechanical stops (``MakerFollowerConfig.joint_limits``, and the Star 102
-leader's ``joint_ranges`` copied from them). The only thing calibration has to
+joint end to end and records what it sees. The CAN arms need nothing of the
+kind: their joint limits are fixed constants measured once against the arms'
+mechanical stops (``MakerFollowerConfig.joint_limits`` /
+``MetalFollowerConfig.joint_limits``, and the Star 102 leader presets'
+``joint_ranges`` copied from them). The only thing calibration has to
 establish is **where zero is**.
 
 So the whole procedure is: torque off, the user poses the arm by hand, we tell
@@ -38,14 +39,19 @@ state in, so every existing reciprocal check keeps working without a new
 options schema. The sessions surface routes kind ``calibration`` here or to
 ``calibrate.py`` based on the robot record's ``arm_type``.
 
-The two device families differ in exactly one place, ``_set_zero``:
+The two device SIDES differ in exactly one place, ``_set_zero``:
 
-* the Maker **follower** speaks CAN, and one whole-bus ``set_zero_position()``
-  zeroes every RobStride motor at once;
+* the **followers** speak CAN (RobStride and Damiao alike), and one whole-bus
+  ``set_zero_position()`` zeroes every motor at once;
 * the Star 102 **leader** speaks FashionStar UART, and each servo has to be
   unlocked and given ``set_origin_point`` individually.
 
-Everything either side of that is shared.
+Between the two CAN FAMILIES the differences are carried by the request's
+``arm_type``: which device configs _connect builds, which pose text the user
+sees (the two zero poses are opposites on the gripper), which library the
+name-collision check reads, and — on Metal — the fact that the post-connect
+``disable_torque()`` is what frees an arm the Damiao handshake just
+energized.
 """
 
 import logging
@@ -94,8 +100,7 @@ def zero_pose_instructions(arm_type: object) -> str:
             "joints at 0 degrees, gripper closed — then confirm."
         )
     return (
-        "Move the arm by hand to its ZERO POSE — folded against the base, "
-        "gripper fully open — then confirm."
+        "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
     )
 
 
