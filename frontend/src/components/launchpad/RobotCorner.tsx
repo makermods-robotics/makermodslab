@@ -338,6 +338,8 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                           : "uppercase tracking-wider",
                       )}
                     >
+                      {t(`robot.corner.armType.${rec.arm_type ?? "so101"}`)}
+                      {" · "}
                       {rec.mode === "bimanual"
                         ? t("robot.corner.mode.bimanual")
                         : t("robot.corner.mode.single")}
