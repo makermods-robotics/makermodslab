@@ -73,6 +73,10 @@ export default {
         label: "Maker 机械臂",
         description: "7 自由度 CAN 机械臂，Star 102 主臂",
       },
+      metal: {
+        label: "Metal 机械臂",
+        description: "7 自由度 Damiao CAN 机械臂，Star 102 主臂",
+      },
     },
     modes: {
       single: {

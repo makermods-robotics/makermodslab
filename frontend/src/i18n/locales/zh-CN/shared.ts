@@ -57,7 +57,7 @@ export default {
     rightArm: "右臂",
     jointAngles: "实时关节角度",
     waitingForJoints: "正在等待关节数据…",
-    noMakerModel: "Maker 机械臂暂无 3D 模型。",
+    noModel: "该机械臂暂无 3D 模型。",
   },
   urdf: {
     switchedDefaultTitle: "已切换到默认模型",

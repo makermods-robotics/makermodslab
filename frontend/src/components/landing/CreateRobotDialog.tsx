@@ -59,7 +59,8 @@ const MODE_OPTIONS: {
 /**
  * The hardware-family options. Same logic/display split as MODE_OPTIONS above:
  * `value` is what the form submits and the backend stores, so it stays the
- * literal "so101"/"maker"; the label/description halves hold catalog KEYS.
+ * literal "so101"/"maker"/"metal"; the label/description halves hold catalog
+ * KEYS.
  *
  * `icon` is deliberately empty for now — the slot is wired through to the
  * option button so a mark can be dropped in later without touching layout.
@@ -81,6 +82,12 @@ const ARM_TYPE_OPTIONS: {
     value: "maker",
     labelKey: "landing.createRobot.armTypes.maker.label",
     descriptionKey: "landing.createRobot.armTypes.maker.description",
+    icon: null,
+  },
+  {
+    value: "metal",
+    labelKey: "landing.createRobot.armTypes.metal.label",
+    descriptionKey: "landing.createRobot.armTypes.metal.description",
     icon: null,
   },
 ];

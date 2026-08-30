@@ -6,19 +6,12 @@ import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
 export type RobotMode = "single" | "bimanual";
 
-/**
- * Which hardware family a robot is.
- *
- * - "so101" — SO-101 leader/follower, Feetech servos on USB serial. 6 joints
- *   per arm, range-sweep calibration (manual or automatic).
- * - "maker" — Maker Arm v1: a 7-DOF RobStride CAN follower driven by a Star
- *   Arm 102 leader on UART servos. Zero-pose calibration only, no automatic
- *   calibration, and no 3D viewer (no Maker URDF ships yet).
- *
- * Records created before the Maker arm existed have no arm_type on disk; the
- * backend reads those back as "so101", so this is never undefined in practice.
- */
-export type ArmType = "so101" | "maker";
+// ArmType and its capability predicates moved to lib/armTypes.ts so they stay
+// pure and independently testable (this module pulls in the API context on
+// import). Re-exported here because ArmType's importers already use this path.
+import type { ArmType } from "@/lib/armTypes";
+export { isCanArmType, jointsPerArm } from "@/lib/armTypes";
+export type { ArmType } from "@/lib/armTypes";
 
 export interface RobotRecord {
   name: string;

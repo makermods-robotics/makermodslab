@@ -5,7 +5,7 @@ import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useRobots } from "@/hooks/useRobots";
+import { useRobots, isCanArmType } from "@/hooks/useRobots";
 
 const TeleoperationPage = () => {
   const navigate = useNavigate();
@@ -16,10 +16,10 @@ const TeleoperationPage = () => {
   // it's bimanual.
   const { selectedRecord } = useRobots();
   const bimanual = selectedRecord?.mode === "bimanual";
-  // No Maker URDF ships yet, so a Maker session shows the live numeric joint
-  // readout in the viewer's place rather than animating the SO-101 model with
-  // a different arm's angles. See JointAngleReadout.
-  const readoutOnly = selectedRecord?.arm_type === "maker";
+  // No URDF ships for the CAN arms (Maker, Metal) yet, so their sessions show
+  // the live numeric joint readout in the viewer's place rather than animating
+  // the SO-101 model with a different arm's angles. See JointAngleReadout.
+  const readoutOnly = isCanArmType(selectedRecord?.arm_type);
 
   // Stop teleoperation exactly once, however the user leaves, so the back
   // button, an in-app link, and the unmount safety net can't double-stop or

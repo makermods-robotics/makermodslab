@@ -96,6 +96,10 @@ export default {
         label: "Maker arm",
         description: "7-DOF CAN arm, Star 102 leader",
       },
+      metal: {
+        label: "Metal arm",
+        description: "7-DOF Damiao CAN arm, Star 102 leader",
+      },
     },
     // The DISPLAY half of MODE_OPTIONS. The submitted value ("single" /
     // "bimanual") is logic and stays in the component, untranslated.
