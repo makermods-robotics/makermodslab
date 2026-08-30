@@ -77,6 +77,10 @@ HEALTH_PATH = "/api/v1/health"
 JOBS_PATH = "/api/v1/jobs"
 QUEUE_PATH = "/api/v1/jobs/queue"
 
+# The peer's system group: policy-extra install + self-restart, proxied by the
+# /api/v1/nodes/{instance_id}/policy-extra/* and /restart routes.
+SYSTEM_PATH = "/api/v1/system"
+
 # A peer verified within this window is trusted without a re-probe; listing
 # re-probes anything older. Also the back-off floor for unreachable peers, so
 # a down host is retried once per window instead of on every list().
@@ -446,6 +450,35 @@ class NodeRegistry:
         """Forward DELETE /api/v1/jobs/{job_id} to the peer (204, no body)."""
         return self._send_peer_request(instance_id, "DELETE", self._job_path(job_id))
 
+    @staticmethod
+    def _policy_extra_path(policy_type: str) -> str:
+        """The peer's own path for one policy's extra; the type is data."""
+        return f"{SYSTEM_PATH}/policy-extra/{quote(policy_type, safe='')}"
+
+    def fetch_peer_policy_extra(self, instance_id: str, policy_type: str) -> Any:
+        """The peer's own GET /api/v1/system/policy-extra/{policy_type} body —
+        whether the extra a policy needs is importable in THE PEER's
+        environment, which is the one the offloaded run will import from."""
+        return self._fetch_peer_path(instance_id, self._policy_extra_path(policy_type))
+
+    def fetch_peer_policy_extra_status(self, instance_id: str, policy_type: str) -> Any:
+        """The peer's own GET .../policy-extra/{policy_type}/install-status
+        body. The peer drains pending log lines per call, so this is
+        incremental, like the job-log proxy."""
+        return self._fetch_peer_path(instance_id, self._policy_extra_path(policy_type) + "/install-status")
+
+    def install_peer_policy_extra(self, instance_id: str, policy_type: str) -> Any:
+        """Forward POST .../policy-extra/{policy_type}/install to the peer:
+        the pip subprocess runs THERE, in the peer's own environment."""
+        return self._send_peer_request(instance_id, "POST", self._policy_extra_path(policy_type) + "/install")
+
+    def restart_peer(self, instance_id: str) -> Any:
+        """Forward POST /api/v1/system/restart to the peer. The peer answers
+        first and re-execs after a grace delay, so a 200 here means the
+        restart is SCHEDULED — the registry will see the node flap
+        unreachable and recover on its own probes."""
+        return self._send_peer_request(instance_id, "POST", SYSTEM_PATH + "/restart")
+
     def _peer_client(self) -> httpx.Client:
         """An httpx client for PEER traffic: trust_env=False, always.
 
@@ -787,6 +820,63 @@ def handle_delete_node_job(instance_id: str, job_id: str) -> None:
     node.unreachable, and 404 node.not_found names an unknown node."""
     try:
         node_registry.delete_peer_job(instance_id, job_id)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except PeerJobRefusalError as exc:
+        raise _peer_refusal_to_api_error(exc) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_get_node_policy_extra(instance_id: str, policy_type: str) -> Any:
+    """Extra-status proxy for GET /api/v1/nodes/{instance_id}/policy-extra/
+    {policy_type}: whether the PEER's environment can import what the policy
+    needs — the local answer is irrelevant to an offloaded run. Same error
+    mapping as the other GET proxies."""
+    try:
+        return node_registry.fetch_peer_policy_extra(instance_id, policy_type)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_get_node_policy_extra_status(instance_id: str, policy_type: str) -> Any:
+    """Install-progress proxy for GET .../policy-extra/{policy_type}/
+    install-status; incremental per call (the peer drains its pending log
+    lines), same error mapping as the GET proxies."""
+    try:
+        return node_registry.fetch_peer_policy_extra_status(instance_id, policy_type)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_install_node_policy_extra(instance_id: str, policy_type: str) -> Any:
+    """Forwarded install for POST .../policy-extra/{policy_type}/install: the
+    pip subprocess runs on the peer, in the environment its jobs import from.
+    Mutation stance, like the stop/delete proxies: the peer's own refusals
+    pass through with THEIR status and body; only transport failure is 502
+    node.unreachable, and 404 node.not_found names an unknown node."""
+    try:
+        return node_registry.install_peer_policy_extra(instance_id, policy_type)
+    except NodeNotFoundError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
+    except PeerJobRefusalError as exc:
+        raise _peer_refusal_to_api_error(exc) from exc
+    except NodeUnreachableError as exc:
+        raise ApiError(status_code=502, detail=str(exc), code=ErrorCode.NODE_UNREACHABLE) from exc
+
+
+def handle_restart_node(instance_id: str) -> Any:
+    """Forwarded restart for POST /api/v1/nodes/{instance_id}/restart. Same
+    mutation stance: the peer's coded refusals (409 session.held /
+    robot.busy.training / system.restart_unsupported — and a plain 404 from
+    a peer too old to have the endpoint) keep THEIR status and body; only
+    transport failure is 502 node.unreachable."""
+    try:
+        return node_registry.restart_peer(instance_id)
     except NodeNotFoundError as exc:
         raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.NODE_NOT_FOUND) from exc
     except PeerJobRefusalError as exc:

@@ -24,6 +24,11 @@ interface Props {
   installTarget: string; // e.g. "lerobot[smolvla]"
   installHint: string; // e.g. "pip install 'lerobot[smolvla]'"
   purpose: "training" | "inference"; // what the caller was about to do
+  /** When set, the install runs on THIS LAN node (through the server-to-server
+   * proxy) instead of the local environment — the offloaded run imports from
+   * the peer's site-packages, so that is where the extra must land. `name` is
+   * the node's display name (data, rendered verbatim). */
+  node?: { instanceId: string; name: string };
 }
 
 /**
@@ -49,6 +54,14 @@ const PURPOSE_KEYS = {
   },
 } as const satisfies Record<Props["purpose"], Record<string, string>>;
 
+// The node variant owns complete sentences too — the extra lands on the PEER,
+// and every line must say so or the user "fixes" the wrong machine.
+const NODE_KEYS = {
+  srDescription: "training.policyExtra.srDescriptionTrainingNode",
+  description: "training.policyExtra.descriptionTrainingNode",
+  ready: "training.install.readyPolicyTrainingNode",
+} as const;
+
 // Some policies (smolvla, pi0, pi0_fast, pi05, diffusion) need an optional
 // LeRobot extra. This catches the missing package before training/inference
 // starts and offers a one-click install, instead of the run dying with a
@@ -61,13 +74,24 @@ const PolicyExtraDialog: React.FC<Props> = ({
   installTarget,
   installHint,
   purpose,
+  node,
 }) => {
-  const install = useInstallExtra(`system/policy-extra/${policyType}`, open);
+  // On a node target the whole flow — status seed, install POST, progress
+  // poll — runs through the server-to-server proxy; the pip subprocess runs
+  // on the peer, in the environment its training subprocesses import from.
+  const install = useInstallExtra(
+    node
+      ? `nodes/${node.instanceId}/policy-extra/${policyType}`
+      : `system/policy-extra/${policyType}`,
+    open,
+  );
   const { t } = useTranslation();
   // A product name (ACT, SmolVLA…) — never translated.
   const shortLabel = policyTypeShortLabel(policyType);
-  const title = t("training.policyExtra.title", { policy: shortLabel });
-  const keys = PURPOSE_KEYS[purpose];
+  const title = node
+    ? t("training.policyExtra.titleNode", { policy: shortLabel, node: node.name })
+    : t("training.policyExtra.title", { policy: shortLabel });
+  const keys = node ? NODE_KEYS : PURPOSE_KEYS[purpose];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -81,6 +105,7 @@ const PolicyExtraDialog: React.FC<Props> = ({
             {t(keys.srDescription, {
               target: installTarget,
               policy: shortLabel,
+              node: node?.name ?? "",
             })}
           </DialogDescription>
         </DialogHeader>
@@ -103,6 +128,7 @@ const PolicyExtraDialog: React.FC<Props> = ({
                   policy: shortLabel,
                   packageName,
                   target: installTarget,
+                  node: node?.name ?? "",
                 }}
                 components={[
                   <span key="0" className="font-semibold" />,
@@ -114,11 +140,17 @@ const PolicyExtraDialog: React.FC<Props> = ({
                     key="2"
                     className="px-1 py-0.5 rounded bg-muted text-info"
                   />,
+                  <span key="3" className="font-semibold" />,
                 ]}
               />
             }
             doneDescription={
-              <ReadyInstructions text={t(keys.ready, { policy: shortLabel })} />
+              <ReadyInstructions
+                text={t(keys.ready, {
+                  policy: shortLabel,
+                  node: node?.name ?? "",
+                })}
+              />
             }
           />
         </div>
