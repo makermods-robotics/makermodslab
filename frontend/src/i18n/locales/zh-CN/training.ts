@@ -40,7 +40,8 @@ export default {
       body: "这会开启一次<0>全新运行</0>（新的优化器，从第 0 步开始），策略权重由该模型初始化。请选择用于训练的<1>数据集</1>，并像平常一样设置训练参数。",
     },
     tooltip: {
-      localBusy: "已有另一个本地训练在运行",
+      // 本地槽位被占不再阻止开始——提交会进入队列。
+      willQueue: "已有一个训练在运行 —— 这次运行会在队列中等待。",
       needAuth: "登录 Hugging Face 后才能使用云端算力",
       needFlavor: "请选择硬件规格",
       offlineDataset: "离线模式已开启 —— 数据集无法上传到 Hub",
@@ -50,6 +51,8 @@ export default {
       uploading: "正在上传…",
       starting: "正在启动…",
       startTraining: "开始训练",
+      // 本地槽位被占时替代「开始训练」：这次点击是把运行加入队列。
+      queueTraining: "加入训练队列",
       startFinetuning: "开始微调",
       continueTraining: "继续训练",
       uploadAndStart: "上传并开始训练",
@@ -57,6 +60,9 @@ export default {
     },
     toast: {
       startedTitle: "训练已开始",
+      queuedTitle: "训练已加入队列",
+      // {{name}} 是运行名（数据）；{{position}} 是其 1 起的队列位置。
+      queuedBody: "{{name}} —— 第 #{{position}} 位。当前运行结束后自动开始。",
       errorTitle: "出错",
       datasetRequired: "必须填写数据集仓库 ID",
       uploadFailedTitle: "上传失败",
@@ -72,8 +78,84 @@ export default {
 
   target: {
     computeLabel: "算力",
-    runnerLocal: "本地 —— 你的机器",
+    // <0> 包裹加粗的名称——“本机”/云端标签/节点名（数据）。
+    runOn: "运行位置：<0>{{name}}</0>",
     runnerCloud: "Hugging Face 云端",
+    thisMachine: "本机",
+    // "MakerMods Lab" 是产品名，保持英文。
+    thisMachineSub: "本地 —— 这台 MakerMods Lab 服务器",
+    cloudSub: "按小时计费的租用 GPU —— 在下方选择硬件",
+    selectorHint:
+      "本次训练在哪里执行。界面始终留在这台服务器上 —— 任务由节点运行，服务器到服务器驱动。",
+    lanNodes: "局域网节点",
+    nodesLoading: "正在查找节点…",
+    // "Tailscale" 是产品名。仅在已注册 tailscale 发现源时显示——
+    // 否则这句话承诺的发现永远不会发生（那种情况用 nodesEmptyNoDiscovery）。
+    nodesEmpty:
+      "还没有节点 —— 通过 Tailscale 发现的其他 MakerMods Lab 服务器会出现在这里，也可以按 URL 添加。",
+    // <0> 包裹字面 CLI 参数 --discover-tailscale：数据，等宽字体原样呈现，
+    // 不翻译。
+    nodesEmptyNoDiscovery:
+      "还没有节点 —— 可按 URL 添加另一台 MakerMods Lab 服务器。以 <0>--discover-tailscale</0> 启动服务器可在 tailnet 上自动发现节点。",
+    viaTailscale: "经 Tailscale",
+    verifying: "验证中…",
+    verifyingTitle: "已发现 —— 等待验证握手确认。",
+    unreachable: "无法连接",
+    // {{when}} 是英文的相对时间（"4m ago"）——时间格式化保持英文
+    // （lib/relativeTime.ts）。
+    lastSeen: "最后在线 {{when}}",
+    unreachableTitle: "无法连接 —— 下次握手成功后会重新变为可选。",
+    unreachableTitleLastSeen:
+      "无法连接 —— 最后在线 {{when}}。下次握手成功后会重新变为可选。",
+    // "makermodslab" 是包名；{{version}} 是数据。
+    nodeVersion: "makermodslab v{{version}}",
+    nodeGone: "已不在注册表中",
+    nodeGoneTitle: "该节点已离开注册表。请改选其他目标，否则启动会被拒绝。",
+    refreshNodes: "刷新节点",
+    addNode: {
+      button: "添加节点…",
+      title: "按 URL 注册另一台 MakerMods Lab 服务器",
+      urlLabel: "节点 URL",
+      submit: "添加",
+      adding: "添加中…",
+      errorSelf: "该 URL 指向的正是这台服务器。",
+      errorDuplicate: "该节点已注册。",
+      errorUnreachable: "该 URL 上没有 MakerMods Lab 服务器应答。",
+    },
+    detail: {
+      instance: "实例",
+      version: "版本",
+      lastSeenLabel: "最后在线",
+      workloadLoading: "正在查询负载…",
+      workloadUnreachable: "无法连接 —— 无法向该节点查询当前负载。",
+      // {{name}} 是运行的显示名（数据）；{{pct}} 已预先格式化。
+      workloadRunningPct: "运行中：{{name}} · {{pct}}%",
+      workloadRunning: "运行中：{{name}}",
+      workloadIdle: "空闲",
+      workloadQueued: "+{{total}} 排队中",
+      // <0>/<1> 都包裹节点名（数据）。"Hub" / "HF" 是产品名。
+      hubSyncHint:
+        "任务在 <0>{{name}}</0> 上运行；数据集经 Hub 同步 —— 该数据集会先上传到你的 HF 账号，再由 <1>{{name}}</1> 从那里拉取。",
+      goneBody: "该节点已不在注册表中。请改选其他算力目标 —— 否则启动会被拒绝。",
+    },
+    // 节点上单次运行的详情对话框（NodeJobDialog）。运行名、编号与日志行都是
+    // 数据，原样渲染；状态标签复用 jobs.jobState，停止/删除提示复用 jobs.jobsData。
+    nodeJob: {
+      // 一整句；<0> 包裹节点的显示名（数据）。
+      onNode: "在 <0>{{name}}</0> 上运行 —— 由本服务器远程驱动。",
+      logsLabel: "实时日志",
+      logsEmpty: "自打开此对话框以来还没有新的日志。",
+      stop: "停止",
+      stopping: "正在停止…",
+      delete: "删除",
+      deleting: "正在删除…",
+      // 代理返回编码 502（node.unreachable）时用我们自己的句子；其余未编码的
+      // 拒绝原样显示服务器文案。
+      unreachable: "无法连接 —— 暂时联系不上该节点。",
+      // 可点击的运行中行 / 排队芯片上的悬停文字。
+      openRunning: "查看此运行的详情",
+      openQueued: "查看此排队中的运行",
+    },
     resumeRunnerHint: "默认沿用这次运行原先的执行位置 —— 也可以切换到别处继续。",
     deviceLabel: "设备",
     deviceAuto: "自动（有 GPU 就用 GPU）",
@@ -243,10 +325,12 @@ export default {
     loadFailed: "无法加载任务 {{jobId}}：{{errorText}}",
     loading: "正在加载任务…",
     runnerLocal: "本地",
+    runnerNode: "局域网节点",
     cloudFallback: "云端",
     viewOnHub: "在 Hub 上查看 ↗",
     viewOnWandb: "在 W&B 上查看 ↗",
     stop: "停止",
+    cancelQueued: "取消",
     delete: "删除",
     runInference: "运行推理",
     noCheckpoints: "还没有检查点 —— 请等待第一次保存。",
@@ -254,6 +338,8 @@ export default {
     toast: {
       stoppingTitle: "正在停止…",
       stopFailedTitle: "停止失败",
+      cancelledTitle: "已从队列移除",
+      cancelFailedTitle: "取消失败",
       removedTitle: "任务已移除",
       deleteFailedTitle: "删除失败",
     },

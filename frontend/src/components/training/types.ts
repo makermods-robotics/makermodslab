@@ -1,5 +1,11 @@
 export interface TrainingConfig {
-  target: { runner: "local" | "hf_cloud"; flavor?: string };
+  // Where the run executes. "lan_node" carries the chosen peer's
+  // node_instance_id (required by the backend); "hf_cloud" carries the flavor.
+  target: {
+    runner: "local" | "hf_cloud" | "lan_node";
+    flavor?: string;
+    node_instance_id?: string;
+  };
 
   // Dataset configuration
   dataset_repo_id: string;

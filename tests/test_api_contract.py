@@ -222,8 +222,11 @@ def test_no_new_routes_outside_api_v1():
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
         # Node registry (multi-node): static/manual peer source.
+        "GET /api/v1/nodes/{instance_id}/jobs/queue",
         "DELETE /api/v1/nodes/{instance_id}",
         "GET /api/v1/nodes",
+        # Workload proxy: the peer's own typed jobs listing, passed through.
+        "GET /api/v1/nodes/{instance_id}/jobs",
         "POST /api/v1/nodes",
         # Maker arm port detection (maker_ports.py). No flat mirror: the flat
         # surface only ever shrinks, and the SO-101's /identify-arm cannot
@@ -231,6 +234,17 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # over UART, neither of which a Feetech bus can open.
         "POST /api/v1/maker/identify-arm",
         "POST /api/v1/maker/probe-ports",
+        # Peer-job drill-in proxies: record + incremental log tail (GET, any
+        # HTTP failure = node.unreachable) and forwarded stop/delete (the
+        # peer's own coded refusals pass through with THEIR status and body).
+        "GET /api/v1/nodes/{instance_id}/jobs/{job_id}",
+        "GET /api/v1/nodes/{instance_id}/jobs/{job_id}/logs",
+        "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
+        "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
+        # Local training queue (PR #83): the machine's plan, in run order, and
+        # the whole-list reorder that goes with it.
+        "GET /api/v1/jobs/queue",
+        "POST /api/v1/jobs/queue/reorder",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
@@ -274,6 +288,8 @@ RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
     [
         # 204 No Content: a successful job delete has no body to model.
         "DELETE /api/v1/jobs/{job_id}",
+        # 204 No Content: the forwarded peer-job delete mirrors the peer's own.
+        "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Raw Response: calibration JSON served as an attachment download.
         "GET /api/v1/calibration-configs/{device_type}/{config_name}/download",
         # StreamingResponse: MJPEG camera preview stream.

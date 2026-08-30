@@ -21,7 +21,7 @@ lives in app/jobs.py.
 import re
 
 import torch
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from makermodslab.utils.config import REQUIRED_HUB_TAGS
 
@@ -153,25 +153,42 @@ class TrainingRequest(BaseModel):
     dataset_root: str | None = None
     dataset_episodes: list[int] | None = None
 
-    # Policy configuration
-    policy_type: str = "act"
+    # Policy configuration. Constrained to a bare lowercase slug because the
+    # value is the FIRST SEGMENT of the generated job id, and the job id is the
+    # job DIRECTORY name under outputs/train/: a path-shaped policy_type
+    # ("/tmp/x", "../evil") made `output_root / job_id` resolve outside the
+    # root entirely (Path's `/` discards the left side for an absolute right
+    # side), so the registry created and persisted a job dir outside its
+    # sandbox under an id no /jobs/{job_id} route could ever address. The
+    # pattern admits every lerobot policy type (act, pi0_fast, gaussian_actor,
+    # …) and everything _clean_policy_type can store; jobs._job_dir refuses
+    # escaping ids independently, as defense in depth.
+    policy_type: str = Field(default="act", pattern=r"^[a-z0-9_]+$")
 
-    # Core training parameters
-    steps: int = 10000
-    batch_size: int = 8
+    # Core training parameters. Bounded at the model so both the wire (422)
+    # and direct registry callers refuse them: steps=0 launched a trainer
+    # whose `range(step, steps)` is empty — a `done` phantom that poisons its
+    # lineage (see start()'s step-target guard) — and negatives/zero for
+    # batch_size crash the dataloader minutes after the request returned 201.
+    # num_workers=0 is legitimate (torch's main-process loading), so it is
+    # floored at 0, not 1.
+    steps: int = Field(default=10000, gt=0)
+    batch_size: int = Field(default=8, gt=0)
     seed: int | None = 1000
-    num_workers: int = 4
+    num_workers: int = Field(default=4, ge=0)
 
     # Logging and checkpointing
     # log_freq drives how often lerobot prints loss/lr (and thus the chart's
     # resolution — one point per log line). Lower = smoother curves but noisier
-    # per-window averages and more log volume.
-    log_freq: int = 50
-    save_freq: int = 1000
+    # per-window averages and more log volume. Both frequencies feed lerobot's
+    # `step % freq` — 0 is a ZeroDivisionError inside the trainer, so gt=0.
+    log_freq: int = Field(default=50, gt=0)
+    save_freq: int = Field(default=1000, gt=0)
     # lerobot 0.6.0 renamed the training CLI flag --eval_freq -> --env_eval_freq
     # (lerobot_train's argparse rejects --eval_freq with rc=2). Frontend never
     # sends this field, so the request contract is unchanged for clients.
-    env_eval_freq: int = 0
+    # 0 means "never evaluate" and is the default, so ge=0 rather than gt.
+    env_eval_freq: int = Field(default=0, ge=0)
     save_checkpoint: bool = True
 
     # Output configuration
@@ -263,11 +280,12 @@ class TrainingRequest(BaseModel):
     wandb_mode: str | None = "online"
     wandb_disable_artifact: bool = False
 
-    # Environment / evaluation
+    # Environment / evaluation. Same bounds rationale as the core numbers
+    # above: 0 episodes / batch 0 are never a meaningful request.
     env_type: str | None = None
     env_task: str | None = None
-    eval_n_episodes: int = 10
-    eval_batch_size: int = 50
+    eval_n_episodes: int = Field(default=10, gt=0)
+    eval_batch_size: int = Field(default=50, gt=0)
     eval_use_async_envs: bool = False
 
     # Policy-specific
@@ -338,7 +356,10 @@ def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:
 
 
 def build_training_command(
-    request: TrainingRequest, output_dir: str, python_executable: str = "python"
+    request: TrainingRequest,
+    output_dir: str,
+    python_executable: str = "python",
+    video_backend: str | None = None,
 ) -> list[str]:
     """Build the argv list to invoke `<python_executable> -m lerobot.scripts.lerobot_train`.
 
@@ -351,6 +372,15 @@ def build_training_command(
     so the subprocess uses the same interpreter as MakerMods Lab itself — otherwise
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
+
+    `video_backend` overrides lerobot's dataset video decoder when set — the
+    LOCAL runner passes "pyav" when torchcodec's native libraries don't load
+    on this host (see utils.system.torchcodec_loads); the cloud runner leaves
+    it None (the container ships working FFmpeg). Emitted on the resume branch
+    too: the checkpoint's train_config.json records whatever backend the
+    ORIGINAL host used, and a resume can land on a host where that backend
+    doesn't load (a plain string field, so the draccus raw-string merge that
+    forbids list-typed overrides here is not a concern).
     """
     cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
 
@@ -400,10 +430,14 @@ def build_training_command(
             cmd.extend(["--policy.private", "false"])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
+        if video_backend:
+            cmd.extend(["--dataset.video_backend", video_backend])
         return cmd
 
     # Dataset
     cmd.extend(["--dataset.repo_id", request.dataset_repo_id])
+    if video_backend:
+        cmd.extend(["--dataset.video_backend", video_backend])
     if request.dataset_revision:
         cmd.extend(["--dataset.revision", request.dataset_revision])
     if request.dataset_root:

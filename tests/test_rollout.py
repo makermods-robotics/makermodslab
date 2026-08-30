@@ -640,6 +640,22 @@ def test_handle_start_inference_blocked_when_recording_active(monkeypatch) -> No
     assert "Recording" in result["message"]
 
 
+def test_handle_start_inference_blocked_when_a_training_run_is_active(monkeypatch) -> None:
+    """The worst pairing of the six: both want several GB of VRAM.
+
+    The training queue already waits for inference. Until it was mutual, this
+    direction walked straight over a run the watchdog had just promoted — and
+    whichever process lost the OOM lost hours, reported only as "Subprocess
+    exited with code 1" with nothing tying it to this click."""
+    from makermodslab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makermodslab.jobs.training_is_active", lambda: "ACT · user/ds")
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "ACT · user/ds" in result["message"]
+
+
 def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None:
     from makermodslab import rollout
 

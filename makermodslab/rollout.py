@@ -1789,6 +1789,19 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "message": "Replay is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
+        # Lazy, because jobs imports this module back the same way. Inference is
+        # the worst pairing: both want several GB of VRAM, and whichever loses
+        # takes a CUDA OOM — if that is the trainer, hours of work end as
+        # "Subprocess exited with code 1" with nothing tying it to this click.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
+            }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first
         # status poll (the download runs on the inference page — the UI must be

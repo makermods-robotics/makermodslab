@@ -2305,6 +2305,31 @@ def test_start_recording_rejects_with_409_when_inference_active(
     assert "Inference is currently active" in result["message"]
 
 
+def test_start_recording_rejects_with_409_when_a_training_run_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Training stayed outside the robot mutex for as long as a run could only
+    begin from an explicit submit — the user was present and knew what else they
+    had running. The queue starts runs from a watchdog thread with nobody at the
+    keyboard, so the gate has to be mutual: the queue already waits for a
+    recording session, and now a recording session waits for it."""
+    import makermodslab.jobs as jobs
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(jobs, "training_is_active", lambda: "ACT · user/ds")
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "ACT · user/ds" in result["message"]
+
+
 def test_start_recording_rejects_with_400_for_invalid_dataset_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
