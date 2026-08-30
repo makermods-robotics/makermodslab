@@ -32,6 +32,11 @@ import {
 } from "@/lib/jobsApi";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
+import {
+  getNodePolicyExtra,
+  listNodes,
+  nodeDisplayName,
+} from "@/lib/nodesApi";
 import { getDatasetInfo } from "@/lib/replayApi";
 
 // Passed by the "Continue" button on a completed local job, or the "Resume"
@@ -326,6 +331,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     packageName: string;
     installTarget: string;
     installHint: string;
+    // Set when the missing extra is on a LAN NODE's environment (the chosen
+    // compute target), not the local one — the dialog then installs there.
+    node?: { instanceId: string; name: string };
   } | null>(null);
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
@@ -573,9 +581,11 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     }
 
     // Pre-flight: smolvla/pi0/pi0_fast/pi05/diffusion need an optional package
-    // installed locally. Catch it here with a one-click installer instead of a buried
-    // ImportError after the job has already started. Cloud jobs run in their
-    // own environment, so the local package is irrelevant — skip the check.
+    // installed WHERE THE RUN EXECUTES — locally for a local run, on the peer
+    // for a LAN-node run (read through the server-to-server proxy). Catch it
+    // here with a one-click installer instead of a buried ImportError after
+    // the job has already started. Cloud jobs run in their own container
+    // environment, so neither answer applies — skip the check.
     if (config.target.runner === "local") {
       try {
         const r = await fetchWithHeaders(
@@ -596,6 +606,45 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       } catch {
         // Check failed (offline / older backend) — fall through and let the
         // job report any problem itself.
+      }
+    } else if (
+      config.target.runner === "lan_node" &&
+      config.target.node_instance_id
+    ) {
+      const instanceId = config.target.node_instance_id;
+      try {
+        const extra = await getNodePolicyExtra(
+          baseUrl,
+          fetchWithHeaders,
+          instanceId,
+          config.policy_type,
+        );
+        if (extra.needs_extra && !extra.available) {
+          // The dialog names the node so the user knows WHERE the install
+          // lands; resolve its display name from the registry, falling back
+          // to a short instance id when the listing can't be read.
+          let name = instanceId.slice(0, 8);
+          try {
+            const listing = await listNodes(baseUrl, fetchWithHeaders);
+            const entry = listing.nodes.find(
+              (n) => n.instance_id === instanceId,
+            );
+            if (entry) name = nodeDisplayName(entry);
+          } catch {
+            // Name lookup is cosmetic — the short id is enough.
+          }
+          setPolicyExtra({
+            policyType: config.policy_type,
+            packageName: extra.package,
+            installTarget: extra.install_target,
+            installHint: extra.install_hint,
+            node: { instanceId, name },
+          });
+          return;
+        }
+      } catch {
+        // Node unreachable or an older peer without the endpoint — fall
+        // through and let the peer's own job validation report the problem.
       }
     }
 
@@ -902,6 +951,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           installTarget={policyExtra.installTarget}
           installHint={policyExtra.installHint}
           purpose="training"
+          node={policyExtra.node}
         />
       )}
     </div>

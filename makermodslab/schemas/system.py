@@ -29,7 +29,12 @@ from makermodslab.update import UpdateResult, UpdateStatus
 
 # Handlers in makermodslab/utils/system.py return dicts with exactly these
 # fields (InstallManager.start / .get_status and handle_get_*_extra).
-from makermodslab.utils.system import ExtraStatus, InstallStartResponse, InstallStatusResponse
+from makermodslab.utils.system import (
+    ExtraStatus,
+    InstallStartResponse,
+    InstallStatusResponse,
+    RestartResponse,
+)
 
 __all__ = [
     "AvailableCamerasResponse",
@@ -45,6 +50,7 @@ __all__ = [
     "PolicyExtraStatus",
     "PolicyOptimizerDefaultsResponse",
     "PolicyOptimizerPreset",
+    "RestartResponse",
     "RobotPortResponse",
     "SupplyVoltageResponse",
     "UpdateResult",
