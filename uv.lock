@@ -909,7 +909,7 @@ wheels = [
 [[package]]
 name = "lerobot"
 version = "0.6.2"
-source = { git = "https://github.com/Maker-Mods/lerobot.git?rev=af9072a8ca4b1767ef25b98eed1149d1bbf89f46#af9072a8ca4b1767ef25b98eed1149d1bbf89f46" }
+source = { git = "https://github.com/makermods-robotics/lerobot.git?rev=b968c0c015e16699a225070f677dc644543707f0#b968c0c015e16699a225070f677dc644543707f0" }
 dependencies = [
     { name = "cmake" },
     { name = "draccus" },
@@ -1002,7 +1002,7 @@ test = [
 requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
-    { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "rebot"], git = "https://github.com/Maker-Mods/lerobot.git?rev=af9072a8ca4b1767ef25b98eed1149d1bbf89f46" },
+    { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=b968c0c015e16699a225070f677dc644543707f0" },
     { name = "makermodslab", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },
     { name = "psutil", specifier = ">=5.9.0" },
