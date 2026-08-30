@@ -140,6 +140,11 @@ export default {
       hubSyncHint:
         "任务在 <0>{{name}}</0> 上运行；数据集经 Hub 同步 —— 该数据集会先上传到你的 HF 账号，再由 <1>{{name}}</1> 从那里拉取。",
       goneBody: "该节点已不在注册表中。请改选其他算力目标 —— 否则启动会被拒绝。",
+      // 远程重启按钮（两步：先武装再确认）及其状态行。
+      // {{name}} 是节点的显示名 —— 数据，按原样呈现。
+      restartAction: "重启节点",
+      restartConfirm: "确认重启？",
+      restartRequested: "已请求重启 —— {{name}} 会离线几秒后自动恢复。",
     },
     // 节点上单次运行的详情对话框（NodeJobDialog）。运行名、编号与日志行都是
     // 数据，原样渲染；状态标签复用 jobs.jobState，停止/删除提示复用 jobs.jobsData。
@@ -289,6 +294,9 @@ export default {
       "安装完成 —— {{policy}} 训练已立即可用，无需重启。如果没有自动解锁，刷新页面即可。",
     readyPolicyInference:
       "安装完成 —— {{policy}} 推理已立即可用，无需重启。如果没有自动解锁，刷新页面即可。",
+    // {{node}} 是局域网节点的显示名 —— 数据，按原样呈现。
+    readyPolicyTrainingNode:
+      "已在 {{node}} 上安装完成 —— {{policy}} 训练在该节点上已立即可用，无需重启。重新启动运行即可。",
   },
 
   extraGate: {
@@ -312,6 +320,13 @@ export default {
       "训练 <0>{{policy}}</0> 策略需要 <1>{{packageName}}</1> 包（通过 <2>{{target}}</2> 安装），而当前环境中还没有它。安装后即可训练该策略。",
     descriptionInference:
       "运行 <0>{{policy}}</0> 策略需要 <1>{{packageName}}</1> 包（通过 <2>{{target}}</2> 安装），而当前环境中还没有它。安装后即可运行该策略。",
+    // 局域网节点变体：软件包安装到对端节点的环境中，每句话都要说明这一点。
+    // {{node}} 是节点的显示名（数据）。
+    titleNode: "{{policy}} 需要在 {{node}} 上安装额外的软件包",
+    srDescriptionTrainingNode:
+      "在节点 {{node}} 上安装 {{target}} 以使用 {{policy}} 进行训练。",
+    descriptionTrainingNode:
+      "在 <3>{{node}}</3> 上训练 <0>{{policy}}</0> 策略需要 <1>{{packageName}}</1> 包（通过 <2>{{target}}</2> 安装），而该节点的环境中还没有它。在此安装 —— pip 安装会在该节点上执行。",
   },
 
   monitoring: {

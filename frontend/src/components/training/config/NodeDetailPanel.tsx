@@ -1,9 +1,16 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { Loader2 } from "lucide-react";
+import { Loader2, RotateCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
+import { ApiError } from "@/lib/apiClient";
 import { JobRecord, jobDisplayName } from "@/lib/jobsApi";
-import { NodeEntry, getNodeJobs, getNodeQueue, nodeDisplayName } from "@/lib/nodesApi";
+import {
+  NodeEntry,
+  getNodeJobs,
+  getNodeQueue,
+  nodeDisplayName,
+  restartNode,
+} from "@/lib/nodesApi";
 import { relativeTimeAgo } from "@/lib/relativeTime";
 import NodeJobDialog from "./NodeJobDialog";
 
@@ -55,6 +62,14 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
   // Bumped when the dialog stopped/deleted something, so the workload line
   // catches up without waiting out the 15s poll.
   const [changeToken, setChangeToken] = useState(0);
+  // The remote-restart flow: an armed two-step button (idle → confirm), then
+  // "requested" while the node bounces. The peer's refusal prose (its own 409
+  // detail — server prose, rendered in English like all of it) lands in
+  // `restartError`.
+  const [restart, setRestart] = useState<"idle" | "confirm" | "requested">(
+    "idle",
+  );
+  const [restartError, setRestartError] = useState<string | null>(null);
 
   const reachable = node != null && node.status === "ok";
 
@@ -76,6 +91,9 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
             running: jobs.find((j) => j.state === "running") ?? null,
             queued: queue,
           });
+          // A successful read through the proxy means the node is answering
+          // again — a pending restart has completed.
+          setRestart((r) => (r === "requested" ? "idle" : r));
         })
         .catch(() => {
           // node.unreachable / node.not_found / network — one honest word.
@@ -89,6 +107,38 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
       clearInterval(timer);
     };
   }, [baseUrl, fetchWithHeaders, instanceId, reachable, refreshToken, changeToken]);
+
+  // The armed confirm disarms itself: an unclicked "Confirm restart?" must
+  // not linger as a landmine for a later stray click.
+  useEffect(() => {
+    if (restart !== "confirm") return;
+    const timer = setTimeout(() => setRestart("idle"), 5_000);
+    return () => clearTimeout(timer);
+  }, [restart]);
+
+  const handleRestart = async () => {
+    if (restart === "idle") {
+      setRestartError(null);
+      setRestart("confirm");
+      return;
+    }
+    setRestartError(null);
+    setRestart("requested");
+    try {
+      await restartNode(baseUrl, fetchWithHeaders, instanceId);
+    } catch (e) {
+      // The peer's own refusal (409 robot.busy.* / system.restart_unsupported,
+      // or a plain 404 from a peer without the endpoint) — its prose says why.
+      setRestart("idle");
+      setRestartError(
+        e instanceof ApiError && e.detail
+          ? e.detail
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
+    }
+  };
 
   const name = node ? nodeDisplayName(node) : instanceId.slice(0, 8);
 
@@ -230,6 +280,40 @@ const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
           ]}
         />
       </p>
+
+      {/* Remote restart: re-exec the node's server in place (e.g. after an
+          environment change). Two-step arm/confirm; disabled while the node
+          has work — the peer would refuse anyway, no point inviting the
+          click. The peer's refusal prose renders verbatim. */}
+      {reachable ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleRestart}
+            disabled={
+              restart === "requested" ||
+              running != null ||
+              (workload.kind === "ok" && workload.queued.length > 0)
+            }
+            className="flex items-center gap-1 rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground hover:border-ring/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <RotateCw
+              className={`h-3 w-3 ${restart === "requested" ? "animate-spin" : ""}`}
+            />
+            {restart === "confirm"
+              ? t("training.target.detail.restartConfirm")
+              : t("training.target.detail.restartAction")}
+          </button>
+          {restart === "requested" ? (
+            <span className="text-[11px] text-muted-foreground">
+              {t("training.target.detail.restartRequested", { name })}
+            </span>
+          ) : null}
+          {restartError ? (
+            <span className="text-[11px] text-warn">{restartError}</span>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Drill-in dialog for the clicked run. Keyed by run id so switching
           runs remounts it with fresh state; it polls its own record + log

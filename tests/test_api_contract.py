@@ -246,6 +246,17 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "GET /api/v1/nodes/{instance_id}/jobs/{job_id}/logs",
         "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
         "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
+        # Environment proxies: the peer's own policy-extra status / install /
+        # install-progress (the pip subprocess runs on the PEER), plus the
+        # forwarded self-restart that makes a just-installed environment
+        # reachable without a shell on the node.
+        "GET /api/v1/nodes/{instance_id}/policy-extra/{policy_type}",
+        "GET /api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install-status",
+        "POST /api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install",
+        "POST /api/v1/nodes/{instance_id}/restart",
+        # Self-restart (the peer half of the proxy above): re-exec in place,
+        # guarded by the busy matrix + the training queue.
+        "POST /api/v1/system/restart",
         # Local training queue (PR #83): the machine's plan, in run order, and
         # the whole-list reorder that goes with it.
         "GET /api/v1/jobs/queue",

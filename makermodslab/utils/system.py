@@ -72,16 +72,42 @@ def _extra_available(module: str) -> bool:
         return False
 
 
+# Where the standard installers put uv when it is NOT on this process's PATH —
+# a headless server started over ssh/nohup gets a minimal PATH without
+# ~/.local/bin, and the whole point of the uv branch below is that a uv venv
+# has no pip to fall back to (field-debugged on a remote node whose installs
+# all died with "pip exited with code 1"). Same disease, same cure as the
+# macOS tailscale CLI lookup in node_sources.py.
+_UV_FALLBACK_PATHS = (
+    os.path.expanduser("~/.local/bin/uv"),  # the uv installer's default target
+    "/opt/homebrew/bin/uv",
+    "/usr/local/bin/uv",
+)
+
+
+def _find_uv() -> str | None:
+    """The uv binary to run: PATH first, then the standard install locations."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    for candidate in _UV_FALLBACK_PATHS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def _build_install_cmd(package: str) -> list[str]:
     """Pick the best installer for the running Python.
 
     Venvs created with `uv venv` don't ship pip, so `python -m pip` fails with
-    `No module named pip`. Detect uv on PATH and use it with --python pinned to
-    sys.executable so the install lands in this Python's site-packages.
-    Otherwise fall back to `python -m pip`.
+    `No module named pip`. Find uv (PATH, then the standard install
+    locations) and use it with --python pinned to sys.executable so the
+    install lands in this Python's site-packages. Otherwise fall back to
+    `python -m pip`.
     """
-    if shutil.which("uv"):
-        return ["uv", "pip", "install", "--python", sys.executable, package]
+    uv = _find_uv()
+    if uv:
+        return [uv, "pip", "install", "--python", sys.executable, package]
     return [sys.executable, "-m", "pip", "install", package]
 
 
@@ -312,6 +338,82 @@ def handle_install_policy_extra_status(policy_type: str) -> dict[str, Any]:
     if mgr is None:
         return {"state": "done", "error": None, "logs": []}
     return mgr.get_status()
+
+
+# --------------------------------------------------------------------------- #
+# Self-restart
+# --------------------------------------------------------------------------- #
+# POST /api/v1/system/restart re-execs this process in place so a remote
+# operator (the node proxies) can bounce a headless station without a shell on
+# it. os.execv keeps PID, argv, env, cwd and the std FDs (a nohup log redirect
+# survives), while every other FD — the uvicorn listen socket included — closes
+# on exec (PEP 446), so the relaunched process binds the port cleanly.
+
+RESTART_DELAY_S = 1.0
+# The launcher entry points (pyproject [project.scripts]) — the only argv[0]s
+# we KNOW re-run the launcher when re-executed.
+_RESTART_ENTRY_POINTS = ("makermodslab", "makermodslab-station")
+
+
+def install_in_progress() -> str | None:
+    """The package a live InstallManager is installing right now, or None.
+
+    A restart guard: re-exec would orphan the pip subprocess mid-write and
+    leave a half-installed site-packages, so the restart route refuses while
+    any install (training/wandb/policy extras) is running.
+    """
+    managers = [training_install_manager, wandb_install_manager, *_policy_install_managers.values()]
+    for mgr in managers:
+        if mgr.state == "installing":
+            return mgr.package
+    return None
+
+
+def restart_supported() -> tuple[bool, str]:
+    """Whether this process can safely re-exec itself; (False, why) if not.
+
+    Only a POSIX process whose argv[0] is one of our launcher entry points
+    qualifies: there, ``execv(sys.executable, [sys.executable, *sys.argv])``
+    re-runs the launcher with identical arguments. A dev-mode reload worker
+    (uvicorn --reload spawns it via multiprocessing; argv is not the
+    launcher) must never execv — uvicorn's reloader already restarts it on
+    any code change. Windows is excluded: its execv spawns a NEW process and
+    returns in the caller, which would leave two servers fighting over the
+    port.
+    """
+    if os.name != "posix":
+        return False, "restart-in-place is not supported on this platform"
+    argv0 = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 not in _RESTART_ENTRY_POINTS:
+        return False, (
+            f"this process was not started by a MakerMods Lab entry point (argv[0]={argv0!r}) — "
+            "restart it the way it was started (dev mode auto-reloads on code changes)"
+        )
+    return True, ""
+
+
+def schedule_restart(delay_s: float = RESTART_DELAY_S, execv=os.execv) -> threading.Thread:
+    """Re-exec this process after ``delay_s`` (from a daemon thread).
+
+    The delay lets the HTTP response that announced the restart actually
+    reach the client before the connection dies with the process. ``execv``
+    is injectable for tests — the real one never returns. Returns the thread
+    so a test can join an injected no-op execv.
+    """
+
+    def _restart() -> None:
+        time.sleep(delay_s)
+        logger.info("🔄 Restarting: re-exec %s %s", sys.executable, " ".join(sys.argv))
+        execv(sys.executable, [sys.executable, *sys.argv])
+
+    thread = threading.Thread(target=_restart, name="self-restart", daemon=True)
+    thread.start()
+    return thread
+
+
+class RestartResponse(BaseModel):
+    restarting: bool
+    message: str
 
 
 # Detect the common Windows/MakerMods Lab mismatch where an NVIDIA GPU is visible to the
