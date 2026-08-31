@@ -857,9 +857,7 @@ def _coaching_route(command: str):
     return result
 
 
-@v1_router.post(
-    "/coaching-takeover", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-takeover", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_takeover():
     """Coaching mode only: take control from the policy and start recording.
 
@@ -869,17 +867,13 @@ def coaching_takeover():
     return _coaching_route(CMD_TAKEOVER)
 
 
-@v1_router.post(
-    "/coaching-handback", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-handback", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_handback():
     """Coaching mode only: end the correction, SAVE it, and resume the policy."""
     return _coaching_route(CMD_HANDBACK)
 
 
-@v1_router.post(
-    "/coaching-cancel", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-cancel", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_cancel():
     """Coaching mode only: end the correction and DISCARD it.
 
@@ -889,9 +883,7 @@ def coaching_cancel():
     return _coaching_route(CMD_CANCEL)
 
 
-@v1_router.post(
-    "/coaching-hold", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-hold", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_hold():
     """Coaching mode only: freeze the policy without taking over.
 
@@ -901,17 +893,13 @@ def coaching_hold():
     return _coaching_route(CMD_HOLD)
 
 
-@v1_router.post(
-    "/coaching-resume", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-resume", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_resume():
     """Coaching mode only: hand control back to the policy from a hold."""
     return _coaching_route(CMD_RESUME)
 
 
-@v1_router.post(
-    "/coaching-reset", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-reset", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_reset():
     """Coaching mode only: end this ATTEMPT at the task and reset for the next.
 
@@ -930,9 +918,7 @@ def coaching_reset():
     return _coaching_route(CMD_RESET)
 
 
-@v1_router.post(
-    "/coaching-recover", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-recover", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_recover():
     """Coaching mode only: get me out of here.
 
@@ -952,9 +938,7 @@ def coaching_recover():
     return _coaching_route(CMD_RECOVER)
 
 
-@v1_router.post(
-    "/coaching-recovered", response_model=CoachingCommandResponse, tags=["inference"]
-)
+@v1_router.post("/coaching-recovered", response_model=CoachingCommandResponse, tags=["inference"])
 def coaching_recovered():
     """Coaching mode only: mark the end of RECOVERY inside the correction.
 

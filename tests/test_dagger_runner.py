@@ -466,8 +466,7 @@ def test_the_retry_patch_is_idempotent() -> None:
     importlib.reload(bus_retry)
 
     assert bus_retry._original_sync_read is pristine, (
-        "the reload re-captured the patch as its own original — calling sync_read "
-        "would now recurse forever"
+        "the reload re-captured the patch as its own original — calling sync_read would now recurse forever"
     )
     assert bus_retry._original_sync_read.__name__ == "sync_read"
     assert MotorsBus.sync_read.__name__ == "_sync_read_with_default_retries"

@@ -661,6 +661,7 @@ def test_run_cli_removes_the_output_when_weights_cannot_be_stored(
     assert merge._run_cli(["a/out", "a/one", "a/two", "--weights", "1", "3"]) == 1
     assert not (tmp_lerobot_home / "a/out").exists()
 
+
 # ---------------------------------------------------------------------------
 # Droppable features
 #

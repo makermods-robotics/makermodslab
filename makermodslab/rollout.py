@@ -2024,7 +2024,7 @@ def _coaching_cli_args(request: InferenceRequest) -> list[str]:
         # Encode frames as they are captured rather than in one lump at save
         # time. MEASURED on the station, 132 frames x 2 cameras at 480x640:
         # save_episode takes 2.32s with lerobot's default (False) and 0.44s
-        # with this on, producing identical output and no leftover PNGs.
+        # with this on, producing identical output and no leftover PNG frames.
         # `save_episode()` runs synchronously on the control loop at the
         # hand-back edge, so that difference is time the operator spends
         # waiting with the arm frozen.

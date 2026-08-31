@@ -198,7 +198,7 @@ _SETUP_COMPLETE_LOG = "Rollout setup complete"
 # Not a timeout — nothing is cancelled — purely a diagnostic. A correction of
 # 132 frames x 2 cameras measures 0.4-2.3s on the station, so 30s means
 # something is genuinely stuck rather than slow. A hang here was observed once
-# (0% CPU, PNGs undrained, no video written) and could not be explained from
+# (0% CPU, PNG frames undrained, no video written) and could not be explained from
 # the log afterwards, because a blocked thread writes nothing. The dump turns a
 # silent wedge into a stack trace naming the exact call.
 _SAVE_WATCHDOG_S = 30.0

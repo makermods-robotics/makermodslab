@@ -139,7 +139,7 @@ def restore_stock(leader, *, reset_p: bool) -> None:
 
 
 def find_robot_records() -> list[dict]:
-    records = []
+    records: list[dict] = []
     if not ROBOTS_PATH.is_dir():
         return records
     for path in sorted(ROBOTS_PATH.glob("*.json")):
