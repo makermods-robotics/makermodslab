@@ -12,7 +12,6 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useRobots } from "@/hooks/useRobots";
-import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import {
@@ -157,17 +156,10 @@ const CollectPanel: React.FC = () => {
       return;
     }
     const robot = selectedRecord;
-    if (!robot.is_clean) {
-      toast({
-        title: t("studio.collect.toast.notReadyTitle"),
-        description: t("studio.collect.toast.notReadyBody", {
-          name: robot.name,
-          gap: formatRobotSetupGap(t, robot),
-        }),
-        variant: "destructive",
-      });
-      return;
-    }
+    // No is_clean gate here any more: record readiness is the SERVER's check
+    // now (400 robot.not_ready from POST /api/v1/sessions, rendered by the
+    // session dialog's start-failure toast). The Start button below still
+    // disables on the same condition as a courtesy.
     if (!datasetName || !singleTask) {
       toast({
         title: t("studio.collect.toast.missingDetailsTitle"),
@@ -209,22 +201,11 @@ const CollectPanel: React.FC = () => {
       });
     }
 
+    // Robot NAME + dataset-shaped options only: the session dialog POSTs this
+    // to /api/v1/sessions and the server resolves everything hardware-shaped
+    // (ports, configs, mode, right-arm fields, cameras) from the saved record.
     const recordingConfig = {
-      leader_port: robot.leader_port,
-      follower_port: robot.follower_port,
-      leader_config: robot.leader_config,
-      follower_config: robot.follower_config,
-      // Bimanual: forward mode + the right arm so the backend records a BiSO pair.
-      mode: robot.mode,
-      right_leader_port: robot.right_leader_port,
-      right_follower_port: robot.right_follower_port,
-      right_leader_config: robot.right_leader_config,
-      right_follower_config: robot.right_follower_config,
-      // Robot name → the record the backend resolves this session's CAMERAS
-      // from (the request carries no camera payload). Bimanual also uses it as
-      // the BiSO staging base id, naming the per-session staging dir; it does
-      // not affect which calibration drives which arm.
-      robot_name: robot.name,
+      robot: robot.name,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,
@@ -235,8 +216,6 @@ const CollectPanel: React.FC = () => {
       push_to_hub: false,
       resume: false,
       streaming_encoding: streamingEncoding,
-      // No `cameras` here on purpose: the backend resolves this session's
-      // cameras from the robot record named above.
     };
 
     setActiveRecording(recordingConfig);

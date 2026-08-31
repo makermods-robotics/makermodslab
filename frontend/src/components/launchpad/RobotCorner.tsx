@@ -49,6 +49,9 @@ import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots, RobotRecord, RobotMode } from "@/hooks/useRobots";
+import { ApiError } from "@/lib/apiClient";
+import { startSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
@@ -101,6 +104,9 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   const [configRobotName, setConfigRobotName] = useState<string | null>(null);
   const [teleopStarting, setTeleopStarting] = useState(false);
   const [teleopOpen, setTeleopOpen] = useState(false);
+  // Session identity from POST /api/v1/sessions — TeleopDialog heartbeats it
+  // and stops it by id.
+  const [teleopSessionId, setTeleopSessionId] = useState<string | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -158,73 +164,56 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
     return ok;
   };
 
-  // Ported verbatim from min_stable RobotConfigManager.handleTeleop — the
-  // backend returns HTTP 200 with { success: false } for logical failures,
-  // so gate on data.success, not just res.ok.
+  // Start teleoperation through the sessions surface: the request carries the
+  // robot NAME only — ports, configs, mode, right-arm fields all resolve
+  // server-side from the saved record — plus this tab's owner id, which
+  // attaches the lease TeleopDialog keeps renewed while it is open.
   const handleTeleop = async (robot: RobotRecord) => {
     setTeleopStarting(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/move-arm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          leader_port: robot.leader_port,
-          follower_port: robot.follower_port,
-          leader_config: robot.leader_config,
-          follower_config: robot.follower_config,
-          // Bimanual: include the mode + right arm so the backend builds a BiSO pair.
-          mode: robot.mode,
-          right_leader_port: robot.right_leader_port,
-          right_follower_port: robot.right_follower_port,
-          right_leader_config: robot.right_leader_config,
-          right_follower_config: robot.right_follower_config,
-          // Robot name → BiSO staging base id (bimanual). Names the per-session
-          // staging dir; does not affect which calibration drives which arm.
-          robot_name: robot.name,
-        }),
+      const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "teleoperation",
+        robot: robot.name,
+        owner: tabOwnerId(),
+        options: {},
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
+      setTeleopSessionId(session.id);
+      if (warnings?.length) {
         // A success can carry a warn-but-allow arm-identity finding (e.g. the
-        // arm's servos hold a different saved calibration). Make it visible.
-        if (data.warning) {
-          toast({
-            title: t("robot.teleop.startedWarningTitle"),
-            description: data.warning,
-            duration: 10000,
-          });
-        } else {
-          toast({
-            title: t("robot.teleop.startedTitle"),
-            description:
-              data.message ||
-              t("robot.teleop.startedFallback", { name: robot.name }),
-          });
-        }
-        setTeleopOpen(true);
-      } else if (data.warning) {
-        // Setup failed after a device was already armed — the backend force-
-        // disabled torque and is reporting whether that succeeded. Surface it
-        // alongside the failure reason instead of dropping it silently.
+        // arm's servos hold a different saved calibration). Make it visible —
+        // the warning text is backend prose, rendered verbatim.
         toast({
-          title: t("robot.teleop.failedWithWarningTitle"),
-          description: `${data.message || t("robot.teleop.failedFallback")} ${data.warning}`,
-          variant: "destructive",
+          title: t("robot.teleop.startedWarningTitle"),
+          description: warnings.join(" "),
           duration: 10000,
         });
       } else {
         toast({
+          title: t("robot.teleop.startedTitle"),
+          description: t("robot.teleop.startedFallback", { name: robot.name }),
+        });
+      }
+      setTeleopOpen(true);
+    } catch (e) {
+      if (e instanceof ApiError) {
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; every other coded refusal (robot.not_ready, hardware.*) shows
+        // the server's own prose.
+        toast({
           title: t("robot.teleop.failedTitle"),
-          description: data.message || t("robot.teleop.failedFallback"),
+          description:
+            formatSessionHeld(t, e) ??
+            e.detail ??
+            t("robot.teleop.failedFallback"),
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: t("common.connectionError.title"),
+          description: t("common.connectionError.description"),
           variant: "destructive",
         });
       }
-    } catch {
-      toast({
-        title: t("common.connectionError.title"),
-        description: t("common.connectionError.description"),
-        variant: "destructive",
-      });
     } finally {
       setTeleopStarting(false);
     }
@@ -418,7 +407,11 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         onCreateNew={handleCreate}
       />
 
-      <TeleopDialog open={teleopOpen} onOpenChange={setTeleopOpen} />
+      <TeleopDialog
+        open={teleopOpen}
+        onOpenChange={setTeleopOpen}
+        sessionId={teleopSessionId}
+      />
 
       <RobotConfigDialog
         open={configOpen}

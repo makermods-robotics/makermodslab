@@ -368,7 +368,7 @@ const ModelCard: React.FC<Props> = ({
     if (selectedStep == null) return;
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/jobs/${selectedJob.id}/checkpoints/${selectedStep}/download`,
+        `${baseUrl}/api/v1/jobs/${selectedJob.id}/checkpoints/${selectedStep}/download`,
       );
       if (!res.ok) {
         toast({

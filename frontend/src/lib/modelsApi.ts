@@ -38,7 +38,7 @@ export async function getModels(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<ModelItem[]> {
-  return apiRequest<ModelItem[]>(baseUrl, fetcher, "/models", {
+  return apiRequest<ModelItem[]>(baseUrl, fetcher, "/api/v1/models", {
     signal,
     action: "List models",
   });
@@ -107,7 +107,7 @@ export async function getSkills(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<SkillsEnvelope> {
-  return apiRequest<SkillsEnvelope>(baseUrl, fetcher, "/skills", {
+  return apiRequest<SkillsEnvelope>(baseUrl, fetcher, "/api/v1/skills", {
     signal,
     action: "List skills",
   });
@@ -131,7 +131,7 @@ export async function getModelInfo(
   return apiRequest<ModelInfo>(
     baseUrl,
     fetcher,
-    `/models/info?id=${encodeURIComponent(id)}`,
+    `/api/v1/models/info?id=${encodeURIComponent(id)}`,
     { signal, action: "Model info" },
   );
 }
@@ -147,7 +147,7 @@ export async function uploadModel(
   id: string,
   repoId?: string,
 ): Promise<{ repo_id: string; url: string; tags: string[] }> {
-  return apiRequest(baseUrl, fetcher, "/models/upload", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/upload", {
     method: "POST",
     body: { id, ...(repoId ? { repo_id: repoId } : {}) },
     action: "Upload model",
@@ -163,7 +163,7 @@ export async function deleteModel(
   fetcher: Fetcher,
   id: string,
 ): Promise<{ deleted: boolean; id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/delete", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/delete", {
     method: "POST",
     body: { id },
     action: "Delete model",
@@ -177,7 +177,7 @@ export async function saveCustomModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/custom", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Save custom model",
@@ -192,7 +192,7 @@ export async function hideModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/hide", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/hide", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Hide model",
@@ -206,7 +206,7 @@ export async function removeCustomModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/custom", {
     method: "DELETE",
     body: { repo_id: repoId },
     action: "Remove custom model",
@@ -233,7 +233,7 @@ export async function downloadModel(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ started: boolean; repo_id: string; message: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/download", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/download", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Download model",
@@ -250,7 +250,7 @@ export async function getModelDownloadStatus(
   return apiRequest<ModelDownloadStatus>(
     baseUrl,
     fetcher,
-    "/models/download-status",
+    "/api/v1/models/download-status",
     { action: "Model download status", signal },
   );
 }
@@ -268,7 +268,7 @@ export async function importModelFromDisk(
   path: string,
   name?: string,
 ): Promise<{ repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/models/import", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/models/import", {
     method: "POST",
     body: { path, name },
     action: "Import model",

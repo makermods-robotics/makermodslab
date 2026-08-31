@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makermodslab.scripts.makermodslab — covers `_wait_for_port` and
-`_ensure_path_symlinks`. The launcher's `_run_prod` / `_run_dev` / `main`
-functions are CLI/process glue (they call uvicorn.run, spawn npm, install
-SIGINT handlers) and have no unit-testable seam without rewriting them; they
-are left to manual smoke testing."""
+"""Tests for makermodslab.scripts.makermodslab — covers `_wait_for_port`,
+`_ensure_path_symlinks`, `_resolve_bind_host`, and `main`'s arg handling (with
+`_run_prod` stubbed out). The launcher's `_run_prod` / `_run_dev` bodies are
+CLI/process glue (they call uvicorn.run, spawn npm, install SIGINT handlers)
+and have no unit-testable seam without rewriting them; they are left to manual
+smoke testing."""
 
 from __future__ import annotations
 
@@ -261,6 +262,33 @@ def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured["argv"] == ["makermodslab-station", "--lan", "--offline", "--dev"]
 
 
+def test_discover_tailscale_flag_sets_env_before_server_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--discover-tailscale` follows the MAKERMODSLAB_NO_UI precedent: the env
+    var must be in place before uvicorn imports makermodslab.server (where
+    nodes.register_sources_from_env reads it). OFF unless the flag is given."""
+    import os
+
+    from makermodslab.scripts import makermodslab as launcher
+
+    monkeypatch.setenv("MAKERMODSLAB_DISCOVER_TAILSCALE", "0")  # restored by monkeypatch
+    monkeypatch.delenv("MAKERMODSLAB_DISCOVER_TAILSCALE")
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    seen_at_run: dict[str, str | None] = {}
+
+    def fake_run_prod(**_kwargs) -> None:
+        seen_at_run["env"] = os.environ.get("MAKERMODSLAB_DISCOVER_TAILSCALE")
+
+    monkeypatch.setattr(launcher, "_run_prod", fake_run_prod)
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab"])
+    launcher.main()
+    assert seen_at_run["env"] is None  # off by default
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--discover-tailscale"])
+    launcher.main()
+    assert seen_at_run["env"] == "1"
+
+
 def test_entry_points_target_correct_functions() -> None:
     """`makermodslab` -> `main` (friendly default), `makermodslab-station` ->
     `station` (headless posture). The old `lelab*` / `makerlabs` / `makerlab*`
@@ -300,6 +328,129 @@ def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
     assert (bin_dir / "makermodslab").resolve() != (source_dir / "makermodslab").resolve()
     # The other name, not uv-owned, is linked to the venv as usual.
     assert (bin_dir / "makermodslab-station").resolve() == (source_dir / "makermodslab-station").resolve()
+
+
+# --- --bind: literal address or interface name -------------------------------
+
+
+def _fake_if_addrs(monkeypatch: pytest.MonkeyPatch, addrs: dict) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.setattr(launcher.psutil, "net_if_addrs", lambda: addrs)
+
+
+def _snic(family: int, address: str):
+    """A psutil snicaddr stand-in (only family/address are read)."""
+    return types.SimpleNamespace(family=family, address=address)
+
+
+def test_resolve_bind_host_passes_literal_ip_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A literal IP never consults the interface table."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.setattr(
+        launcher.psutil, "net_if_addrs", lambda: pytest.fail("literal IPs must not hit psutil")
+    )
+    assert launcher._resolve_bind_host("192.168.1.10") == "192.168.1.10"
+    assert launcher._resolve_bind_host("100.64.0.7") == "100.64.0.7"
+    assert launcher._resolve_bind_host("::1") == "::1"
+
+
+def test_resolve_bind_host_resolves_interface_to_first_ipv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(
+        monkeypatch,
+        {
+            "lo0": [_snic(socket.AF_INET, "127.0.0.1")],
+            "tailscale0": [
+                _snic(socket.AF_INET6, "fd7a:115c:a1e0::7"),  # v6 first, like real tables
+                _snic(socket.AF_INET, "100.64.0.7"),
+                _snic(socket.AF_INET, "100.64.0.8"),  # aliases: first IPv4 wins
+            ],
+        },
+    )
+    assert launcher._resolve_bind_host("tailscale0") == "100.64.0.7"
+
+
+def test_resolve_bind_host_unknown_interface_fails_with_the_available_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(monkeypatch, {"lo0": [_snic(socket.AF_INET, "127.0.0.1")]})
+    with pytest.raises(ValueError, match="lo0"):
+        launcher._resolve_bind_host("tailscale0")
+
+
+def test_resolve_bind_host_interface_without_ipv4_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(monkeypatch, {"utun3": [_snic(socket.AF_INET6, "fd7a:115c:a1e0::7")]})
+    with pytest.raises(ValueError, match="no IPv4"):
+        launcher._resolve_bind_host("utun3")
+
+
+def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> dict:
+    """Drive main() with `argv`, capturing the _run_prod call instead of
+    starting a server."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_prod", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", *argv])
+    launcher.main()
+    return captured
+
+
+def test_main_passes_resolved_bind_host_to_run_prod(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _run_main(monkeypatch, ["--bind", "100.64.0.7"])["host"] == "100.64.0.7"
+
+
+def test_main_without_bind_leaves_host_to_lan_or_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _run_main(monkeypatch, ["--lan"])
+    assert captured["host"] is None
+    assert captured["lan"] is True
+
+
+def test_bind_wins_over_lan_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO):
+        captured = _run_main(monkeypatch, ["--lan", "--bind", "100.64.0.7"])
+    assert captured["host"] == "100.64.0.7"
+    assert "--bind" in caplog.text
+    assert "--lan" in caplog.text
+
+
+def test_bad_bind_fails_fast_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    _fake_if_addrs(monkeypatch, {"lo0": [_snic(socket.AF_INET, "127.0.0.1")]})
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: pytest.fail("must fail before this"))
+    monkeypatch.setattr(launcher, "_run_prod", lambda **_kw: pytest.fail("must not start"))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--bind", "no-such-if0"])
+
+    with pytest.raises(SystemExit), caplog.at_level(logging.ERROR):
+        launcher.main()
+    assert "no-such-if0" in caplog.text
+
+
+def test_bind_is_ignored_in_dev_mode_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda: None)
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev", "--bind", "100.64.0.7"])
+
+    with caplog.at_level(logging.WARNING):
+        launcher.main()
+    assert "--bind is ignored in --dev mode" in caplog.text
 
 
 # --- Shutdown reliability: --stop, port preflight, process-tree teardown -----

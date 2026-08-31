@@ -126,6 +126,12 @@ def friendly_hint(error_text: str | None) -> str | None:
             "The GPU ran out of memory. Turn on mixed precision (AMP), lower the batch size, "
             "or run on a larger GPU."
         )
+    if "libtorchcodec" in low or "library not loaded: @rpath/libavutil" in low:
+        return (
+            "The trainer's video decoder (torchcodec) couldn't load its FFmpeg libraries on this "
+            "machine. Install ffmpeg (macOS: brew install ffmpeg; Ubuntu: sudo apt install ffmpeg) "
+            "or retry — newer MakerMods Lab falls back to the built-in pyav decoder automatically."
+        )
     if "overload" in low or "torque_enable" in low:
         return (
             "A motor overloaded — usually the gripper holding an object too hard. Release the object / "

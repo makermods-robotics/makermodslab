@@ -88,9 +88,6 @@ export default {
       noRobotTitle: "No robot selected",
       noRobotBody:
         "Select or create a robot first — use the robot menu in the top-right corner.",
-      notReadyTitle: "Robot not ready",
-      // {{gap}} is the rendered setup-gap phrase; {{name}} the robot's name.
-      notReadyBody: "{{name}} {{gap}}. Open Robot settings before recording.",
       missingDetailsTitle: "Missing dataset details",
       missingDetailsBody: "Please enter a dataset name and task description.",
       // The body is validateDatasetName's own message — client-side, but owned

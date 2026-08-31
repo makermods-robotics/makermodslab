@@ -47,6 +47,7 @@ from huggingface_hub import constants as hf_constants, metadata_update, snapshot
 from huggingface_hub.file_download import repo_folder_name
 from huggingface_hub.utils import filter_repo_objects
 
+from .api_errors import ErrorCode
 from .datasets import (
     DownloadManager,
     _dir_mtime_iso,
@@ -56,6 +57,7 @@ from .datasets import (
 from .jobs import (
     JobHasChildrenError,
     JobRecord,
+    JobSourceOfQueuedRunError,
     _list_local_checkpoints,
     _read_checkpoint_config,
     job_registry,
@@ -201,13 +203,18 @@ class ModelError(Exception):
     the HTTP status the route should return (400 offline/invalid, 403 no write
     permission, 404 not found, 409 busy, 502 other Hub failure); `message` is
     the user-facing reason; `docs_url` (optional) links auth docs for a login
-    failure."""
+    failure; `code` (optional) is the machine-readable ErrorCode value the
+    route forwards beside the message — additive, exactly as everywhere else
+    in the API (api_errors.py)."""
 
-    def __init__(self, status: int, message: str, docs_url: str | None = None) -> None:
+    def __init__(
+        self, status: int, message: str, docs_url: str | None = None, code: str | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
         self.docs_url = docs_url
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -2203,6 +2210,22 @@ def _model_in_use(target_dir: Path) -> str | None:
     return None
 
 
+def _queued_runs_reading_dir(target_dir: Path) -> list[str]:
+    """Ids of QUEUED runs whose frozen `policy_pretrained_path` points at (or
+    inside) `target_dir`. The downloaded-model twin of the registry's
+    `_queued_dependents_of` path-containment leg: that one guards a REGISTRY
+    RECORD's output dir; this guards a store dir that has no record. Compared
+    on the resolved path with a separator-suffixed prefix so a sibling like
+    `<root>/base-old` never matches `<root>/base`."""
+    target = str(target_dir.resolve()).rstrip("/")
+    out: list[str] = []
+    for record in job_registry.list_queue():
+        pretrained = record.config.policy_pretrained_path or ""
+        if pretrained == target or pretrained.startswith(target + "/"):
+            out.append(record.id)
+    return sorted(out)
+
+
 def delete_local_model(model_id: str) -> dict[str, Any]:
     """Delete a local model's LOCAL files — a training run's output dir, or a
     downloaded/imported checkpoint's dir in the local models dir.
@@ -2235,6 +2258,21 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
         in_use = _model_in_use(model_dir)
         if in_use is not None:
             raise ModelError(409, in_use) from None
+        # The store-dir twin of the registry's `_queued_dependents_of`: a
+        # QUEUED run whose frozen policy_pretrained_path points inside this
+        # dir will read it at launch — the live-inference guard above can't
+        # see that, and the registry's guard only covers registry records, so
+        # the rmtree below pulled the base out from under a run that failed
+        # hours later with a path nobody could tie to this click.
+        queued_readers = _queued_runs_reading_dir(model_dir)
+        if queued_readers:
+            waiting = ", ".join(repr(qid) for qid in queued_readers)
+            raise ModelError(
+                409,
+                f"Model {model_id!r} holds the checkpoint queued run(s) {waiting} will train "
+                "from. Cancel them first, or wait for them to finish.",
+                code=str(ErrorCode.JOB_HAS_QUEUED_DEPENDENTS),
+            ) from None
         try:
             shutil.rmtree(model_dir)
         except OSError as rm_exc:
@@ -2251,6 +2289,27 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
         raise ModelError(
             400,
             f"Model {model_id!r} is not a local training run, so there's nothing local to delete.",
+        )
+
+    # Only a TERMINAL run's artifacts are deletable here. `JobRegistry.delete`
+    # refuses `running` on its own, but it deliberately allows `queued` —
+    # cancelling a queued run IS a legitimate jobs-surface operation — so a
+    # queued id reaching it through THIS surface was silently cancelled and
+    # reported as "deleted": a model deletion that removed a pending training
+    # run the user never asked to touch. Refuse both non-terminal states up
+    # front, each naming where the run can actually be stopped.
+    if record.state == "queued":
+        raise ModelError(
+            409,
+            f"Model {model_id!r} is a queued training run — it hasn't produced anything to "
+            "delete. Cancel it from the training queue if you don't want it to run.",
+            code=str(ErrorCode.JOB_NOT_TERMINAL),
+        )
+    if record.state == "running":
+        raise ModelError(
+            409,
+            f"Model {model_id!r} is still training — stop the run before deleting it.",
+            code=str(ErrorCode.JOB_NOT_TERMINAL),
         )
 
     # Resolve the run dir and refuse anything outside outputs/train/. The
@@ -2294,6 +2353,20 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
             409,
             f"Model {model_id!r} was continued by {continued_by}, which would be left "
             "pointing at a deleted run. Delete the continuation(s) first.",
+        ) from exc
+    except JobSourceOfQueuedRunError as exc:
+        # The queue-era sibling of the refusal above: a QUEUED run froze this
+        # run's checkpoint path at submit time and reads it when the slot
+        # frees. Uncaught it fell into the catch-all below and surfaced as a
+        # 502 "Failed to delete model" — a deliberate guard reported as an
+        # infrastructure failure. Same 409 + code the /jobs delete route
+        # emits, so the refusal reads identically from either library.
+        waiting = ", ".join(repr(qid) for qid in exc.queued_ids)
+        raise ModelError(
+            409,
+            f"Model {model_id!r} holds the checkpoint queued run(s) {waiting} will train "
+            "from. Cancel them first, or wait for them to finish.",
+            code=str(ErrorCode.JOB_HAS_QUEUED_DEPENDENTS),
         ) from exc
     except JobNotFoundError as exc:
         raise ModelError(404, f"Model {model_id!r} not found.") from exc

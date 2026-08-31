@@ -6,7 +6,9 @@
 //   Quit — end WITHOUT saving. A FRESH session's whole dataset (this session's
 //          own creation) is deleted; a RESUME session keeps every episode
 //          already committed to the pre-existing dataset and only drops the
-//          in-progress take. An unintentional page exit is treated as Quit.
+//          in-progress take. (An abandoned page no longer discards anything:
+//          the session's server-side lease expires and the safety stop KEEPS
+//          the saved episodes — quit-without-saving is explicit-buttons-only.)
 //
 // These return STRUCTURE, not a resolved sentence assembled at module scope:
 // `t` is injected by the caller so the copy tracks the live language (the same
@@ -33,32 +35,4 @@ export function quitConfirmCopy(t: TFunction, resume: boolean): ExitConfirmCopy 
       ? t("recording.exit.quit.descriptionResume")
       : t("recording.exit.quit.descriptionFresh"),
   };
-}
-
-/**
- * Toast/confirm line for an UNINTENTIONAL leave (back button, tab close), which
- * is treated as Quit. Mirrors quitConfirmCopy's fresh-vs-resume distinction.
- *
- * ENGLISH ONLY, deliberately. This feeds the shared exit guard's native
- * `window.confirm()`, whose chrome (the OK/Cancel buttons, the origin line) is
- * rendered by the browser in the BROWSER's language — a translated body inside
- * an English dialog frame reads worse than an English one, and the native
- * prompt is not ours to style. `formatLeaveDiscardMessage` below is the
- * localized twin used everywhere the message is rendered by React.
- */
-export function leaveDiscardMessage(resume: boolean): string {
-  return resume
-    ? "Leaving quits the recording without saving — episodes already saved stay in the dataset."
-    : "Leaving quits the recording without saving — the recording and all its episodes will be deleted.";
-}
-
-/** Localized equivalent of `leaveDiscardMessage`, for React-rendered surfaces
- * (the discard toast). Same fresh-vs-resume split. */
-export function formatLeaveDiscardMessage(
-  t: TFunction,
-  resume: boolean,
-): string {
-  return resume
-    ? t("recording.exit.leaveResume")
-    : t("recording.exit.leaveFresh");
 }

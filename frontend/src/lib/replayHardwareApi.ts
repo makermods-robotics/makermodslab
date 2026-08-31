@@ -1,12 +1,10 @@
 import { Fetcher, apiRequest } from "./apiClient";
 
-export interface StartReplayRequest {
-  repo_id: string;
-  episode_index: number;
-  follower_port: string;
-  follower_config: string;
-  robot_name?: string;
-}
+// Starting a replay no longer lives here: launch goes through POST
+// /api/v1/sessions (lib/sessionApi.ts startSession, kind "replay") — the
+// request carries the robot NAME plus {repo_id, episode_index}, and the
+// server resolves the follower port/config from the saved record. This module
+// keeps the status polling and the kind-level fallback stop.
 
 export type ReplayPhase = "idle" | "easing_in" | "playing" | "stopping" | "done" | "error";
 
@@ -20,23 +18,11 @@ export interface ReplayStatus {
   hint?: string | null;
 }
 
-export async function startReplay(
-  baseUrl: string,
-  fetcher: Fetcher,
-  request: StartReplayRequest,
-): Promise<{ message: string; warning?: string }> {
-  return apiRequest(baseUrl, fetcher, "/start-replay", {
-    method: "POST",
-    body: request,
-    action: "Start replay",
-  });
-}
-
 export async function stopReplay(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest(baseUrl, fetcher, "/stop-replay", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/stop-replay", {
     method: "POST",
     action: "Stop replay",
   });
@@ -47,7 +33,7 @@ export async function getReplayStatus(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<ReplayStatus> {
-  return apiRequest<ReplayStatus>(baseUrl, fetcher, "/replay-status", {
+  return apiRequest<ReplayStatus>(baseUrl, fetcher, "/api/v1/replay-status", {
     signal,
     action: "Get replay status",
   });

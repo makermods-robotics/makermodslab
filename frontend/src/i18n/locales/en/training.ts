@@ -70,7 +70,9 @@ export default {
       body: "<0>Fresh run</0> from step 0 — new optimizer, with the policy weights loaded from this checkpoint.",
     },
     tooltip: {
-      localBusy: "Another local training is already running",
+      // A busy local slot no longer blocks Start — the submission queues.
+      willQueue:
+        "A training is already running — this run will wait in the queue.",
       needAuth: "Log in to Hugging Face to use cloud compute",
       needFlavor: "Select a hardware flavor",
       offlineDataset:
@@ -82,6 +84,9 @@ export default {
       uploading: "Uploading…",
       starting: "Starting…",
       startTraining: "Start training",
+      // Shown instead of "Start training" while the local slot is busy: the
+      // click ENQUEUES the run rather than starting it.
+      queueTraining: "Queue training",
       startFinetuning: "Start fine-tuning",
       continueTraining: "Continue training",
       uploadAndStart: "Upload & start training",
@@ -89,6 +94,10 @@ export default {
     },
     toast: {
       startedTitle: "Training Started",
+      queuedTitle: "Training queued",
+      // {{name}} is the run's name (data); {{position}} its 1-based place.
+      queuedBody:
+        "{{name}} — position #{{position}}. It starts when the current run finishes.",
       errorTitle: "Error",
       datasetRequired: "Dataset repository ID is required",
       uploadFailedTitle: "Upload failed",
@@ -105,8 +114,100 @@ export default {
 
   target: {
     computeLabel: "Compute",
-    runnerLocal: "Local — your machine",
+    // The section header's live summary. <0> is the bold name — "This
+    // machine" / the cloud label / a node's name (data).
+    runOn: "Run on: <0>{{name}}</0>",
     runnerCloud: "Hugging Face Cloud",
+    thisMachine: "This machine",
+    // "MakerMods Lab" is the product name and stays untranslated.
+    thisMachineSub: "Local — this MakerMods Lab server",
+    cloudSub: "Rented GPU, billed per hour — pick hardware below",
+    // The honest server-to-server sentence: choosing a node never moves the
+    // browser off this server.
+    selectorHint:
+      "Where this run executes. The interface stays on this server — a node runs the job, driven server-to-server.",
+    lanNodes: "LAN nodes",
+    nodesLoading: "Looking for nodes…",
+    // "Tailscale" is a product name. Shown only while a tailscale discovery
+    // source is registered — otherwise the sentence would promise discovery
+    // that will never happen (nodesEmptyNoDiscovery covers that case).
+    nodesEmpty:
+      "No nodes yet — other MakerMods Lab servers appear here when discovered via Tailscale, or add one by URL.",
+    // <0> wraps the literal CLI flag --discover-tailscale: data, rendered
+    // verbatim in a mono span, never translated.
+    nodesEmptyNoDiscovery:
+      "No nodes yet — add another MakerMods Lab server by URL. Starting the server with <0>--discover-tailscale</0> finds them over your tailnet automatically.",
+    viaTailscale: "via tailscale",
+    verifying: "Verifying…",
+    verifyingTitle: "Discovered — waiting for the verify handshake to confirm it.",
+    unreachable: "Unreachable",
+    // {{when}} is a pre-formatted relative duration ("4m ago") — duration
+    // formatting stays English everywhere (lib/relativeTime.ts).
+    lastSeen: "last seen {{when}}",
+    unreachableTitle:
+      "Unreachable — it reappears as selectable when the next handshake succeeds.",
+    unreachableTitleLastSeen:
+      "Unreachable — last seen {{when}}. It reappears as selectable when the next handshake succeeds.",
+    // "makermodslab" is the package name; {{version}} is data.
+    nodeVersion: "makermodslab v{{version}}",
+    nodeGone: "No longer registered",
+    nodeGoneTitle:
+      "This node has left the registry. Pick another target, or starting will be refused.",
+    refreshNodes: "Refresh nodes",
+    addNode: {
+      button: "Add node…",
+      title: "Register another MakerMods Lab server by URL",
+      urlLabel: "Node URL",
+      submit: "Add",
+      adding: "Adding…",
+      // Client-side sentences for the backend's CODED refusals (node.self /
+      // node.duplicate / node.unreachable). Every uncoded refusal shows the
+      // server's own detail verbatim instead.
+      errorSelf: "That URL answers as this server itself.",
+      errorDuplicate: "That node is already registered.",
+      errorUnreachable: "No MakerMods Lab server answered at that URL.",
+    },
+    detail: {
+      instance: "Instance",
+      version: "Version",
+      lastSeenLabel: "Last seen",
+      workloadLoading: "Checking workload…",
+      workloadUnreachable:
+        "Unreachable — couldn't ask this node for its workload.",
+      // {{name}} is the run's display name (data); {{pct}} is pre-formatted.
+      workloadRunningPct: "Running: {{name}} · {{pct}}%",
+      workloadRunning: "Running: {{name}}",
+      workloadIdle: "Idle",
+      // A plain figure, named `total` rather than `count` so i18next does not
+      // treat it as a plural selector.
+      workloadQueued: "+{{total}} queued",
+      // <0>/<1> both wrap the node's name (data). "Hub" / "HF" are product
+      // names.
+      hubSyncHint:
+        "The job runs on <0>{{name}}</0>; datasets sync via the Hub — this dataset uploads to your HF account first, and <1>{{name}}</1> pulls it from there.",
+      goneBody:
+        "This node is no longer in the registry. Pick another compute target — starting the run would be refused.",
+    },
+    // The drill-in dialog for one run ON a peer node (NodeJobDialog). Run
+    // names, numbers and log lines are data, rendered verbatim; the state
+    // labels come from jobs.jobState, and the stop/delete toasts reuse
+    // jobs.jobsData so a peer run reads exactly like a local one.
+    nodeJob: {
+      // One whole sentence; <0> wraps the node's display name (data).
+      onNode: "Runs on <0>{{name}}</0> — driven server-to-server from here.",
+      logsLabel: "Live log tail",
+      logsEmpty: "No log lines since this dialog opened.",
+      stop: "Stop",
+      stopping: "Stopping…",
+      delete: "Delete",
+      deleting: "Deleting…",
+      // Our sentence for the proxy's coded 502 (node.unreachable); every
+      // uncoded refusal shows the server's own prose verbatim.
+      unreachable: "Unreachable — couldn't reach this node just now.",
+      // Hover text on the clickable running line / queued chips.
+      openRunning: "View this run's details",
+      openQueued: "View this queued run",
+    },
     resumeRunnerHint:
       "Defaults to the runner this run started on — switch it to continue somewhere else.",
     deviceLabel: "Device",
@@ -329,11 +430,13 @@ export default {
     loadFailed: "Couldn't load job {{jobId}}: {{errorText}}",
     loading: "Loading job…",
     runnerLocal: "Local",
+    runnerNode: "LAN node",
     // Stand-in when a cloud job has no flavor recorded.
     cloudFallback: "cloud",
     viewOnHub: "View on Hub ↗",
     viewOnWandb: "View on W&B ↗",
     stop: "Stop",
+    cancelQueued: "Cancel",
     delete: "Delete",
     runInference: "Run inference",
     noCheckpoints: "No checkpoints yet — wait for the first save.",
@@ -341,6 +444,8 @@ export default {
     toast: {
       stoppingTitle: "Stopping…",
       stopFailedTitle: "Stop failed",
+      cancelledTitle: "Removed from the queue",
+      cancelFailedTitle: "Cancel failed",
       removedTitle: "Job removed",
       deleteFailedTitle: "Delete failed",
     },

@@ -43,11 +43,11 @@ from huggingface_hub import get_token
 from packaging.requirements import Requirement
 
 from .. import sampling as _sampling, train_weighted as _train_weighted
-from ..datasets import hub_repo_exists, push_dataset_to_hub, resolve_hub_repo_id
+from ..datasets import resolve_hub_repo_id
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
-from ..utils.config import with_makermodslab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
+from ._dataset import ensure_dataset_on_hub
 
 logger = logging.getLogger(__name__)
 
@@ -961,48 +961,10 @@ class HfCloudJobRunner:
             logger.warning("Could not write upload log line: %s", exc)
 
     def _ensure_dataset_on_hub(self, local_repo_id: str, hub_repo_id: str) -> None:
-        """If the dataset is local-only, push it to the Hub.
-
-        The cloud pod resolves the dataset by repo_id; it can't see the
-        host's `~/.cache/huggingface/lerobot`. We push synchronously and
-        let any failure bubble up — JobRegistry.start marks the record
-        as failed with the exception message.
-
-        `local_repo_id` addresses the host's cache (a locally-recorded
-        dataset's directory — and so its id — is bare); `hub_repo_id` is that
-        id resolved against the caller's namespace, which is what every Hub
-        call here must use.
-
-        Existence goes through the shared hub_repo_exists — not
-        get_hub_status, whose process-lifetime memo is wrong for a caller about
-        to WRITE. Only a confirmed absence pushes: on None
-        (offline / rate-limited / any transport error) we leave the Hub alone,
-        because pushing into a repo we could not verify is worse than a pod
-        that fails resolving a dataset.
-        """
-        if hub_repo_exists(hub_repo_id) is not False:
-            return
-
-        cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-        if not (cache_root / local_repo_id / "meta" / "info.json").is_file():
-            # Neither local nor on Hub. Let the trainer surface the error
-            # — same behaviour as before.
-            return
-
-        self._log_line(f"[upload] dataset {hub_repo_id} not on Hub; pushing local copy (public)...")
-        try:
-            # Public by default: MakerMods Lab's global policy is that datasets it pushes
-            # to the Hub are public and carry the required org/product tags (see
-            # with_makermodslab_tag / REQUIRED_HUB_TAGS). This implicit cloud-run upload
-            # follows that same default so all MakerMods Lab-produced datasets are
-            # discoverable. (This intentionally reverses the earlier private
-            # default — an implicit upload of a local-only dataset is now public.)
-            push_dataset_to_hub(local_repo_id, tags=with_makermodslab_tag(None), private=False)
-        except Exception as exc:
-            msg = f"Failed to upload local dataset {local_repo_id} to Hub: {exc}"
-            self._log_line(f"[upload] {msg}")
-            raise RuntimeError(msg) from exc
-        self._log_line(f"[upload] dataset {hub_repo_id} uploaded.")
+        """If the dataset is local-only, push it to the Hub — the shared
+        remote-runner rule; see runners/_dataset.ensure_dataset_on_hub for the
+        full contract (what pushes, what abstains, and why)."""
+        ensure_dataset_on_hub(local_repo_id, hub_repo_id, self._log_line)
 
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the

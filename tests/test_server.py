@@ -35,7 +35,7 @@ BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0
 
 REQUIRED_PATHS = {
     "/health",
-    "/skills",
+    "/api/v1/skills",
     "/move-arm",
     "/stop-teleoperation",
     "/teleoperation-status",
@@ -56,8 +56,11 @@ REQUIRED_PATHS = {
 
 def test_app_exposes_required_endpoints() -> None:
     from makermodslab.server import app
+    from tests.test_api_contract import _walk_routes
 
-    paths = {route.path for route in app.routes}
+    # _walk_routes traverses FastAPI >= 0.138's lazy _IncludedRouter entries;
+    # a bare {route.path for route in app.routes} no longer sees the API routes.
+    paths = {path for path, _ in _walk_routes(app.routes)}
     missing = REQUIRED_PATHS - paths
     assert not missing, f"missing routes: {missing}"
 
@@ -293,7 +296,7 @@ def test_skills_endpoint_returns_an_envelope_not_a_bare_array(client: TestClient
             "hub": {"ok": False, "authenticated": True, "degraded": True, "stale_rows": True},
         },
     ):
-        response = client.get("/skills")
+        response = client.get("/api/v1/skills")
 
     assert response.status_code == 200
     body = response.json()
@@ -1556,7 +1559,7 @@ def test_list_device_runs_survives_an_unreachable_hub(
         raise RuntimeError("network is down")
 
     monkeypatch.setattr(server_mod.presence, "read_board", _boom)
-    resp = client.get("/jobs/devices")
+    resp = client.get("/api/v1/jobs/devices")
     assert resp.status_code == 200
     assert resp.json()["devices"] == []
 
@@ -1578,14 +1581,16 @@ def test_list_device_runs_reports_a_write_forbidden_token(
             "last_write": 0.0,
         },
     )
-    body = client.get("/jobs/devices").json()
+    body = client.get("/api/v1/jobs/devices").json()
     assert body["disabled_reason"] == "forbidden"
 
 
 def test_presence_settings_round_trip(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
-    assert client.post("/jobs/devices/settings", json={"enabled": False}).json()["enabled"] is False
+    assert client.post("/api/v1/jobs/devices/settings", json={"enabled": False}).json()["enabled"] is False
     assert server_mod.presence.load_settings()["enabled"] is False
-    assert client.post("/jobs/devices/settings", json={"label": "desktop"}).json()["label"] == "desktop"
+    assert (
+        client.post("/api/v1/jobs/devices/settings", json={"label": "desktop"}).json()["label"] == "desktop"
+    )
     # A label-only update must not silently flip sharing back on.
     assert server_mod.presence.load_settings()["enabled"] is False
 
@@ -1594,7 +1599,7 @@ def test_forget_device_refuses_this_device(client: TestClient, monkeypatch, tmp_
     # Its file is rewritten on the next publish, so deleting it would be a no-op
     # that looks like it worked.
     mine = server_mod.presence.device_id()
-    resp = client.delete(f"/jobs/devices/{mine}")
+    resp = client.delete(f"/api/v1/jobs/devices/{mine}")
     assert resp.status_code == 400
 
 

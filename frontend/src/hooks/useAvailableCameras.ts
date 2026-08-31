@@ -79,7 +79,7 @@ export function useAvailableCameras({
           .map((d) => ({ deviceId: d.deviceId, label: d.label }));
       }
 
-      const r = await fetchWithHeaders(`${baseUrl}/available-cameras`);
+      const r = await fetchWithHeaders(`${baseUrl}/api/v1/available-cameras`);
       if (!r.ok) {
         setCameras([]);
         return [];

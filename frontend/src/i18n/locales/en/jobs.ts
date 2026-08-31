@@ -17,6 +17,10 @@ export default {
   // Stop button produces, and "Interrupted" suggests something happened TO the
   // run.
   jobState: {
+    queued: "Queued",
+    // The badge variant carrying the run's live 1-based queue position — a
+    // derived figure the server re-stamps on every response.
+    queuedAt: "Queued · #{{position}}",
     running: "Running",
     done: "Done",
     failed: "Failed",
@@ -47,6 +51,12 @@ export default {
     hub: "Hub",
     localTitle: "Runs on this machine",
     cloudTitle: "Runs on Hugging Face cloud",
+    // A lan_node run whose node id is missing falls back to this word; the
+    // chip normally shows the node's NAME or short instance id (data).
+    node: "Node",
+    nodeTitle: "Runs on a LAN node, driven by this server",
+    // {{name}} is the node's display name — data.
+    nodeTitleNamed: "Runs on the LAN node {{name}}, driven by this server",
     fromHub: "from Hub",
     fromHubTitle: "Imported from a Hugging Face Hub repo",
   },
@@ -184,11 +194,15 @@ export default {
     // The final subtitle branch: the run's state as running text. Lowercase in
     // English by hand, never by calling .toLowerCase() on a translated word.
     subtitleState: {
+      queued: "waiting for the training slot",
       running: "running",
       done: "done",
       failed: "failed",
       interrupted: "stopped",
     },
+    cancelQueuedAria: "Cancel queued run",
+    queueMoveUpAria: "Move up the queue",
+    queueMoveDownAria: "Move down the queue",
     resumeLatest: "Resume from latest",
     // {{step}} arrives pre-formatted (toLocaleString) — deliberately not an
     // i18next `count`, which would try to re-derive a plural from a string.
@@ -243,6 +257,17 @@ export default {
     deleteFailed: "Delete failed",
     dismissed: "Job removed from list",
     dismissFailed: "Remove failed",
+    queueCancelled: "Removed from the queue",
+    cancelFailed: "Cancel failed",
+    // Our sentences for the two CODED refusals worth translating; every other
+    // refusal shows the backend's own prose verbatim.
+    cancelBlockedDependents:
+      "Another queued run will train from this one's checkpoint. Cancel that one first.",
+    cancelStateChanged:
+      "This run changed state while you were looking at it — nothing was cancelled. Decide again from its current state.",
+    // The one refusal a refetch-and-retry clears (409 job.queue_stale).
+    queueStale: "Queue changed — try again",
+    reorderFailed: "Reorder failed",
   },
   jobsDropdown: {
     triggerAria: "Select a training run",
@@ -278,12 +303,14 @@ export default {
     filters: {
       all: "All",
       local: "Local",
-      online: "Online",
+      // Everything that executes off this machine: Hugging Face cloud/Hub
+      // runs and runs offloaded to a LAN node.
+      remote: "Remote",
     },
     empty: {
       search: "No jobs match your search.",
       local: "No local jobs.",
-      online: "No online jobs.",
+      remote: "No remote jobs.",
       none: "No training jobs yet.",
     },
     firstRun: "No training jobs yet. Start one above.",

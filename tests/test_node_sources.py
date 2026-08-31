@@ -1,0 +1,265 @@
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""TailscaleSource: `tailscale status --json` parsing via an injected runner.
+
+The source only produces CANDIDATES — bare urls at this app's backend port on
+peers' tailnet IPv4s — and the registry's verify handshake remains the single
+trust path. Failure modes are TRI-STATE: a missing binary, a backend that is
+not Running, and a clean run with no peers are DEFINITIVE empty answers
+(return [], evict-eligible; the first two warn once per outage — the flag is
+an explicit opt-in); a timeout, a non-zero exit, or malformed output is a
+TRANSIENT outage (NodeSourceOutageError) — the registry keeps what it knows
+rather than evicting on a guess. Either way the server never degrades.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+
+import pytest
+
+
+def _status_doc(peers: dict, backend_state: str = "Running") -> str:
+    """A realistic `tailscale status --json` document (v1.6x shape, trimmed to
+    the fields real output carries around the ones we read)."""
+    return json.dumps(
+        {
+            "Version": "1.66.4",
+            "TUN": True,
+            "BackendState": backend_state,
+            "AuthURL": "",
+            "TailscaleIPs": ["100.101.102.103", "fd7a:115c:a1e0::1"],
+            "Self": {
+                "ID": "n0",
+                "PublicKey": "nodekey:self",
+                "HostName": "station",
+                "DNSName": "station.tail1234.ts.net.",
+                "OS": "linux",
+                "TailscaleIPs": ["100.101.102.103", "fd7a:115c:a1e0::1"],
+                "Online": True,
+            },
+            "Health": [],
+            "MagicDNSSuffix": "tail1234.ts.net",
+            "CertDomains": None,
+            "Peer": peers,
+        }
+    )
+
+
+def _peer(hostname: str, ips: list[str], online: bool) -> dict:
+    return {
+        "ID": "n1",
+        "PublicKey": f"nodekey:{hostname}",
+        "HostName": hostname,
+        "DNSName": f"{hostname}.tail1234.ts.net.",
+        "OS": "linux",
+        "TailscaleIPs": ips,
+        "Online": online,
+        "ExitNode": False,
+        "Active": online,
+    }
+
+
+def _source(output: str | Exception, port: int = 8000):
+    from makermodslab.node_sources import TailscaleSource
+
+    def runner() -> str:
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    return TailscaleSource(port=port, runner=runner)
+
+
+def test_source_id_is_tailscale():
+    assert _source(_status_doc({})).source_id == "tailscale"
+
+
+def test_online_peers_become_candidates_at_backend_port():
+    from makermodslab.nodes import DiscoveredPeer
+
+    doc = _status_doc(
+        {
+            "nodekey:aaa": _peer("bench-pi", ["100.64.0.7", "fd7a:115c:a1e0::7"], online=True),
+            "nodekey:bbb": _peer("laptop", ["100.64.0.8"], online=False),
+        }
+    )
+    assert _source(doc).discover() == [
+        DiscoveredPeer(url="http://100.64.0.7:8000", name="bench-pi"),
+    ]
+
+
+def test_candidates_use_the_configured_port():
+    doc = _status_doc({"nodekey:aaa": _peer("bench-pi", ["100.64.0.7"], online=True)})
+    [candidate] = _source(doc, port=8443).discover()
+    assert candidate.url == "http://100.64.0.7:8443"
+
+
+def test_peer_without_a_tailnet_ipv4_is_skipped():
+    """Only 100.64.0.0/10 IPv4s qualify: an IPv6-only peer and one advertising
+    a non-CGNAT address (however it got there) produce no candidate."""
+    doc = _status_doc(
+        {
+            "nodekey:aaa": _peer("v6-only", ["fd7a:115c:a1e0::9"], online=True),
+            "nodekey:bbb": _peer("weird", ["192.168.1.5"], online=True),
+            "nodekey:ccc": _peer("no-ips", [], online=True),
+        }
+    )
+    assert _source(doc).discover() == []
+
+
+def test_peer_missing_optional_fields_is_tolerated():
+    """Real output varies by version; a peer without HostName/Online blocks
+    must not crash the parse (absent Online means not online)."""
+    doc = _status_doc(
+        {
+            "nodekey:aaa": {"TailscaleIPs": ["100.64.0.7"], "Online": True},
+            "nodekey:bbb": {"TailscaleIPs": ["100.64.0.8"]},  # no Online key
+            "nodekey:ccc": "not-a-dict",
+        }
+    )
+    [candidate] = _source(doc).discover()
+    assert candidate.url == "http://100.64.0.7:8000"
+    assert candidate.name is None
+
+
+def test_not_logged_in_is_a_definitive_empty_discovery(caplog: pytest.LogCaptureFixture):
+    """A backend that is not Running (logged out, stopped) cannot see ANY
+    peer: a real empty answer — never a raise — warned once per outage."""
+    with caplog.at_level(logging.INFO):
+        assert _source(_status_doc({}, backend_state="NeedsLogin")).discover() == []
+    needs_login = [r for r in caplog.records if "NeedsLogin" in r.getMessage()]
+    assert len(needs_login) == 1
+    assert needs_login[0].levelno == logging.WARNING
+
+
+def test_stopped_backend_is_a_definitive_empty_discovery():
+    assert _source(_status_doc({}, backend_state="Stopped")).discover() == []
+
+
+def test_missing_or_null_peer_map_is_empty_discovery():
+    doc = json.loads(_status_doc({}))
+    doc["Peer"] = None
+    assert _source(json.dumps(doc)).discover() == []
+    del doc["Peer"]
+    assert _source(json.dumps(doc)).discover() == []
+
+
+def test_missing_binary_is_empty_discovery_logged_once_at_warning(caplog: pytest.LogCaptureFixture):
+    source = _source(FileNotFoundError("No such file or directory: 'tailscale'"))
+    with caplog.at_level(logging.INFO):
+        assert source.discover() == []
+        assert source.discover() == []
+    failure_logs = [r for r in caplog.records if "tailscale" in r.getMessage().lower()]
+    assert len(failure_logs) == 1
+    # WARNING since the macOS-CLI fix: --discover-tailscale is an explicit
+    # opt-in, so its silent absence is exactly what a user ends up debugging.
+    assert failure_logs[0].levelno == logging.WARNING
+
+
+def test_malformed_output_is_a_transient_outage():
+    """Garbage from a CLI that RAN is not an answer about the tailnet — the
+    source raises so the registry keeps its entries instead of evicting."""
+    from makermodslab.nodes import NodeSourceOutageError
+
+    with pytest.raises(NodeSourceOutageError):
+        _source("flagrant nonsense {").discover()
+    with pytest.raises(NodeSourceOutageError):
+        _source(json.dumps(["not", "a", "status", "dict"])).discover()
+
+
+def test_subprocess_failures_are_transient_outages():
+    from makermodslab.nodes import NodeSourceOutageError
+
+    with pytest.raises(NodeSourceOutageError):
+        _source(subprocess.CalledProcessError(1, ["tailscale", "status", "--json"])).discover()
+    with pytest.raises(NodeSourceOutageError):
+        _source(subprocess.TimeoutExpired(["tailscale", "status", "--json"], 5)).discover()
+
+
+def test_failure_log_rearms_after_a_successful_discovery(caplog: pytest.LogCaptureFixture):
+    """One INFO line per outage, not one per process lifetime: a recovery
+    resets the once-guard so the NEXT outage is reported too."""
+    from makermodslab.node_sources import TailscaleSource
+
+    outputs: list[str | Exception] = [
+        FileNotFoundError("no tailscale"),
+        _status_doc({}),
+        FileNotFoundError("no tailscale"),
+    ]
+
+    def runner() -> str:
+        output = outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    source = TailscaleSource(runner=runner)
+    with caplog.at_level(logging.INFO):
+        source.discover()
+        source.discover()
+        source.discover()
+    failure_logs = [r for r in caplog.records if "no tailscale" in r.getMessage()]
+    assert len(failure_logs) == 2
+
+
+# --- binary resolution (the macOS GUI app installs no PATH symlink) -----------
+
+
+def test_binary_resolution_prefers_path(monkeypatch):
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns.shutil, "which", lambda name: "/usr/bin/tailscale")
+    assert ns._resolve_tailscale_binary() == "/usr/bin/tailscale"
+
+
+def test_binary_resolution_falls_back_to_macos_app_bundle(monkeypatch):
+    """The Mac App Store / standalone GUI Tailscale ships its CLI inside the
+    app bundle with no PATH symlink — the number-one reason discovery 'works
+    on Ubuntu but not macOS'."""
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns.shutil, "which", lambda name: None)
+    monkeypatch.setattr(ns.sys, "platform", "darwin")
+    monkeypatch.setattr(ns.os.path, "isfile", lambda p: p == ns._MACOS_APP_BUNDLE_CLI)
+    monkeypatch.setattr(ns.os, "access", lambda p, mode: p == ns._MACOS_APP_BUNDLE_CLI)
+    assert ns._resolve_tailscale_binary() == ns._MACOS_APP_BUNDLE_CLI
+
+
+def test_binary_resolution_none_found(monkeypatch):
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns.shutil, "which", lambda name: None)
+    monkeypatch.setattr(ns.os.path, "isfile", lambda p: False)
+    assert ns._resolve_tailscale_binary() is None
+
+
+def test_missing_binary_warns_once_with_searched_locations(monkeypatch, caplog):
+    """--discover-tailscale is an explicit opt-in: a missing binary is a
+    WARNING naming what was searched, once per outage — not a buried INFO."""
+    import logging
+
+    from makermodslab import node_sources as ns
+
+    monkeypatch.setattr(ns, "_resolve_tailscale_binary", lambda: None)
+    src = ns.TailscaleSource()
+    with caplog.at_level(logging.WARNING, logger="makermodslab.node_sources"):
+        assert src.discover() == []
+        assert src.discover() == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "tailscale" in warnings[0].getMessage()

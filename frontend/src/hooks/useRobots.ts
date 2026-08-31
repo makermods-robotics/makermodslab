@@ -129,7 +129,7 @@ export const useRobots = () => {
     pendingFetches += 1;
     setState({ isLoading: true });
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/robots`);
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots`);
       const data = await res.json();
       const next: Record<string, RobotRecord> = {};
       for (const r of data.robots ?? []) next[r.name] = r;
@@ -172,7 +172,7 @@ export const useRobots = () => {
         return false;
       }
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}?create=true`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mode }),
@@ -207,7 +207,7 @@ export const useRobots = () => {
   const deleteRobot = useCallback(
     async (name: string): Promise<boolean> => {
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(name)}`, {
           method: "DELETE",
         });
         // 404 = the record is already gone (deleted elsewhere, or removed on
@@ -252,7 +252,7 @@ export const useRobots = () => {
         return false;
       }
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(oldName)}/rename`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(oldName)}/rename`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ new_name: newName }),

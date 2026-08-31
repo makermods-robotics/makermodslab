@@ -770,7 +770,7 @@ const TrainPanel: React.FC = () => {
         <div ref={setActionsEl} className={formOpen ? undefined : "hidden"} />
       </div>
 
-      {/* Training jobs library — local + online runs as cards, pinned to the
+      {/* Training jobs library — local + remote runs as cards, pinned to the
           panel foot like Collect's datasets and Deploy's models. mt-0 keeps it
           glued to the actions slot above, which carries the panel's mt-auto. */}
       <LibrarySection className="mt-0">

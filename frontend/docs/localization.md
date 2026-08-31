@@ -409,8 +409,10 @@ function AdvancedSection({ title }) {
 ```
 
 ```tsx
-// Copy passed into a hook
-useSessionExitGuard({ confirmMessage: t("dialogs.replay.leaveConfirm") });
+// Copy passed into a hook: resolve with t() at the call site, never a
+// module-level English constant. (The retired useSessionExitGuard's
+// confirmMessage option was the canonical example of this shape.)
+useSomeHook({ message: t("dialogs.replay.toast.failedTitle") });
 ```
 
 `RobotStatus` in `studio/panel/primitives.tsx` shows the shape to prefer: it takes copy as
@@ -463,8 +465,8 @@ stylesheet:
 The OK/Cancel buttons and the frame come from the **browser's** locale, not the app's. A
 translated question with English buttons is worse than an English question.
 
-There are 13 such call sites (job cards and dropdowns, the training job dialog, and the
-shared session exit guard). They stay English and carry a comment saying why. Converting them to Radix
+The remaining call sites (job cards and dropdowns, and the training job dialog) stay
+English and carry a comment saying why. Converting them to Radix
 `AlertDialog`s is a real improvement, but it is a **UX change and belongs in its own PR** —
 do not smuggle it into a translation change.
 

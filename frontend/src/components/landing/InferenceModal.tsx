@@ -34,7 +34,8 @@ import {
   getCheckpointPolicyConfig,
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
-import { startInference } from "@/lib/inferenceApi";
+import { startSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
@@ -178,7 +179,7 @@ const InferenceModal: React.FC<Props> = ({
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
   // Inference engine A/B. "sync" is the server default and the historical
-  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
   // ACT temporal ensembling — see DeployPanel, which carries the same pair.
@@ -445,44 +446,47 @@ const InferenceModal: React.FC<Props> = ({
       }
     }
     try {
-      // The POST now returns immediately (it only validates cheaply, then the
+      // POST /api/v1/sessions returns as soon as the run is claimed (the
       // server downloads the model + preflights the arm in the background), so
       // this opens the inference dialog right away — the download and its
       // progress, any warn-but-allow arm finding, and any failure all surface
-      // there via /inference-status polling.
-      await startInference(baseUrl, fetchWithHeaders, {
-        follower_port: robot.follower_port,
-        follower_config: robot.follower_config,
-        policy_ref: selectedRef,
-        task,
-        camera_bindings: cameraBindingPayload,
-        camera_dims: cameraDimsPayload,
-        duration_s: durationS,
-        // Bimanual: forward the mode + right-arm follower so the server builds a
-        // `bi_so_follower` command staging both follower calibrations. In single
-        // mode the right_* fields are inert (mode defaults to "single"
-        // server-side). robot_name is the BiSO staging base id.
-        mode: robot.mode,
-        right_follower_port: robot.right_follower_port,
-        right_follower_config: robot.right_follower_config,
-        robot_name: robot.name,
-        // Forward the checkpoint's flat state width so the server enforces the
-        // same arm-count guard authoritatively (null when the checkpoint omits
-        // observation.state — the server then defers to its shape check).
-        checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-        inference_engine: inferenceEngine,
-        // ACT-only, and only while the switch is on — otherwise omitted so the
-        // checkpoint's own (ensembling-off) config stands.
-        temporal_ensemble_coeff:
-          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+      // there via /inference-status polling. The request carries the robot
+      // NAME plus policy-shaped options only — ports, configs, mode and the
+      // camera devices behind the bindings all resolve server-side from the
+      // saved record. The owner attaches the lease the dialog keeps renewed.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "inference",
+        robot: robot.name,
+        owner: tabOwnerId(),
+        options: {
+          policy_ref: selectedRef,
+          task,
+          camera_bindings: cameraBindingPayload,
+          camera_dims: cameraDimsPayload,
+          duration_s: durationS,
+          // Forward the checkpoint's flat state width so the server enforces
+          // the same arm-count guard authoritatively (omitted when the
+          // checkpoint lacks observation.state — the server then defers to
+          // its shape check).
+          checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+          inference_engine: inferenceEngine,
+          // ACT-only, and only while the switch is on — otherwise omitted so
+          // the checkpoint's own (ensembling-off) config stands.
+          temporal_ensemble_coeff:
+            isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+        },
       });
       onOpenChange(false);
-      openInferenceSession();
+      openInferenceSession(session.id);
     } catch (e) {
       toast({
-        // The description is the raw error text — not ours to translate.
         title: t("landing.inference.startFailedTitle"),
-        description: e instanceof Error ? e.message : String(e),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; everything else is the server's raw error text — not ours to
+        // translate.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof Error ? e.message : String(e)),
         variant: "destructive",
       });
       // Failure: bring the previews back so the user can adjust.

@@ -58,7 +58,16 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useUnloadWarning } from "@/hooks/useUnloadWarning";
+import { ApiError } from "@/lib/apiClient";
+import {
+  startSession,
+  stopSession,
+  getCurrentSession,
+  formatSessionHeld,
+} from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration, {
   CameraConfig,
@@ -93,15 +102,6 @@ interface CalibrationStatus {
     string,
     { min: number; max: number; current: number }
   > | null;
-}
-
-interface CalibrationRequest {
-  device_type: string; // "robot" or "teleop"
-  port: string;
-  config_file: string;
-  robot_name: string | null;
-  overwrite?: boolean; // must be true to replace an existing config of the same name
-  arm?: "left" | "right"; // which arm of a bimanual robot ("left" = the single pair)
 }
 
 // One selectable (device_type, arm) slot — shared by the Device step's card
@@ -229,10 +229,13 @@ export interface RobotConfigDialogProps {
  * control sizes).
  *
  * The whole window body mounts fresh per open and unmounts on close — that is
- * what makes the page semantics carry over: camera streams release, the
- * session exit guard's unmount cleanup aborts a live manual calibration, and
- * every draft resets. A running batch auto-calibration intentionally survives
- * close (it's a backend subprocess) and resumes its panel on reopen.
+ * what makes the page semantics carry over: camera streams release and every
+ * draft resets. Closing during a live MANUAL calibration confirms an explicit
+ * abort (stop by session id); any other abandonment (route change, tab gone)
+ * is covered by the session lease — missed heartbeats make the SERVER stop
+ * the session. A running batch auto-calibration survives close only as long
+ * as its lease: reopening resumes the panel (and the heartbeat) while it
+ * lives.
  */
 const RobotConfigDialog = ({
   open,
@@ -564,7 +567,7 @@ const RobotConfigWindow = ({
     if (!robotName) return null;
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+        `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
       );
       if (!res.ok) return null;
       const data = await res.json();
@@ -583,7 +586,7 @@ const RobotConfigWindow = ({
   const openCalibrationFolder = useCallback(
     async (device: "teleop" | "robot") => {
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/open-calibration-folder`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/open-calibration-folder`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ device_type: device }),
@@ -612,7 +615,7 @@ const RobotConfigWindow = ({
   const fetchPorts = useCallback(async () => {
     setPortsLoading(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/available-ports`);
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/available-ports`);
       const data = await res.json();
       setAvailablePorts(Array.isArray(data.ports) ? data.ports : []);
     } catch (e) {
@@ -675,16 +678,15 @@ const RobotConfigWindow = ({
   );
   const [isPolling, setIsPolling] = useState(false);
 
-  // Manual (step-by-step) calibration liveness, in state so the shared exit
-  // guard below can react to it. Set optimistically at start (so a close in the
-  // sub-second before the first status poll still aborts) and cleared when the
-  // session reaches a terminal status.
+  // Manual (step-by-step) calibration liveness. Set optimistically at start
+  // (so the abort prompt already guards a close in the sub-second before the
+  // first status poll) and cleared when the session reaches a terminal
+  // status.
   //
-  // Scope note: this guards the MANUAL flow ONLY. The batch auto-calibration
-  // subprocess is deliberately designed to SURVIVE close — it resumes on
-  // remount (see the batch-status resume/poll effects) — so it is intentionally
-  // NOT aborted on close. Aborting it here would break that resume feature; a
-  // running batch is stopped only via its explicit "Stop all" button.
+  // Scope note: this tracks the MANUAL flow ONLY. The batch auto-calibration
+  // subprocess resumes its panel on remount (see the batch-status
+  // resume/poll effects) and is stopped only via its explicit "Stop all"
+  // button — or by its lease, once nobody renews it.
   const [manualCalibLive, setManualCalibLive] = useState(false);
   useEffect(() => {
     if (calibrationStatus.calibration_active) {
@@ -696,28 +698,27 @@ const RobotConfigWindow = ({
     }
   }, [calibrationStatus.calibration_active, calibrationStatus.status]);
 
-  // Shared leave safety net (same hook as Recording & Inference). Manual
-  // calibration holds the serial port in a singleton that would otherwise block
-  // the next start ("Calibration already active"); an unintentional exit aborts
-  // it. In the window this covers tab close/reload (beacon) and the window's
-  // own unmount-on-close cleanup. The arm is LIMP during manual range recording
-  // (torque is disabled), so this is a clean teardown, not a mid-motion stop.
-  // The abort reuses the module's existing /stop-calibration teardown.
-  const { markHandled: markCalibHandled } = useSessionExitGuard({
-    active: manualCalibLive,
-    confirmMessage: t("robotConfig.window.leaveConfirm"),
-    beaconUrl: `${baseUrl}/stop-calibration`,
-    onLeave: () => {
-      fetchWithHeaders(`${baseUrl}/stop-calibration`, { method: "POST" }).catch(
-        (e) => console.error("Failed to stop calibration on leave:", e),
-      );
-    },
-    beaconFlagKey: "makermodslab:calibration-stopped",
-  });
+  // Session identities from POST /api/v1/sessions — the last browser exit
+  // guard (useSessionExitGuard: beforeunload beacon + popstate sentinel +
+  // unmount-stop) retired when calibration joined the sessions surface. The
+  // lease is THE safety net now: while a flow is live this window renews it
+  // (~20s heartbeats), and an abandoned page — tab closed, wifi died, route
+  // changed away — makes the SERVER stop the session when the heartbeats
+  // stop. What remains browser-side is a courtesy native confirm so an
+  // accidental ⌘W isn't silent. (The manual-calibration arm is LIMP — torque
+  // off — so a lease-timeout stop is a clean teardown, not a mid-motion
+  // halt; a batch auto-cal stop runs the script's own graceful stop.)
+  const [calibSessionId, setCalibSessionId] = useState<string | null>(null);
+  const [autoCalSessionId, setAutoCalSessionId] = useState<string | null>(null);
+  useSessionHeartbeat(calibSessionId, tabOwnerId(), manualCalibLive);
+  useSessionHeartbeat(autoCalSessionId, tabOwnerId(), batchAutoCal.active);
+  useUnloadWarning(manualCalibLive || batchAutoCal.active);
 
   const pollStatus = async () => {
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/calibration-status`);
+      const response = await fetchWithHeaders(
+        `${baseUrl}/api/v1/calibration-status`,
+      );
       if (response.ok) {
         const status = await response.json();
         setCalibrationStatus(status);
@@ -747,7 +748,7 @@ const RobotConfigWindow = ({
     }
     setWiggling(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/wiggle`, {
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/wiggle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ port }),
@@ -795,7 +796,7 @@ const RobotConfigWindow = ({
   const handleDetect = async () => {
     setDetecting(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/identify-arm`, {
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/identify-arm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}), // empty = watch all detected ports
@@ -1013,7 +1014,7 @@ const RobotConfigWindow = ({
     (async () => {
       try {
         const res = await fetchWithHeaders(
-          `${baseUrl}/auto-calibration-batch-status`,
+          `${baseUrl}/api/v1/auto-calibration-batch-status`,
         );
         const data = await res.json();
         setBatchAutoCal(data);
@@ -1023,6 +1024,24 @@ const RobotConfigWindow = ({
           // expand one (any row works; the batch is multi-arm) so the running
           // batch is visible on reopen.
           setNewCalibFor((prev) => prev ?? "leader_config");
+          // Recover the run's session id so this window can resume renewing
+          // its lease (the previous window's heartbeats died with it) and
+          // stop it by id. Only when the lease is this tab's — or absent —
+          // so a resumed heartbeat can never 409 against another owner.
+          try {
+            const { session } = await getCurrentSession(
+              baseUrl,
+              fetchWithHeaders,
+            );
+            if (
+              session?.kind === "auto_calibration" &&
+              (session.lease === null || session.owner === tabOwnerId())
+            ) {
+              setAutoCalSessionId(session.id);
+            }
+          } catch {
+            // identity is a nicety here — the kind-level stop still works
+          }
         }
       } catch {
         // ignore
@@ -1046,7 +1065,7 @@ const RobotConfigWindow = ({
     const id = setInterval(async () => {
       try {
         const res = await fetchWithHeaders(
-          `${baseUrl}/auto-calibration-batch-status`,
+          `${baseUrl}/api/v1/auto-calibration-batch-status`,
         );
         const data: BatchAutoCalStatus = await res.json();
         setBatchAutoCal(data);
@@ -1125,51 +1144,49 @@ const RobotConfigWindow = ({
     }));
 
     try {
-      const res = await fetchWithHeaders(
-        `${baseUrl}/start-auto-calibration-batch`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          // Each arm saves to its own default name, so replacing that arm's
-          // existing calibration is the expected outcome — overwrite is always
-          // on and the old name-taken confirmation is gone. motor_power is the
-          // torque slider's CURRENT position (draft, not the saved record) so
-          // what the user sees is what the calibration drives at.
-          body: JSON.stringify({
-            robot_name: robotName,
-            overwrite: true,
-            arms,
-            motor_power: motorPercent,
-          }),
+      // Start through the sessions surface: robot NAME plus the per-arm
+      // slots. Each arm's port/save-name still travel explicitly — they are
+      // this window's resolved values (detected ports, unsaved drafts
+      // included), which is why the calibration kinds' options may carry
+      // them. Each arm saves to its own default name, so replacing that
+      // arm's existing calibration is the expected outcome — overwrite is
+      // always on and the old name-taken confirmation is gone. motor_power
+      // is the torque slider's CURRENT position (draft, not the saved
+      // record) so what the user sees is what the calibration drives at.
+      // The owner attaches the lease the heartbeat above renews.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "auto_calibration",
+        robot: robotName,
+        owner: tabOwnerId(),
+        options: {
+          arms,
+          overwrite: true,
+          motor_power: motorPercent,
         },
-      );
-      const data = await res.json();
-      if (data.success) {
-        setBatchAutoCal({
-          active: true,
-          arms: [],
-          total: data.total ?? arms.length,
-          completed: 0,
-          failed: 0,
-          logs: [],
-        });
-        toast({
-          title: t("robotConfig.batch.toast.startedTitle", {
-            count: data.launched ?? arms.length,
-          }),
-          description: t("robotConfig.batch.toast.startedDescription"),
-        });
-      } else {
-        toast({
-          title: t("robotConfig.batch.toast.startFailedTitle"),
-          description: data.message,
-          variant: "destructive",
-        });
-      }
+      });
+      setAutoCalSessionId(session.id);
+      setBatchAutoCal({
+        active: true,
+        arms: [],
+        total: arms.length,
+        completed: 0,
+        failed: 0,
+        logs: [],
+      });
+      toast({
+        title: t("robotConfig.batch.toast.startedTitle", {
+          count: arms.length,
+        }),
+        description: t("robotConfig.batch.toast.startedDescription"),
+      });
     } catch (e) {
       toast({
         title: t("robotConfig.batch.toast.startFailedTitle"),
-        description: String(e),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; every other coded refusal shows the server's own prose.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof ApiError ? (e.detail ?? e.message) : String(e)),
         variant: "destructive",
       });
     }
@@ -1177,7 +1194,19 @@ const RobotConfigWindow = ({
 
   const stopBatchAutoCalibration = async () => {
     try {
-      await fetchWithHeaders(`${baseUrl}/stop-auto-calibration-batch`, {
+      // Stop by session id when this window started (or recovered) it; a 404
+      // means the run already ended. The kind-level stop covers a batch whose
+      // session id we never learned.
+      if (autoCalSessionId) {
+        try {
+          await stopSession(baseUrl, fetchWithHeaders, autoCalSessionId);
+          return;
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 404) return;
+          throw e;
+        }
+      }
+      await fetchWithHeaders(`${baseUrl}/api/v1/stop-auto-calibration-batch`, {
         method: "POST",
       });
     } catch (e) {
@@ -1203,75 +1232,96 @@ const RobotConfigWindow = ({
       return;
     }
 
-    const request: CalibrationRequest = {
-      device_type: deviceType,
-      port: port,
-      config_file: calibrationConfigName,
-      robot_name: robotName,
-      // The name is always the robot's own default for this slot, so replacing
-      // its existing calibration is the expected outcome — overwrite is always
-      // on and the old name-taken confirmation prompt is gone. To keep the old
-      // calibration, rename it afterward via the per-side rename feature.
-      overwrite: true,
-      arm,
-    };
-
-    // Optimistically mark as active so the leave guard will fire even if the
-    // user closes the window before the backend reports calibration_active=true.
-    // Reverted below if the start request fails.
+    // Optimistically mark as active so the abort prompt already guards a
+    // close before the backend reports calibration_active=true. Reverted
+    // below if the start request fails.
     setManualCalibLive(true);
 
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/start-calibration`, {
-        method: "POST",
-        body: JSON.stringify(request),
+      // Start through the sessions surface: robot NAME + the slot
+      // (device_type/arm) plus this window's port pick and save name — the
+      // port may be an unsaved draft, which is why calibration's options
+      // carry it (the backend writes it into the record on success). The
+      // owner attaches the lease the heartbeat above renews.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "calibration",
+        robot: robotName,
+        owner: tabOwnerId(),
+        options: {
+          device_type: deviceType as "robot" | "teleop",
+          arm,
+          port,
+          config_file: calibrationConfigName,
+          // The name is always the robot's own default for this slot, so
+          // replacing its existing calibration is the expected outcome —
+          // overwrite is always on and the old name-taken confirmation
+          // prompt is gone. To keep the old calibration, rename it afterward
+          // via the per-side rename feature.
+          overwrite: true,
+        },
       });
-
-      const result = await response.json();
-
-      if (result.success) {
-        toast({
-          title: t("robotConfig.calib.toast.startedTitle"),
-          // `deviceType` is the backend enum ("teleop"/"robot") — the VALUE is
-          // untouched; only its rendered label is localized, falling back to
-          // the raw string for anything unmapped.
-          description: t("robotConfig.calib.toast.startedDescription", {
-            device: t(`robotConfig.deviceValue.${deviceType}` as never, {
-              defaultValue: deviceType,
-            }),
+      setCalibSessionId(session.id);
+      toast({
+        title: t("robotConfig.calib.toast.startedTitle"),
+        // `deviceType` is the backend enum ("teleop"/"robot") — the VALUE is
+        // untouched; only its rendered label is localized, falling back to
+        // the raw string for anything unmapped.
+        description: t("robotConfig.calib.toast.startedDescription", {
+          device: t(`robotConfig.deviceValue.${deviceType}` as never, {
+            defaultValue: deviceType,
           }),
-        });
-        setIsPolling(true);
-      } else {
-        setManualCalibLive(false);
+        }),
+      });
+      setIsPolling(true);
+    } catch (error) {
+      setManualCalibLive(false);
+      if (error instanceof ApiError) {
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; every other coded refusal shows the server's own prose.
         toast({
           title: t("robotConfig.calib.toast.startFailedTitle"),
           description:
-            result.message || t("robotConfig.calib.toast.startFailedFallback"),
+            formatSessionHeld(t, error) ??
+            error.detail ??
+            t("robotConfig.calib.toast.startFailedFallback"),
+          variant: "destructive",
+        });
+      } else {
+        console.error("Error starting calibration:", error);
+        toast({
+          title: t("robotConfig.calib.toast.errorTitle"),
+          description: t("robotConfig.calib.toast.startError"),
           variant: "destructive",
         });
       }
-    } catch (error) {
-      setManualCalibLive(false);
-      console.error("Error starting calibration:", error);
-      toast({
-        title: t("robotConfig.calib.toast.errorTitle"),
-        description: t("robotConfig.calib.toast.startError"),
-        variant: "destructive",
-      });
     }
   };
 
   const handleStopCalibration = async () => {
-    // Explicit Cancel — mark handled so the leave guard doesn't also fire while
-    // the session winds down (the hook re-arms for any later calibration).
-    markCalibHandled();
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/stop-calibration`, {
-        method: "POST",
-      });
-
-      const result = await response.json();
+      // Stop by session id (a 404 means the session already ended — fine);
+      // fall back to the kind-level stop when this window never started one
+      // (e.g. a calibration left running by another tab). `result` is
+      // calibrate.py's own stop-handler response either way.
+      let result: { success?: boolean; message?: string };
+      if (calibSessionId) {
+        try {
+          ({ result } = (await stopSession(
+            baseUrl,
+            fetchWithHeaders,
+            calibSessionId,
+          )) as { result: { success?: boolean; message?: string } });
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 404)) throw e;
+          result = { success: true };
+        }
+      } else {
+        const response = await fetchWithHeaders(
+          `${baseUrl}/api/v1/stop-calibration`,
+          { method: "POST" },
+        );
+        result = await response.json();
+      }
 
       if (result.success) {
         // The 200ms polling interval will pick up the stopped state.
@@ -1302,7 +1352,7 @@ const RobotConfigWindow = ({
 
     try {
       const response = await fetchWithHeaders(
-        `${baseUrl}/complete-calibration-step`,
+        `${baseUrl}/api/v1/complete-calibration-step`,
         { method: "POST" },
       );
 
@@ -1478,7 +1528,7 @@ const RobotConfigWindow = ({
     setSaving(true);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+        `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1547,12 +1597,23 @@ const RobotConfigWindow = ({
     onOpenChange(false);
   }, [onOpenChange]);
 
-  // Confirmed abort-and-close: just close — the exit guard's unmount cleanup
-  // POSTs /stop-calibration (the same teardown a page navigation triggered).
+  // Confirmed abort-and-close: fire the stop explicitly, then close. The
+  // retired exit guard used to do this from its unmount cleanup; without it
+  // the lease would still safety-stop the abandoned session, but the user
+  // asked for the abort NOW — the arm shouldn't sit claimed for the lease
+  // timeout. Best-effort: a failure here is the lease's problem.
   const confirmAbortAndClose = useCallback(() => {
     setAbortPromptOpen(false);
+    const stop = calibSessionId
+      ? stopSession(baseUrl, fetchWithHeaders, calibSessionId).then(() => {})
+      : fetchWithHeaders(`${baseUrl}/api/v1/stop-calibration`, {
+          method: "POST",
+        }).then(() => {});
+    stop.catch((e) =>
+      console.error("Failed to stop calibration on close:", e),
+    );
     onOpenChange(false);
-  }, [onOpenChange]);
+  }, [onOpenChange, calibSessionId, baseUrl, fetchWithHeaders]);
 
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {

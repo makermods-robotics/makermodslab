@@ -103,10 +103,13 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     // the status detail so the tile can say "recording is using the cameras"
     // instead of a generic failure. Best-effort: any probe error is itself
     // a reason ("server unreachable").
-    fetchWithHeaders(`${baseUrl}/camera-preview/${cameraIndex}${uniqueIdQuery}`, {
-      method: "GET",
-      headers: { Range: "bytes=0-0" },
-    })
+    fetchWithHeaders(
+      `${baseUrl}/api/v1/camera-preview/${cameraIndex}${uniqueIdQuery}`,
+      {
+        method: "GET",
+        headers: { Range: "bytes=0-0" },
+      }
+    )
       .then(async (r) => {
         if (r.ok) {
           // Endpoint is fine again — the stream just dropped; retry sooner.
@@ -158,7 +161,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     <img
       key={attempt}
       ref={attachImg}
-      src={`${baseUrl}/camera-preview/${cameraIndex}?r=${attempt}${
+      src={`${baseUrl}/api/v1/camera-preview/${cameraIndex}?r=${attempt}${
         uniqueId ? `&unique_id=${encodeURIComponent(uniqueId)}` : ""
       }`}
       onError={handleError}

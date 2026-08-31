@@ -387,6 +387,7 @@ def test_start_teleoperation_blocked_when_calibration_active(monkeypatch: pytest
     assert result == {
         "success": False,
         "message": "Calibration is currently active. Stop it first.",
+        "code": "robot.busy.calibration",
     }
 
 
@@ -400,6 +401,7 @@ def test_start_teleoperation_blocked_when_auto_calibration_active(monkeypatch: p
     assert result == {
         "success": False,
         "message": "Auto-calibration is currently active. Stop it first.",
+        "code": "robot.busy.auto_calibration",
     }
 
 
@@ -413,6 +415,7 @@ def test_start_teleoperation_blocked_when_wiggle_active(monkeypatch: pytest.Monk
     assert result == {
         "success": False,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+        "code": "robot.busy.wiggle",
     }
 
 
@@ -429,6 +432,7 @@ def test_start_teleoperation_blocked_when_replay_active(monkeypatch: pytest.Monk
     assert result == {
         "success": False,
         "message": "Replay is currently active. Stop it first.",
+        "code": "robot.busy.replay",
     }
 
 

@@ -42,9 +42,10 @@ import {
 import {
   InferenceStatus,
   getInferenceStatus,
-  startInference,
   stopInference,
 } from "@/lib/inferenceApi";
+import { startSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import { JobRecord, getJob, jobDisplayName } from "@/lib/jobsApi";
 import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
@@ -278,7 +279,7 @@ const DeployPanel: React.FC = () => {
   // between each and an accuracy at the end. Clamped again server-side.
   const [evalEpisodes, setEvalEpisodes] = useState(1);
   // Inference engine A/B. "sync" is the server default and the historical
-  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
   // ACT temporal ensembling. Held as (on, coeff) rather than `number | null`
@@ -730,7 +731,7 @@ const DeployPanel: React.FC = () => {
       setCheckingExtra(true);
       try {
         const r = await fetchWithHeaders(
-          `${baseUrl}/system/policy-extra/${policyConfig.policy_type}`,
+          `${baseUrl}/api/v1/system/policy-extra/${policyConfig.policy_type}`,
         );
         if (r.ok) {
           const extra = await r.json();
@@ -782,29 +783,31 @@ const DeployPanel: React.FC = () => {
       }
     }
     try {
-      await startInference(baseUrl, fetchWithHeaders, {
-        follower_port: robot.follower_port,
-        follower_config: robot.follower_config,
-        policy_ref: selectedRef,
-        task,
-        camera_bindings: cameraBindingPayload,
-        camera_dims: cameraDimsPayload,
-        duration_s: durationS,
-        mode: robot.mode,
-        right_follower_port: robot.right_follower_port,
-        right_follower_config: robot.right_follower_config,
-        robot_name: robot.name,
-        checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-        eval_episodes: evalEpisodes,
-        inference_engine: inferenceEngine,
-        // ACT-only, and only while the switch is on — otherwise omitted so the
-        // checkpoint's own (ensembling-off) config stands.
-        temporal_ensemble_coeff:
-          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+      // Robot NAME + policy-shaped options only — ports, configs, mode and
+      // the camera devices behind the bindings resolve server-side from the
+      // saved record. The owner attaches the lease the session dialog renews.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "inference",
+        robot: robot.name,
+        owner: tabOwnerId(),
+        options: {
+          policy_ref: selectedRef,
+          task,
+          camera_bindings: cameraBindingPayload,
+          camera_dims: cameraDimsPayload,
+          duration_s: durationS,
+          checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+          eval_episodes: evalEpisodes,
+          inference_engine: inferenceEngine,
+          // ACT-only, and only while the switch is on — otherwise omitted so
+          // the checkpoint's own (ensembling-off) config stands.
+          temporal_ensemble_coeff:
+            isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+        },
       });
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
-      openInferenceSession();
+      openInferenceSession(session.id);
       if (!hasSeenDeployMilestone) {
         setDeployMilestonePending(true);
         markDeployMilestoneSeen();
@@ -823,7 +826,11 @@ const DeployPanel: React.FC = () => {
     } catch (e) {
       toast({
         title: t("studio.deploy.toast.startFailed"),
-        description: e instanceof Error ? e.message : String(e),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; everything else is the server's raw error text.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof Error ? e.message : String(e)),
         variant: "destructive",
       });
       // Failure: bring the previews back so the user can adjust.

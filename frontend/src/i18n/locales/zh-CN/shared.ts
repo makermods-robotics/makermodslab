@@ -3,14 +3,18 @@ export default {
     defaultTitle: "日志",
     waiting: "等待日志输出…",
   },
-  singleTab: {
-    title: "MakerMods Lab 已在另一个标签页中打开",
-    body: "同一时间只能有一个标签页控制机器人。请切换回原标签页，或在此接管 — 另一个标签页将被锁定。",
-    takeOver: "使用此标签页",
-  },
-  teleopStopNotice: {
-    title: "遥操作已停止",
-    description: "离开页面时已停止。机械臂将返回起始位置，然后释放力矩。",
+  sessionBusy: {
+    message: "机器人正忙 — {{activity}}正在运行。请先停止它。",
+    generic: "机器人正忙于另一个会话。请先停止它。",
+    activity: {
+      teleoperation: "遥操作",
+      recording: "录制会话",
+      inference: "推理运行",
+      replay: "回合回放",
+      calibration: "标定",
+      auto_calibration: "自动标定",
+      wiggle: "夹爪摆动",
+    },
   },
   update: {
     title: "MakerMods Lab 有可用更新",

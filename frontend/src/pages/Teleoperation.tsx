@@ -42,7 +42,9 @@ const TeleoperationPage = () => {
     const tick = async () => {
       if (cancelled || stoppedRef.current) return;
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/teleoperation-status`);
+        const res = await fetchWithHeaders(
+          `${baseUrl}/api/v1/teleoperation-status`,
+        );
         if (!res.ok) return;
         const status = await res.json();
         if (cancelled || stoppedRef.current) return;
@@ -74,7 +76,7 @@ const TeleoperationPage = () => {
     if (stoppedRef.current) return;
     stoppedRef.current = true;
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/stop-teleoperation`, {
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/stop-teleoperation`, {
         method: "POST",
       });
       const data = await res.json();
@@ -100,9 +102,9 @@ const TeleoperationPage = () => {
         // navigating away).
         setTimeout(async () => {
           try {
-            const status = await fetchWithHeaders(`${baseUrl}/teleoperation-status`).then((r) =>
-              r.json()
-            );
+            const status = await fetchWithHeaders(
+              `${baseUrl}/api/v1/teleoperation-status`
+            ).then((r) => r.json());
             if (status?.last_cleanup_error) {
               toast({
                 title: t("pages.teleop.checkArmTitle"),
@@ -129,34 +131,19 @@ const TeleoperationPage = () => {
     }
   }, [baseUrl, fetchWithHeaders, toast]);
 
-  // Cover every exit path so a session can't keep running and block the next
-  // start with "already active":
-  //   - the back button awaits stopTeleoperation() then navigates (below);
-  //   - any other in-app navigation unmounts this component → stop via cleanup;
-  //   - a browser-level leave (URL change, reload, tab close) never runs React
-  //     cleanup, so `pagehide` fires a keepalive stop that survives the unload
-  //     and stashes a flag the next page reads to confirm the clean disconnect.
-  //     It uses a bare fetch (no JSON Content-Type) so the request stays a CORS
-  //     "simple request" and isn't dropped to a preflight mid-unload.
+  // Deliberate in-app exits stop the session: the back button awaits
+  // stopTeleoperation() then navigates (below), and any other in-app
+  // navigation stops via this cleanup — on this legacy page, leaving the page
+  // IS ending the session. There is no browser-unload stop beacon any more:
+  // a session started through /api/v1/sessions carries a lease the server
+  // safety-stops when its owner's heartbeats cease, and a beacon here could
+  // kill a session some OTHER tab is legitimately running (the crossfire the
+  // retired SingleTabGuard existed to prevent).
   useEffect(() => {
-    const handlePageHide = () => {
-      try {
-        sessionStorage.setItem("makermodslab:teleop-stopped", "1");
-      } catch {
-        /* sessionStorage may be unavailable; the stop below still runs */
-      }
-      fetch(`${baseUrl}/stop-teleoperation`, {
-        method: "POST",
-        keepalive: true,
-      }).catch(() => {});
-    };
-    window.addEventListener("pagehide", handlePageHide);
-
     return () => {
-      window.removeEventListener("pagehide", handlePageHide);
       stopTeleoperation();
     };
-  }, [baseUrl, stopTeleoperation]);
+  }, [stopTeleoperation]);
 
   const handleGoBack = async () => {
     await stopTeleoperation();

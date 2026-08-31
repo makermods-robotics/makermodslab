@@ -63,8 +63,6 @@ export default {
     toast: {
       noRobotTitle: "未选择机器人",
       noRobotBody: "请先选择或创建机器人 — 使用右上角的机器人菜单。",
-      notReadyTitle: "机器人未就绪",
-      notReadyBody: "{{name}}{{gap}}。请先打开机器人设置，然后再开始录制。",
       missingDetailsTitle: "数据集信息不完整",
       missingDetailsBody: "请填写数据集名称和任务描述。",
       invalidNameTitle: "数据集名称无效",

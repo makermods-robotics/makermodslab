@@ -47,7 +47,6 @@ export default {
       done: "已完成",
       error: "出错",
     },
-    leaveConfirm: "离开将停止正在进行的回放。是否继续？",
     robotNotReady: "请选择一台可以回放的机械臂：这台机械臂{{gap}}。",
     noRobot: "请选择一台已连接从臂的机械臂，才能在硬件上回放该回合。",
     start: "在硬件上回放",

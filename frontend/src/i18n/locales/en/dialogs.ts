@@ -71,8 +71,6 @@ export default {
       done: "Done",
       error: "Error",
     },
-    // Native leave prompt + the in-app back-button confirm.
-    leaveConfirm: "Leaving stops the running replay. Continue?",
     // {{gap}} is the localized diagnosis from formatRobotSetupGap().
     robotNotReady: "Select a robot ready to replay: this robot {{gap}}.",
     noRobot:

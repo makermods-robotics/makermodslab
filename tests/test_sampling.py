@@ -434,11 +434,14 @@ def test_cloud_run_allows_an_unweighted_dataset_past_the_weight_guard(tmp_path, 
     monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "ok"})  # noqa: ARG005
     monkeypatch.setattr("makermodslab.datasets.dataset_is_weighted", lambda repo_id: False)  # noqa: ARG005
 
-    # Stop the launch at the next guard so the test never reaches the Hub.
-    def _stop(self, target):  # noqa: ARG001
+    # Stop the launch at record creation so the test never reaches the Hub.
+    # (`_assert_no_running_local` was the stop point until the local queue
+    # replaced the one-run mutex; id minting is the equivalent choke point on
+    # the cloud path, and it is reached only after every earlier guard passed.)
+    def _stop(self, policy_type, dataset_repo_id):  # noqa: ARG001
         raise RuntimeError("reached the mutex check")
 
-    monkeypatch.setattr(JobRegistry, "_assert_no_running_local", _stop)
+    monkeypatch.setattr(JobRegistry, "_unique_job_id", _stop)
 
     registry = JobRegistry(tmp_path / "root")
     with pytest.raises(RuntimeError, match="reached the mutex check"):
