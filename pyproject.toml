@@ -122,8 +122,9 @@ files.extend-exclude = [
 # short and justified — a blanket ignore defeats the point of running typos.
 [tool.typos.default]
 extend-ignore-re = [
-    # Hyphenated "mis-" prefix (mis-group, mis-bind) reads as a misspelt "miss".
-    'mis-[a-z]+',
+    # Hyphenated "mis-" prefix (mis-group, mis-bind, "Mis-stamped" at the start
+    # of a sentence) reads as a misspelt "miss".
+    '[Mm]is-[a-z]+',
     # Regex fragment inside a pytest.raises(match=...), not prose.
     '\[Ff\]ine-tun',
     # Short lambda params in a test stub: le = leader, fo = follower.
