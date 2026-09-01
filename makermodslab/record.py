@@ -1562,13 +1562,11 @@ class UploadManager:
             import traceback
 
             logger.error(f"Full traceback: {traceback.format_exc()}")
-            # A FAILED push may still have changed the Hub: push_to_hub creates
-            # the repo before sending files, so a death mid-push leaves an empty
-            # repo behind while the status cache still says "local_only" — and
-            # only the success path invalidates (inside push_dataset_to_hub).
-            # Drop the cached facts here too, so the card's next poll can see
-            # the half-finished state and warn NOW, not after a server restart.
-            invalidate_hub_status(repo_id)
+            # No invalidation here: push_dataset_to_hub drops the cached Hub
+            # facts on its own failure path (a failed push may still have
+            # CREATED the repo), so every push caller — this worker, record's
+            # trailing push, the runners' refill — surfaces the half-finished
+            # state without each remembering to.
             auth = _upload_auth_error(e)
             with self._lock:
                 self.state = "error"

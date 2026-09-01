@@ -60,6 +60,11 @@ const ManageCachesDialog: React.FC<Props> = ({
   // real copy. They stay listed (so the state is visible) but aren't clearable
   // until a re-upload fills the repo. No claim (null) leaves a row clearable.
   const [notBackedUp, setNotBackedUp] = useState<Set<string>>(new Set());
+  // Rows whose hub-status fetch has SETTLED (answered or failed). Until then a
+  // row is not clearable: the guard above only holds once the answer is in,
+  // and the slow-network window where the fetch is still in flight is exactly
+  // when a half-uploaded repo would otherwise be one click from deletion.
+  const [statusSettled, setStatusSettled] = useState<Set<string>>(new Set());
 
   // On open: reset transient state and fetch sizes + the offline signal.
   useEffect(() => {
@@ -68,6 +73,7 @@ const ManageCachesDialog: React.FC<Props> = ({
     setClearing(new Set());
     setSizes({});
     setNotBackedUp(new Set());
+    setStatusSettled(new Set());
 
     let cancelled = false;
     listRunnerHardware(baseUrl, fetchWithHeaders)
@@ -96,7 +102,11 @@ const ManageCachesDialog: React.FC<Props> = ({
             setNotBackedUp((prev) => new Set(prev).add(d.repo_id));
         })
         .catch(() => {
-          // No claim — the row stays clearable, like hub_has_data === null.
+          // No claim — the row becomes clearable, like hub_has_data === null.
+        })
+        .finally(() => {
+          if (!cancelled)
+            setStatusSettled((prev) => new Set(prev).add(d.repo_id));
         });
     }
 
@@ -133,8 +143,11 @@ const ManageCachesDialog: React.FC<Props> = ({
     }
   };
 
-  // Rows "Clear all" may touch: never one whose Hub repo is known-empty.
-  const clearable = cached.filter((d) => !notBackedUp.has(d.repo_id));
+  // Rows "Clear all" may touch: never one whose Hub repo is known-empty, and
+  // never one whose status is still in flight (it could turn out to be).
+  const clearable = cached.filter(
+    (d) => statusSettled.has(d.repo_id) && !notBackedUp.has(d.repo_id),
+  );
 
   const clearAll = async () => {
     setError(null);
@@ -189,7 +202,8 @@ const ManageCachesDialog: React.FC<Props> = ({
               {cached.map((d) => {
                 const size = sizes[d.repo_id];
                 const isClearing = clearing.has(d.repo_id);
-                const unsafe = notBackedUp.has(d.repo_id);
+                const unsafe =
+                  notBackedUp.has(d.repo_id) || !statusSettled.has(d.repo_id);
                 return (
                   <div
                     key={d.repo_id}
@@ -197,7 +211,7 @@ const ManageCachesDialog: React.FC<Props> = ({
                   >
                     <div className="min-w-0 flex-1">
                       <span className="break-all">{d.repo_id}</span>
-                      {unsafe && (
+                      {notBackedUp.has(d.repo_id) && (
                         <p className="mt-0.5 flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
                           <AlertTriangle className="h-3 w-3 shrink-0" />
                           {t("landing.manageCaches.notBackedUp")}

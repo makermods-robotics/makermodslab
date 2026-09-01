@@ -24,11 +24,14 @@ runners cannot drift on when a push happens or what it looks like.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
-from pathlib import Path
 
-from ..datasets import hub_copy_has_data, hub_repo_exists, push_dataset_to_hub
+from ..datasets import (
+    hub_copy_has_data,
+    hub_repo_exists,
+    local_pushable_copy_exists,
+    push_dataset_to_hub,
+)
 from ..utils.config import with_makermodslab_tag
 
 
@@ -68,8 +71,7 @@ def ensure_dataset_on_hub(local_repo_id: str, hub_repo_id: str, log: Callable[[s
     if exists and hub_copy_has_data(hub_repo_id, fresh=True) is not False:
         return
 
-    cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-    if not (cache_root / local_repo_id / "meta" / "info.json").is_file():
+    if not local_pushable_copy_exists(local_repo_id):
         # Neither local nor usable on the Hub. Let the trainer surface the
         # error — same behaviour as before — but say why in the job log:
         # an empty repo was positively diagnosed, and silence here would
@@ -82,9 +84,7 @@ def ensure_dataset_on_hub(local_repo_id: str, hub_repo_id: str, log: Callable[[s
         return
 
     reason = (
-        "exists on the Hub but holds no data (an earlier upload didn't finish)"
-        if exists
-        else "not on Hub"
+        "exists on the Hub but holds no data (an earlier upload didn't finish)" if exists else "not on Hub"
     )
     log(f"[upload] dataset {hub_repo_id} {reason}; pushing local copy (public)...")
     try:
