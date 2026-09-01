@@ -78,6 +78,7 @@ from .jobs import (
     JobHasChildrenError,
     JobNotFoundError,
     JobNotRunningError,
+    JobPublishInProgressError,
     JobRemovalFailedError,
     JobSourceOfQueuedRunError,
     JobState,
@@ -2887,6 +2888,18 @@ def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    except JobPublishInProgressError as exc:
+        # The background Hub publish is reading this run's checkpoint dirs
+        # right now; deleting them mid-upload kills the publish with an
+        # opaque error. Same refusal POST /models/delete gives.
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Job {job_id!r} is being published to the Hub — wait for the "
+                "publish to finish before deleting it."
+            ),
+            code=ErrorCode.JOB_PUBLISH_IN_PROGRESS,
+        ) from exc
     except JobHasChildrenError as exc:
         # Mid-chain delete: name the runs that continue from this one so the
         # user can work inwards from the tip instead of guessing.

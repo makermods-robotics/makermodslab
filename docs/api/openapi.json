@@ -2661,6 +2661,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -2818,6 +2833,21 @@
               }
             ],
             "title": "Last Modified"
+          },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
           },
           "name": {
             "title": "Name",

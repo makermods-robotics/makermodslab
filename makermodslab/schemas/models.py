@@ -99,6 +99,13 @@ class ModelListItem(BaseModel):
     private: bool | None = None
     saved_custom: bool | None = None
     dataset_episodes: list[int] | None = None
+    # What the LOCAL side of the row is — a training run (whose unpublished
+    # checkpoints exist nowhere else) or a replaceable copy pulled from the
+    # Hub / imported from disk. Set by the two local producers, sticky on the
+    # "both" collapse (a run never relabels as "downloaded"), absent on
+    # hub-only rows. Undeclared it was silently FILTERED by response_model,
+    # which is exactly the trap the module docstring warns about.
+    local_kind: Literal["run", "downloaded"] | None = None
 
 
 class ModelInfoResponse(BaseModel):
@@ -128,6 +135,8 @@ class ModelInfoResponse(BaseModel):
     state: str | None = None
     private: bool | None = None
     dataset_episodes: list[int] | None = None
+    # See ModelListItem.local_kind; set by the same two local producers.
+    local_kind: Literal["run", "downloaded"] | None = None
 
 
 class ModelUploadResponse(BaseModel):

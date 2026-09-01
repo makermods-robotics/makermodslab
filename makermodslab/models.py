@@ -60,6 +60,7 @@ from .datasets import (
 )
 from .jobs import (
     JobHasChildrenError,
+    JobPublishInProgressError,
     JobRecord,
     JobSourceOfQueuedRunError,
     _list_local_checkpoints,
@@ -2011,6 +2012,17 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
 
     try:
         job_registry.delete(model_id)
+    except JobPublishInProgressError as exc:
+        # The registry's guard, surfaced with this surface's words: the
+        # background publish is reading this run's checkpoint dirs right now,
+        # and the rmtree would kill it mid-upload. Same 409 + code the /jobs
+        # delete route emits.
+        raise ModelError(
+            409,
+            f"Model {model_id!r} is being published to the Hub — wait for the "
+            "publish to finish before deleting it.",
+            code=str(ErrorCode.JOB_PUBLISH_IN_PROGRESS),
+        ) from exc
     except JobNotRunningError as exc:
         # JobRegistry.delete raises JobNotRunningError when the job IS running
         # (its guard refuses to delete a live run's dir).

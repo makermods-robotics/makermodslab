@@ -2815,6 +2815,22 @@ class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
 
 
+class JobPublishInProgressError(Exception):
+    """Raised when delete() targets a run whose checkpoints the background Hub
+    publish (models.model_upload_manager) is uploading right now.
+
+    A publish reads the run's checkpoint dirs for minutes off the request
+    thread, so a delete that passes every other guard (the run IS terminal)
+    would rmtree the files out from under upload_folder mid-read — the upload
+    dies with an opaque OS/Hub error and its repo pin fails against a deleted
+    record. One guard here covers both delete surfaces, since POST
+    /models/delete's run branch reuses JobRegistry.delete."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+
+
 class JobSourceOfQueuedRunError(Exception):
     """Raised when delete() would take the checkpoint a QUEUED run will read.
 
@@ -5150,6 +5166,18 @@ class JobRegistry:
             )
 
     def delete(self, job_id: str) -> None:
+        # Refuse while the background Hub publish is reading this run's
+        # checkpoint dirs (lazy import: models imports from this module).
+        # Checked BEFORE our lock so the two locks are never held together —
+        # the publish worker takes this registry's lock (set_hf_repo_id)
+        # without holding the manager's. The unlocked read leaves a tiny
+        # start-after-check window, which is fine: a publish that starts after
+        # this point 404s on the deleted run instead of racing the rmtree.
+        from .models import model_upload_manager
+
+        publish = model_upload_manager.get_status()
+        if publish["state"] == "running" and publish["model_id"] == job_id:
+            raise JobPublishInProgressError(job_id)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:

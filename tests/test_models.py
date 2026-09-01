@@ -3118,6 +3118,112 @@ def test_models_delete_route_forwards_the_refusal_code(client, monkeypatch, tmp_
         job_registry._records.update(original)
 
 
+def test_delete_local_model_409_while_its_publish_is_running(registry, monkeypatch) -> None:
+    """The background publish reads a run's checkpoint dirs for minutes; a
+    delete that passes every terminal-state guard would rmtree them out from
+    under upload_folder mid-read. The registry guard refuses it with the same
+    coded 409 shape every other delete refusal uses."""
+    import makermodslab.models as m
+    from makermodslab.models import ModelError, delete_local_model
+
+    _seed_run(registry, "pub_run", state="done")
+    monkeypatch.setattr(m.model_upload_manager, "state", "running")
+    monkeypatch.setattr(m.model_upload_manager, "model_id", "pub_run")
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("pub_run")
+    assert ei.value.status == 409
+    assert ei.value.code == "job.publish_in_progress"
+    # The dir must still be there — the publish is reading it.
+    assert (registry._output_root / "pub_run").exists()
+
+
+def test_delete_local_model_allowed_while_anothers_publish_is_running(registry, monkeypatch) -> None:
+    """The guard is per-run: a publish of run A must not lock run B's delete —
+    the single-slot manager would otherwise make every delete 409 for minutes."""
+    import makermodslab.models as m
+    from makermodslab.models import delete_local_model
+
+    _seed_run(registry, "other_run", state="done")
+    monkeypatch.setattr(m.model_upload_manager, "state", "running")
+    monkeypatch.setattr(m.model_upload_manager, "model_id", "some_other_publish")
+    assert delete_local_model("other_run")["deleted"] is True
+
+
+def test_jobs_delete_route_409_while_publish_is_running(client, monkeypatch, tmp_path) -> None:
+    """The jobs surface reuses the registry guard: DELETE /jobs/{id} during
+    that run's publish refuses with the same code instead of racing the
+    upload."""
+    import makermodslab.models as m
+    from makermodslab.jobs import JobRecord, job_registry
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(m.model_upload_manager, "state", "running")
+    monkeypatch.setattr(m.model_upload_manager, "model_id", "pub-on-wire")
+    record = JobRecord(
+        id="pub-on-wire",
+        name="pub-on-wire",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir=str(tmp_path / "pub-on-wire" / "run"),
+        started_at=0.0,
+        runner="local",
+    )
+    original = dict(job_registry._records)
+    try:
+        job_registry._records["pub-on-wire"] = record
+        resp = client.delete("/api/v1/jobs/pub-on-wire")
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["code"] == "job.publish_in_progress"
+        assert isinstance(body["detail"], str)
+        # The record survives the refusal.
+        assert "pub-on-wire" in job_registry._records
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
+
+
+def test_models_routes_keep_local_kind(client, monkeypatch) -> None:
+    """Regression: `local_kind` was emitted by the producers but undeclared on
+    ModelListItem/ModelInfoResponse, so response_model silently FILTERED it and
+    the frontend's delete semantics never saw it. Declared now — the routes
+    must pass it through, and exclude_unset must keep it absent (not null) on
+    rows whose producer never set it."""
+    import makermodslab.models as m
+
+    run_row = {
+        "id": "run_lk",
+        "name": "run lk",
+        "policy_type": "act",
+        "dataset": "user/pick",
+        "steps": 100,
+        "path": "/tmp/x",
+        "last_modified": None,
+        "hf_repo_id": None,
+        "source": "local",
+        "local_kind": "run",
+    }
+    hub_row = {
+        "id": "user/repo",
+        "name": "repo",
+        "policy_type": None,
+        "dataset": None,
+        "steps": None,
+        "path": None,
+        "last_modified": None,
+        "hf_repo_id": "user/repo",
+        "source": "hub",
+    }
+    monkeypatch.setattr(m, "list_all_models", lambda: [run_row, hub_row])
+    rows = client.get("/api/v1/models").json()
+    assert rows[0]["local_kind"] == "run"
+    assert "local_kind" not in rows[1]
+
+    monkeypatch.setattr(m, "get_model_info", lambda _id: {**run_row, "size_bytes": 1})
+    info = client.get("/api/v1/models/info", params={"id": "run_lk"}).json()
+    assert info["local_kind"] == "run"
+
+
 def test_delete_local_model_names_the_queued_finetune_instead_of_502ing(registry) -> None:
     """JobRegistry.delete raises JobSourceOfQueuedRunError when a QUEUED run
     froze this run's checkpoint path at submit time. models.py didn't catch
