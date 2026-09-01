@@ -19,7 +19,21 @@ dependencies = [
     "websockets>=15.0.1",
     "uvicorn>=0.24.0",
     "psutil>=5.9.0",
-    "lerobot[core_scripts,feetech,training] @ git+https://github.com/huggingface/lerobot.git@v0.6.0",
+    # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (b968c0c01), the
+    # two-parent merge of robot/makermods-maker-arm (af9072a8c — the previous pin,
+    # via the Maker-Mods org) and arm/makermods-metal (2503a5d7a). Upstream v0.6.2
+    # base; a strict superset of the Maker-only pin, adding the Metal arm's
+    # MetalFollower/BiMetalFollower (7-DOF Damiao CAN) and metal_leader stack.
+    # Pinned by SHA, not branch name — a moving pin makes every unrelated failure
+    # a bisect.
+    # Extras beyond the SO-101 set: `maker` = RobStride over CAN (python-can +
+    # pyserial for the slcan transport, the only one that works on macOS);
+    # `damiao` = the Metal arm's CAN follower stack (same python-can/pyserial
+    # underneath); `rebot` = motorbridge, the FashionStar UART servo stack the
+    # Star Arm 102 leader speaks. NEVER the fork's `metal` extra here — it
+    # drags in Pinocchio (`pin`, no Windows wheels) that only the
+    # not-yet-integrated gravity leader needs.
+    "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@b968c0c015e16699a225070f677dc644543707f0",
     # Windows-only: real DirectShow camera names for /available-cameras so the
     # frontend can match a camera to its browser deviceId (issues #12, #16).
     # Guarded by try/except at the call site, so its absence degrades gracefully.

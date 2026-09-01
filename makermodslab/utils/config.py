@@ -32,6 +32,97 @@ CALIBRATION_BASE_PATH_ROBOTS = os.path.expanduser("~/.cache/huggingface/lerobot/
 LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "so_leader")
 FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 
+# The hardware families a robot record can describe. "so101" is the SO-101
+# leader/follower pair (Feetech STS3215 over USB serial); "maker" is the Maker
+# Arm v1 — a 7-DOF RobStride CAN follower driven by a Star Arm 102 (reBot 102)
+# leader on FashionStar UART servos. The two share no bus protocol, no
+# calibration procedure and no port-detection method, so the arm type is the
+# discriminant every hardware path branches on.
+ArmType = Literal["so101", "maker", "metal"]
+ARM_TYPES: tuple[str, ...] = ("so101", "maker", "metal")
+DEFAULT_ARM_TYPE = "so101"
+
+# lerobot derives a device's calibration directory from the device CLASS's
+# `name` attribute (Robot.__init__ / Teleoperator.__init__ ->
+# HF_LEROBOT_CALIBRATION/<robots|teleoperators>/<name>). These constants must
+# therefore match those class names EXACTLY — "so_leader"/"so_follower" for
+# the SO-101 pair, "rebot_102_leader" for the Star Arm 102 leader, and
+# "maker_follower"/"metal_follower" for the CAN followers. Renaming a device
+# class upstream silently strands a whole library here.
+#
+# The LEADER path is shared by the Maker AND Metal arms: their leader presets
+# (`rebot_102_leader_maker` / `rebot_102_leader_metal`) are config-only
+# variants of the one RebotArm102Leader class, and the class name is what
+# picks the directory. That sharing is why default_slot_config_name below
+# mints per-arm-type ids — the two presets' zero POSES are different, so a
+# name collision would silently reuse the wrong zero.
+MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader")
+MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
+METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")
+
+
+def normalize_arm_type(value: object) -> str:
+    """Coerce any stored/received arm_type to a known one, defaulting to so101.
+
+    Unknown values fall back rather than raising for the same reason
+    ``clamp_motor_power`` does: a corrupted or future-dated record must never
+    make a robot unopenable. so101 is the safe default — it is what every
+    record written before the Maker arm existed implicitly is.
+    """
+    return value if value in ARM_TYPES else DEFAULT_ARM_TYPE
+
+
+# Each arm type owns a SEPARATE calibration library: a Maker zero-pose
+# calibration is meaningless to an SO-101 and vice versa, and lerobot would not
+# look for it in the other directory anyway. Nothing merges the two listings.
+#
+# Both resolvers read the module-level path globals at CALL time rather than
+# capturing them in a lookup table at import time, so a test (or an install
+# with a relocated cache) that monkeypatches LEADER_CONFIG_PATH still steers
+# every caller — a frozen table would silently ignore the patch.
+
+
+def leader_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
+    """The calibration library dir holding this arm type's LEADER configs.
+
+    Maker and Metal share one library (both leaders are the Star Arm 102 —
+    same device class, different joint-mapping preset); the per-arm-type
+    separation there is carried by the minted config NAMES instead
+    (default_slot_config_name).
+    """
+    if normalize_arm_type(arm_type) in ("maker", "metal"):
+        return MAKER_LEADER_CONFIG_PATH
+    return LEADER_CONFIG_PATH
+
+
+def follower_config_path_for(arm_type: object = DEFAULT_ARM_TYPE) -> str:
+    """The calibration library dir holding this arm type's FOLLOWER configs."""
+    normalized = normalize_arm_type(arm_type)
+    if normalized == "maker":
+        return MAKER_FOLLOWER_CONFIG_PATH
+    if normalized == "metal":
+        return METAL_FOLLOWER_CONFIG_PATH
+    return FOLLOWER_CONFIG_PATH
+
+
+def default_slot_config_name(record_name: str, mode: object, arm: str, arm_type: object) -> str:
+    """The default calibration id for a robot record's empty slot.
+
+    SO-101 keeps its historical defaults ("<name>", "<name>_<arm>" bimanual).
+    The CAN families mint the arm type into the name ("<name>_metal",
+    "<name>_metal_<arm>") because their Star-leader calibrations live in ONE
+    shared directory while the presets' zero poses differ — an unsuffixed
+    default would let a Maker robot and a Metal robot silently share a zero
+    that is wrong for one of them. Followers get the same suffix purely for
+    consistency (their libraries are already separate).
+
+    Only a default: a slot that already names a calibration keeps it.
+    """
+    normalized = normalize_arm_type(arm_type)
+    base = record_name if normalized == DEFAULT_ARM_TYPE else f"{record_name}_{normalized}"
+    return f"{base}_{arm}" if mode == "bimanual" else base
+
+
 # Define port storage path
 PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
@@ -202,17 +293,26 @@ def _require_assigned_config(config: str, side: str) -> None:
         )
 
 
-def setup_calibration_files(leader_config: str, follower_config: str):
-    """Setup calibration files in the correct locations for teleoperation and recording"""
+def setup_calibration_files(leader_config: str, follower_config: str, arm_type: object = DEFAULT_ARM_TYPE):
+    """Setup calibration files in the correct locations for teleoperation and recording.
+
+    ``arm_type`` selects which library pair to read/write — an SO-101 session
+    stages from so_leader/so_follower, a Maker session from
+    rebot_102_leader/maker_follower. Those ARE lerobot's expected locations for
+    each device class, so this stays a validating no-op copy within one dir.
+    """
     _require_assigned_config(leader_config, "leader")
     _require_assigned_config(follower_config, "follower")
     # Extract config names from file paths (remove .json extension)
     leader_config_name = os.path.splitext(leader_config)[0]
     follower_config_name = os.path.splitext(follower_config)[0]
 
+    leader_library = leader_config_path_for(arm_type)
+    follower_library = follower_config_path_for(arm_type)
+
     # Log the full paths to check if files exist
-    leader_config_full_path = os.path.join(LEADER_CONFIG_PATH, leader_config)
-    follower_config_full_path = os.path.join(FOLLOWER_CONFIG_PATH, follower_config)
+    leader_config_full_path = os.path.join(leader_library, leader_config)
+    follower_config_full_path = os.path.join(follower_library, follower_config)
 
     logger.info("Checking calibration files:")
     logger.info(f"Leader config path: {leader_config_full_path}")
@@ -221,8 +321,8 @@ def setup_calibration_files(leader_config: str, follower_config: str):
     logger.info(f"Follower config exists: {os.path.exists(follower_config_full_path)}")
 
     # Create calibration directories if they don't exist
-    leader_calibration_dir = LEADER_CONFIG_PATH
-    follower_calibration_dir = FOLLOWER_CONFIG_PATH
+    leader_calibration_dir = leader_library
+    follower_calibration_dir = follower_library
     os.makedirs(leader_calibration_dir, exist_ok=True)
     os.makedirs(follower_calibration_dir, exist_ok=True)
 
@@ -251,21 +351,23 @@ def setup_calibration_files(leader_config: str, follower_config: str):
     return leader_config_name, follower_config_name
 
 
-def setup_follower_calibration_file(follower_config: str):
+def setup_follower_calibration_file(follower_config: str, arm_type: object = DEFAULT_ARM_TYPE):
     """Setup follower calibration file in the correct location for replay functionality"""
     _require_assigned_config(follower_config, "follower")
     # Extract config name from file path (remove .json extension)
     follower_config_name = os.path.splitext(follower_config)[0]
 
+    follower_library = follower_config_path_for(arm_type)
+
     # Log the full path to check if file exists
-    follower_config_full_path = os.path.join(FOLLOWER_CONFIG_PATH, follower_config)
+    follower_config_full_path = os.path.join(follower_library, follower_config)
 
     logger.info("Checking follower calibration file:")
     logger.info(f"Follower config path: {follower_config_full_path}")
     logger.info(f"Follower config exists: {os.path.exists(follower_config_full_path)}")
 
     # Create calibration directory if it doesn't exist
-    follower_calibration_dir = FOLLOWER_CONFIG_PATH
+    follower_calibration_dir = follower_library
     os.makedirs(follower_calibration_dir, exist_ok=True)
 
     # Copy calibration file to the correct location if it's not already there
@@ -416,7 +518,12 @@ def validate_job_name(name: str) -> str:
 
 
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
+    record: dict = {
+        "name": name,
+        "mode": _DEFAULT_MODE,
+        "arm_type": DEFAULT_ARM_TYPE,
+        "motor_power": DEFAULT_MOTOR_POWER,
+    }
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -449,6 +556,9 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
+    # Records written before the Maker arm existed carry no arm_type; they are
+    # SO-101s by definition, which is exactly what normalize_arm_type returns.
+    record["arm_type"] = normalize_arm_type(record.get("arm_type"))
     # Older records have no motor_power (→ full power via _empty_record); an
     # out-of-range or corrupted value on disk is clamped so every consumer
     # sees a safe 10-100 integer.
@@ -492,6 +602,9 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
         return False
 
     record = existing if existing is not None else _empty_record(name)
+    # Decided BEFORE the merge below, because the switch blanks hardware-bound
+    # fields and must not blank ones this same payload is setting.
+    switching_arm_type = data.get("arm_type") in ARM_TYPES and data["arm_type"] != record.get("arm_type")
     for field in _ROBOT_STRING_FIELDS:
         if field in data and isinstance(data[field], str):
             record[field] = data[field]
@@ -506,6 +619,21 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
+    # Switching arm type invalidates every hardware-bound field on the record.
+    # The ports name physically different adapters (a Feetech USB-serial bridge
+    # vs a CANable + a FashionStar UART bridge) and the calibration names point
+    # into the OTHER arm type's library, where they do not exist — a stale
+    # reference would fail deep inside lerobot's connect() as a missing-file
+    # error instead of here as "this arm needs setting up". Blank them so the
+    # robot lands back in the normal needs-calibration state. Fields set by
+    # THIS payload survive: a caller that switches type and assigns new ports
+    # in one request means both.
+    if switching_arm_type:
+        record["arm_type"] = data["arm_type"]
+        for stale in _ROBOT_STRING_FIELDS:
+            if stale not in data:
+                record[stale] = ""
+    record.setdefault("arm_type", DEFAULT_ARM_TYPE)
     record["name"] = name
 
     path = _robot_record_path(name)
@@ -760,15 +888,22 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
         if not isinstance(value, str) or not value.strip():
             return False
 
+    # Resolve the libraries by THIS record's arm type: the SO-101 and Maker
+    # pairs keep separate directories, so checking the SO-101 ones for a Maker
+    # robot looks for a file that was never going to be there and the robot can
+    # never read as ready.
+    follower_library = follower_config_path_for(record.get("arm_type"))
+    leader_library = leader_config_path_for(record.get("arm_type"))
+
     config_files = [
-        _file_for(FOLLOWER_CONFIG_PATH, record["follower_config"]),
+        _file_for(follower_library, record["follower_config"]),
     ]
     if not follower_only:
-        config_files.append(_file_for(LEADER_CONFIG_PATH, record["leader_config"]))
+        config_files.append(_file_for(leader_library, record["leader_config"]))
     if bimanual:
-        config_files.append(_file_for(FOLLOWER_CONFIG_PATH, record["right_follower_config"]))
+        config_files.append(_file_for(follower_library, record["right_follower_config"]))
         if not follower_only:
-            config_files.append(_file_for(LEADER_CONFIG_PATH, record["right_leader_config"]))
+            config_files.append(_file_for(leader_library, record["right_leader_config"]))
     return all(os.path.exists(p) for p in config_files)
 
 
@@ -859,6 +994,7 @@ def stage_bimanual_calibrations(
     leader_right: str,
     follower_left: str,
     follower_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
 ) -> tuple[str, str, str]:
     """Stage the four arbitrarily-named library calibrations for a BiSO session.
 
@@ -876,8 +1012,17 @@ def stage_bimanual_calibrations(
     """
     leader_staging = _bimanual_leader_staging_dir(base)
     follower_staging = _bimanual_follower_staging_dir(base)
-    _stage_one_side(LEADER_CONFIG_PATH, leader_staging, base, leader_left, leader_right, "leader")
-    _stage_one_side(FOLLOWER_CONFIG_PATH, follower_staging, base, follower_left, follower_right, "follower")
+    _stage_one_side(
+        leader_config_path_for(arm_type), leader_staging, base, leader_left, leader_right, "leader"
+    )
+    _stage_one_side(
+        follower_config_path_for(arm_type),
+        follower_staging,
+        base,
+        follower_left,
+        follower_right,
+        "follower",
+    )
     return leader_staging, follower_staging, base
 
 
@@ -885,6 +1030,7 @@ def stage_bimanual_follower_calibrations(
     base: str,
     follower_left: str,
     follower_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
 ) -> tuple[str, str]:
     """Stage only the two follower calibrations for a follower-only BiSO session.
 
@@ -896,7 +1042,14 @@ def stage_bimanual_follower_calibrations(
     base).
     """
     follower_staging = _bimanual_follower_staging_dir(base)
-    _stage_one_side(FOLLOWER_CONFIG_PATH, follower_staging, base, follower_left, follower_right, "follower")
+    _stage_one_side(
+        follower_config_path_for(arm_type),
+        follower_staging,
+        base,
+        follower_left,
+        follower_right,
+        "follower",
+    )
     return follower_staging, base
 
 
@@ -1202,12 +1355,17 @@ def remove_hidden_model(repo_id: str) -> bool:
 _CALIBRATION_MOTOR_FIELDS = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
 
 
-def calibration_dir_for_device(device_type: str) -> str | None:
-    """Map an API device_type ("teleop"/"robot") to its calibration dir, or None."""
+def calibration_dir_for_device(device_type: str, arm_type: object = DEFAULT_ARM_TYPE) -> str | None:
+    """Map an API device_type ("teleop"/"robot") to its calibration dir, or None.
+
+    ``arm_type`` picks the library: the SO-101 pair and the Maker pair keep
+    entirely separate directories (see _CALIBRATION_DIRS), so a caller that
+    forgets to thread it through reads the SO-101 library by default.
+    """
     if device_type == "robot":
-        return FOLLOWER_CONFIG_PATH
+        return follower_config_path_for(arm_type)
     if device_type == "teleop":
-        return LEADER_CONFIG_PATH
+        return leader_config_path_for(arm_type)
     return None
 
 
@@ -1283,14 +1441,17 @@ def validate_calibration_data(data: object) -> tuple[bool, str]:
     return True, ""
 
 
-def save_imported_calibration(device_type: str, name: str, data: object) -> tuple[bool, str, str]:
+def save_imported_calibration(
+    device_type: str, name: str, data: object, arm_type: object = DEFAULT_ARM_TYPE
+) -> tuple[bool, str, str]:
     """
     Validate and persist an uploaded calibration as <name>.json under the side's
-    config dir. Never overwrites an existing file. Returns (ok, reason, name)
-    where `name` is the normalized config name (extension stripped). Reason codes:
-    "invalid_device", "invalid_name", "invalid_data:<msg>", "name_taken", "".
+    config dir for this arm type. Never overwrites an existing file. Returns
+    (ok, reason, name) where `name` is the normalized config name (extension
+    stripped). Reason codes: "invalid_device", "invalid_name",
+    "invalid_data:<msg>", "name_taken", "".
     """
-    config_path = calibration_dir_for_device(device_type)
+    config_path = calibration_dir_for_device(device_type, arm_type)
     if config_path is None:
         return False, "invalid_device", ""
 
@@ -1311,18 +1472,22 @@ def save_imported_calibration(device_type: str, name: str, data: object) -> tupl
         return False, "name_taken", name
 
     _atomic_write_text(file_path, json.dumps(data, indent=2))
-    logger.info(f"Imported calibration {device_type}/{name}")
+    logger.info(f"Imported calibration {normalize_arm_type(arm_type)}/{device_type}/{name}")
     return True, "", name
 
 
-def rename_calibration_config(device_type: str, old_name: str, new_name: str) -> tuple[bool, str]:
+def rename_calibration_config(
+    device_type: str, old_name: str, new_name: str, arm_type: object = DEFAULT_ARM_TYPE
+) -> tuple[bool, str]:
     """
     Rename a calibration config file within a side's dir. Never overwrites an
-    existing target. Robot records that referenced the old name (on this side)
-    are repointed to the new name so they stay valid. Returns (ok, reason):
-    "invalid_device", "invalid_name", "not_found", "name_taken", "".
+    existing target. Robot records that referenced the old name (on this side,
+    AND of this arm type) are repointed to the new name so they stay valid.
+    Returns (ok, reason): "invalid_device", "invalid_name", "not_found",
+    "name_taken", "".
     """
-    config_path = calibration_dir_for_device(device_type)
+    arm_type = normalize_arm_type(arm_type)
+    config_path = calibration_dir_for_device(device_type, arm_type)
     if config_path is None:
         return False, "invalid_device"
 
@@ -1346,27 +1511,37 @@ def rename_calibration_config(device_type: str, old_name: str, new_name: str) ->
     os.rename(old_path, new_path)
 
     # Repoint any robot records that used the old config on this side — both the
-    # primary/left slot and the bimanual right slot live in the same dir.
+    # primary/left slot and the bimanual right slot live in the same dir. Only
+    # records of the SAME arm type: the two libraries are separate namespaces,
+    # so an SO-101 record naming "arm_a" is a different file from a Maker record
+    # naming "arm_a" and must not be dragged along by this rename.
     fields = (
         ("leader_config", "right_leader_config")
         if device_type == "teleop"
         else ("follower_config", "right_follower_config")
     )
     for rec in list_robot_records():
+        if rec.get("arm_type") != arm_type:
+            continue
         patch = {f: new_stem for f in fields if rec.get(f) == old_stem}
         if patch:
             save_robot_record(rec["name"], patch, allow_create=False)
 
-    logger.info(f"Renamed calibration {device_type}/{old_stem} -> {new_stem}")
+    logger.info(f"Renamed calibration {arm_type}/{device_type}/{old_stem} -> {new_stem}")
     return True, ""
 
 
-def clear_config_references(device_type: str, config_name: str) -> list[dict]:
+def clear_config_references(
+    device_type: str, config_name: str, arm_type: object = DEFAULT_ARM_TYPE
+) -> list[dict]:
     """Blank every robot-record field (on this side) that references this
-    calibration config, across ALL robot records — both the primary/left slot
-    and the bimanual right slot, regardless of mode. A stale right_* reference
-    in a single-mode record is cleared too: it points at a file that no longer
-    exists, so leaving it would resurface a dangling name on a mode switch.
+    calibration config, across all robot records OF THIS ARM TYPE — both the
+    primary/left slot and the bimanual right slot, regardless of mode. A stale
+    right_* reference in a single-mode record is cleared too: it points at a
+    file that no longer exists, so leaving it would resurface a dangling name
+    on a mode switch. Records of the other arm type are skipped: their config
+    names live in a separate library, so an identical name there is a different
+    file that this delete did not touch.
 
     Called when a calibration config is deleted: instead of refusing the
     delete, the referencing arms are unassigned and return to the "needs
@@ -1381,9 +1556,12 @@ def clear_config_references(device_type: str, config_name: str) -> list[dict]:
         if device_type == "teleop"
         else ("follower_config", "right_follower_config")
     )
+    arm_type = normalize_arm_type(arm_type)
     stem = config_name.removesuffix(".json")
     cleared: list[dict] = []
     for rec in list_robot_records():
+        if rec.get("arm_type") != arm_type:
+            continue
         hit = [f for f in fields if rec.get(f) == stem]
         if hit:
             save_robot_record(rec["name"], dict.fromkeys(hit, ""), allow_create=False)

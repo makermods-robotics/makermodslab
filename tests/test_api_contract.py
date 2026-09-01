@@ -228,6 +228,16 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Workload proxy: the peer's own typed jobs listing, passed through.
         "GET /api/v1/nodes/{instance_id}/jobs",
         "POST /api/v1/nodes",
+        # Maker arm port detection (maker_ports.py). No flat mirror: the flat
+        # surface only ever shrinks, and the SO-101's /identify-arm cannot
+        # serve these — a Maker rig answers RobStride over CAN and FashionStar
+        # over UART, neither of which a Feetech bus can open.
+        "POST /api/v1/maker/identify-arm",
+        "POST /api/v1/maker/probe-ports",
+        # CAN crash recovery (can_recovery.py): de-energize a follower whose
+        # process died holding torque. Not a session (see the module
+        # docstring), and no flat mirror for the same only-shrinks reason.
+        "POST /api/v1/arms/release-torque",
         # Peer-job drill-in proxies: record + incremental log tail (GET, any
         # HTTP failure = node.unreachable) and forwarded stop/delete (the
         # peer's own coded refusals pass through with THEIR status and body).

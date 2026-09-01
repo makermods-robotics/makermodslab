@@ -305,8 +305,9 @@ def test_delete_in_use_calibration_config_unassigns_robots(
     robots_dir = tmp_lerobot_home / "robots"
     robots_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
-    # server.py binds LEADER_CONFIG_PATH at import; repoint it at the tmp dir.
-    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+    # No server-side repoint needed: the route resolves the dir through
+    # cfg.calibration_dir_for_device, which reads cfg's globals at call time
+    # and tmp_lerobot_home has already pointed those at the tmp dir.
 
     config_file = Path(cfg.LEADER_CONFIG_PATH) / "mycal.json"
     config_file.write_text("{}")
@@ -329,7 +330,6 @@ def test_delete_in_use_calibration_config_unassigns_robots(
 def test_delete_unused_calibration_config_reports_no_unassignments(
     client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
     config_file = Path(cfg.LEADER_CONFIG_PATH) / "spare.json"
     config_file.write_text("{}")
 
@@ -491,7 +491,7 @@ def test_download_calibration_config_returns_file(
     leader_dir.mkdir()
     (leader_dir / "armA.json").write_text('{"shoulder_pan": {"id": 1}}')
     # server.py binds its own LEADER_CONFIG_PATH at import — patch that one.
-    monkeypatch.setattr("makermodslab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makermodslab.utils.config.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/armA/download")
     assert response.status_code == 200
@@ -507,7 +507,7 @@ def test_download_calibration_config_accepts_dot_json_suffix(
     leader_dir = tmp_path / "leader"
     leader_dir.mkdir()
     (leader_dir / "so101.json").write_text('{"shoulder_pan": {"id": 1}}')
-    monkeypatch.setattr("makermodslab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makermodslab.utils.config.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/so101.json/download")
     assert response.status_code == 200
@@ -519,7 +519,7 @@ def test_download_calibration_config_missing_returns_404(
 ) -> None:
     leader_dir = tmp_path / "leader"
     leader_dir.mkdir()
-    monkeypatch.setattr("makermodslab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makermodslab.utils.config.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/nope/download")
     assert response.status_code == 404
@@ -1287,8 +1287,20 @@ def _job_with(**attrs):
 
 def test_hub_job_run_name_prefers_submission_label() -> None:
     job = _job_with(
-        labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"},
+        labels={"makermodslab_run": "act_cube_2026-08-01_12-00-00"},
         command=["python", "-c", "…", "--", "--policy.repo_id", "makermods/other_name"],
+    )
+    assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
+
+
+def test_hub_job_run_name_still_reads_the_legacy_dotted_label() -> None:
+    """The dotted key was renamed because the Hub started rejecting a
+    "key=value" tag containing a dot. Every job submitted before that rename
+    still carries it, and dropping the read would un-name the whole existing
+    cloud backlog in the jobs UI."""
+    job = _job_with(
+        labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"},
+        command=["python", "-c", "…"],
     )
     assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
 

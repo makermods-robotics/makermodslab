@@ -69,6 +69,7 @@ from .auto_calibrate import (
 from .calibrate import CalibrationRequest, calibration_manager
 from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
+from .can_recovery import ReleaseCanTorqueRequest, handle_release_can_torque
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -87,6 +88,7 @@ from .jobs import (
     job_registry,
     training_is_active,
 )
+from .maker_ports import identify_maker_arm_by_motion, probe_maker_ports
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
 from .nodes import (
@@ -205,8 +207,11 @@ from .schemas.system import (
     HfLoginResponse,
     InstallStartResponse,
     InstallStatusResponse,
+    MakerIdentifyArmResponse,
+    MakerProbePortsResponse,
     PolicyExtraStatus,
     PolicyOptimizerDefaultsResponse,
+    ReleaseCanTorqueResponse,
     RestartResponse,
     RobotPortResponse,
     SupplyVoltageResponse,
@@ -234,8 +239,6 @@ from .teleoperate import (
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
-    FOLLOWER_CONFIG_PATH,
-    LEADER_CONFIG_PATH,
     add_dismissed_hub_job,
     add_hidden_dataset,
     add_hidden_model,
@@ -290,6 +293,7 @@ from .utils.system import (
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
+from .zero_calibrate import zero_calibration_is_active, zero_calibration_manager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -2009,8 +2013,11 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
-# Mirrors _RUN_LABEL in runners/hf_cloud.py — the label a submitted job carries.
-_HUB_RUN_LABEL = "makermodslab.run"
+# Mirrors _RUN_LABEL + _LEGACY_RUN_LABELS in runners/hf_cloud.py — the label a
+# submitted job carries, newest first. The dotted key is read but never
+# written: the Hub now rejects a "key=value" tag containing a dot, so it was
+# renamed, and every job submitted before that still carries the old one.
+_HUB_RUN_LABELS = ("makermodslab_run", "makermodslab.run")
 
 
 def _hub_job_run_name(ji) -> str | None:
@@ -2023,15 +2030,16 @@ def _hub_job_run_name(ji) -> str | None:
     record, and the name has to come off the Hub instead.
 
     Two sources, preferred first:
-    1. The `makermodslab.run` label hf_cloud stamps at submission.
+    1. The run label hf_cloud stamps at submission (either spelling).
     2. `--policy.repo_id` in the job's own argv. Every cloud run publishes to
        "<user>/<run slug>", so this recovers a name for jobs submitted before
        labelling existed — the whole existing backlog.
     """
     labels = getattr(ji, "labels", None) or {}
-    labelled = labels.get(_HUB_RUN_LABEL)
-    if isinstance(labelled, str) and labelled.strip():
-        return labelled.strip()
+    for key in _HUB_RUN_LABELS:
+        labelled = labels.get(key)
+        if isinstance(labelled, str) and labelled.strip():
+            return labelled.strip()
 
     # `arguments` is where the Hub splits argv for some submission paths; ours
     # rides entirely in `command`. Scan both so neither shape is missed.
@@ -2994,28 +3002,53 @@ def run_update():
 # Calibration endpoints
 @router.post("/start-calibration")
 def start_calibration(request: CalibrationRequest):
-    """Start calibration process"""
+    """Start calibration process.
+
+    Legacy/external entry point: it takes a device + port directly rather than
+    a robot name, so there is no record to read an arm type from and it always
+    runs the SO-101 range sweep. The Maker arm's zero-pose flow is reached
+    through the sessions surface (POST /api/v1/sessions, kind "calibration"),
+    which resolves the arm type from the robot record.
+    """
     return calibration_manager.start_calibration(request)
 
 
 @router.post("/stop-calibration")
 def stop_calibration():
-    """Stop calibration process"""
+    """Stop calibration process.
+
+    Stops whichever calibration flow is live. Stopping is never owner-gated
+    and the two managers are mutually exclusive, so trying the zero-pose flow
+    first and falling through is unambiguous.
+    """
+    if zero_calibration_is_active():
+        return zero_calibration_manager.stop()
     return calibration_manager.stop_calibration_process()
 
 
 @router.get("/calibration-status")
 def calibration_status():
-    """Get current calibration status"""
+    """Get current calibration status, from whichever flow is live.
+
+    The two status dataclasses are field-compatible where they overlap, so one
+    client shape reads both. `awaiting_pose` is present only on the zero-pose
+    flow and defaults to False for the SO-101 sweep, which is what lets the
+    frontend switch panels on it.
+    """
     from dataclasses import asdict
 
-    status = calibration_manager.get_status()
-    return asdict(status)
+    if zero_calibration_is_active():
+        return asdict(zero_calibration_manager.get_status())
+    payload = asdict(calibration_manager.get_status())
+    payload.setdefault("awaiting_pose", False)
+    return payload
 
 
 @router.post("/complete-calibration-step")
 def complete_calibration_step():
-    """Complete the current calibration step"""
+    """Complete the current calibration step (either flow)."""
+    if zero_calibration_is_active():
+        return zero_calibration_manager.complete_step()
     return calibration_manager.complete_step()
 
 
@@ -3063,14 +3096,11 @@ def auto_calibration_batch_status():
 
 
 @router.get("/calibration-configs/{device_type}")
-def get_calibration_configs(device_type: str):
+def get_calibration_configs(device_type: str, arm_type: str = "so101"):
     """Get all calibration config files for a specific device type"""
     try:
-        if device_type == "robot":
-            config_path = FOLLOWER_CONFIG_PATH
-        elif device_type == "teleop":
-            config_path = LEADER_CONFIG_PATH
-        else:
+        config_path = calibration_dir_for_device(device_type, arm_type)
+        if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
         # Get all JSON files in the config directory
@@ -3100,14 +3130,11 @@ def get_calibration_configs(device_type: str):
 
 
 @router.delete("/calibration-configs/{device_type}/{config_name}")
-def delete_calibration_config(device_type: str, config_name: str):
+def delete_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
     """Delete a calibration config file"""
     try:
-        if device_type == "robot":
-            config_path = FOLLOWER_CONFIG_PATH
-        elif device_type == "teleop":
-            config_path = LEADER_CONFIG_PATH
-        else:
+        config_path = calibration_dir_for_device(device_type, arm_type)
+        if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
         # config_name is interpolated into a filename, so reject path-traversal
@@ -3135,7 +3162,7 @@ def delete_calibration_config(device_type: str, config_name: str):
         # those arms return to the "needs calibration" state instead of
         # dangling on a missing file. The response lists them so the UI can
         # refresh the affected robots.
-        unassigned = clear_config_references(device_type, config_name)
+        unassigned = clear_config_references(device_type, config_name, arm_type)
         if unassigned:
             robots = ", ".join(u["robot"] for u in unassigned)
             message = (
@@ -3156,7 +3183,7 @@ def delete_calibration_config(device_type: str, config_name: str):
 
 
 @router.get("/calibration-configs/{device_type}/{config_name}/download")
-def download_calibration_config(device_type: str, config_name: str):
+def download_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
     """
     Download one arm's calibration as a raw lerobot calibration JSON file.
 
@@ -3164,11 +3191,8 @@ def download_calibration_config(device_type: str, config_name: str):
     drop-in: shareable, hand-copyable, and re-importable anywhere. The arm's
     side/name are supplied by the caller on re-import, not stored in the file.
     """
-    if device_type == "robot":
-        config_path = FOLLOWER_CONFIG_PATH
-    elif device_type == "teleop":
-        config_path = LEADER_CONFIG_PATH
-    else:
+    config_path = calibration_dir_for_device(device_type, arm_type)
+    if config_path is None:
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
 
     # config_name is interpolated into a filename, so reject path-traversal
@@ -3205,7 +3229,7 @@ def download_calibration_config(device_type: str, config_name: str):
 
 
 @router.post("/calibration-configs/{device_type}/upload")
-def upload_calibration_config(device_type: str, body: dict):
+def upload_calibration_config(device_type: str, body: dict, arm_type: str = "so101"):
     """
     Import a calibration into a side's config dir. Body: {"name": "...",
     "data": {<raw lerobot calibration>}}. The data is shape-validated; an
@@ -3216,7 +3240,7 @@ def upload_calibration_config(device_type: str, body: dict):
     if not isinstance(name, str):
         return JSONResponse(status_code=400, content={"success": False, "message": "name must be a string"})
 
-    ok, reason, saved = save_imported_calibration(device_type, name, data)
+    ok, reason, saved = save_imported_calibration(device_type, name, data, arm_type)
     if ok:
         return {"success": True, "name": saved}
 
@@ -3240,7 +3264,9 @@ def upload_calibration_config(device_type: str, body: dict):
 
 
 @router.post("/calibration-configs/{device_type}/{config_name}/rename")
-def rename_calibration_config_endpoint(device_type: str, config_name: str, body: dict):
+def rename_calibration_config_endpoint(
+    device_type: str, config_name: str, body: dict, arm_type: str = "so101"
+):
     """
     Rename a calibration config file. Body: {"new_name": "..."}. Never
     overwrites; robot records referencing the old name are repointed.
@@ -3251,7 +3277,7 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
             status_code=400, content={"success": False, "message": "new_name must be a string"}
         )
 
-    ok, reason = rename_calibration_config(device_type, config_name, new_name)
+    ok, reason = rename_calibration_config(device_type, config_name, new_name, arm_type)
     if ok:
         return {"success": True, "name": new_name.strip().removesuffix(".json")}
 
@@ -3266,6 +3292,10 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
 
 class OpenCalibrationFolderRequest(BaseModel):
     device_type: str  # "teleop" (leader) or "robot" (follower)
+    # Which arm type's library to open — "so101" or "maker". The two live in
+    # separate directories (so_leader/so_follower vs
+    # rebot_102_leader/maker_follower).
+    arm_type: str = "so101"
 
 
 @router.post("/open-calibration-folder")
@@ -3275,7 +3305,7 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
     The dir is created if missing so a fresh install opens an empty folder rather
     than failing. An unknown device_type is rejected with 400.
     """
-    path = calibration_dir_for_device(request.device_type)
+    path = calibration_dir_for_device(request.device_type, request.arm_type)
     if path is None:
         return JSONResponse(
             status_code=400,
@@ -3328,6 +3358,76 @@ async def wiggle(request: WiggleRequest):
 class IdentifyArmRequest(BaseModel):
     # Candidate ports to watch; empty/omitted = all detected arm ports.
     ports: list[str] | None = None
+
+
+class MakerProbePortsRequest(BaseModel):
+    # Candidate ports to probe; empty/omitted = every detected serial port.
+    ports: list[str] | None = None
+    # Which CAN family the follower probe should speak: "maker" (RobStride) or
+    # "metal" (Damiao). The leader probe is identical either way (both
+    # families use the Star Arm 102). Defaults to maker so a client that
+    # predates the Metal arm is unchanged.
+    arm_type: Literal["maker", "metal"] = "maker"
+
+
+class MakerIdentifyArmRequest(BaseModel):
+    # "robot" (the CAN follower) or "teleop" (the UART leader). Unlike the
+    # SO-101, the two halves of a Maker rig need different bus drivers, so the
+    # caller must say which side it is asking about.
+    device_type: str
+    ports: list[str] | None = None
+    # See MakerProbePortsRequest. For "metal" the follower side is refused
+    # (opening a Damiao bus energizes it mid-gesture); the leader side works.
+    arm_type: Literal["maker", "metal"] = "maker"
+
+
+@v1_router.post("/maker/probe-ports", response_model=MakerProbePortsResponse, tags=["system"])
+async def probe_maker_arm_ports(request: MakerProbePortsRequest):
+    """Find which ports carry a Maker follower and which carry its Star 102 leader.
+
+    A CAN rig's two halves speak different protocols on different adapters
+    (RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101
+    this needs NO gesture from the user — asking each port which protocol
+    answers is enough. The maker probe is strictly read-only; the METAL
+    follower probe briefly enables the gravity-neutral base joint and disables
+    it again (the Damiao handshake is the enable command — see
+    maker_ports._open_metal_follower_bus).
+    """
+    return await probe_maker_ports(request.ports, request.arm_type)
+
+
+# exclude_none: success carries `port`, failure omits it entirely (never null),
+# so None-exclusion reproduces each branch exactly — same contract as
+# /identify-arm above.
+@v1_router.post(
+    "/maker/identify-arm",
+    response_model=MakerIdentifyArmResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+async def identify_maker_arm(request: MakerIdentifyArmRequest):
+    """Tell one Maker arm from its twin by watching for a hand gesture.
+
+    Only needed for a BIMANUAL Maker robot: both arms ship with identical CAN
+    and servo ids, so probing alone cannot say which is left and which is
+    right. The user swings one arm's base and we report the port that saw it.
+    Read-only — no motor writes.
+    """
+    return await identify_maker_arm_by_motion(request.device_type, request.ports, request.arm_type)
+
+
+@v1_router.post("/arms/release-torque", response_model=ReleaseCanTorqueResponse, tags=["system"])
+async def release_can_torque(request: ReleaseCanTorqueRequest):
+    """De-energize a CAN follower after a crash left it holding torque.
+
+    A SIGKILL or power loss leaves Damiao motors rigid at their last command
+    with no session and no device object to clean up through. This reopens
+    the named bus WITHOUT the energizing handshake, broadcasts the disable,
+    and closes. Refused (409 session.held) while any live session holds the
+    hardware; not a session itself — no lease, no session events (see
+    can_recovery.py).
+    """
+    return await asyncio.to_thread(handle_release_can_torque, request)
 
 
 @router.post("/identify-arm")
