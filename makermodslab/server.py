@@ -1943,17 +1943,13 @@ async def create_training_job(req: Request):
         # this app is designed for — run inline they'd stall every other
         # request for the duration.
         record = await asyncio.to_thread(job_registry.start, body.config, body.target)
-    except DatasetNotOnHubError as exc:
-        # Cloud run on a local-only dataset. 409: the caller must upload the
-        # dataset first (the browser flow does this automatically before
-        # submitting, so this fires for non-UI callers).
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except DatasetHubCopyEmptyError as exc:
-        # Remote run on a dataset whose Hub repo exists but is empty (an
-        # interrupted upload) with no local copy the runner could refill it
-        # from. 409 for the same reason as the local-only case above: a
-        # conflict with Hub state the caller has to resolve (fill or delete
-        # the empty repo) before the run can proceed.
+    except (DatasetNotOnHubError, DatasetHubCopyEmptyError) as exc:
+        # Remote run on a dataset the remote side can't fetch: local-only
+        # (upload it first — the browser flow does so automatically, so this
+        # fires for non-UI callers), or a Hub repo that exists but is empty
+        # (an interrupted upload) with no local copy the runner could refill
+        # it from. 409 both ways: a conflict with Hub state the caller has to
+        # resolve before the run can proceed, not a malformed request.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except JobAlreadyContinuedError as exc:
         # Sticks only: the source already has a continuation, so a second one

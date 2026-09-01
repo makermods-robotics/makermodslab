@@ -35,20 +35,6 @@ from ..datasets import (
 from ..utils.config import with_makermodslab_tag
 
 
-def local_pushable_copy_exists(local_repo_id: str) -> bool:
-    """Is there a flat-layout copy of `local_repo_id` in the host's lerobot
-    cache — the only form ``push_dataset_to_hub`` can push?
-
-    A snapshot-cache download (a Hub dataset fetched for local use) is
-    deliberately NOT pushable and returns False: the runner cannot re-push
-    what it never had in pushable form. Shared with the jobs preflight, which
-    must ask the exact same question — "can the runner refill an empty repo
-    itself?" — so the two cannot drift on what counts as a local copy.
-    """
-    cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-    return (cache_root / local_repo_id / "meta" / "info.json").is_file()
-
-
 def ensure_dataset_on_hub(local_repo_id: str, hub_repo_id: str, log: Callable[[str], None]) -> None:
     """If the dataset is local-only, push it to the Hub.
 

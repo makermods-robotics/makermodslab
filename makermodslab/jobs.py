@@ -3334,7 +3334,7 @@ class JobRegistry:
             # raising here would make the user resolve something the machine
             # resolves itself.
             if status == "on_hub" and hub_copy_has_data(config.dataset_repo_id) is False:
-                from .runners._dataset import local_pushable_copy_exists
+                from .datasets import local_pushable_copy_exists
 
                 if not local_pushable_copy_exists(config.dataset_repo_id):
                     raise DatasetHubCopyEmptyError(config.dataset_repo_id)
