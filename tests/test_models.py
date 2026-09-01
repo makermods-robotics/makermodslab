@@ -155,6 +155,19 @@ def test_list_local_models_reads_train_config_over_record(registry) -> None:
     assert m["dataset"] == "cfg/other"
 
 
+def test_list_local_models_gates_dataset_episodes_same_as_get_model_info(registry) -> None:
+    """The listing (GET /models) must never carry an ungated dataset_episodes
+    for a private-dataset run — the privacy rule has to hold everywhere the
+    field is emitted, not only on the per-model detail view."""
+    from makermodslab.models import list_local_models
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[0, 1])
+    with patch("makermodslab.models.is_dataset_private", return_value=True):
+        assert list_local_models()[0]["dataset_episodes"] is None
+    with patch("makermodslab.models.is_dataset_private", return_value=False):
+        assert list_local_models()[0]["dataset_episodes"] == [0, 1]
+
+
 def test_list_local_models_skips_running_but_keeps_checkpointed_interrupted(registry) -> None:
     """A run counts as usable once it's "done" or "interrupted" (not
     "running") and has a real checkpoint on disk (MT10). An "interrupted" run
@@ -880,6 +893,65 @@ def test_get_model_info_unknown_returns_none(registry) -> None:
 
     with patch("makermodslab.models.hf_hub_offline", return_value=True):
         assert get_model_info("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# dataset_episodes — training-episode provenance, gated on the source
+# dataset's Hub privacy (see models._gate_dataset_episodes).
+# ---------------------------------------------------------------------------
+
+
+def _seed_run_with_episodes(registry, job_id: str, *, dataset: str, episodes: list[int]) -> Path:
+    """_seed_run, then rewrite train_config.json with a dataset.episodes
+    subset — mirrors test_list_local_models_reads_train_config_over_record's
+    pattern of overwriting the file _seed_run already wrote."""
+    pretrained = _seed_run(registry, job_id, dataset=dataset)
+    (pretrained / "train_config.json").write_text(
+        json.dumps({"policy": {"type": "act"}, "dataset": {"repo_id": dataset, "episodes": episodes}})
+    )
+    return pretrained
+
+
+def test_get_model_info_local_shows_episodes_for_public_dataset(registry) -> None:
+    from makermodslab.models import get_model_info
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[3, 1, 1, 2])
+    with patch("makermodslab.models.is_dataset_private", return_value=False) as gate:
+        info = get_model_info("curated_run")
+    assert info["dataset_episodes"] == [1, 2, 3]  # deduped, sorted
+    gate.assert_called_once_with("user/pick")
+
+
+def test_get_model_info_local_hides_episodes_for_private_dataset(registry) -> None:
+    from makermodslab.models import get_model_info
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[0, 1])
+    with patch("makermodslab.models.is_dataset_private", return_value=True):
+        info = get_model_info("curated_run")
+    assert info["dataset_episodes"] is None
+
+
+def test_get_model_info_local_hides_episodes_when_dataset_unresolvable(registry) -> None:
+    """Fail closed: a dataset that can't be resolved (never pushed to the Hub,
+    deleted, offline) is treated the same as an explicit private=True."""
+    from makermodslab.models import get_model_info
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[0, 1])
+    with patch("makermodslab.models.is_dataset_private", return_value=None):
+        info = get_model_info("curated_run")
+    assert info["dataset_episodes"] is None
+
+
+def test_get_model_info_local_no_subset_skips_privacy_check(registry) -> None:
+    """A run trained on every episode has nothing to gate, so the Hub privacy
+    lookup — a real network call for an arbitrary dataset — never fires."""
+    from makermodslab.models import get_model_info
+
+    _seed_run(registry, "full_run", dataset="user/pick")
+    with patch("makermodslab.models.is_dataset_private") as gate:
+        info = get_model_info("full_run")
+    assert info["dataset_episodes"] is None
+    gate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -2022,6 +2094,47 @@ def test_hub_model_info_maps_expanded_fields() -> None:
     assert row["last_modified"] is not None
     assert row["source"] == "hub"
     fake_api.model_info.assert_called_once()
+
+
+def test_hub_model_info_reads_episodes_from_final_checkpoint_train_config() -> None:
+    """dataset_episodes for a Hub skill comes from its final checkpoint's
+    train_config.json — a file read separate from the card-metadata dataset
+    name, since the Hub card only ever carries the repo id, not episode
+    granularity."""
+    import makermodslab.models as m
+    from makermodslab.jobs import JobCheckpoint
+
+    _clear_model_hub_info_cache()
+    fake_api = MagicMock()
+    fake_api.model_info.return_value = _fake_model_info(model_name="act", datasets=["user/pick"])
+    final_ckpt = JobCheckpoint(step=1000, source="hub", ref="user/policy@checkpoints/001000")
+    with (
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.jobs._list_imported_hub", return_value=[final_ckpt]),
+        patch(
+            "makermodslab.jobs.read_checkpoint_train_config",
+            return_value={"dataset": {"repo_id": "user/pick", "episodes": [2, 0]}},
+        ),
+    ):
+        row = m._hub_model_info("user/policy")
+    assert row["dataset_episodes"] == [0, 2]
+
+
+def test_hub_model_info_no_dataset_skips_episode_lookup() -> None:
+    """No dataset from the card ⇒ no point fetching a checkpoint just to look
+    for its episodes."""
+    import makermodslab.models as m
+
+    _clear_model_hub_info_cache()
+    fake_api = MagicMock()
+    fake_api.model_info.return_value = _fake_model_info(model_name="act", datasets=None)
+    with (
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.jobs._list_imported_hub") as list_ckpts,
+    ):
+        row = m._hub_model_info("user/policy")
+    assert row["dataset_episodes"] is None
+    list_ckpts.assert_not_called()
 
 
 def test_hub_model_info_falls_back_to_probe_on_error() -> None:

@@ -120,6 +120,10 @@ interface TrainingConfiguratorProps {
   onPolicyTypeChange: (policyType: string) => void;
   /** Controlled training dataset. Empty string ⇒ Start stays disabled. */
   datasetRepoId: string;
+  /** Controlled episode subset for datasetRepoId (e.g. seeded from the
+   * dataset viewer's exclude-from-training checkboxes). undefined ⇒ every
+   * episode trains, same as the field being absent from the request. */
+  episodeIndices?: number[];
   /** A "Continue"/"Resume" seed — inherits the source run's target + cadence. */
   resumeSeed?: ResumeSeed | null;
   /** A "Fine-tune" seed — fresh run initialized from a source checkpoint. */
@@ -153,6 +157,7 @@ function configToRequest(
   return {
     target: c.target,
     dataset_repo_id: c.dataset_repo_id,
+    dataset_episodes: c.dataset_episodes,
     policy_type: c.policy_type,
     job_name: c.job_name,
     steps: c.steps,
@@ -218,6 +223,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   policyType,
   onPolicyTypeChange,
   datasetRepoId: controlledDatasetRepoId,
+  episodeIndices: controlledEpisodeIndices,
   resumeSeed = null,
   finetuneSeed = null,
   onStarted,
@@ -315,8 +321,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       ...trainingConfig,
       policy_type: policyType,
       dataset_repo_id: controlledDatasetRepoId,
+      dataset_episodes: controlledEpisodeIndices,
     }),
-    [trainingConfig, policyType, controlledDatasetRepoId],
+    [trainingConfig, policyType, controlledDatasetRepoId, controlledEpisodeIndices],
   );
 
   const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<

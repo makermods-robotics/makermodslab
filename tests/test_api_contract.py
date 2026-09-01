@@ -265,6 +265,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/sessions",
         "POST /api/v1/sessions/{session_id}/heartbeat",
         "POST /api/v1/sessions/{session_id}/stop",
+        # Episode curation (PR #84): which episodes of a dataset a training
+        # run is launched with. Read/replace only — never deletes an episode.
+        "GET /api/v1/datasets/excluded-episodes",
+        "PUT /api/v1/datasets/excluded-episodes",
     ]
 )
 

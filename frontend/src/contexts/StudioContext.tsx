@@ -75,6 +75,10 @@ export interface TrainPrefill {
    * the models listing doesn't carry this id. */
   baseName?: string;
   datasetRepoId?: string;
+  /** Episode subset for datasetRepoId, e.g. seeded from the dataset viewer's
+   * exclude-from-training checkboxes. Only meaningful alongside datasetRepoId
+   * — TrainPanel drops it if the dataset selection later diverges. */
+  episodeIndices?: number[];
   /** Built by buildResumeSeed — see components/jobs/resumeSeed.ts. */
   resume?: ResumeSeed;
 }

@@ -1066,6 +1066,49 @@
         "title": "EpisodeSummary",
         "type": "object"
       },
+      "ExcludedEpisodesRequest": {
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesRequest",
+        "type": "object"
+      },
+      "ExcludedEpisodesResponse": {
+        "description": "server.py datasets_excluded_episodes — the episode indices left OUT of\nthe training subset for one dataset. Empty list when nothing is excluded;\nthe dataset itself is untouched (curation, not deletion).",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesResponse",
+        "type": "object"
+      },
       "ExtraStatus": {
         "properties": {
           "available": {
@@ -2553,7 +2596,7 @@
         "type": "object"
       },
       "ModelInfoResponse": {
-        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.",
+        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.\n``dataset_episodes`` is absent only on that file-tree fallback.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2565,6 +2608,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -2697,7 +2754,7 @@
         "type": "object"
       },
       "ModelListItem": {
-        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
+        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\n``dataset_episodes`` (the training-episode subset, privacy-gated by\nmodels._gate_dataset_episodes) is set by the two local producers and is\nabsent on a Hub-seeded row, which never reads a checkpoint's\ntrain_config.json.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2709,6 +2766,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -3846,6 +3917,33 @@
           "result"
         ],
         "title": "SessionStopResponse",
+        "type": "object"
+      },
+      "SetExcludedEpisodesResponse": {
+        "description": "server.py datasets_set_excluded_episodes — echoes the set actually\npersisted (re-read from disk), not the caller's input.",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "SetExcludedEpisodesResponse",
         "type": "object"
       },
       "SuccessRepoIdResponse": {
@@ -5568,6 +5666,89 @@
           }
         },
         "summary": "Datasets Episodes",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
+    "/api/v1/datasets/excluded-episodes": {
+      "get": {
+        "description": "Episode indices the user excluded from training for this dataset\n(curation, not deletion — see set_excluded_episodes). Empty list for a\ndataset with no exclusions.",
+        "operationId": "datasets_excluded_episodes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Excluded Episodes",
+        "tags": [
+          "datasets"
+        ]
+      },
+      "put": {
+        "description": "Replace the excluded-episode set for one dataset. NEVER deletes or\nmutates the dataset — the viewer computes the training subset from this\nand sends it as dataset_episodes when launching a run.",
+        "operationId": "datasets_set_excluded_episodes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExcludedEpisodesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Set Excluded Episodes",
         "tags": [
           "datasets"
         ]
