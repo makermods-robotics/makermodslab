@@ -340,17 +340,36 @@ def _plant_follower_file(base: str, stem: str) -> str:
     return path
 
 
+def _follower_file_path(base: str, stem: str) -> str:
+    """Where the subprocess WOULD write, without creating it.
+
+    Stray-file tests must let the run itself create the file (see
+    `_write_during_run`): a file planted before `start()` is, by construction,
+    indistinguishable from the user's previous calibration under the same name,
+    and the cleanup deliberately keeps those (P0-1 / C1)."""
+    path = os.path.join(base, "so_follower", f"{stem}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
 def test_stray_file_removed_when_run_fails_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A run that exits non-zero after the subprocess already wrote its file
-    must not leave a phantom library entry behind."""
+    must not leave a phantom library entry behind.
+
+    The file is written by the fake subprocess DURING the run (not planted
+    before `start`), so it is genuinely this run's output — which is what makes
+    it a stray rather than the user's previous calibration (P0-1 / C1).
+    """
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    stray = _follower_file_path(str(tmp_path), "my_arm")
 
     class FailProc:
         def __init__(self) -> None:
             self.stdout = iter(["Stage 0: init\n"])
 
         def wait(self) -> int:
+            with open(stray, "w") as f:  # the subprocess wrote it, then failed
+                f.write("{}")
             return 1
 
         def terminate(self) -> None:
@@ -370,15 +389,21 @@ def test_stray_file_removed_when_run_fails_nonzero(monkeypatch: pytest.MonkeyPat
 def test_stray_file_removed_when_post_processing_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A successful subprocess whose post-processing (_finalize_success) raises
     must clean up the file the subprocess wrote — the run is 'failed', so its
-    name must not persist as a phantom entry."""
+    name must not persist as a phantom entry.
+
+    As above, the fake subprocess writes the file during the run so it is this
+    run's output rather than a pre-existing calibration.
+    """
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    stray = _follower_file_path(str(tmp_path), "my_arm")
 
     class OkProc:
         def __init__(self) -> None:
             self.stdout = iter(["calibration done\n"])
 
         def wait(self) -> int:
+            with open(stray, "w") as f:  # the subprocess succeeded and wrote it
+                f.write("{}")
             return 0
 
         def terminate(self) -> None:
@@ -402,13 +427,21 @@ def test_stray_file_removed_when_post_processing_fails(monkeypatch: pytest.Monke
 
 def test_stray_file_removed_on_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A stopped run must leave no phantom file even if a stop landed just after
-    the subprocess wrote it."""
+    the subprocess wrote it.
+
+    The file appears AFTER `start()` — i.e. the running subprocess wrote it —
+    which is what distinguishes it from the user's previous calibration under the
+    same name (P0-1 / C1).
+    """
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    stray = _follower_file_path(str(tmp_path), "my_arm")
 
     proc = StoppableFakeProc()
     released: list[str] = []
     mgr, _ = _start_with_fake_proc(monkeypatch, proc, released)
+
+    with open(stray, "w") as f:  # written mid-run, just before the stop lands
+        f.write("{}")
 
     assert mgr.stop()["success"] is True
     _join_stop(mgr)

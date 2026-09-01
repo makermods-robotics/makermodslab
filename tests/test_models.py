@@ -33,18 +33,6 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_model_cache():
-    """Clear the module-global /models listing cache before and after each test
-    so a cached result from one test never leaks into another (the conftest
-    autouse fixture resets the datasets/jobs caches but not this one)."""
-    import makermodslab.models as m
-
-    m.invalidate_model_listing_cache()
-    yield
-    m.invalidate_model_listing_cache()
-
-
 @pytest.fixture
 def registry(tmp_path: Path):
     """A JobRegistry rooted at a temp outputs/train, patched in as the module
