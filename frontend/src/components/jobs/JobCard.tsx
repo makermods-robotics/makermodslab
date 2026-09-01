@@ -396,12 +396,18 @@ const JobCard: React.FC<Props> = ({
         )
       )
         onDelete(job.id);
-    } else if (
-      window.confirm("Delete this run? This wipes the output directory.")
-    ) {
-      onDelete(job.id);
     }
+    // A terminal local run deliberately has no branch here: the destructive
+    // "wipe the output directory" delete was removed from the UI (the backend
+    // routes remain for a future management surface). `hasAction` below keeps
+    // the button from rendering for that case.
   };
+
+  // Which cards still carry an action button: cancel (queued), stop (running),
+  // and the record-only removals (imported / cloud) that never destroy model
+  // files. Terminal local runs get none — see handleAction.
+  const hasAction =
+    isQueued || isRunning || isImported || job.runner === "hf_cloud";
 
   // The selected checkpoint may belong to this run or an inherited source run;
   // route inference/continue to whichever run owns it. Resolved by ref, so
@@ -752,10 +758,11 @@ const JobCard: React.FC<Props> = ({
               </Button>
             ) : null}
             {/* A running cloud run is steered from its Hub page (the link
-                above), so it gets no local action button. Everything else —
-                including a FINISHED cloud run — gets stop/delete, so dead
-                cloud runs are removable instead of link-only. */}
-            {!(job.runner === "hf_cloud" && job.hf_job_url && isRunning) ? (
+                above), so it gets no local action button. Finished cloud and
+                imported records keep their record-only removal so dead rows
+                are dismissable; terminal local runs have no action (hasAction). */}
+            {hasAction &&
+            !(job.runner === "hf_cloud" && job.hf_job_url && isRunning) ? (
               <Button
                 variant="ghost"
                 size="icon"

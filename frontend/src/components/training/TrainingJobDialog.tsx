@@ -9,7 +9,7 @@ import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Loader2, Play, Square, Trash2, ArrowLeft, XCircle } from "lucide-react";
+import { Loader2, Play, Square, ArrowLeft, XCircle } from "lucide-react";
 
 import {
   JobRecord,
@@ -19,7 +19,6 @@ import {
   jobDisplayName,
   jobStateLabel,
   stopJob,
-  deleteJob,
 } from "@/lib/jobsApi";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
@@ -274,24 +273,6 @@ const TrainingJobDialog: React.FC<{
     }
   };
 
-  const handleDelete = async () => {
-    if (!job) return;
-    // English for the same reason as handleStop's confirm above.
-    if (!window.confirm("Delete this run? This wipes the output directory."))
-      return;
-    try {
-      await deleteJob(baseUrl, fetchWithHeaders, job.id);
-      toast({ title: t("training.jobDialog.toast.removedTitle") });
-      onExit();
-    } catch (e) {
-      toast({
-        title: t("training.jobDialog.toast.deleteFailedTitle"),
-        description: e instanceof Error ? e.message : String(e),
-        variant: "destructive",
-      });
-    }
-  };
-
   /** Re-read the job after a publish — the first one pins hf_repo_id, which the
    * header renders as "View on Hub". A refetch blip is swallowed: the publish
    * already reported its own outcome, so a failure here must not read as a
@@ -476,16 +457,10 @@ const TrainingJobDialog: React.FC<{
                   <XCircle className="mr-2 h-4 w-4" />{" "}
                   {t("training.jobDialog.cancelQueued")}
                 </Button>
-              ) : (
-                <Button
-                  onClick={handleDelete}
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  <Trash2 className="mr-2 h-4 w-4" /> {t("training.jobDialog.delete")}
-                </Button>
-              )}
+              ) : // A terminal run gets no delete here: destructive run deletion
+              // was removed from the UI (the backend routes remain for a future
+              // management surface).
+              null}
             </div>
 
             {/* One line, always — whatever the trainer prints. `truncate` on
