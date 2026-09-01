@@ -1,6 +1,6 @@
 /**
  * "dialogs" namespace — the standalone dialogs in `components/dialogs/`:
- * the dataset viewer (+ its joint chart and hardware-replay panel), the skill
+ * the dataset viewer (+ its joint chart and hardware-replay panel), the policy
  * detail / manage dialogs, and the floating teleoperation viewer.
  *
  * Key tree must match the other language exactly (see i18n/catalogs.test.ts).
@@ -41,7 +41,7 @@ export default {
     nextEpisode: "Next episode",
     play: "Play",
     pause: "Pause",
-    trainSkill: "Train a skill from this",
+    trainPolicy: "Train a policy from this",
     // Episode curation: pick which episodes of this dataset a training run
     // uses. Nothing is deleted — excluded episodes stay on disk and on the
     // Hub, they are just left out of the next run's subset.
@@ -97,11 +97,11 @@ export default {
     },
   },
 
-  skillDetail: {
-    // {{title}} is the skill's display title.
+  policyDetail: {
+    // {{title}} is the policy's display title.
     previewAlt: "{{title}} rollout preview",
     previewPlaceholder: "rollout preview",
-    // Pill on a skill that exists both locally and on the Hub. "Hub" is a
+    // Pill on a policy that exists both locally and on the Hub. "Hub" is a
     // product name.
     localAndHub: "Local + Hub",
     // Byline. {{author}} is a Hub namespace — data, never translated.
@@ -112,24 +112,24 @@ export default {
     private: "private",
     // <0> is the emphasized lead-in, <1> the dataset repo id (mono, verbatim).
     trainedOn: "<0>Trained on</0> <1>{{dataset}}</1>",
-    // How much of that dataset the skill actually trained on, when it was
+    // How much of that dataset the policy actually trained on, when it was
     // curated down to a subset. The "of total" variant needs the dataset's
     // own episode count, which is unavailable for a Hub-only dataset.
     episodeSubset: "{{used}} episodes",
     episodeSubsetOfTotal: "{{used}} of {{total}} episodes",
-    notTrained: "Not trained yet — this skill is still in development.",
+    notTrained: "Not trained yet — this policy is still in development.",
     // {{robot}} is the selected robot's name, or `robotFallback` when none is
     // selected.
     run: "Run on {{robot}}",
     robotFallback: "robot",
-    fineTune: "Fine-tune this skill",
+    fineTune: "Fine-tune this policy",
     // The API exposes no like count and no like action, so this is a static
     // placeholder, not a button.
     likesUnavailable: "Likes unavailable",
     viewOnHub: "View on HF Hub",
   },
 
-  skillManage: {
+  policyManage: {
     runOnRobot: "Run on robot",
     toast: {
       // Unpin / hide — the row leaves the listing, nothing is deleted.

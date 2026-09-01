@@ -18,8 +18,8 @@ import { useEyebrowClass } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
 
 /**
- * The fullscreen skill studio — slides up over the Launchpad when the
- * "+ New Skill" banner (or any Run-on-robot / Fine-tune action) opens it.
+ * The fullscreen policy studio — slides up over the Launchpad when the
+ * "+ New Policy" banner (or any Run-on-robot / Fine-tune action) opens it.
  * Stays mounted so panel state survives close/reopen within a visit.
  */
 const StudioOverlay: React.FC = () => {

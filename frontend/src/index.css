@@ -135,7 +135,7 @@
     @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
-  /* hide native scrollbars on tracks that have their own nav (skill slider) */
+  /* hide native scrollbars on tracks that have their own nav (policy slider) */
   .no-scrollbar {
     scrollbar-width: none;
     -ms-overflow-style: none;

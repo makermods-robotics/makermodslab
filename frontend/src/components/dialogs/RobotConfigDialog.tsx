@@ -237,7 +237,7 @@ export interface RobotConfigDialogProps {
  * a full-page route. The configuration logic is the former Calibration page's,
  * ported verbatim (draft-until-Save ports/cameras/torque, Detect/Wiggle,
  * manual + concurrent multi-arm auto-calibration, exit guard); only the
- * surface changed: a shadcn Dialog styled with the skill studio's vocabulary
+ * surface changed: a shadcn Dialog styled with the policy studio's vocabulary
  * (PanelHeader step digits, eyebrow labels, hairline dividers, default
  * control sizes).
  *
@@ -1564,7 +1564,7 @@ const RobotConfigWindow = ({
   // makermodslab/utils/config.py clamp_motor_power). It is the torque the
   // AUTO-CALIBRATION subprocess drives the arm at (threaded through as its
   // --torque-limit = percent × 10; see makermodslab/auto_calibrate.py). Regular
-  // sessions (teleop/record/skill runs) run at stock LeRobot torque and
+  // sessions (teleop/record/policy runs) run at stock LeRobot torque and
   // ignore this value. The UI below is expressed in RAW Torque_Limit register
   // units (0-1000) — the same scale as the vendored script's
   // DEFAULT_TORQUE_LIMIT = 380 — so operators can reason in one vocabulary.

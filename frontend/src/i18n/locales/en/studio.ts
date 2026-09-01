@@ -1,5 +1,5 @@
 /**
- * "studio" namespace — the skill studio overlay and its three panels
+ * "studio" namespace — the policy studio overlay and its three panels
  * (1 · Collect, 2 · Train, 3 · Run/Deploy) plus the shared panel primitives.
  *
  * Key tree must match the other language exactly (see i18n/catalogs.test.ts).
@@ -16,7 +16,7 @@ export default {
     // One key for the overlay's dialog aria-label AND the header eyebrow: the
     // same two words naming the same surface, so two keys could only drift.
     // The "by MakerMods" mark beside it is branding and stays English.
-    title: "Skill studio",
+    title: "Policy studio",
     // aria-label and title on the same button — one key, two attributes.
     backToMenu: "Back to main menu",
     close: "Close studio",
@@ -135,7 +135,7 @@ export default {
       hubUpload: {
         title: "Uploaded to the Hub!",
         description:
-          "Your dataset is public and shareable — reference its repo id anywhere in MakerLab, or fine-tune a skill on it from the Train panel.",
+          "Your dataset is public and shareable — reference its repo id anywhere in MakerLab, or fine-tune a policy on it from the Train panel.",
       },
     },
   },
@@ -193,14 +193,14 @@ export default {
       // public base checkpoint rather than training random weights.
       fromBase: "Train from base",
       loading: "Loading checkpoints…",
-      finetuneHint: "Fine-tunes from this skill's latest checkpoint.",
-      hint: "Fine-tune an existing skill, or start fresh.",
+      finetuneHint: "Fine-tunes from this policy's latest checkpoint.",
+      hint: "Fine-tune an existing policy, or start fresh.",
       // The `hint` counterpart for those same foundation policies.
       foundationHint:
-        "Fine-tune an existing skill, or train from its public base.",
+        "Fine-tune an existing policy, or train from its public base.",
     },
     toast: {
-      noCheckpointsTitle: "No checkpoints in this skill",
+      noCheckpointsTitle: "No checkpoints in this policy",
       noCheckpointsBody: "It has no saved checkpoint to fine-tune from.",
       // Body is the caught error's own message and stays as thrown.
       baseFailedTitle: "Couldn't load the starting point",
@@ -216,20 +216,20 @@ export default {
   deploy: {
     title: "Run",
     picker: {
-      placeholder: "Pick a skill",
-      loading: "Loading skills…",
-      empty: "No trained or imported skills yet",
+      placeholder: "Pick a policy",
+      loading: "Loading policies…",
+      empty: "No trained or imported policies yet",
       // aria-label and title on the same button.
-      import: "Import skill",
-      hint: "Pick a trained checkpoint or an imported Hub skill to run on your robot.",
+      import: "Import policy",
+      hint: "Pick a trained checkpoint or an imported Hub policy to run on your robot.",
     },
-    // Where a skill lives. Rendered as a small marker beside its name.
+    // Where a policy lives. Rendered as a small marker beside its name.
     source: {
       hub: "hub",
       local: "local",
       both: "local · hub",
     },
-    intro: "Run this skill on your robot, then start inference.",
+    intro: "Run this policy on your robot, then start inference.",
     noRobot:
       "Select a robot to run on — use the robot menu in the top-right corner of this window.",
     // <0> wraps the robot name; {{gap}} is the rendered follower-scoped setup
@@ -241,7 +241,7 @@ export default {
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arms — leader setup isn't needed.)",
     checkpoint: {
       label: "Checkpoint",
-      none: "No checkpoints available for this skill yet.",
+      none: "No checkpoints available for this policy yet.",
     },
     // Checkpoint/robot arm-count mismatch. Each branch is one complete
     // sentence pair so word order is the translator's to choose. <0> is the
@@ -328,16 +328,16 @@ export default {
     toast: {
       // Every *Failed title below is paired with the caught error's own
       // message, which stays exactly as thrown.
-      loadSkillFailed: "Couldn't load the skill",
+      loadPolicyFailed: "Couldn't load the policy",
       startFailed: "Couldn't start inference",
       stoppingTitle: "Stopping inference",
       stoppingBody: "The rollout is winding down.",
       stopFailed: "Stop failed",
     },
     milestone: {
-      title: "First skill deployed!",
+      title: "First policy deployed!",
       description:
-        "Your robot just ran a trained policy. Come back here anytime to redeploy it, swap checkpoints, or run a different skill.",
+        "Your robot just ran a trained policy. Come back here anytime to redeploy it, swap checkpoints, or run a different policy.",
     },
   },
 } as const;

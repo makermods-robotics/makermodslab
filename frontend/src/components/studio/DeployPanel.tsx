@@ -70,7 +70,7 @@ import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
 import { useOnceFlag } from "@/lib/onboarding/storage";
 
 /**
- * Studio panel 3 · Deploy — run a skill (local trained checkpoint or an
+ * Studio panel 3 · Deploy — run a policy (local trained checkpoint or an
  * imported Hub model) on the corner robot. Every "Run on robot" action lands
  * here via `useStudio().deployPrefill`.
  *
@@ -190,17 +190,17 @@ const DeployPanel: React.FC = () => {
   const { openInferenceSession, sessionOpen } = useInferenceSession();
   const { selectedRecord: robot } = useRobots();
   // Reuse the shared lazy-import (husk-repo messaging + idempotent registration)
-  // so a Hub skill resolves to a pseudo-job exactly as the Jobs cards do.
+  // so a Hub policy resolves to a pseudo-job exactly as the Jobs cards do.
   const { importSource } = useInferenceLaunch();
 
-  // --- Skill picker state ------------------------------------------------
+  // --- Policy picker state ------------------------------------------------
   const [models, setModels] = useState<ModelItem[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<JobRecord | null>(null);
   const [resolving, setResolving] = useState(false);
-  // Duplicate of ModelsLibrary's "Import skill" entry point, surfaced right
-  // on the skill picker itself so importing doesn't require scrolling down
+  // Duplicate of ModelsLibrary's "Import policy" entry point, surfaced right
+  // on the policy picker itself so importing doesn't require scrolling down
   // to the library section below.
   const [importModalOpen, setImportModalOpen] = useState(false);
 
@@ -314,7 +314,7 @@ const DeployPanel: React.FC = () => {
     [recordCameraByName, availableCameras],
   );
 
-  // Load the skill listing (local runs + Hub models) when the studio opens.
+  // Load the policy listing (local runs + Hub models) when the studio opens.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -334,7 +334,7 @@ const DeployPanel: React.FC = () => {
     };
   }, [open, baseUrl, fetchWithHeaders]);
 
-  // Re-fetch the skill listing after a successful import so the new skill
+  // Re-fetch the policy listing after a successful import so the new policy
   // shows up in the picker right away — mirrors ModelsLibrary's onImported.
   const handleImported = useCallback(() => {
     setModelsLoading(true);
@@ -355,7 +355,7 @@ const DeployPanel: React.FC = () => {
     (async () => {
       setResolving(true);
       // The settings (robot, checkpoint, cameras) are no longer collapsible —
-      // they render as soon as a skill is selected, which the prefill does
+      // they render as soon as a policy is selected, which the prefill does
       // below, so there is nothing to re-open here.
       try {
         if (deployPrefill.source === "job") {
@@ -374,7 +374,7 @@ const DeployPanel: React.FC = () => {
       } catch (e) {
         if (!cancelled) {
           toast({
-            title: t("studio.deploy.toast.loadSkillFailed"),
+            title: t("studio.deploy.toast.loadPolicyFailed"),
             // The thrown error's own text — shown exactly as raised.
             description: e instanceof Error ? e.message : String(e),
             variant: "destructive",
@@ -400,14 +400,14 @@ const DeployPanel: React.FC = () => {
     t,
   ]);
 
-  // Manual skill pick: resolve the chosen model to a launchable job (its own
+  // Manual policy pick: resolve the chosen model to a launchable job (its own
   // registry id, an already-imported repo, or a fresh lazy import).
-  const handlePickSkill = useCallback(
+  const handlePickPolicy = useCallback(
     async (modelId: string) => {
       setSelectedModelId(modelId);
       const model = models.find((m) => m.id === modelId);
       if (!model) return;
-      // New skill → drop the prior step so the load effect picks the new job's
+      // New policy → drop the prior step so the load effect picks the new job's
       // latest checkpoint.
       setSelectedStep(null);
       setResolving(true);
@@ -769,7 +769,7 @@ const DeployPanel: React.FC = () => {
     setCameraBindings((prev) => ({ ...prev, [name]: value }));
   };
 
-  const selectedSkillLabel = selectedJob ? jobDisplayName(selectedJob) : null;
+  const selectedPolicyLabel = selectedJob ? jobDisplayName(selectedJob) : null;
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
@@ -779,15 +779,15 @@ const DeployPanel: React.FC = () => {
         ) : null}
       </PanelHeader>
 
-      {/* Skill picker — the panel's entry control. A real <Select> rather than
-          a PanelEntryControl because picking a skill IS the value here, not a
+      {/* Policy picker — the panel's entry control. A real <Select> rather than
+          a PanelEntryControl because picking a policy IS the value here, not a
           trigger that opens a form; it wears PANEL_ENTRY_CLASS and a dot so it
           still reads as the same control as Collect's and Train's openers. */}
       <div className="space-y-2">
         <div className="relative">
           <Select
             value={selectedModelId ?? undefined}
-            onValueChange={handlePickSkill}
+            onValueChange={handlePickPolicy}
             disabled={resolving}
           >
             {/* justify-start + ml-auto on the chevron: SelectTrigger defaults
@@ -802,8 +802,8 @@ const DeployPanel: React.FC = () => {
               )}
             >
               <PanelEntryDot className="bg-sky-500" />
-              {selectedSkillLabel ? (
-                <DisplayName name={selectedSkillLabel} className="min-w-0" />
+              {selectedPolicyLabel ? (
+                <DisplayName name={selectedPolicyLabel} className="min-w-0" />
               ) : (
                 <SelectValue placeholder={t("studio.deploy.picker.placeholder")} />
               )}
@@ -840,7 +840,7 @@ const DeployPanel: React.FC = () => {
               )}
             </SelectContent>
           </Select>
-          {/* Duplicate of ModelsLibrary's "Import skill" button, docked
+          {/* Duplicate of ModelsLibrary's "Import policy" button, docked
               inside the picker's own box (right edge) so it's visible
               without opening the dropdown. A sibling overlay, not a child of
               SelectTrigger — SelectTrigger is itself a <button>, and Radix
@@ -875,7 +875,7 @@ const DeployPanel: React.FC = () => {
         onImported={handleImported}
       />
 
-      {/* Everything below is flat and appears as soon as a skill is picked —
+      {/* Everything below is flat and appears as soon as a policy is picked —
           disclosure comes from the selection, not from a second click. The old
           "Settings & configuration" collapsible was an extra step neither
           Collect nor Train has. ------------------------------------------- */}
@@ -1234,7 +1234,7 @@ const DeployPanel: React.FC = () => {
         />
       )}
 
-      {/* Actions — pinned directly above the skill library. Side by side so
+      {/* Actions — pinned directly above the policy library. Side by side so
           the row sits level with Collect's and Train's single Start. -------- */}
       <div className="mt-auto flex gap-2 pt-2">
         <Button
@@ -1267,7 +1267,7 @@ const DeployPanel: React.FC = () => {
       </div>
 
       {/* Model / policy library — imported models + uploaded Hub repos.
-          Picking a card selects it as the skill above (step null → the
+          Picking a card selects it as the policy above (step null → the
           checkpoint loader falls back to the latest). mt-0 keeps it glued to
           the actions block above, which carries the panel's mt-auto. */}
       <LibrarySection className="mt-0">

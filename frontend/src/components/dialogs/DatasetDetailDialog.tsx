@@ -755,7 +755,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                 className="w-full gap-2"
               >
                 <Boxes className="h-4 w-4" />
-                {t("dialogs.datasetDetail.trainSkill")}
+                {t("dialogs.datasetDetail.trainPolicy")}
               </Button>
             </div>
           </div>

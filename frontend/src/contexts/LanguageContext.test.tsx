@@ -35,7 +35,7 @@ afterEach(async () => {
 describe("LanguageProvider", () => {
   it("renders English copy by default", () => {
     renderApp();
-    expect(screen.getByLabelText("Search skills")).toBeInTheDocument();
+    expect(screen.getByLabelText("Search policies")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Clean my desk…")).toBeInTheDocument();
     // The rotating verbs all render (stacked in one grid cell).
     expect(screen.getByText("Run")).toBeInTheDocument();
@@ -48,12 +48,12 @@ describe("LanguageProvider", () => {
       screen.getByText("toggle").click();
     });
 
-    expect(screen.getByLabelText("搜索技能")).toBeInTheDocument();
+    expect(screen.getByLabelText("搜索策略")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("整理我的桌面…")).toBeInTheDocument();
     expect(screen.getByText("运行")).toBeInTheDocument();
     expect(screen.getByText("训练")).toBeInTheDocument();
     // No English left behind in the switched subtree.
-    expect(screen.queryByLabelText("Search skills")).toBeNull();
+    expect(screen.queryByLabelText("Search policies")).toBeNull();
 
     expect(document.documentElement.lang).toBe("zh-CN");
   });
@@ -62,7 +62,7 @@ describe("LanguageProvider", () => {
     renderApp();
     await act(async () => screen.getByText("toggle").click());
     await act(async () => screen.getByText("toggle").click());
-    expect(screen.getByLabelText("Search skills")).toBeInTheDocument();
+    expect(screen.getByLabelText("Search policies")).toBeInTheDocument();
     expect(document.documentElement.lang).toBe("en");
   });
 });

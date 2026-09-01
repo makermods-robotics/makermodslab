@@ -16,7 +16,7 @@
 The per-robot "motor power" percentage (10-100) is the AUTO-CALIBRATION drive
 torque: it is threaded into the vendored autocal subprocess as its
 ``--torque-limit`` (percent × 10; see makermodslab/auto_calibrate.py). Regular
-sessions — teleoperation, recording, skill runs — deliberately run at stock
+sessions — teleoperation, recording, policy runs — deliberately run at stock
 LeRobot torque instead: lerobot never writes ``Torque_Limit``, so "stock"
 means the register's power-on value.
 
@@ -138,7 +138,7 @@ def _for_each_motor(device, action, on_fail_message, on_success_message=None) ->
 def reset_torque_limit(device, label: str = "follower arm") -> list[str]:
     """Restore stock torque on every motor of a FOLLOWER device.
 
-    Sessions (teleop, recording, skill runs) run at LeRobot-default torque —
+    Sessions (teleop, recording, policy runs) run at LeRobot-default torque —
     the robot's torque slider only sets AUTO-CALIBRATION's drive torque. But
     ``Torque_Limit`` is RAM: a lower value written by a previous
     auto-calibration survives until a power cycle, so simply not writing

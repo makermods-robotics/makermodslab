@@ -42,7 +42,7 @@ const DEFAULT_COLLECT_FORM: CollectFormState = {
   pushToHub: true,
 };
 
-/** Pre-fills the Deploy panel when a skill card / job row says "Run on robot".
+/** Pre-fills the Deploy panel when a policy card / job row says "Run on robot".
  * `job` sources resolve through the local job registry (id + optional step);
  * `hub` sources are Hub model repo ids that DeployPanel lazy-imports. */
 export interface DeployPrefill {
@@ -54,8 +54,8 @@ export interface DeployPrefill {
 /** Pre-fills the Train panel: fine-tune base, resume seed, and/or a
  * preselected dataset.
  *
- * A local skill's fine-tune base is a job registry id (`baseJobId`); a Hub
- * skill's is a repo id (`baseModelRepoId`) that the panel lazy-imports. Set
+ * A local policy's fine-tune base is a job registry id (`baseJobId`); a Hub
+ * policy's is a repo id (`baseModelRepoId`) that the panel lazy-imports. Set
  * exactly one of the two. `baseStep` optionally pins the checkpoint to
  * fine-tune from (the card's dropdown choice); omitted ⇒ latest.
  *
@@ -71,7 +71,7 @@ export interface TrainPrefill {
   baseModelRepoId?: string;
   baseJobId?: string;
   baseStep?: number;
-  /** Display name for the base skill, shown in the picker while (or in case)
+  /** Display name for the base policy, shown in the picker while (or in case)
    * the models listing doesn't carry this id. */
   baseName?: string;
   datasetRepoId?: string;

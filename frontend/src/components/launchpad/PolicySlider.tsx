@@ -3,43 +3,43 @@ import { useTranslation } from "react-i18next";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useModels } from "@/hooks/useModels";
 import { ModelItem } from "@/lib/modelsApi";
-import SkillCard, {
-  SkillBadge,
-  WIP_SKILL_IDS,
-  isWipSkillId,
-  skillDisplayTitle,
-  skillNamespace,
-  skillTitle,
-} from "@/components/launchpad/SkillCard";
-import SkillDetailDialog from "@/components/dialogs/SkillDetailDialog";
+import PolicyCard, {
+  PolicyBadge,
+  WIP_POLICY_IDS,
+  isWipPolicyId,
+  policyDisplayTitle,
+  policyNamespace,
+  policyTitle,
+} from "@/components/launchpad/PolicyCard";
+import PolicyDetailDialog from "@/components/dialogs/PolicyDetailDialog";
 
-export interface SkillSliderProps {
+export interface PolicySliderProps {
   /** Live search filter from the hero search box. */
   search: string;
 }
 
-/** The one curated, fully-trained skill shown on the launchpad. */
-const FEATURED_SKILL_ID =
+/** The one curated, fully-trained policy shown on the launchpad. */
+const FEATURED_POLICY_ID =
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55";
 
 /** Rendered when /models doesn't carry the featured repo (e.g. logged-out or
  * offline) so the launchpad always shows the curated card. */
 const FEATURED_FALLBACK: ModelItem = {
-  id: FEATURED_SKILL_ID,
-  name: FEATURED_SKILL_ID,
+  id: FEATURED_POLICY_ID,
+  name: FEATURED_POLICY_ID,
   policy_type: "act",
   dataset: null,
   steps: null,
   path: null,
   last_modified: null,
-  hf_repo_id: FEATURED_SKILL_ID,
+  hf_repo_id: FEATURED_POLICY_ID,
   source: "hub",
 };
 
-/** Static preview card for a skill that hasn't been trained yet — never comes
+/** Static preview card for a policy that hasn't been trained yet — never comes
  * from /models, so it's a plain client-side entry (never enriched, never
  * runnable). */
-const wipSkill = (id: string): ModelItem => ({
+const wipPolicy = (id: string): ModelItem => ({
   id,
   name: id,
   policy_type: null,
@@ -51,10 +51,10 @@ const wipSkill = (id: string): ModelItem => ({
   source: "hub",
 });
 
-/** Static WIP preview cards shown alongside the real featured skill. */
-const WIP_SKILLS: ModelItem[] = Object.values(WIP_SKILL_IDS).map(wipSkill);
+/** Static WIP preview cards shown alongside the real featured policy. */
+const WIP_POLICIES: ModelItem[] = Object.values(WIP_POLICY_IDS).map(wipPolicy);
 
-/** A single loading skeleton shaped like a SkillCard. */
+/** A single loading skeleton shaped like a PolicyCard. */
 const CardSkeleton: React.FC = () => (
   <div className="flex w-64 shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-1">
     <div className="aspect-[4/3] w-full animate-pulse bg-muted" />
@@ -68,17 +68,17 @@ const CardSkeleton: React.FC = () => (
 
 /** "wip" for a not-yet-trained preview card, "makermods" for every other
  * curated card on the launchpad. */
-const badgeFor = (m: ModelItem): SkillBadge =>
-  isWipSkillId(m.id) ? "wip" : "makermods";
+const badgeFor = (m: ModelItem): PolicyBadge =>
+  isWipPolicyId(m.id) ? "wip" : "makermods";
 
 /**
- * Horizontal skill slider — the launchpad shows the curated MakerMods-
- * supported skill (real /models row when available, static fallback
- * otherwise) plus static WIP preview cards for skills still in training.
+ * Horizontal policy slider — the launchpad shows the curated MakerMods-
+ * supported policy (real /models row when available, static fallback
+ * otherwise) plus static WIP preview cards for policies still in training.
  * Scroll-snap track with ‹ › arrow buttons; the hero search box filters live
- * by name/author. Card click opens the skill detail dialog.
+ * by name/author. Card click opens the policy detail dialog.
  */
-const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
+const PolicySlider: React.FC<PolicySliderProps> = ({ search }) => {
   const { models, loading } = useModels();
   const { t } = useTranslation();
   const trackRef = useRef<HTMLDivElement>(null);
@@ -87,20 +87,20 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
 
   const filtered = useMemo(() => {
     const featured =
-      models.find((m) => (m.hf_repo_id ?? m.id) === FEATURED_SKILL_ID) ??
+      models.find((m) => (m.hf_repo_id ?? m.id) === FEATURED_POLICY_ID) ??
       FEATURED_FALLBACK;
-    const curated = [featured, ...WIP_SKILLS];
+    const curated = [featured, ...WIP_POLICIES];
     const q = search.trim().toLowerCase();
     if (!q) return curated;
     return curated.filter((m) => {
-      const ns = skillNamespace(m) ?? "";
+      const ns = policyNamespace(m) ?? "";
       return (
         // The English title stays matchable in every language, so searching
         // "sock" keeps finding the sorting-socks card while the UI is in
         // Chinese. The translated title is an ADDITIONAL match, never a
         // replacement — this filter is a strict superset of the old one.
-        skillTitle(m).toLowerCase().includes(q) ||
-        skillDisplayTitle(t, m).toLowerCase().includes(q) ||
+        policyTitle(m).toLowerCase().includes(q) ||
+        policyDisplayTitle(t, m).toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q) ||
         ns.toLowerCase().includes(q)
       );
@@ -120,15 +120,15 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
 
   return (
     <section
-      data-tour="launchpad-skills"
+      data-tour="launchpad-policies"
       className="w-full"
-      aria-label={t("launchpad.skills.sectionLabel")}
+      aria-label={t("launchpad.policies.sectionLabel")}
     >
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => scrollBy(-1)}
-          aria-label={t("launchpad.skills.previous")}
+          aria-label={t("launchpad.policies.previous")}
           className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-1 transition-colors hover:border-ring hover:text-foreground sm:flex"
         >
           <ChevronLeft className="h-4 w-4" />
@@ -142,11 +142,11 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
             <CardSkeleton />
           ) : filtered.length === 0 ? (
             <div className="flex min-h-[13rem] w-full items-center justify-center rounded-lg border border-dashed border-border bg-card/50 px-6 py-10 text-center text-sm text-muted-foreground">
-              {t("launchpad.skills.empty")}
+              {t("launchpad.policies.empty")}
             </div>
           ) : (
             filtered.map((model) => (
-              <SkillCard
+              <PolicyCard
                 key={model.id}
                 model={model}
                 badge={badgeFor(model)}
@@ -159,14 +159,14 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
         <button
           type="button"
           onClick={() => scrollBy(1)}
-          aria-label={t("launchpad.skills.next")}
+          aria-label={t("launchpad.policies.next")}
           className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-1 transition-colors hover:border-ring hover:text-foreground sm:flex"
         >
           <ChevronRight className="h-4 w-4" />
         </button>
       </div>
 
-      <SkillDetailDialog
+      <PolicyDetailDialog
         model={detail}
         open={detailOpen}
         onOpenChange={setDetailOpen}
@@ -175,4 +175,4 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
   );
 };
 
-export default SkillSlider;
+export default PolicySlider;

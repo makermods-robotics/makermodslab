@@ -1101,7 +1101,7 @@ def _classify_outcome(rc: int | None, rollout_started: bool, error_text: str | N
     """ok | ran_with_warning | failed.
 
     A non-zero exit *after* the rollout main loop started, where the error is a
-    torque-disable/overload on shutdown, means the skill ran but a motor (usually
+    torque-disable/overload on shutdown, means the policy ran but a motor (usually
     the loaded gripper) complained during cleanup — that's a warning, not a
     failure, so the UI shouldn't call a working run "failed". A mid-run
     disconnect (or a non-zero exit before the loop began) stays a real failure —
