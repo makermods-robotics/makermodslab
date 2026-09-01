@@ -88,9 +88,6 @@ export default {
       noRobotTitle: "No robot selected",
       noRobotBody:
         "Select or create a robot first — use the robot menu in the top-right corner.",
-      notReadyTitle: "Robot not ready",
-      // {{gap}} is the rendered setup-gap phrase; {{name}} the robot's name.
-      notReadyBody: "{{name}} {{gap}}. Open Robot settings before recording.",
       missingDetailsTitle: "Missing dataset details",
       missingDetailsBody: "Please enter a dataset name and task description.",
       // The body is validateDatasetName's own message — client-side, but owned
@@ -161,6 +158,13 @@ export default {
       resumeHint: "Inherited from the run being continued.",
       remove: "Remove {{repoId}}",
       searchPlaceholder: "Search datasets, or type a public org/name Hub id",
+      // Note shown when the dataset arrived from the viewer curated down to
+      // a subset of its episodes. The "of total" variant needs the dataset's
+      // own episode count, which a Hub-only dataset may not resolve.
+      episodeSubset:
+        "Training on {{used}} episodes — adjust which ones from this dataset's viewer in My Library.",
+      episodeSubsetOfTotal:
+        "Training on {{used}} of {{total}} episodes — adjust which ones from this dataset's viewer in My Library.",
       // aria-label and title on the same button.
       choose: "Choose dataset",
       // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.

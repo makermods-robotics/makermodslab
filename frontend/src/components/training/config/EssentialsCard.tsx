@@ -54,7 +54,7 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
     // for the training extra (accelerate) instead of letting the user start
     // a run that will fail.
     try {
-      const r = await fetchWithHeaders(`${baseUrl}/system/wandb-extra`);
+      const r = await fetchWithHeaders(`${baseUrl}/api/v1/system/wandb-extra`);
       const data: { available: boolean; install_hint: string } = await r.json();
       if (data.available) {
         updateConfig("wandb_enable", true);

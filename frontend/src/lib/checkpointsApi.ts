@@ -50,7 +50,7 @@ export async function listJobCheckpoints(
   const body = await apiRequest<{ checkpoints: JobCheckpoint[] }>(
     baseUrl,
     fetcher,
-    `/jobs/${jobId}/checkpoints`,
+    `/api/v1/jobs/${jobId}/checkpoints`,
     { signal, action: "List checkpoints" },
   );
   return body.checkpoints;
@@ -66,7 +66,7 @@ export async function getCheckpointPolicyConfig(
   return apiRequest<PolicyConfigSummary>(
     baseUrl,
     fetcher,
-    `/jobs/${jobId}/checkpoints/${step}/policy-config`,
+    `/api/v1/jobs/${jobId}/checkpoints/${step}/policy-config`,
     { signal, action: "Load policy config" },
   );
 }

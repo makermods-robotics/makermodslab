@@ -4,15 +4,22 @@ export default {
     defaultTitle: "Log",
     waiting: "Waiting for log output…",
   },
-  singleTab: {
-    title: "MakerMods Lab is already open in another tab",
-    body: "Only one tab can control the robot at a time. Switch back to the original tab, or take over here — the other tab will lock.",
-    takeOver: "Use this tab",
-  },
-  teleopStopNotice: {
-    title: "Teleoperation stopped",
-    description:
-      "Stopped when you left the page. The arm returns to its starting position, then goes limp.",
+  // 409 session.held from POST /api/v1/sessions — rendered by
+  // formatSessionHeld (lib/sessionApi.ts) in every flow's start-error path.
+  // The activity labels are display twins of the backend's session-kind enum
+  // (the values themselves are data, matched on and never translated).
+  sessionBusy: {
+    message: "The robot is busy — {{activity}} is running. Stop it first.",
+    generic: "The robot is busy with another session. Stop it first.",
+    activity: {
+      teleoperation: "teleoperation",
+      recording: "a recording session",
+      inference: "an inference run",
+      replay: "an episode replay",
+      calibration: "a calibration",
+      auto_calibration: "an auto-calibration",
+      wiggle: "a gripper wiggle",
+    },
   },
   update: {
     title: "MakerMods Lab update available",
@@ -56,6 +63,12 @@ export default {
     done: "Done",
     leftArm: "Left arm",
     rightArm: "Right arm",
+    // Shown in the 3D viewer's place on a Maker arm, which has no URDF yet.
+    jointAngles: "Live joint angles",
+    waitingForJoints: "Waiting for joint data…",
+    // Family-neutral on purpose: the readout serves every CAN arm (Maker,
+    // Metal), and none of them ships a URDF yet.
+    noModel: "No 3D model is available for this arm yet.",
   },
   urdf: {
     switchedDefaultTitle: "Switched to default model",

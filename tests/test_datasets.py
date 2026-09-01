@@ -349,6 +349,7 @@ def _clear_hub_status_cache() -> None:
 
     with ds._HUB_STATUS_LOCK:
         ds._HUB_STATUS_CACHE.clear()
+        ds._HUB_HAS_DATA_CACHE.clear()
 
 
 def test_get_hub_status_reports_on_hub_when_repo_exists() -> None:
@@ -469,6 +470,25 @@ def test_hub_status_endpoint(client: TestClient) -> None:
     assert body["repo_id"] == "alice/pick"
     assert body["status"] == "on_hub"
     assert body["url"] == "https://huggingface.co/datasets/alice/pick"
+
+
+def test_hub_status_endpoint_carries_the_emptiness_claim_over_the_wire(client: TestClient) -> None:
+    """Through the ROUTE, not the function: the typed response model FILTERS
+    undeclared fields, so a hub_has_data missing from DatasetHubStatusResponse
+    is stripped silently — every function-level test still passes while the
+    card's 'Upload didn't finish' warning and the cache dialog's not-backed-up
+    gate go dark. This pins the field to the wire."""
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.get_paths_info.return_value = []  # repo exists, holds no dataset
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=True),
+    ):
+        resp = client.get("/datasets/hub-status", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    assert resp.json()["hub_has_data"] is False
 
 
 # --- Rename -----------------------------------------------------------------
@@ -713,15 +733,17 @@ def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
     _make_dataset(tmp_lerobot_home, "makermods/train_ds", episodes=1)
 
     # _dataset_in_use imports job_registry from .jobs lazily (datasets<->record
-    # cycle), so patch it at its source module.
+    # cycle), so patch it at its source module. The registry answers via
+    # local_dataset_in_use (exact scan; matching covered by
+    # test_dataset_in_use_sees_every_active_run_not_a_page).
     from makermodslab import jobs
 
-    job = MagicMock()
-    job.state = "running"
-    job.runner = "local"
-    job.config.dataset_repo_id = "makermods/train_ds"
     with (
-        patch.object(jobs.job_registry, "list", return_value=[job]),
+        patch.object(
+            jobs.job_registry,
+            "local_dataset_in_use",
+            side_effect=lambda repo_id: repo_id == "makermods/train_ds",
+        ),
         pytest.raises(DatasetRenameError) as exc,
     ):
         rename_local_dataset("makermods/train_ds", "renamed")
@@ -1809,6 +1831,105 @@ def test_pin_route_auto_unhides(
     resp = client.post("/datasets/custom", json={"repo_id": "alice/pick"})
     assert resp.status_code == 200
     assert get_hidden_datasets() == set()
+
+
+# ---------------------------------------------------------------------------
+# Excluded episodes — persistent per-dataset training-curation filter.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def excluded_episodes_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect EXCLUDED_EPISODES_FILE into a tmp file so these tests never
+    touch the developer's real ~/.cache."""
+    from makermodslab.utils import config as cfg
+
+    path = tmp_path / "excluded_episodes.json"
+    monkeypatch.setattr(cfg, "EXCLUDED_EPISODES_FILE", str(path))
+    return path
+
+
+def test_excluded_episodes_round_trip(excluded_episodes_file: Path) -> None:
+    from makermodslab.utils.config import get_excluded_episodes, set_excluded_episodes
+
+    assert get_excluded_episodes("alice/pick") == []
+
+    set_excluded_episodes("alice/pick", [3, 1, 1, 2])
+    assert get_excluded_episodes("alice/pick") == [1, 2, 3]  # deduped, sorted
+    assert get_excluded_episodes("bob/place") == []  # other datasets untouched
+
+    set_excluded_episodes("alice/pick", [])
+    assert get_excluded_episodes("alice/pick") == []  # empty list clears the entry
+
+
+def test_excluded_episodes_corrupt_file_degrades_to_empty(excluded_episodes_file: Path) -> None:
+    from makermodslab.utils.config import get_excluded_episodes
+
+    excluded_episodes_file.write_text("{not json")
+    assert get_excluded_episodes("alice/pick") == []
+    excluded_episodes_file.write_text(json.dumps(["not", "an", "object"]))
+    assert get_excluded_episodes("alice/pick") == []
+
+
+def test_excluded_episodes_endpoints_round_trip(client: TestClient, excluded_episodes_file: Path) -> None:
+    """v1-only surface (see test_api_contract.V1_ONLY_ROUTES) — there is no
+    flat mirror to exercise."""
+    resp = client.get("/api/v1/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    assert resp.json() == {"repo_id": "alice/pick", "episode_indices": []}
+
+    resp = client.put(
+        "/api/v1/datasets/excluded-episodes",
+        json={"repo_id": "alice/pick", "episode_indices": [2, 0]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"success": True, "repo_id": "alice/pick", "episode_indices": [0, 2]}
+
+    resp = client.get("/api/v1/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    assert resp.json()["episode_indices"] == [0, 2]
+
+
+# ---------------------------------------------------------------------------
+# is_dataset_private — the marketplace-visibility gate for a skill's
+# dataset_episodes (see models._gate_dataset_episodes).
+# ---------------------------------------------------------------------------
+
+
+def test_is_dataset_private_true() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=True)
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/pick") is True
+    fake_api.dataset_info.assert_called_once_with("alice/pick", expand=["private"])
+
+
+def test_is_dataset_private_false() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=False)
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/pick") is False
+
+
+def test_is_dataset_private_none_when_unresolvable() -> None:
+    """Never pushed to the Hub, deleted, or no access — callers must treat
+    this the same as an explicit private=True, not as public."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.side_effect = RuntimeError("404")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.is_dataset_private("alice/local-only") is None
+
+
+def test_is_dataset_private_none_offline() -> None:
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.hf_hub_offline", return_value=True):
+        assert ds.is_dataset_private("alice/pick") is None
 
 
 # ---------------------------------------------------------------------------
@@ -2938,3 +3059,333 @@ def test_get_hub_dataset_info_caches_under_the_resolved_id(tmp_path: Path) -> No
     # The upload path holds the bare id; the sweep must still find the entry.
     ds.invalidate_hub_dataset_info("pick")
     assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+# --- half-finished uploads --------------------------------------------------
+#
+# A repo can exist on the Hub and hold nothing: an upload is create-then-send,
+# and a failure after the create leaves the empty repo behind. "Exists" then
+# reads as "backed up" for a repo with no data in it — the one mistake that can
+# cost the user their only copy.
+
+
+def test_hub_copy_has_data_false_when_the_repo_is_empty() -> None:
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = []
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is False
+
+
+def test_hub_copy_has_data_true_when_the_dataset_is_there() -> None:
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = [MagicMock()]
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+
+
+def test_hub_copy_has_data_returns_none_when_the_listing_fails() -> None:
+    """A degraded read must not manufacture an "empty repo" claim."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is None
+
+
+def test_get_hub_status_flags_an_empty_hub_repo_with_a_local_copy() -> None:
+    """The case that costs data: the card would otherwise say "Uploaded to
+    HuggingFace" for a repo holding nothing, next to 25 local episodes."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.get_paths_info.return_value = []
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=True),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "on_hub"
+    assert result["hub_has_data"] is False
+
+
+def test_get_hub_status_makes_no_emptiness_claim_without_a_local_copy() -> None:
+    """An empty repo with nothing local is just litter on the Hub — no claim,
+    and no extra listing call on the common path."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=False),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "on_hub"
+    assert result["hub_has_data"] is None
+    fake_api.get_paths_info.assert_not_called()
+
+
+def test_get_hub_status_emptiness_claim_survives_the_status_cache_hit() -> None:
+    """status is memoized; the claim must still be attached on a cache hit, or
+    the warning would vanish on the card's second render."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.get_paths_info.return_value = []
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=True),
+    ):
+        ds.get_hub_status("alice/pick")
+        second = ds.get_hub_status("alice/pick")
+
+    assert fake_api.repo_exists.call_count == 1  # status came from the cache
+    assert second["hub_has_data"] is False
+
+
+def test_invalidate_hub_status_drops_the_emptiness_answer_too() -> None:
+    """After a successful upload the repo is no longer empty — both cached Hub
+    facts must go, or the card would keep warning about a finished upload."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, None)
+
+    ds.invalidate_hub_status("pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_push_dataset_to_hub_invalidates_the_cached_hub_facts() -> None:
+    """A successful push falsifies both cached Hub answers for the dataset.
+
+    Invalidating inside the one push function rather than at each call site is
+    what keeps a caller from leaving the card insisting "Local only" — or
+    "Upload didn't finish" — about a dataset it just uploaded. The cloud
+    runner's implicit upload is exactly such a caller.
+    """
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    _clear_hub_dataset_info_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, None)
+    ds._HUB_DATASET_INFO_CACHE["alice/pick"] = {"total_episodes": 0}
+
+    fake_dataset = MagicMock(num_episodes=25)
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("lerobot.datasets.LeRobotDataset", return_value=fake_dataset),
+    ):
+        assert ds.push_dataset_to_hub("pick", tags=["makermods"], private=False) == "alice/pick"
+
+    fake_dataset.push_to_hub.assert_called_once()
+    assert fake_dataset.repo_id == "alice/pick"
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+    assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+def test_hub_copy_has_data_fresh_bypasses_the_memo() -> None:
+    """A caller deciding whether to WRITE (the runners' push-if-absent) must
+    see the Hub, not a memo — a stale True would skip the refill and send the
+    remote job at an empty repo."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (True, None)
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = []
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick", fresh=True) is False
+    fake_api.get_paths_info.assert_called_once()
+
+
+def test_hub_copy_has_data_empty_answer_expires() -> None:
+    """ "Empty" can be falsified from OUTSIDE the app (huggingface-cli, the Hub
+    web UI), with no invalidation hook, so a cached False must re-check after
+    its TTL instead of warning — or refusing — for the process lifetime."""
+    import time as _time
+
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (False, _time.monotonic() - 1.0)
+    fake_api = MagicMock()
+    fake_api.get_paths_info.return_value = [MagicMock()]
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+
+
+def test_hub_copy_has_data_positive_answer_is_served_from_the_memo() -> None:
+    """Only in-app flows change "has data", and they invalidate — so True is
+    stable and never re-pays the probe."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_HAS_DATA_CACHE["alice/pick"] = (True, None)
+    fake_api = MagicMock()
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is True
+    fake_api.get_paths_info.assert_not_called()
+
+
+def test_hub_copy_has_data_loses_the_race_against_an_invalidation() -> None:
+    """A probe that straddles a concurrent push's invalidation must NOT write
+    its answer back: it was computed against the pre-push repo, and storing it
+    after the invalidation would resurrect exactly the stale "empty" claim the
+    invalidation removed — permanently, since only another push drops it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+
+    def _push_finishes_mid_probe(*args, **kwargs):
+        ds.invalidate_hub_status("alice/pick")
+        return []
+
+    fake_api.get_paths_info.side_effect = _push_finishes_mid_probe
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        # This call's own answer stands (it describes the repo it saw)...
+        assert ds.hub_copy_has_data("alice/pick") is False
+    # ...but it must not outlive the invalidation that raced it.
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_invalidate_hub_status_drops_a_miscased_bare_entry() -> None:
+    """The bare branch must casefold too: an unauthenticated session caches
+    the caller's own spelling unresolved, and a slash-free key can never be
+    matched by the "/<name>" suffix sweep — so a case-sensitive pop would
+    leave 'PICK' serving a stale answer after 'pick' was deleted."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["PICK"] = "local_only"
+    ds._HUB_HAS_DATA_CACHE["PICK"] = (False, None)
+
+    with patch("makermodslab.datasets.cached_whoami", return_value=None):
+        ds.invalidate_hub_status("pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_get_hub_status_loses_the_race_against_an_invalidation() -> None:
+    """Same straddle rule as hub_copy_has_data, on the status cache: an
+    existence read that began before a concurrent push finished must not write
+    its pre-push answer back AFTER that push's invalidation — status answers
+    are memoized for the process lifetime, so the stale 'local_only' would
+    hide the uploaded dataset (and silence hub_has_data) until restart."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+
+    def _push_finishes_mid_read(*args, **kwargs):
+        ds.invalidate_hub_status("alice/pick")
+        return False  # computed against the pre-push Hub
+
+    fake_api.repo_exists.side_effect = _push_finishes_mid_read
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+        patch("makermodslab.datasets.local_pushable_copy_exists", return_value=False),
+    ):
+        result = ds.get_hub_status("alice/pick")
+
+    # This call's own answer stands, but it must not outlive the invalidation.
+    assert result["status"] == "local_only"
+    assert ds._HUB_STATUS_CACHE == {}
+
+
+def test_hub_copy_has_data_failed_probe_is_not_repaid_within_its_ttl() -> None:
+    """The shared HfApi client has no request timeout, so re-probing a
+    black-holed connection on every call would pin a threadpool worker per
+    card poll. A failed probe's "no claim" is cached briefly instead."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.get_paths_info.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_copy_has_data("alice/pick") is None
+        assert ds.hub_copy_has_data("alice/pick") is None
+    fake_api.get_paths_info.assert_called_once()
+
+
+def test_invalidate_hub_status_drops_a_miscased_namespaced_entry() -> None:
+    """Entries are keyed by the CANONICAL casing the resolver produced; the
+    upload path may hold the local spelling ("MyOrg/pick"). A case-sensitive
+    pop would miss the entry and leave a stale "empty" claim serving for the
+    process lifetime."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["myorg/pick"] = "on_hub"
+    ds._HUB_HAS_DATA_CACHE["myorg/pick"] = (False, None)
+
+    ds.invalidate_hub_status("MyOrg/pick")
+
+    assert ds._HUB_STATUS_CACHE == {}
+    assert ds._HUB_HAS_DATA_CACHE == {}
+
+
+def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path) -> None:
+    """_dataset_in_use scanned `job_registry.list(limit=200)` — a PAGE — so an
+    active local run past the 200th record was invisible and its dataset
+    could be renamed or deleted out from under it. The check now asks the
+    registry exactly (one snapshot under the lock), so no depth of queue or
+    history can hide a consumer."""
+    from unittest.mock import patch as _patch
+
+    from makermodslab import jobs
+    from makermodslab.datasets import _dataset_in_use
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    with _patch.object(JobRegistry, "_start_watchdog", lambda self: None):
+        reg = JobRegistry(tmp_lerobot_home / "outputs" / "train")
+
+    # 201 queued runs on other datasets ahead of the one that matters.
+    for i in range(201):
+        reg._records[f"q{i:03d}"] = JobRecord(
+            id=f"q{i:03d}",
+            name=f"q{i:03d}",
+            state="queued",
+            config=TrainingRequest(dataset_repo_id="user/other"),
+            output_dir=str(reg._output_root / f"q{i:03d}" / "run"),
+            started_at=float(i),
+            runner="local",
+            queue_seq=i + 1,
+        )
+    reg._records["target"] = JobRecord(
+        id="target",
+        name="target",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/held"),
+        output_dir=str(reg._output_root / "target" / "run"),
+        started_at=999.0,
+        runner="local",
+        queue_seq=999,
+    )
+
+    with _patch.object(jobs, "job_registry", reg):
+        assert _dataset_in_use("user/held") is not None
+        assert _dataset_in_use("user/untouched") is None

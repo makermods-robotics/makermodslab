@@ -54,3 +54,124 @@ def force_disable_bus_torque(bus, label: str = "device") -> list[str]:
     )
     logger.error(message)
     return [message]
+
+
+def release_maker_torque(device, label: str = "device") -> list[str]:
+    """Disable torque on a Maker device before disconnect, loudly on failure.
+
+    The Feetech path above cannot be reused: it walks each bus motor-by-motor
+    through Feetech register writes and a Dynamixel-style ``port_handler``,
+    neither of which a RobStride CAN bus has. RobStride exposes one
+    whole-bus ``disable_torque()`` instead, so that is what this calls.
+
+    The Star Arm 102 leader is skipped, and that is not an oversight: its
+    joints contain encoders and no motors, so it has no torque to disable and
+    its FashionStar bus handle has no ``disable_torque`` to call. That same
+    fact is why a Maker arm can never run a DAgger handover — see
+    ``arm_capabilities.supports_dagger``.
+
+    Returns a list of problem descriptions — empty when every bus released.
+    """
+    problems: list[str] = []
+    for bus in _maker_device_buses(device):
+        disable = getattr(bus, "disable_torque", None)
+        if disable is None:
+            continue  # the leader's FashionStar bus — nothing to release
+        try:
+            disable()
+        except Exception as e:
+            port = getattr(bus, "port", None) or "unknown port"
+            message = (
+                f"Failed to disable torque on the {label} ({port}): {e}. "
+                "TORQUE MAY STILL BE ENABLED — the arm can stay rigid; unplug its power to release it."
+            )
+            logger.error(message)
+            problems.append(message)
+    return problems
+
+
+def _maker_device_buses(device) -> list:
+    """The motor bus(es) of a device: ``.bus``, or both sub-arms' when bimanual.
+
+    A local copy of ``teleoperate._device_buses`` for the same reason the loop
+    above is a local copy of ``force_disable_torque`` — this module is imported
+    by teleoperate, so reaching back into it would close an import cycle.
+    """
+    if device is None:
+        return []
+    arms = [
+        arm
+        for arm in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
+        if arm is not None
+    ]
+    targets = arms if arms else [device]
+    return [target.bus for target in targets if getattr(target, "bus", None) is not None]
+
+
+def de_energize_can_bus(bus, label: str = "device") -> list[str]:
+    """Free a CAN arm that may be energized behind a dead-looking bus object.
+
+    Two situations land here that ``release_maker_torque`` cannot reach,
+    both specific to how CAN buses fail:
+
+    * a **partial Damiao handshake** — the handshake frame IS the motor
+      enable command, sent motor by motor, so a handshake that raises on the
+      Nth motor has already energized the first N-1 while ``is_connected``
+      still reads False (nothing sets it on the failure path);
+    * a **previous process killed hard** (SIGKILL, power loss) — the Damiao
+      motors hold their last MIT command indefinitely, and the new process's
+      bus object naturally starts disconnected.
+
+    The recovery is to (re)open WITHOUT the handshake — reopening with it
+    would re-energize the very motors being freed — then broadcast the
+    disable, then close with ``disable_torque=False`` (the disable already
+    ran; re-running it inside disconnect would just re-raise on a bad motor
+    after the port is half-closed).
+
+    Never raises; returns problem descriptions, empty on success. Loud on a
+    failed disable — same alarm contract as force_disable_bus_torque.
+    """
+    problems: list[str] = []
+    port = getattr(bus, "port", None) or "unknown port"
+    if not getattr(bus, "is_connected", False):
+        try:
+            bus.connect(handshake=False)
+        except Exception as e:
+            message = (
+                f"Could not reopen the CAN bus on {port} ({label}) to release it: {e}. "
+                "If the arm is rigid, unplug its power to release it."
+            )
+            logger.warning(message)
+            return [message]
+    try:
+        bus.disable_torque()
+    except Exception as e:
+        message = (
+            f"Failed to disable torque on {port} ({label}): {e}. "
+            "TORQUE MAY STILL BE ENABLED — the arm can stay rigid; unplug its power to release it."
+        )
+        logger.error(message)
+        problems.append(message)
+    try:
+        bus.disconnect(disable_torque=False)
+    except Exception as e:
+        message = f"Could not close the CAN bus on {port} ({label}): {e}"
+        logger.warning(message)
+        problems.append(message)
+    return problems
+
+
+def de_energize_can_device(device, label: str = "device") -> list[str]:
+    """``de_energize_can_bus`` over every CAN bus of a device.
+
+    Walks single and bimanual devices alike (same shape as
+    ``_maker_device_buses``) and skips any bus without ``disable_torque`` —
+    the Star leader's FashionStar handle, whose joints hold encoders and no
+    motors.
+    """
+    problems: list[str] = []
+    for bus in _maker_device_buses(device):
+        if getattr(bus, "disable_torque", None) is None:
+            continue
+        problems += de_energize_can_bus(bus, label)
+    return problems

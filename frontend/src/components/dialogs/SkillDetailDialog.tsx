@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { useRobots } from "@/hooks/useRobots";
 import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelInfo, ModelItem, getModelInfo } from "@/lib/modelsApi";
+import { getDatasetInfo } from "@/lib/replayApi";
 import {
   SkillBadgePill,
   classifySkill,
@@ -87,6 +88,25 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
       });
     return () => controller.abort();
   }, [open, model, baseUrl, fetchWithHeaders]);
+
+  // Total episode count for the "X of Y" line below — only fetched while a
+  // subset is actually present (the backend already omits dataset_episodes
+  // for a private/unresolvable source dataset, so this never runs for one).
+  const datasetEpisodes = info?.dataset_episodes ?? null;
+  const [datasetTotalEpisodes, setDatasetTotalEpisodes] = useState<
+    number | null
+  >(null);
+  useEffect(() => {
+    if (!datasetEpisodes || !info?.dataset) {
+      setDatasetTotalEpisodes(null);
+      return;
+    }
+    const controller = new AbortController();
+    getDatasetInfo(baseUrl, fetchWithHeaders, info.dataset, controller.signal)
+      .then((d) => setDatasetTotalEpisodes(d.total_episodes))
+      .catch(() => setDatasetTotalEpisodes(null));
+    return () => controller.abort();
+  }, [datasetEpisodes, info?.dataset, baseUrl, fetchWithHeaders]);
 
   if (!model) return null;
 
@@ -187,16 +207,30 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
               </p>
             )}
             {dataset && (
-              <p className="mb-3 text-sm text-muted-foreground">
-                <Trans
-                  i18nKey="dialogs.skillDetail.trainedOn"
-                  values={{ dataset }}
-                  components={[
-                    <span key="0" className="text-foreground" />,
-                    <span key="1" className="font-mono" />,
-                  ]}
-                />
-              </p>
+              <div className="mb-3">
+                <p className="text-sm text-muted-foreground">
+                  <Trans
+                    i18nKey="dialogs.skillDetail.trainedOn"
+                    values={{ dataset }}
+                    components={[
+                      <span key="0" className="text-foreground" />,
+                      <span key="1" className="font-mono" />,
+                    ]}
+                  />
+                </p>
+                {datasetEpisodes && (
+                  <p className="text-xs text-muted-foreground">
+                    {datasetTotalEpisodes != null
+                      ? t("dialogs.skillDetail.episodeSubsetOfTotal", {
+                          used: datasetEpisodes.length,
+                          total: datasetTotalEpisodes,
+                        })
+                      : t("dialogs.skillDetail.episodeSubset", {
+                          used: datasetEpisodes.length,
+                        })}
+                  </p>
+                )}
+              </div>
             )}
 
             <div className="mt-auto flex flex-col gap-2 pt-2">

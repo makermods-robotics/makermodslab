@@ -29,6 +29,10 @@ export interface UseInstallExtraResult {
  * Drives the backend extra-install flow (`accelerate`, `wandb`, …). Seeds state
  * from `${endpointPrefix}/install-status`, polls while installing, and exposes
  * install/retry handlers. Pass `enabled=false` to gate seeding on dialog open.
+ *
+ * All extra-install endpoints live in the backend's "system" group, which is
+ * served under /api/v1 — the prefix is applied here so every caller migrates
+ * together.
  */
 export function useInstallExtra(
   endpointPrefix: string,
@@ -46,7 +50,7 @@ export function useInstallExtra(
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    fetchWithHeaders(`${baseUrl}/${endpointPrefix}/install-status`)
+    fetchWithHeaders(`${baseUrl}/api/v1/${endpointPrefix}/install-status`)
       .then((r) => r.json())
       .then((status: InstallStatus) => {
         if (cancelled) return;
@@ -68,7 +72,7 @@ export function useInstallExtra(
     const id = setInterval(async () => {
       try {
         const r = await fetchWithHeaders(
-          `${baseUrl}/${endpointPrefix}/install-status`
+          `${baseUrl}/api/v1/${endpointPrefix}/install-status`
         );
         if (!r.ok) return;
         const status: InstallStatus = await r.json();
@@ -99,7 +103,7 @@ export function useInstallExtra(
     setLogs([]);
     try {
       const r = await fetchWithHeaders(
-        `${baseUrl}/${endpointPrefix}/install`,
+        `${baseUrl}/api/v1/${endpointPrefix}/install`,
         { method: "POST" }
       );
       const body: { started: boolean; message: string } = await r.json();

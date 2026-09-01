@@ -18,7 +18,7 @@ export async function listDatasets(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<DatasetItem[]> {
-  return apiRequest<DatasetItem[]>(baseUrl, fetcher, "/datasets", {
+  return apiRequest<DatasetItem[]>(baseUrl, fetcher, "/api/v1/datasets", {
     signal,
     action: "List datasets",
   });
@@ -31,7 +31,7 @@ export async function saveCustomDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/custom", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Save custom dataset",
@@ -46,7 +46,7 @@ export async function hideDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/hide", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/hide", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Hide dataset",
@@ -60,7 +60,7 @@ export async function removeCustomDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/custom", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/custom", {
     method: "DELETE",
     body: { repo_id: repoId },
     action: "Remove custom dataset",
@@ -88,7 +88,7 @@ export async function downloadDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ started: boolean; repo_id: string; message: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/download", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/download", {
     method: "POST",
     body: { repo_id: repoId },
     action: "Download dataset",
@@ -106,7 +106,7 @@ export async function getDatasetDownloadStatus(
   return apiRequest<DatasetDownloadStatus>(
     baseUrl,
     fetcher,
-    "/datasets/download-status",
+    "/api/v1/datasets/download-status",
     { action: "Download status", signal },
   );
 }
@@ -122,7 +122,7 @@ export async function importDataset(
   path: string,
   name?: string,
 ): Promise<{ repo_id: string }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/import", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/import", {
     method: "POST",
     body: { path, name },
     action: "Import dataset",
@@ -163,7 +163,7 @@ export async function getDatasetInfo(
   return apiRequest<DatasetInfo>(
     baseUrl,
     fetcher,
-    `/datasets/info?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/info?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "Dataset info" },
   );
 }
@@ -193,9 +193,49 @@ export async function listEpisodes(
   return apiRequest<EpisodeSummary[]>(
     baseUrl,
     fetcher,
-    `/datasets/episodes?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/episodes?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "List episodes" },
   );
+}
+
+/** Episode indices excluded from training for a dataset (curation, not
+ * deletion — the episode stays on disk/Hub, it's just left out of the
+ * subset a training run is launched with). GET
+ * /api/v1/datasets/excluded-episodes. */
+export async function getExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    `/api/v1/datasets/excluded-episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Get excluded episodes" },
+  );
+  return body.episode_indices;
+}
+
+/** Replace the excluded-episode set for a dataset. NEVER touches the
+ * dataset's files or Hub copy. PUT /api/v1/datasets/excluded-episodes. */
+export async function setExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndices: number[],
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/datasets/excluded-episodes",
+    {
+      method: "PUT",
+      body: { repo_id: repoId, episode_indices: episodeIndices },
+      action: "Set excluded episodes",
+    },
+  );
+  return body.episode_indices;
 }
 
 export interface EpisodeJointSeries {
@@ -216,7 +256,7 @@ export async function getEpisodeJoints(
   return apiRequest<EpisodeJointSeries>(
     baseUrl,
     fetcher,
-    `/datasets/episode-joints?repo_id=${encodeURIComponent(repoId)}&episode_index=${episodeIndex}`,
+    `/api/v1/datasets/episode-joints?repo_id=${encodeURIComponent(repoId)}&episode_index=${episodeIndex}`,
     { signal, action: "Load episode joint data" },
   );
 }
@@ -236,7 +276,7 @@ export function episodeVideoUrl(
     episode_index: String(episodeIndex),
     camera,
   });
-  return `${baseUrl}/datasets/episode-video?${params.toString()}`;
+  return `${baseUrl}/api/v1/datasets/episode-video?${params.toString()}`;
 }
 
 /** Where a dataset with this id lives. "local_only" = a local copy exists but
@@ -249,6 +289,12 @@ export interface HubStatus {
   repo_id: string;
   status: HubStatusValue;
   url: string | null;
+  /** Qualifies "on_hub": false when that repo exists but holds no dataset —
+   * an upload that died partway leaves behind the empty repo its first call
+   * created. Such a repo is NOT a backup of the local copy, so the card must
+   * not present it as one. null = no claim (not on_hub, no local copy to
+   * protect, or the check couldn't be made). */
+  hub_has_data: boolean | null;
 }
 
 /** Hub existence check, fetched lazily/separately so it never blocks the
@@ -262,7 +308,7 @@ export async function getDatasetHubStatus(
   return apiRequest<HubStatus>(
     baseUrl,
     fetcher,
-    `/datasets/hub-status?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/hub-status?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "Hub status" },
   );
 }
@@ -288,7 +334,7 @@ export async function getDatasetHubSettings(
   return apiRequest<HubSettings>(
     baseUrl,
     fetcher,
-    `/datasets/hub-settings?repo_id=${encodeURIComponent(repoId)}`,
+    `/api/v1/datasets/hub-settings?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "Hub settings" },
   );
 }
@@ -303,7 +349,7 @@ export async function setDatasetVisibility(
   isPrivate: boolean,
   signal?: AbortSignal,
 ): Promise<{ repo_id: string; private: boolean }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/visibility", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/visibility", {
     method: "POST",
     body: { repo_id: repoId, private: isPrivate },
     action: "Set visibility",
@@ -322,7 +368,7 @@ export async function setDatasetTags(
   tags: string[],
   signal?: AbortSignal,
 ): Promise<{ repo_id: string; tags: string[] }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/tags", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/tags", {
     method: "POST",
     body: { repo_id: repoId, tags },
     action: "Set tags",
@@ -355,7 +401,7 @@ export async function uploadDataset(
   isPrivate: boolean,
   signal?: AbortSignal,
 ): Promise<{ started: boolean; repo_id: string; message: string }> {
-  return apiRequest(baseUrl, fetcher, "/upload-dataset", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/upload-dataset", {
     method: "POST",
     body: { dataset_repo_id: repoId, tags, private: isPrivate },
     action: "Upload dataset",
@@ -370,7 +416,7 @@ export async function getDatasetUploadStatus(
   fetcher: Fetcher,
   signal?: AbortSignal,
 ): Promise<UploadStatus> {
-  return apiRequest<UploadStatus>(baseUrl, fetcher, "/upload-status", {
+  return apiRequest<UploadStatus>(baseUrl, fetcher, "/api/v1/upload-status", {
     action: "Upload status",
     signal,
   });
@@ -381,7 +427,7 @@ export async function deleteDataset(
   fetcher: Fetcher,
   repoId: string,
 ): Promise<{ success: boolean; message?: string }> {
-  return apiRequest(baseUrl, fetcher, "/delete-dataset", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/delete-dataset", {
     method: "POST",
     body: { dataset_repo_id: repoId },
     action: "Delete dataset",
@@ -410,7 +456,7 @@ export async function renameDataset(
   repoId: string,
   newName: string,
 ): Promise<{ success: boolean; repo_id: string; hub: DatasetRenameHubResult }> {
-  return apiRequest(baseUrl, fetcher, "/datasets/rename", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/rename", {
     method: "POST",
     body: { repo_id: repoId, new_name: newName },
     action: "Rename dataset",
@@ -433,7 +479,7 @@ export async function startDatasetMerge(
   outputRepoId: string,
 ): Promise<{ started: boolean; message: string }> {
   // apiRequest JSON.stringifies `body` itself — pass a raw object, not a string.
-  return apiRequest(baseUrl, fetcher, "/datasets/merge", {
+  return apiRequest(baseUrl, fetcher, "/api/v1/datasets/merge", {
     method: "POST",
     body: { source_repo_ids: sourceRepoIds, output_repo_id: outputRepoId },
     action: "Merge datasets",
@@ -444,7 +490,7 @@ export async function getDatasetMergeStatus(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<MergeStatus> {
-  return apiRequest<MergeStatus>(baseUrl, fetcher, "/datasets/merge/status", {
+  return apiRequest<MergeStatus>(baseUrl, fetcher, "/api/v1/datasets/merge/status", {
     action: "Merge status",
   });
 }

@@ -9,6 +9,9 @@
  */
 export default {
   jobState: {
+    queued: "排队中",
+    // 带实时队列位置（1 起）的徽标变体——位置由服务器每次响应重新计算。
+    queuedAt: "排队中 · #{{position}}",
     running: "运行中",
     done: "已完成",
     failed: "失败",
@@ -33,6 +36,11 @@ export default {
     hub: "Hub",
     localTitle: "在本机运行",
     cloudTitle: "在 Hugging Face 云端运行",
+    // lan_node 运行缺少节点 id 时退回这个词；芯片通常显示节点名或短实例 id（数据）。
+    node: "节点",
+    nodeTitle: "在局域网节点上运行，由本服务器驱动",
+    // {{name}} 是节点的显示名——数据。
+    nodeTitleNamed: "在局域网节点 {{name}} 上运行，由本服务器驱动",
     fromHub: "来自 Hub",
     fromHubTitle: "从 Hugging Face Hub 仓库导入",
   },
@@ -97,11 +105,15 @@ export default {
       ended: "结束于 {{when}}",
     },
     subtitleState: {
+      queued: "等待训练槽位",
       running: "运行中",
       done: "已完成",
       failed: "失败",
       interrupted: "已停止",
     },
+    cancelQueuedAria: "取消排队中的运行",
+    queueMoveUpAria: "在队列中上移",
+    queueMoveDownAria: "在队列中下移",
     resumeLatest: "从最新检查点继续",
     resumeStep: "从第 {{step}} 步继续",
     resumeHint:
@@ -143,6 +155,16 @@ export default {
     deleteFailed: "删除失败",
     dismissed: "任务已从列表中移除",
     dismissFailed: "移除失败",
+    queueCancelled: "已从队列移除",
+    cancelFailed: "取消失败",
+    // 两个值得翻译的编码拒绝；其余拒绝原样显示后端文案。
+    cancelBlockedDependents:
+      "另一个排队中的运行将从这次运行的检查点继续训练。请先取消那一个。",
+    cancelStateChanged:
+      "这次运行的状态在你查看期间发生了变化——没有任何内容被取消。请按它当前的状态重新决定。",
+    // 唯一一个「刷新后重试」就能解决的拒绝（409 job.queue_stale）。
+    queueStale: "队列已变化——请重试",
+    reorderFailed: "调整顺序失败",
   },
   jobsDropdown: {
     triggerAria: "选择一次训练运行",
@@ -170,12 +192,13 @@ export default {
     filters: {
       all: "全部",
       local: "本地",
-      online: "在线",
+      // 在本机之外执行的运行：Hugging Face 云端/Hub 任务和转派到局域网节点的运行。
+      remote: "远程",
     },
     empty: {
       search: "没有符合搜索条件的任务。",
       local: "没有本地任务。",
-      online: "没有在线任务。",
+      remote: "没有远程任务。",
       none: "还没有训练任务。",
     },
     firstRun: "还没有训练任务。在上方开始一次训练吧。",

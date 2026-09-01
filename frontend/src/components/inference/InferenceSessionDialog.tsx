@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { CheckCircle2, Loader2, Play, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,11 @@ import {
 } from "@/lib/inferenceApi";
 import LogPanel from "@/components/LogPanel";
 import { formatBytes } from "@/lib/formatBytes";
-import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useUnloadWarning } from "@/hooks/useUnloadWarning";
+import { ApiError } from "@/lib/apiClient";
+import { stopSession } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 
 const POLL_MS = 1000;
 
@@ -93,16 +97,21 @@ function formatTime(seconds: number): string {
  * replaces the old /inference page (the polling/safety logic is ported
  * verbatim; every navigate-home became `onExit`). While the run is live
  * (including the connecting/setup window before the first status lands) the
- * dialog can't be dismissed by ESC / outside click / X: leaving stops the arm,
- * so the only exits are the explicit Stop flow, the clean-finish auto-close,
- * or the shared exit guard's confirmed leave. Once the run has ended,
- * dismissal is free.
+ * dialog can't be dismissed by ESC / outside click / X: leaving stops the
+ * arm, so the only in-app exits are the explicit Stop flow and the
+ * clean-finish auto-close. An abandoned page (tab close, crash) is covered by
+ * the session's server-side lease: the missed heartbeats make the server stop
+ * the run. Once the run has ended, dismissal is free.
  */
 const InferenceSessionDialog: React.FC<{
+  /** Identity from POST /api/v1/sessions — this dialog heartbeats its lease
+   * and stops it by id. Null only for defensive robustness (e.g. a stale
+   * launcher); the stop then falls back to the kind-level endpoint. */
+  sessionId: string | null;
   /** Called for every exit — closes the dialog, landing back where the run
    * was launched from. */
   onExit: () => void;
-}> = ({ onExit }) => {
+}> = ({ sessionId, onExit }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { t } = useTranslation();
@@ -132,27 +141,37 @@ const InferenceSessionDialog: React.FC<{
   // Toast it once when first seen so it isn't repeated on every poll.
   const warnedRef = useRef(false);
 
-  // Safety net: a policy must never keep driving the arm with nobody watching.
-  // While a session is active (any phase, INCLUDING downloading_model), an
-  // unintentional exit stops the run — in-app back gets a blocking confirm, a
-  // browser unload fires a best-effort stop beacon. There's no artifact and no
-  // Done/Quit split here: the only semantic is STOP. After the run ends
-  // (inference_active false) the guard disarms and navigation is free.
-  const { markHandled } = useSessionExitGuard({
-    active: status?.inference_active === true,
-    confirmMessage: t("inference.leaveConfirm"),
-    beaconUrl: `${baseUrl}/stop-inference`,
-    onLeave: () => {
-      stopInference(baseUrl, fetchWithHeaders).catch(() => {});
-    },
-    beaconFlagKey: "makermodslab:inference-stopped",
-  });
+  // Safety net: a policy must never keep driving the arm with nobody
+  // watching. That guarantee is server-side now — while the run is live
+  // (treating the pre-first-status window as live, since the launcher just
+  // started it) this tab renews the session's lease, and if the page goes
+  // away the missed heartbeats make the SERVER stop the run. The courtesy
+  // beforeunload only keeps an accidental tab-close from being silent; the
+  // old exit guard's beacon/back-confirm/unmount-stop machinery is retired.
+  const sessionLive = status == null || status.inference_active === true;
+  useSessionHeartbeat(sessionId, tabOwnerId(), sessionLive);
+  useUnloadWarning(sessionLive);
+
+  // Stop this run: by session id when we have one (a 404 means the session is
+  // already gone — fine, the poll shows the ending), else the kind-level stop.
+  const stopThisRun = useCallback(async () => {
+    if (sessionId) {
+      try {
+        await stopSession(baseUrl, fetchWithHeaders, sessionId);
+        return;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return;
+        throw e;
+      }
+    }
+    await stopInference(baseUrl, fetchWithHeaders);
+  }, [sessionId, baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     let cancelled = false;
     const stopIfHung = async () => {
       try {
-        await stopInference(baseUrl, fetchWithHeaders);
+        await stopThisRun();
       } catch {
         // The next status poll will surface the failure if it persists.
       }
@@ -217,7 +236,6 @@ const InferenceSessionDialog: React.FC<{
           // close. Checked after the failure branch above so a session-level
           // startup failure still renders as an error, not a summary.
           if (next.eval_mode && next.exited) {
-            markHandled();
             exitedRef.current = true;
             doneRef.current = true;
             toast({
@@ -238,9 +256,6 @@ const InferenceSessionDialog: React.FC<{
             return;
           }
           // A clean finish (completed / user stop): toast + auto-close.
-          // Mark the exit handled so the leave guard doesn't fire a spurious
-          // stop on the imminent unmount.
-          markHandled();
           exitedRef.current = true;
           doneRef.current = true;
           if (next.exited) {
@@ -290,18 +305,15 @@ const InferenceSessionDialog: React.FC<{
       cancelled = true;
       clearInterval(id);
     };
-  }, [baseUrl, fetchWithHeaders, onExit, toast, markHandled]);
+  }, [baseUrl, fetchWithHeaders, onExit, toast, stopThisRun]);
 
   // Stops immediately — no confirmation dialog. The follower eases back to its
   // start pose and releases torque; `stopping` guards against double-fires
   // while the request is in flight.
   const handleStop = async () => {
     setStopping(true);
-    // Explicit Stop — mark handled so the leave guard doesn't double-fire while
-    // the run winds down.
-    markHandled();
     try {
-      await stopInference(baseUrl, fetchWithHeaders);
+      await stopThisRun();
       // Status poll will catch the inactive state and close the dialog.
     } catch (e) {
       setStopping(false);

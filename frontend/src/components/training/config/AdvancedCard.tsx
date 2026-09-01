@@ -122,7 +122,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
     let cancelled = false;
     (async () => {
       try {
-        const r = await fetchWithHeaders(`${baseUrl}/policy-optimizer-defaults`);
+        const r = await fetchWithHeaders(`${baseUrl}/api/v1/policy-optimizer-defaults`);
         const data: { defaults: Record<string, OptimizerDefaults | null> } =
           await r.json();
         if (!cancelled) setPolicyDefaults(data.defaults || {});

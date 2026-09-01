@@ -72,16 +72,42 @@ def _extra_available(module: str) -> bool:
         return False
 
 
+# Where the standard installers put uv when it is NOT on this process's PATH —
+# a headless server started over ssh/nohup gets a minimal PATH without
+# ~/.local/bin, and the whole point of the uv branch below is that a uv venv
+# has no pip to fall back to (field-debugged on a remote node whose installs
+# all died with "pip exited with code 1"). Same disease, same cure as the
+# macOS tailscale CLI lookup in node_sources.py.
+_UV_FALLBACK_PATHS = (
+    os.path.expanduser("~/.local/bin/uv"),  # the uv installer's default target
+    "/opt/homebrew/bin/uv",
+    "/usr/local/bin/uv",
+)
+
+
+def _find_uv() -> str | None:
+    """The uv binary to run: PATH first, then the standard install locations."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    for candidate in _UV_FALLBACK_PATHS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def _build_install_cmd(package: str) -> list[str]:
     """Pick the best installer for the running Python.
 
     Venvs created with `uv venv` don't ship pip, so `python -m pip` fails with
-    `No module named pip`. Detect uv on PATH and use it with --python pinned to
-    sys.executable so the install lands in this Python's site-packages.
-    Otherwise fall back to `python -m pip`.
+    `No module named pip`. Find uv (PATH, then the standard install
+    locations) and use it with --python pinned to sys.executable so the
+    install lands in this Python's site-packages. Otherwise fall back to
+    `python -m pip`.
     """
-    if shutil.which("uv"):
-        return ["uv", "pip", "install", "--python", sys.executable, package]
+    uv = _find_uv()
+    if uv:
+        return [uv, "pip", "install", "--python", sys.executable, package]
     return [sys.executable, "-m", "pip", "install", package]
 
 
@@ -314,6 +340,82 @@ def handle_install_policy_extra_status(policy_type: str) -> dict[str, Any]:
     return mgr.get_status()
 
 
+# --------------------------------------------------------------------------- #
+# Self-restart
+# --------------------------------------------------------------------------- #
+# POST /api/v1/system/restart re-execs this process in place so a remote
+# operator (the node proxies) can bounce a headless station without a shell on
+# it. os.execv keeps PID, argv, env, cwd and the std FDs (a nohup log redirect
+# survives), while every other FD — the uvicorn listen socket included — closes
+# on exec (PEP 446), so the relaunched process binds the port cleanly.
+
+RESTART_DELAY_S = 1.0
+# The launcher entry points (pyproject [project.scripts]) — the only argv[0]s
+# we KNOW re-run the launcher when re-executed.
+_RESTART_ENTRY_POINTS = ("makermodslab", "makermodslab-station")
+
+
+def install_in_progress() -> str | None:
+    """The package a live InstallManager is installing right now, or None.
+
+    A restart guard: re-exec would orphan the pip subprocess mid-write and
+    leave a half-installed site-packages, so the restart route refuses while
+    any install (training/wandb/policy extras) is running.
+    """
+    managers = [training_install_manager, wandb_install_manager, *_policy_install_managers.values()]
+    for mgr in managers:
+        if mgr.state == "installing":
+            return mgr.package
+    return None
+
+
+def restart_supported() -> tuple[bool, str]:
+    """Whether this process can safely re-exec itself; (False, why) if not.
+
+    Only a POSIX process whose argv[0] is one of our launcher entry points
+    qualifies: there, ``execv(sys.executable, [sys.executable, *sys.argv])``
+    re-runs the launcher with identical arguments. A dev-mode reload worker
+    (uvicorn --reload spawns it via multiprocessing; argv is not the
+    launcher) must never execv — uvicorn's reloader already restarts it on
+    any code change. Windows is excluded: its execv spawns a NEW process and
+    returns in the caller, which would leave two servers fighting over the
+    port.
+    """
+    if os.name != "posix":
+        return False, "restart-in-place is not supported on this platform"
+    argv0 = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0 not in _RESTART_ENTRY_POINTS:
+        return False, (
+            f"this process was not started by a MakerMods Lab entry point (argv[0]={argv0!r}) — "
+            "restart it the way it was started (dev mode auto-reloads on code changes)"
+        )
+    return True, ""
+
+
+def schedule_restart(delay_s: float = RESTART_DELAY_S, execv=os.execv) -> threading.Thread:
+    """Re-exec this process after ``delay_s`` (from a daemon thread).
+
+    The delay lets the HTTP response that announced the restart actually
+    reach the client before the connection dies with the process. ``execv``
+    is injectable for tests — the real one never returns. Returns the thread
+    so a test can join an injected no-op execv.
+    """
+
+    def _restart() -> None:
+        time.sleep(delay_s)
+        logger.info("🔄 Restarting: re-exec %s %s", sys.executable, " ".join(sys.argv))
+        execv(sys.executable, [sys.executable, *sys.argv])
+
+    thread = threading.Thread(target=_restart, name="self-restart", daemon=True)
+    thread.start()
+    return thread
+
+
+class RestartResponse(BaseModel):
+    restarting: bool
+    message: str
+
+
 # Detect the common Windows/MakerMods Lab mismatch where an NVIDIA GPU is visible to the
 # OS, but the active PyTorch build cannot use CUDA. Do not auto-install torch.
 
@@ -390,3 +492,93 @@ def warn_if_cuda_mismatch() -> None:
         status["torch_version"],
         status["install_hint"],
     )
+
+
+# --- GPU capability probe -----------------------------------------------------
+
+# Cached for the process lifetime: hardware doesn't hotplug under a running
+# server, and /health is polled by every peer's registry. _GPU_UNPROBED is the
+# not-yet-probed sentinel (None is a real "no accelerator" answer).
+_GPU_UNPROBED = object()
+_gpu_cache: object = _GPU_UNPROBED
+
+
+def _probe_gpu_uncached() -> dict[str, str] | None:
+    """The accelerator torch sees, display-ready, or None.
+
+    torch is already resident in the server process (the lerobot import chain
+    pulls it in), so this costs microseconds — but stays defensive anyway: any
+    probe failure means "no accelerator", never an error, because /health is
+    the node-registry handshake and must not break over a driver hiccup.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            return {
+                "name": torch.cuda.get_device_name(0),
+                "vram": f"{props.total_memory / 2**30:.0f}GB",
+            }
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            # Apple unified memory: no discrete VRAM figure to report.
+            return {"name": "Apple Silicon (MPS)", "vram": ""}
+    except Exception:  # noqa: BLE001 — health must answer regardless
+        logger.debug("GPU probe failed", exc_info=True)
+    return None
+
+
+def probe_gpu() -> dict[str, str] | None:
+    """Cached _probe_gpu_uncached; the capabilities.gpu value for /health."""
+    global _gpu_cache
+    if _gpu_cache is _GPU_UNPROBED:
+        _gpu_cache = _probe_gpu_uncached()
+    return _gpu_cache  # type: ignore[return-value]
+
+
+# --- torchcodec loadability probe ---------------------------------------------
+
+# Cached like the GPU probe. Subprocess-isolated on purpose: probing means
+# dlopening torchcodec's FFmpeg-linked dylibs, and a broken dylib can do worse
+# than raise — it can hard-crash the process. The trainer is a subprocess, so
+# the probe mirrors exactly what the trainer will experience.
+_TORCHCODEC_UNPROBED = object()
+_torchcodec_cache: object = _TORCHCODEC_UNPROBED
+
+
+def _probe_torchcodec_uncached() -> bool:
+    """True when torchcodec's native libraries actually LOAD on this host.
+
+    `import torchcodec` succeeding is NOT enough — lerobot picks torchcodec as
+    the video backend whenever the package imports, but the FFmpeg shared
+    libraries it dlopens (libavutil & co) load lazily at first decode, and a
+    host without FFmpeg installed dies on the first training batch
+    (field-debugged on a Mac with no Homebrew ffmpeg). torchcodec._core.ops
+    performs that dlopen at import, so importing it in a subprocess is the
+    honest preflight.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", "import torchcodec._core.ops"],
+            capture_output=True,
+            timeout=30,
+        )
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001 — a probe failure means "can't use it"
+        logger.debug("torchcodec probe failed to run", exc_info=True)
+        return False
+
+
+def torchcodec_loads() -> bool:
+    """Cached _probe_torchcodec_uncached."""
+    global _torchcodec_cache
+    if _torchcodec_cache is _TORCHCODEC_UNPROBED:
+        _torchcodec_cache = _probe_torchcodec_uncached()
+        if not _torchcodec_cache:
+            logger.warning(
+                "torchcodec's native libraries don't load on this host (FFmpeg shared "
+                "libraries missing?) — local training will decode video with pyav instead. "
+                "Install ffmpeg (brew install ffmpeg / apt install ffmpeg) to use torchcodec."
+            )
+    return _torchcodec_cache  # type: ignore[return-value]

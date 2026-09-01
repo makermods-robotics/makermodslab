@@ -5,7 +5,16 @@ import React, {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { Boxes, Pause, Play, SkipBack, SkipForward, VideoOff } from "lucide-react";
+import {
+  Boxes,
+  Check,
+  Loader2,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  VideoOff,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -13,9 +22,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useStudio } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
+import { useToast } from "@/hooks/use-toast";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
@@ -28,7 +39,9 @@ import {
   episodeVideoUrl,
   getDatasetInfo,
   getEpisodeJoints,
+  getExcludedEpisodes,
   listEpisodes,
+  setExcludedEpisodes,
 } from "@/lib/replayApi";
 
 export interface DatasetDetailDialogProps {
@@ -483,12 +496,27 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio } = useStudio();
   const { setSelectedDataset } = useSelectedDataset();
+  const { toast } = useToast();
 
   const [episodes, setEpisodes] = useState<EpisodeSummary[] | null>(null);
   const [episodesLoading, setEpisodesLoading] = useState(true);
   const [cameras, setCameras] = useState<string[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Episodes excluded from training (curation, not deletion — see
+  // replayApi's getExcludedEpisodes). The last SAVED state; while
+  // `selecting` is true, edits live in `draftExcluded` instead and only land
+  // here once "Done" commits them.
+  const [excludedEpisodes, setExcludedEpisodesState] = useState<Set<number>>(
+    new Set(),
+  );
+  // Selection mode: checkboxes only render, and Train + the dataset-info
+  // panel only unblock, outside of this. Entering it seeds the draft from
+  // the last saved state; leaving without pressing Done (closing the dialog,
+  // switching datasets) abandons it — see the reset in the load effect below.
+  const [selecting, setSelecting] = useState(false);
+  const [draftExcluded, setDraftExcluded] = useState<Set<number>>(new Set());
+  const [savingSelection, setSavingSelection] = useState(false);
 
   useEffect(() => {
     if (!repoId || !open) return;
@@ -496,24 +524,76 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     setEpisodesLoading(true);
     setEpisodes(null);
     setCameras([]);
+    setExcludedEpisodesState(new Set());
+    setSelecting(false);
     Promise.all([
       listEpisodes(baseUrl, fetchWithHeaders, repoId, controller.signal).catch(() => null),
       getDatasetInfo(baseUrl, fetchWithHeaders, repoId, controller.signal).catch(() => null),
-    ]).then(([eps, info]) => {
+      getExcludedEpisodes(baseUrl, fetchWithHeaders, repoId, controller.signal).catch(() => []),
+    ]).then(([eps, info, excluded]) => {
       if (controller.signal.aborted) return;
       setEpisodes(eps);
       setCameras(info?.cameras ?? []);
+      setExcludedEpisodesState(new Set(excluded));
       setSelectedEpisode(eps && eps.length > 0 ? eps[0].episode_index : null);
       setEpisodesLoading(false);
     });
     return () => controller.abort();
   }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey]);
 
+  const validEpisodeIndices = new Set((episodes ?? []).map((e) => e.episode_index));
+  const activeExcluded = selecting ? draftExcluded : excludedEpisodes;
+  const includedEpisodes = (episodes ?? [])
+    .map((e) => e.episode_index)
+    .filter((i) => !activeExcluded.has(i));
+
+  const startSelecting = () => {
+    setDraftExcluded(new Set(excludedEpisodes));
+    setSelecting(true);
+  };
+
+  const toggleDraftEpisode = (episodeIndex: number) => {
+    setDraftExcluded((prev) => {
+      const next = new Set(prev);
+      if (next.has(episodeIndex)) {
+        next.delete(episodeIndex);
+      } else {
+        next.add(episodeIndex);
+      }
+      return next;
+    });
+  };
+
+  const finishSelecting = () => {
+    if (!repoId) return;
+    const persisted = [...draftExcluded].filter((i) => validEpisodeIndices.has(i));
+    setSavingSelection(true);
+    setExcludedEpisodes(baseUrl, fetchWithHeaders, repoId, persisted)
+      .then(() => {
+        setExcludedEpisodesState(new Set(persisted));
+        setSelecting(false);
+      })
+      .catch(() => {
+        toast({
+          title: t("dialogs.datasetDetail.curateSaveFailedTitle"),
+          description: t("dialogs.datasetDetail.curateSaveFailedBody"),
+          variant: "destructive",
+        });
+      })
+      .finally(() => setSavingSelection(false));
+  };
+
   if (!repoId) return null;
 
   const handleTrain = () => {
     setSelectedDataset(repoId);
-    openStudio("train", { train: { datasetRepoId: repoId } });
+    const allIncluded = includedEpisodes.length === (episodes?.length ?? 0);
+    openStudio("train", {
+      train: {
+        datasetRepoId: repoId,
+        episodeIndices: allIncluded ? undefined : includedEpisodes,
+      },
+    });
     onOpenChange(false);
     onStudioAction?.();
   };
@@ -561,39 +641,83 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
           <div className="flex min-h-0 flex-col divide-y divide-border overflow-y-auto border-l border-border">
             <div className="flex min-h-0 flex-1 flex-col p-3">
-              <p className={cn(eyebrow, "mb-2")}>
-                {episodes
-                  ? t("dialogs.datasetDetail.episodesHeadingWithCount", {
-                      total: episodes.length,
-                    })
-                  : t("dialogs.datasetDetail.episodesHeading")}
-              </p>
+              <div className="mb-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className={eyebrow}>
+                    {episodes
+                      ? t("dialogs.datasetDetail.episodesHeadingWithCount", {
+                          total: episodes.length,
+                        })
+                      : t("dialogs.datasetDetail.episodesHeading")}
+                  </p>
+                  {episodes && episodes.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant={selecting ? "default" : "outline"}
+                      onClick={selecting ? finishSelecting : startSelecting}
+                      disabled={savingSelection}
+                      className="h-6 gap-1 px-2 text-[11px]"
+                    >
+                      {savingSelection ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : selecting ? (
+                        <Check className="h-3 w-3" />
+                      ) : null}
+                      {selecting
+                        ? t("dialogs.datasetDetail.curateDone")
+                        : t("dialogs.datasetDetail.curateEpisodes")}
+                    </Button>
+                  )}
+                </div>
+                {activeExcluded.size > 0 && (
+                  <p className="mt-0.5 text-[10px] text-muted-foreground">
+                    {t("dialogs.datasetDetail.includedCount", {
+                      included: includedEpisodes.length,
+                      total: episodes?.length ?? 0,
+                    })}
+                  </p>
+                )}
+              </div>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {episodes && episodes.length > 0 ? (
                   <div className="space-y-0.5">
                     {episodes.map((ep) => (
-                      <button
+                      <div
                         key={ep.episode_index}
-                        type="button"
-                        onClick={() => setSelectedEpisode(ep.episode_index)}
-                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent ${
+                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-accent ${
                           selectedEpisode === ep.episode_index
                             ? "border border-border bg-accent"
                             : "border border-transparent"
                         }`}
                       >
-                        <span className="w-6 shrink-0 font-mono text-[11px] text-muted-foreground">
-                          {String(ep.episode_index).padStart(2, "0")}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">
-                          {t("dialogs.datasetDetail.episodeRow", {
-                            index: ep.episode_index,
-                          })}
-                        </span>
-                        <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
-                          {ep.duration.toFixed(1)}s
-                        </span>
-                      </button>
+                        {selecting && (
+                          <Checkbox
+                            checked={!draftExcluded.has(ep.episode_index)}
+                            onCheckedChange={() => toggleDraftEpisode(ep.episode_index)}
+                            aria-label={t("dialogs.datasetDetail.includeEpisodeAria", {
+                              index: ep.episode_index,
+                            })}
+                            className="h-3.5 w-3.5 shrink-0 border-muted-foreground/40 data-[state=checked]:border-primary"
+                          />
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedEpisode(ep.episode_index)}
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        >
+                          <span className="w-6 shrink-0 font-mono text-[11px] text-muted-foreground">
+                            {String(ep.episode_index).padStart(2, "0")}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">
+                            {t("dialogs.datasetDetail.episodeRow", {
+                              index: ep.episode_index,
+                            })}
+                          </span>
+                          <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
+                            {ep.duration.toFixed(1)}s
+                          </span>
+                        </button>
+                      </div>
                     ))}
                   </div>
                 ) : (
@@ -604,7 +728,15 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
               </div>
             </div>
 
-            <div className="p-3">
+            {/* Non-related while picking episodes to train on — rename, tags,
+                visibility, upload/download, delete-whole-dataset all live
+                here, none of it relevant to "which episodes." A dimmed
+                pointer-events-none wrapper keeps this from needing a
+                `disabled` prop threaded through DatasetInfoCard's internals. */}
+            <div
+              className={selecting ? "pointer-events-none p-3 opacity-40" : "p-3"}
+              aria-disabled={selecting}
+            >
               <DatasetInfoCard
                 repoId={repoId}
                 onDownloaded={() => setReloadKey((k) => k + 1)}
@@ -612,7 +744,16 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
             </div>
 
             <div className="p-3">
-              <Button onClick={handleTrain} className="w-full gap-2">
+              <Button
+                onClick={handleTrain}
+                disabled={selecting || includedEpisodes.length === 0}
+                title={
+                  selecting
+                    ? t("dialogs.datasetDetail.finishCuratingFirst")
+                    : undefined
+                }
+                className="w-full gap-2"
+              >
                 <Boxes className="h-4 w-4" />
                 {t("dialogs.datasetDetail.trainSkill")}
               </Button>

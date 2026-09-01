@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
-import { RobotRecord } from "@/hooks/useRobots";
+import { RobotRecord, jointsPerArm } from "@/hooks/useRobots";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -34,7 +34,8 @@ import {
   getCheckpointPolicyConfig,
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
-import { startInference } from "@/lib/inferenceApi";
+import { startSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
@@ -178,7 +179,7 @@ const InferenceModal: React.FC<Props> = ({
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
   // Inference engine A/B. "sync" is the server default and the historical
-  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
   // ACT temporal ensembling — see DeployPanel, which carries the same pair.
@@ -359,18 +360,24 @@ const InferenceModal: React.FC<Props> = ({
       : null;
 
   // Arm-count mismatch between the CHECKPOINT and the selected ROBOT. A
-  // bimanual-trained SO-101 checkpoint carries a 12-dim state/action (two 6-DOF
-  // arms) and left_/right_-prefixed camera names; a single-arm checkpoint is
-  // 6-dim. Running a policy on the wrong arm count crashes on a shape mismatch
+  // bimanual-trained checkpoint carries a two-arm-wide state/action (12 dims
+  // for SO-101, 14 for a CAN arm) and left_/right_-prefixed camera names; a
+  // single-arm checkpoint is one arm wide. Running a policy on the wrong arm count crashes on a shape mismatch
   // deep in the rollout subprocess. Detect it here from the checkpoint's state
   // dim (fall back to action dim) and explain it before Start. This is the
   // client mirror of the server's `_arm_count_mismatch` 409 guard — we forward
   // `checkpoint_state_dim` so the server enforces the same rule authoritatively.
-  const SO101_DOF = 6;
+  // Per-arm DOF is a property of the ROBOT, not a constant: an SO-101 arm is
+  // 6-DOF and a CAN arm (Maker, Metal) 7 (six joints plus its permanent
+  // gripper). Measured against 6, a 7-dim CAN checkpoint is not a clean
+  // multiple, so checkpointArms would resolve to null and this guard would
+  // silently go quiet on exactly the mismatch it exists to catch. Mirrors the
+  // server's `_ARM_STATE_DIMS` in rollout.py — change both together.
+  const armDof = jointsPerArm(robot?.arm_type);
   const checkpointDim = policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
   const checkpointArms =
-    checkpointDim != null && checkpointDim % SO101_DOF === 0
-      ? checkpointDim / SO101_DOF
+    checkpointDim != null && checkpointDim % armDof === 0
+      ? checkpointDim / armDof
       : null;
   const checkpointIsBimanual = checkpointArms != null && checkpointArms >= 2;
   // Flag both directions: a bimanual checkpoint on a single-arm robot, AND a
@@ -445,44 +452,47 @@ const InferenceModal: React.FC<Props> = ({
       }
     }
     try {
-      // The POST now returns immediately (it only validates cheaply, then the
+      // POST /api/v1/sessions returns as soon as the run is claimed (the
       // server downloads the model + preflights the arm in the background), so
       // this opens the inference dialog right away — the download and its
       // progress, any warn-but-allow arm finding, and any failure all surface
-      // there via /inference-status polling.
-      await startInference(baseUrl, fetchWithHeaders, {
-        follower_port: robot.follower_port,
-        follower_config: robot.follower_config,
-        policy_ref: selectedRef,
-        task,
-        camera_bindings: cameraBindingPayload,
-        camera_dims: cameraDimsPayload,
-        duration_s: durationS,
-        // Bimanual: forward the mode + right-arm follower so the server builds a
-        // `bi_so_follower` command staging both follower calibrations. In single
-        // mode the right_* fields are inert (mode defaults to "single"
-        // server-side). robot_name is the BiSO staging base id.
-        mode: robot.mode,
-        right_follower_port: robot.right_follower_port,
-        right_follower_config: robot.right_follower_config,
-        robot_name: robot.name,
-        // Forward the checkpoint's flat state width so the server enforces the
-        // same arm-count guard authoritatively (null when the checkpoint omits
-        // observation.state — the server then defers to its shape check).
-        checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-        inference_engine: inferenceEngine,
-        // ACT-only, and only while the switch is on — otherwise omitted so the
-        // checkpoint's own (ensembling-off) config stands.
-        temporal_ensemble_coeff:
-          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+      // there via /inference-status polling. The request carries the robot
+      // NAME plus policy-shaped options only — ports, configs, mode and the
+      // camera devices behind the bindings all resolve server-side from the
+      // saved record. The owner attaches the lease the dialog keeps renewed.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "inference",
+        robot: robot.name,
+        owner: tabOwnerId(),
+        options: {
+          policy_ref: selectedRef,
+          task,
+          camera_bindings: cameraBindingPayload,
+          camera_dims: cameraDimsPayload,
+          duration_s: durationS,
+          // Forward the checkpoint's flat state width so the server enforces
+          // the same arm-count guard authoritatively (omitted when the
+          // checkpoint lacks observation.state — the server then defers to
+          // its shape check).
+          checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+          inference_engine: inferenceEngine,
+          // ACT-only, and only while the switch is on — otherwise omitted so
+          // the checkpoint's own (ensembling-off) config stands.
+          temporal_ensemble_coeff:
+            isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+        },
       });
       onOpenChange(false);
-      openInferenceSession();
+      openInferenceSession(session.id);
     } catch (e) {
       toast({
-        // The description is the raw error text — not ours to translate.
         title: t("landing.inference.startFailedTitle"),
-        description: e instanceof Error ? e.message : String(e),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; everything else is the server's raw error text — not ours to
+        // translate.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof Error ? e.message : String(e)),
         variant: "destructive",
       });
       // Failure: bring the previews back so the user can adjust.

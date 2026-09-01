@@ -73,6 +73,8 @@ outputs/
 # and have not taken from leLab.
 docs/*
 !docs/upstream/
+# ... and the committed OpenAPI snapshot (see makermodslab/scripts/export_openapi.py)
+!docs/api/
 PHONE_CAMERA_SETUP.md
 HTTPS_SETUP.md
 JETSON_SETUP.md

@@ -31,6 +31,8 @@ from lerobot.motors.motors_bus import MotorsBus
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
 
+from .api_errors import ErrorCode
+from .arm_capabilities import arm_type_of_robot_config, uses_feetech_bus
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
 from .datasets import (
@@ -39,14 +41,21 @@ from .datasets import (
     invalidate_hub_status,
     push_dataset_to_hub,
 )
+from .maker_rest_pose import (
+    capture_maker_pose,
+    maker_follower_arms,
+    return_maker_arms_to_rest,
+)
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
+from .session_events import notify_session_changed
 from .teleoperate import (
     _device_buses,
     _return_followers_to_rest,
     force_disable_torque,
     force_disconnect_partial,
 )
+from .torque import release_maker_torque
 from .utils.config import (
     CameraResolutionError,
     load_robot_cameras,
@@ -205,6 +214,21 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
+
+
+def _set_phase(phase: str) -> None:
+    """Record the session phase and broadcast the transition as a
+    `session_changed` hint (see makermodslab/session_events.py).
+
+    Pure assignment plus a droppable notification — every consumer refetches
+    /recording-status rather than trusting the hint, so this changes no
+    behavior. Phase transitions go through here; the flag claim/release sites
+    emit their own hints where the active flag actually flips."""
+    global current_phase
+    current_phase = phase
+    notify_session_changed("recording", recording_active, phase=phase)
+
+
 # Set only while current_phase == "reconnecting_robot" (the teardown and
 # backoff sleep between connect retries below); 0 otherwise — including on a
 # successful connect and on the terminal failure, so a reader can treat
@@ -373,6 +397,12 @@ class RecordingRequest(BaseModel):
     # read-only now); pydantic ignores unknown fields, so an older frontend's
     # payload still parses and its stale camera set is correctly ignored.
     robot_name: str = ""
+    # Hardware family: "so101" (Feetech serial) or "maker" (RobStride CAN
+    # follower + Star Arm 102 leader). Decides which lerobot config classes the
+    # robot factory builds, which calibration library the names resolve in, and
+    # which of the Feetech-only safety helpers apply. Defaults to so101 so a
+    # request from a client that predates the Maker arm is unchanged.
+    arm_type: str = "so101"
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -650,39 +680,61 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     if releasing
                     else "Recording is already active"
                 ),
+                "code": ErrorCode.ROBOT_BUSY_RELEASING if releasing else ErrorCode.ROBOT_BUSY_RECORDING,
             }
         if _teleoperate.teleoperation_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
             }
         if _rollout.inference_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
             }
         if _auto_calibrate.auto_calibration_is_active():
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "Auto-calibration is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
             }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                "code": ErrorCode.ROBOT_BUSY_WIGGLE,
             }
         if _replay.replay_active:
-            return {"success": False, "message": "Replay is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Replay is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REPLAY,
+            }
+
+        # Lazy, because jobs imports this module back the same way.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
+            }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".
@@ -693,7 +745,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 request.dataset_repo_id,
                 name_reason,
             )
-            return {"success": False, "status_code": 400, "message": name_reason}
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": name_reason,
+                "code": ErrorCode.REQUEST_INVALID_NAME,
+            }
         # Resolve the session's cameras from the robot record NAMED BY THE
         # REQUEST — the request itself carries no camera payload. Done here,
         # before the flag is claimed, so a wrong robot name or an ambiguous
@@ -729,6 +786,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         # lock that claims the active flag (mirrors the _release_now reset), so a
         # stale flag can never make this fresh session delete its own dataset.
         discard_requested = False
+
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client (any page, any remote UI) refetches /recording-status.
+    notify_session_changed("recording", True, phase="preparing")
 
     # Backend camera previews hold the cv2 devices; hand them over before we open
     # the same indices. Ordered deliberately: `recording_active` is already True
@@ -838,12 +899,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 work_completed = current_phase == "completed"
                 last_session_outcome = classify_outcome(work_completed, last_session_error)
                 if not work_completed:
-                    current_phase = "error"
+                    _set_phase("error")
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
             finally:
                 if current_phase != "error":
-                    current_phase = "completed"
+                    _set_phase("completed")
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
 
@@ -872,6 +933,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
 
                 recording_active = False
+                # Final release: record_with_web_events' own finally already
+                # released torque and disconnected before this ran, so the
+                # ports are free now — including on error paths.
+                notify_session_changed("recording", False, phase=current_phase)
                 recording_start_time = None
                 phase_start_time = None
                 current_episode = 1
@@ -894,6 +959,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
     except Exception as e:
         recording_active = False
+        # The claim above already broadcast active=True; undo the hint now
+        # that the failed start released the flag.
+        notify_session_changed("recording", False)
         logger.error(f"Failed to start recording: {e}")
         return {"success": False, "message": f"Failed to start recording: {str(e)}"}
 
@@ -933,7 +1001,7 @@ def handle_stop_recording(discard: bool = False) -> dict[str, Any]:
         discard_requested = True
     recording_events["stop_recording"] = True
     recording_events["exit_early"] = True
-    current_phase = "stopping"
+    _set_phase("stopping")
     phase_start_time = None
     logger.info("Stop recording triggered from web interface (discard=%s)", discard)
     if discard:
@@ -1494,6 +1562,11 @@ class UploadManager:
             import traceback
 
             logger.error(f"Full traceback: {traceback.format_exc()}")
+            # No invalidation here: push_dataset_to_hub drops the cached Hub
+            # facts on its own failure path (a failed push may still have
+            # CREATED the repo), so every push caller — this worker, record's
+            # trailing push, the runners' refill — surfaces the half-finished
+            # state without each remembering to.
             auth = _upload_auth_error(e)
             with self._lock:
                 self.state = "error"
@@ -1626,6 +1699,11 @@ def record_with_web_events(
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
+    # Read the arm type back off the assembled config rather than taking it as
+    # a parameter, so it can never disagree with the devices actually built.
+    # Everything below that touches a Feetech register by name is gated on it.
+    feetech = uses_feetech_bus(arm_type_of_robot_config(cfg.robot))
+
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
     action_features = hw_to_dataset_features(robot.action_features, "action", cfg.dataset.video)
@@ -1694,7 +1772,7 @@ def record_with_web_events(
     # can't cleanly split arm-connect from camera-warmup — they share this
     # substep. (Both surface through the same current_phase global the status
     # handler already returns; no new plumbing.)
-    current_phase = "connecting_robot"
+    _set_phase("connecting_robot")
     phase_start_time = time.time()
     for attempt in range(1, _CONNECT_ATTEMPTS + 1):
         try:
@@ -1737,7 +1815,7 @@ def record_with_web_events(
                 # Logged at INFO through this module's own logger (already in
                 # _RECORD_LOG_LOGGER_NAMES) so it reaches the visible
                 # Record-page log panel, not just the server console.
-                current_phase = "reconnecting_robot"
+                _set_phase("reconnecting_robot")
                 # The attempt about to run, not the one that just failed —
                 # same convention as the log line below, so the Record page's
                 # dialog and its log panel can't disagree about the number
@@ -1761,7 +1839,7 @@ def record_with_web_events(
                 # Let the OS release settle past the turbulence window before
                 # re-rolling the connect.
                 time.sleep(2.0)
-                current_phase = "connecting_robot"
+                _set_phase("connecting_robot")
                 # Back to a plain connect attempt: keep the "0 unless we are
                 # in reconnecting_robot" contract this field documents, so a
                 # later reader can't mistake a healthy session for a retrying
@@ -1772,7 +1850,7 @@ def record_with_web_events(
 
     if teleop is not None:
         # Second detectable substep of the preparing window: the leader bus.
-        current_phase = "connecting_teleop"
+        _set_phase("connecting_teleop")
         phase_start_time = time.time()
         try:
             logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
@@ -1803,7 +1881,11 @@ def record_with_web_events(
     try:
         identity_warnings = verify_devices(
             ((robot, "follower"), (teleop, "leader")),
-            skip=skip_identity_check,
+            # A Maker arm has no EEPROM fingerprint to compare — its zero lives
+            # inside the RobStride motors and its calibration writes
+            # homing_offset=0 for every joint — so the guard is skipped whole
+            # rather than left to fail open per arm.
+            skip=skip_identity_check or not feetech,
             config_names=identity_config_names,
         )
     except ArmIdentityError:
@@ -1842,18 +1924,27 @@ def record_with_web_events(
                 f"{label.capitalize()} bus or calibration not available - calibration may not be applied"
             )
 
-    _write_calibration(robot, "robot")
-    _write_calibration(teleop, "teleop")
+    if feetech:
+        _write_calibration(robot, "robot")
+        _write_calibration(teleop, "teleop")
+    else:
+        # The CAN devices' own connect() already registered their calibration
+        # on the bus. Re-writing it here would also hit the Star 102 leader,
+        # whose bus is a FashionStar handle with no write_calibration at all —
+        # its zero is set by set_origin_point during calibration and lives in
+        # the servos, not in a file the bus reloads.
+        logger.info("CAN arm: calibration registered by connect(); skipping the explicit write")
 
     # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
     # follower only, never the human-held leader. Clears any torque cap a
     # previous auto-calibration left in RAM; a failed write degrades to the
     # previous limit (logged inside) and must not abort the session.
-    reset_torque_limit(robot, "follower arm")
-    # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
-    # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
-    # follower only, never the human-held leader. See makermodslab/motor_power.py.
-    clear_goal_velocity(robot, "follower arm")
+    if feetech:
+        reset_torque_limit(robot, "follower arm")
+        # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
+        # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
+        # follower only, never the human-held leader. See makermodslab/motor_power.py.
+        clear_goal_velocity(robot, "follower arm")
 
     # Capture the follower's rest pose now — after connect/configure/identity
     # guard, before the recording loop moves anything — so a normal stop can
@@ -1862,10 +1953,19 @@ def record_with_web_events(
     # follower buses), NEVER the human-held leader. The gripper is excluded: at
     # stop time it may be holding an object, and returning it to its (likely
     # open) starting width would drop the object mid-return.
-    follower_rest_poses = [
-        (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-        for bus in _device_buses(robot)
-    ]
+    # Both arm types are driven back to this pose on a normal stop; only the
+    # mechanism differs by bus (see teleoperate's matching branch and
+    # maker_rest_pose.py). A Maker arm has no brakes, so releasing torque
+    # wherever the last episode ended would drop it.
+    if feetech:
+        follower_rest_poses = [
+            (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
+            for bus in _device_buses(robot)
+        ]
+        maker_rest_poses = []
+    else:
+        follower_rest_poses = []
+        maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -1880,7 +1980,7 @@ def record_with_web_events(
     try:
         while saved_episodes < cfg.dataset.num_episodes:
             # RECORDING PHASE - with dataset (matches original record.py exactly)
-            current_phase = "recording"
+            _set_phase("recording")
             phase_start_time = time.time()
             # Defense in depth alongside the phase gate in handle_recording_status:
             # a reset phase's pause bookkeeping must never survive into the
@@ -1967,7 +2067,7 @@ def record_with_web_events(
 
                 # Go through reset phase before re-recording (don't increment episode counters)
                 # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
+                _set_phase("resetting")
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
@@ -2047,7 +2147,7 @@ def record_with_web_events(
             # Skip reset for the last episode that was just saved
             if saved_episodes < cfg.dataset.num_episodes:
                 # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
+                _set_phase("resetting")
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
@@ -2099,7 +2199,7 @@ def record_with_web_events(
                     break
 
         # Recording completed
-        current_phase = "completed"
+        _set_phase("completed")
         phase_start_time = None
         print("🏁 STATUS CHANGE: Recording session completed - all episodes finished")
         log_say("Stop recording", cfg.play_sounds, blocking=True)
@@ -2115,12 +2215,20 @@ def record_with_web_events(
                 # stop). A second stop (release-now) skips/aborts the return;
                 # error exits skip this — the bus may be gone, release ASAP.
                 releasing = True
+                # Still energized and holding the ports — a phase of this
+                # session, not idle yet (the worker's finally emits the final
+                # release hint once cleanup is done).
+                notify_session_changed("recording", True, phase="releasing")
                 _return_followers_to_rest(follower_rest_poses, _release_now)
+                return_maker_arms_to_rest(maker_rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.
-            force_disable_torque(robot, "robot")
-            force_disable_torque(teleop, "teleop")
+            if feetech:
+                force_disable_torque(robot, "robot")
+                force_disable_torque(teleop, "teleop")
+            else:
+                release_maker_torque(robot, "CAN follower arm")
             robot.disconnect()
             if teleop:
                 teleop.disconnect()

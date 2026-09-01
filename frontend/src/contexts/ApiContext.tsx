@@ -59,7 +59,7 @@ export const ApiProvider: React.FC<{ children: ReactNode }> = ({
     if (baseUrl === fallback) return;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4000);
-    fetch(`${baseUrl}/hf-auth-status`, { signal: controller.signal })
+    fetch(`${baseUrl}/api/v1/hf-auth-status`, { signal: controller.signal })
       .catch(() => {
         console.warn(
           `Saved API address ${baseUrl} is unreachable — falling back to ${fallback}.`,
