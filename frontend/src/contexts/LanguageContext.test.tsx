@@ -27,6 +27,9 @@ function renderApp() {
 }
 
 afterEach(async () => {
+  // Reset both halves of the language state: i18next's active language and
+  // the persisted choice the next LanguageProvider would boot from.
+  localStorage.clear();
   await act(async () => {
     await i18n.changeLanguage("en");
   });
