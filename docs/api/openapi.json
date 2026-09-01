@@ -483,6 +483,17 @@
       "DatasetHubStatusResponse": {
         "description": "datasets.py get_hub_status — url is null (not absent) for every status\nexcept on_hub, so None must NOT be excluded on this route.",
         "properties": {
+          "hub_has_data": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Has Data"
+          },
           "repo_id": {
             "title": "Repo Id",
             "type": "string"
@@ -512,7 +523,8 @@
         "required": [
           "repo_id",
           "status",
-          "url"
+          "url",
+          "hub_has_data"
         ],
         "title": "DatasetHubStatusResponse",
         "type": "object"

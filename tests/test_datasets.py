@@ -472,6 +472,25 @@ def test_hub_status_endpoint(client: TestClient) -> None:
     assert body["url"] == "https://huggingface.co/datasets/alice/pick"
 
 
+def test_hub_status_endpoint_carries_the_emptiness_claim_over_the_wire(client: TestClient) -> None:
+    """Through the ROUTE, not the function: the typed response model FILTERS
+    undeclared fields, so a hub_has_data missing from DatasetHubStatusResponse
+    is stripped silently — every function-level test still passes while the
+    card's 'Upload didn't finish' warning and the cache dialog's not-backed-up
+    gate go dark. This pins the field to the wire."""
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    fake_api.get_paths_info.return_value = []  # repo exists, holds no dataset
+    with (
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        resp = client.get("/datasets/hub-status", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    assert resp.json()["hub_has_data"] is False
+
+
 # --- Rename -----------------------------------------------------------------
 
 
