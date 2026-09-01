@@ -496,6 +496,14 @@ export interface HubJob {
   status: { stage: string; message: string | null } | null;
   owner: string | null;
   url: string;
+  // What the run trains, recovered Hub-side from the job's own argv
+  // (_hub_job_identity). Each is independently null: a RESUMED cloud run passes
+  // --config_path instead of --policy.type/--dataset.repo_id, so it reports a
+  // repo and a step target with no policy or dataset.
+  policy_type: string | null;
+  dataset: string | null;
+  total_steps: number | null;
+  hf_repo_id: string | null;
 }
 
 // Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,

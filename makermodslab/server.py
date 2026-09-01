@@ -2041,21 +2041,85 @@ def _hub_job_run_name(ji) -> str | None:
         if isinstance(labelled, str) and labelled.strip():
             return labelled.strip()
 
-    # `arguments` is where the Hub splits argv for some submission paths; ours
-    # rides entirely in `command`. Scan both so neither shape is missed.
-    argv = [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
-    for i, tok in enumerate(argv):
-        if not isinstance(tok, str):
-            continue
-        repo_id = None
-        if tok == "--policy.repo_id" and i + 1 < len(argv):
-            repo_id = argv[i + 1]
-        elif tok.startswith("--policy.repo_id="):
-            repo_id = tok.split("=", 1)[1]
+    repo_id = _hub_job_trainer_args(ji).get("policy.repo_id")
+    if repo_id:
         # The slug after the namespace is the run id the library titles by.
-        if isinstance(repo_id, str) and repo_id.strip():
-            return repo_id.strip().rsplit("/", 1)[-1]
+        return repo_id.rsplit("/", 1)[-1]
     return None
+
+
+# The trainer flags worth reading back off a Hub job, and the JSON key each one
+# becomes on the listing row. Deliberately a small allowlist rather than "parse
+# everything": these four are what an untracked row renders (title, policy chip,
+# dataset/steps on the card), and every one of them is a field a tracked
+# JobRecord already carries, so a foreign run reads like a local one.
+_HUB_JOB_TRAINER_FLAGS = ("policy.type", "dataset.repo_id", "steps", "policy.repo_id")
+
+
+def _hub_job_trainer_args(ji) -> dict[str, str]:
+    """The allowlisted `--flag value` pairs out of a Hub job's own argv.
+
+    A cloud run's whole trainer invocation is stored on the job, so what a
+    foreign run trains — its policy, dataset, and step target — is already in
+    the listing response we fetch, with no extra Hub call. This reads it back.
+
+    The command we submit is
+    ``python -c <wrapper source> <spec> [directives] -- <trainer argv>``, so
+    parsing starts after the first BARE ``--`` sentinel where there is one: the
+    wrapper source is a single argv token, but the wrapper-side directives
+    before the sentinel (e.g. ``--resume-from=...``) are not ours to read as
+    trainer flags. `arguments` is where the Hub splits argv for some submission
+    paths; ours rides entirely in `command`, so both are scanned.
+
+    Both spellings are accepted (``--flag value`` and ``--flag=value``) because
+    build_training_command emits each in different places. A flag repeated wins
+    on its first occurrence; an unparsable or valueless flag is simply absent
+    rather than raising — this decorates a listing and must never be able to
+    500 it.
+    """
+    argv = [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
+    argv = [tok for tok in argv if isinstance(tok, str)]
+    if "--" in argv:
+        argv = argv[argv.index("--") + 1 :]
+
+    out: dict[str, str] = {}
+    for i, tok in enumerate(argv):
+        for flag in _HUB_JOB_TRAINER_FLAGS:
+            if flag in out:
+                continue
+            value = None
+            if tok == f"--{flag}" and i + 1 < len(argv):
+                value = argv[i + 1]
+            elif tok.startswith(f"--{flag}="):
+                value = tok.split("=", 1)[1]
+            # A following token that is itself a flag means this one was passed
+            # without a value; leave it absent rather than recording "--next".
+            if value and not value.startswith("--"):
+                out[flag] = value.strip()
+    return out
+
+
+def _hub_job_identity(ji) -> dict[str, Any]:
+    """The run-identity half of a `/jobs/hub` row: what this job trains.
+
+    Every value is best-effort and independently nullable — a RESUMED cloud run
+    passes `--config_path` instead of `--policy.type`/`--dataset.repo_id`
+    (build_training_command reconstructs those from the checkpoint), so a
+    continuation legitimately reports a repo and steps with no policy or
+    dataset. The frontend reserves the columns and renders a blank, which is the
+    honest answer; inventing one from the run name would be a guess.
+    """
+    args = _hub_job_trainer_args(ji)
+    try:
+        total_steps: int | None = int(args["steps"])
+    except (KeyError, ValueError):
+        total_steps = None
+    return {
+        "policy_type": args.get("policy.type"),
+        "dataset": args.get("dataset.repo_id"),
+        "total_steps": total_steps,
+        "hf_repo_id": args.get("policy.repo_id"),
+    }
 
 
 # Errors a per-author Hub model listing may raise that must degrade to "empty for
@@ -2269,6 +2333,7 @@ def list_hub_jobs():
                 "status": ({"stage": ji.status.stage, "message": ji.status.message} if ji.status else None),
                 "owner": ji.owner.name if ji.owner else None,
                 "url": ji.url,
+                **_hub_job_identity(ji),
             }
             for ji in jobs
         ],

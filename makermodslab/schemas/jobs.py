@@ -137,7 +137,15 @@ class HubJobItem(BaseModel):
     """One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is
     always present; the nullables mirror huggingface_hub's JobInfo (docker_image
     and space_id are mutually exclusive on the Hub side, status/owner can be
-    absent objects → null, name is _hub_job_run_name's best effort)."""
+    absent objects → null, name is _hub_job_run_name's best effort).
+
+    The trailing four are the run's identity, recovered from the job's own argv
+    by _hub_job_identity so a run launched on another machine reads like a
+    tracked one. Each is independently nullable and for a real reason: a RESUMED
+    cloud run carries `--config_path` instead of `--policy.type` /
+    `--dataset.repo_id`, so it reports a repo and a step target with no policy
+    or dataset. They are decoration on a listing — never identity — so a row
+    that answers none of them still renders."""
 
     id: str
     name: str | None
@@ -148,6 +156,10 @@ class HubJobItem(BaseModel):
     status: HubJobStatus | None
     owner: str | None
     url: str
+    policy_type: str | None
+    dataset: str | None
+    total_steps: int | None
+    hf_repo_id: str | None
 
 
 class HubModelItem(BaseModel):
