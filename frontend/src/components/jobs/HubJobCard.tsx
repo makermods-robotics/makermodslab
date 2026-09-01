@@ -102,11 +102,19 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
     job.space_id ??
     t("jobs.hubJob.fallbackTitle", { id: job.id.slice(0, 12) });
 
-  // Unified metadata rows (same format as the dataset/job/model cards).
-  const metaRows: Array<[string, string]> = [
-    [t("jobs.meta.flavor"), job.flavor ?? "—"],
-    [t("jobs.meta.created"), relativeTime(job.created_at)],
-  ];
+  // Unified metadata rows (same format as the dataset/job/model cards). The
+  // run-identity rows lead, in JobCard's order, so a foreign run's card reads
+  // like a tracked one; each is omitted when the job's argv didn't answer it
+  // (a resumed run names a config_path, not a policy or dataset). Only the
+  // LABELS are translated — the values are data (policy type, repo id) or a
+  // pre-formatted number.
+  const metaRows: Array<[string, string]> = [];
+  if (job.policy_type) metaRows.push([t("jobs.meta.policy"), job.policy_type]);
+  if (job.dataset) metaRows.push([t("jobs.meta.dataset"), job.dataset]);
+  if (job.total_steps)
+    metaRows.push([t("jobs.meta.steps"), job.total_steps.toLocaleString()]);
+  metaRows.push([t("jobs.meta.flavor"), job.flavor ?? "—"]);
+  metaRows.push([t("jobs.meta.created"), relativeTime(job.created_at)]);
   if (job.owner) metaRows.push([t("jobs.meta.owner"), job.owner]);
   // Only worth a row once it isn't the title; keeps the image visible for the
   // "which image did this run on" question without spending a row twice.

@@ -13,6 +13,11 @@ export default {
       single: "单臂",
       bimanual: "双臂",
     },
+    armType: {
+      so101: "SO-101",
+      maker: "Maker",
+      metal: "Metal",
+    },
     status: {
       ready: "就绪",
       needsSetup: "需要设置",

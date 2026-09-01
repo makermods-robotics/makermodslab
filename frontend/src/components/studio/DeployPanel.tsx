@@ -25,7 +25,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useStudio } from "@/contexts/StudioContext";
 import { useInferenceSession } from "@/contexts/InferenceSessionContext";
-import { useRobots } from "@/hooks/useRobots";
+import { useRobots, jointsPerArm } from "@/hooks/useRobots";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
 import {
@@ -568,12 +568,19 @@ const DeployPanel: React.FC = () => {
 
   // Arm-count mismatch between CHECKPOINT and ROBOT — client mirror of the
   // server's `_arm_count_mismatch` 409 guard. (Ported verbatim.)
-  const SO101_DOF = 6;
+  //
+  // Per-arm DOF is a property of the ROBOT, not a constant: an SO-101 arm is
+  // 6-DOF and a CAN arm (Maker, Metal) 7 (six joints plus its permanent
+  // gripper). Measured against 6, a 7-dim CAN checkpoint is not a clean
+  // multiple, so checkpointArms would resolve to null and this guard would
+  // silently go quiet on exactly the mismatch it exists to catch. Mirrors the
+  // server's `_ARM_STATE_DIMS` in rollout.py — change both together.
+  const armDof = jointsPerArm(robot?.arm_type);
   const checkpointDim =
     policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
   const checkpointArms =
-    checkpointDim != null && checkpointDim % SO101_DOF === 0
-      ? checkpointDim / SO101_DOF
+    checkpointDim != null && checkpointDim % armDof === 0
+      ? checkpointDim / armDof
       : null;
   const checkpointIsBimanual = checkpointArms != null && checkpointArms >= 2;
   const robotCheckpointArmMismatch =

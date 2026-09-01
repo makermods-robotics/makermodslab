@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import UrdfViewer from "../UrdfViewer";
+import JointAngleReadout from "./JointAngleReadout";
 import Logo from "@/components/Logo";
 
 interface VisualizerPanelProps {
@@ -10,6 +11,14 @@ interface VisualizerPanelProps {
   className?: string;
   /** Render a second arm viewer (driven by the "joints_right" stream). */
   bimanual?: boolean;
+  /**
+   * Show the numeric joint readout instead of the 3D model.
+   *
+   * Set for a Maker arm: the only URDF that ships is the SO-101's, and the
+   * Maker arm is a different 7-DOF geometry, so the viewer would animate the
+   * wrong arm with wrong values. See JointAngleReadout.
+   */
+  readoutOnly?: boolean;
   /** Optional content rendered as a column beside the 3D viewer (e.g. a camera panel). */
   rightSlot?: React.ReactNode;
 }
@@ -18,6 +27,7 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   onGoBack,
   className,
   bimanual = false,
+  readoutOnly = false,
   rightSlot,
 }) => {
   const { t } = useTranslation();
@@ -53,7 +63,11 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
                 {t("shared.visualizer.leftArm")}
               </span>
               <div className="flex-1 bg-background rounded border border-border min-h-[25vh]">
-                <UrdfViewer jointsKey="joints" />
+                {readoutOnly ? (
+                  <JointAngleReadout jointsKey="joints_deg" />
+                ) : (
+                  <UrdfViewer jointsKey="joints" />
+                )}
               </div>
             </div>
             <div className="flex-1 flex flex-col">
@@ -61,13 +75,17 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
                 {t("shared.visualizer.rightArm")}
               </span>
               <div className="flex-1 bg-background rounded border border-border min-h-[25vh]">
-                <UrdfViewer jointsKey="joints_right" />
+                {readoutOnly ? (
+                  <JointAngleReadout jointsKey="joints_deg_right" />
+                ) : (
+                  <UrdfViewer jointsKey="joints_right" />
+                )}
               </div>
             </div>
           </div>
         ) : (
           <div className="flex-1 bg-background rounded border border-border min-h-[50vh] lg:min-h-0">
-            <UrdfViewer />
+            {readoutOnly ? <JointAngleReadout /> : <UrdfViewer />}
           </div>
         )}
       </div>

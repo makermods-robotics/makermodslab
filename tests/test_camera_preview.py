@@ -425,7 +425,7 @@ def test_start_inference_stops_camera_previews(monkeypatch: pytest.MonkeyPatch) 
     # Neutralise the cheap pre-flight guards so this test isolates the preview
     # release; they run BEFORE it and would otherwise early-return.
     monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
-    monkeypatch.setattr(rollout, "_arm_count_mismatch", lambda mode, dim: None)
+    monkeypatch.setattr(rollout, "_arm_count_mismatch", lambda mode, dim, arm_type="so101": None)
 
     result = rollout.handle_start_inference(
         rollout.InferenceRequest(

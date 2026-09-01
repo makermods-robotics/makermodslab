@@ -188,6 +188,54 @@ export async function deleteNodeJob(
   );
 }
 
+/** The PEER's answer to "can your environment import what this policy
+ * needs?" — its own GET /api/v1/system/policy-extra/{policy_type}, proxied
+ * server-to-server. The offloaded run imports from the peer's site-packages,
+ * so the local answer is irrelevant to it. */
+export interface NodePolicyExtraStatus {
+  policy_type: string;
+  needs_extra: boolean;
+  available: boolean;
+  package: string;
+  install_target: string;
+  install_hint: string;
+}
+
+export async function getNodePolicyExtra(
+  baseUrl: string,
+  fetcher: Fetcher,
+  instanceId: string,
+  policyType: string,
+  signal?: AbortSignal,
+): Promise<NodePolicyExtraStatus> {
+  return apiRequest<NodePolicyExtraStatus>(
+    baseUrl,
+    fetcher,
+    `/api/v1/nodes/${encodeURIComponent(instanceId)}/policy-extra/${encodeURIComponent(policyType)}`,
+    { signal, action: "Get node policy extra" },
+  );
+}
+
+/** Ask the peer to restart its server process (re-exec in place), so a
+ * just-installed extra environment or config change lands without a shell on
+ * the node. 200 means the restart is SCHEDULED — expect the node to read
+ * unreachable for a few seconds before the registry's probes pick it back up.
+ * Coded refusals pass through from the peer (409 robot.busy.* /
+ * session.held / system.restart_unsupported); a peer too old to have the
+ * endpoint answers a plain 404. */
+export async function restartNode(
+  baseUrl: string,
+  fetcher: Fetcher,
+  instanceId: string,
+): Promise<{ restarting: boolean; message: string }> {
+  return apiRequest<{ restarting: boolean; message: string }>(
+    baseUrl,
+    fetcher,
+    `/api/v1/nodes/${encodeURIComponent(instanceId)}/restart`,
+    { method: "POST", action: "Restart node" },
+  );
+}
+
 /** A node the Compute selector can offer a training to: reachable, verified
  * (it has an identity to route by), and advertising that it accepts jobs. */
 export function isSelectableNode(node: NodeEntry): boolean {

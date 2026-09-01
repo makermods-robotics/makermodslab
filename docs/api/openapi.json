@@ -1066,6 +1066,49 @@
         "title": "EpisodeSummary",
         "type": "object"
       },
+      "ExcludedEpisodesRequest": {
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesRequest",
+        "type": "object"
+      },
+      "ExcludedEpisodesResponse": {
+        "description": "server.py datasets_excluded_episodes — the episode indices left OUT of\nthe training subset for one dataset. Empty list when nothing is excluded;\nthe dataset itself is untouched (curation, not deletion).",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesResponse",
+        "type": "object"
+      },
       "ExtraStatus": {
         "properties": {
           "available": {
@@ -1263,7 +1306,7 @@
         "type": "object"
       },
       "HubJobItem": {
-        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).",
+        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).\n\nThe trailing four are the run's identity, recovered from the job's own argv\nby _hub_job_identity so a run launched on another machine reads like a\ntracked one. Each is independently nullable and for a real reason: a RESUMED\ncloud run carries `--config_path` instead of `--policy.type` /\n`--dataset.repo_id`, so it reports a repo and a step target with no policy\nor dataset. They are decoration on a listing — never identity — so a row\nthat answers none of them still renders.",
         "properties": {
           "created_at": {
             "anyOf": [
@@ -1275,6 +1318,17 @@
               }
             ],
             "title": "Created At"
+          },
+          "dataset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset"
           },
           "docker_image": {
             "anyOf": [
@@ -1297,6 +1351,17 @@
               }
             ],
             "title": "Flavor"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
           },
           "id": {
             "title": "Id",
@@ -1324,6 +1389,17 @@
             ],
             "title": "Owner"
           },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
           "space_id": {
             "anyOf": [
               {
@@ -1345,6 +1421,17 @@
               }
             ]
           },
+          "total_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Steps"
+          },
           "url": {
             "title": "Url",
             "type": "string"
@@ -1359,7 +1446,11 @@
           "flavor",
           "status",
           "owner",
-          "url"
+          "url",
+          "policy_type",
+          "dataset",
+          "total_steps",
+          "hf_repo_id"
         ],
         "title": "HubJobItem",
         "type": "object"
@@ -1542,6 +1633,11 @@
       },
       "InferenceRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "camera_bindings": {
             "additionalProperties": {
               "type": "string"
@@ -2114,6 +2210,152 @@
         "title": "LogLine",
         "type": "object"
       },
+      "MakerIdentifyArmRequest": {
+        "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "required": [
+          "device_type"
+        ],
+        "title": "MakerIdentifyArmRequest",
+        "type": "object"
+      },
+      "MakerIdentifyArmResponse": {
+        "description": "maker_ports.identify_maker_arm_by_motion — which port saw the gesture.\n\n`port` is absent on failure rather than null, so the route excludes None.\n`skipped` lists ports that could not be opened (usually the other half of\nthe rig, which speaks a different protocol).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "skipped": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "MakerIdentifyArmResponse",
+        "type": "object"
+      },
+      "MakerProbePortsRequest": {
+        "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "title": "MakerProbePortsRequest",
+        "type": "object"
+      },
+      "MakerProbePortsResponse": {
+        "description": "maker_ports.probe_maker_ports — which ports answered which protocol.\n\nEvery list is always present (empty rather than absent) so a client can\nread them unconditionally; `message` is always a human-readable summary,\nincluding on the nothing-found path.",
+        "properties": {
+          "follower_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Follower Ports",
+            "type": "array"
+          },
+          "leader_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Leader Ports",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "unknown_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Ports",
+            "type": "array"
+          }
+        },
+        "required": [
+          "success",
+          "follower_ports",
+          "leader_ports",
+          "unknown_ports",
+          "message"
+        ],
+        "title": "MakerProbePortsResponse",
+        "type": "object"
+      },
       "MergeLogEntry": {
         "description": "One drained line of the merge subprocess log (merge.py _enqueue).",
         "properties": {
@@ -2354,7 +2596,7 @@
         "type": "object"
       },
       "ModelInfoResponse": {
-        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.",
+        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.\n``dataset_episodes`` is absent only on that file-tree fallback.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2366,6 +2608,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -2498,7 +2754,7 @@
         "type": "object"
       },
       "ModelListItem": {
-        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
+        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\n``dataset_episodes`` (the training-episode subset, privacy-gated by\nmodels._gate_dataset_episodes) is set by the two local producers and is\nabsent on a Hub-seeded row, which never reads a checkpoint's\ntrain_config.json.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2510,6 +2766,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -2869,6 +3139,11 @@
       },
       "OpenCalibrationFolderRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "device_type": {
             "title": "Device Type",
             "type": "string"
@@ -3001,6 +3276,11 @@
       },
       "RecordingRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "dataset_repo_id": {
             "title": "Dataset Repo Id",
             "type": "string"
@@ -3130,6 +3410,55 @@
         "title": "RecordingRequest",
         "type": "object"
       },
+      "ReleaseCanTorqueRequest": {
+        "properties": {
+          "arm_type": {
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm_type",
+          "port"
+        ],
+        "title": "ReleaseCanTorqueRequest",
+        "type": "object"
+      },
+      "ReleaseCanTorqueResponse": {
+        "description": "can_recovery.handle_release_can_torque — the crash-recovery release.\n\n`problems` is always present (empty on success) so a client can render\nthe loud per-bus alarms unconditionally.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "problems"
+        ],
+        "title": "ReleaseCanTorqueResponse",
+        "type": "object"
+      },
       "RenameJobBody": {
         "properties": {
           "new_name": {
@@ -3163,6 +3492,11 @@
       },
       "ReplayRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "episode_index": {
             "title": "Episode Index",
             "type": "integer"
@@ -3197,6 +3531,24 @@
           "follower_config"
         ],
         "title": "ReplayRequest",
+        "type": "object"
+      },
+      "RestartResponse": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "restarting": {
+            "title": "Restarting",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "restarting",
+          "message"
+        ],
+        "title": "RestartResponse",
         "type": "object"
       },
       "RobotPortResponse": {
@@ -3567,6 +3919,33 @@
         "title": "SessionStopResponse",
         "type": "object"
       },
+      "SetExcludedEpisodesResponse": {
+        "description": "server.py datasets_set_excluded_episodes — echoes the set actually\npersisted (re-read from disk), not the caller's input.",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "SetExcludedEpisodesResponse",
+        "type": "object"
+      },
       "SuccessRepoIdResponse": {
         "description": "The pin/hide mutations' shared shape (server.py datasets_save_custom /\ndatasets_remove_custom / datasets_hide / datasets_unhide and their models\nmirrors) — success is False when a remove/unhide had nothing to remove.",
         "properties": {
@@ -3624,6 +4003,11 @@
       },
       "TeleoperateRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "follower_config": {
             "title": "Follower Config",
             "type": "string"
@@ -4461,6 +4845,48 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/arms/release-torque": {
+      "post": {
+        "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
+        "operationId": "release_can_torque",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseCanTorqueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseCanTorqueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Can Torque",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/auto-calibration-batch-status": {
       "get": {
         "description": "Per-arm status + logs and overall counts for a batch auto-calibration.",
@@ -4552,6 +4978,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4588,6 +5024,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -4649,6 +5095,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4694,6 +5150,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -4743,6 +5209,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -4782,7 +5258,7 @@
     },
     "/api/v1/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status",
         "responses": {
           "200": {
@@ -4853,7 +5329,7 @@
     },
     "/api/v1/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step",
         "responses": {
           "200": {
@@ -5190,6 +5666,89 @@
           }
         },
         "summary": "Datasets Episodes",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
+    "/api/v1/datasets/excluded-episodes": {
+      "get": {
+        "description": "Episode indices the user excluded from training for this dataset\n(curation, not deletion — see set_excluded_episodes). Empty list for a\ndataset with no exclusions.",
+        "operationId": "datasets_excluded_episodes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Excluded Episodes",
+        "tags": [
+          "datasets"
+        ]
+      },
+      "put": {
+        "description": "Replace the excluded-episode set for one dataset. NEVER deletes or\nmutates the dataset — the viewer computes the training subset from this\nand sends it as dataset_episodes when launching a run.",
+        "operationId": "datasets_set_excluded_episodes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExcludedEpisodesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Set Excluded Episodes",
         "tags": [
           "datasets"
         ]
@@ -6634,6 +7193,90 @@
         ]
       }
     },
+    "/api/v1/maker/identify-arm": {
+      "post": {
+        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes.",
+        "operationId": "identify_maker_arm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerIdentifyArmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerIdentifyArmResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Identify Maker Arm",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/maker/probe-ports": {
+      "post": {
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).",
+        "operationId": "probe_maker_arm_ports",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerProbePortsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerProbePortsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Probe Maker Arm Ports",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/models": {
       "get": {
         "description": "List trained models available to the user — local runs + Hub repos.\n\nEach entry carries a `source` field: \"local\", \"hub\", or \"both\" (a local run\nthat was also pushed to the Hub). Mirrors GET /datasets.",
@@ -7529,6 +8172,205 @@
         ]
       }
     },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}": {
+      "get": {
+        "description": "Environment proxy: the peer's own GET /api/v1/system/policy-extra/\n{policy_type}, passed through — whether the extra the policy needs is\nimportable in THE PEER's environment, the one an offloaded run imports\nfrom (the local answer is irrelevant to it). Same error mapping as the\nother GET proxies: 404 node.not_found for an unknown instance_id, 502\nnode.unreachable for ANY failure to read the peer.",
+        "operationId": "get_node_policy_extra",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyExtraStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Policy Extra",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install": {
+      "post": {
+        "description": "Forward the install to the peer: `pip install lerobot[<extra>]` runs\nTHERE, in the environment its training subprocesses import from. Mutation\nstance, like the stop/delete proxies: the peer's own refusals keep THEIR\nstatus and body; only transport-level failure is 502 node.unreachable,\nand 404 node.not_found names an unknown node.",
+        "operationId": "install_node_policy_extra",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Node Policy Extra",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install-status": {
+      "get": {
+        "description": "The peer's own install-status, passed through. The peer drains pending\npip log lines per call, so this proxy is inherently incremental — like\nthe job-log proxy. Same error mapping as the GET proxies.",
+        "operationId": "get_node_policy_extra_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Policy Extra Status",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/restart": {
+      "post": {
+        "description": "Forward a restart to the peer (its own POST /api/v1/system/restart).\n200 means the peer ANSWERED and scheduled its re-exec — expect it to flap\nunreachable for a few seconds; the registry's probes pick it back up. The\npeer's coded refusals (409 session.held / robot.busy.training /\nsystem.restart_unsupported — or a plain 404 from a peer too old to have\nthe endpoint) pass through with THEIR status and body; only transport\nfailure is 502 node.unreachable.",
+        "operationId": "restart_node",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Node",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
     "/api/v1/open-calibration-folder": {
       "post": {
         "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
@@ -8188,7 +9030,7 @@
     },
     "/api/v1/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration",
         "requestBody": {
           "content": {
@@ -8368,7 +9210,7 @@
     },
     "/api/v1/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration",
         "responses": {
           "200": {
@@ -8640,6 +9482,28 @@
           }
         },
         "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/restart": {
+      "post": {
+        "description": "Re-exec this server process in place (same argv/env/PID), so a remote\noperator — the node-proxy POST /api/v1/nodes/{id}/restart — can bounce a\nheadless station without a shell on it. Answers FIRST, re-execs after a\nshort grace delay so this response reaches the client.\n\nRefusals, all 409: a live robot flow (robot.busy.<feature> — killing the\nserver mid-flow drops the hardware threads with it), a running or queued\ntraining run (robot.busy.training — the loader retires both on startup),\nand a process that cannot safely re-exec (system.restart_unsupported: a\ndev reload worker, a non-entry-point launch, or Windows).",
+        "operationId": "restart_server",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Restart Server",
         "tags": [
           "system"
         ]
@@ -9030,6 +9894,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -9066,6 +9940,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -9127,6 +10011,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -9172,6 +10066,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -9221,6 +10125,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -9260,7 +10174,7 @@
     },
     "/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status_calibration_status_get",
         "responses": {
           "200": {
@@ -9331,7 +10245,7 @@
     },
     "/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step_complete_calibration_step_post",
         "responses": {
           "200": {
@@ -12007,7 +12921,7 @@
     },
     "/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration_start_calibration_post",
         "requestBody": {
           "content": {
@@ -12187,7 +13101,7 @@
     },
     "/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration_stop_calibration_post",
         "responses": {
           "200": {
