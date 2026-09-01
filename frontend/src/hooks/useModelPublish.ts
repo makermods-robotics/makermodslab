@@ -36,8 +36,8 @@ export interface UseModelPublishResult {
 }
 
 /**
- * Drives one run's background multi-checkpoint publish (POST /models/upload +
- * polled /models/upload-status) — the models-publish twin of useHubDownload,
+ * Drives one run's background multi-checkpoint publish (POST /models/publish +
+ * polled /models/publish-status) — the models-publish twin of useHubDownload,
  * against the same one-at-a-time start/poll backend shape.
  *
  * Why a poller rather than an awaited request: a publish is a SEQUENTIAL QUEUE
@@ -77,7 +77,16 @@ export function useModelPublish({
     getModelUploadStatus(baseUrl, fetchWithHeaders)
       .then((s) => {
         if (cancelled) return;
-        setStatus(s.model_id === modelId && s.state === "running" ? s : null);
+        if (s.model_id !== modelId || s.state === "idle") {
+          setStatus(null);
+          return;
+        }
+        // A publish that finished before this mount: keep the terminal status
+        // readable, but never re-fire the one-shot callbacks for it — the
+        // toast belonged to the session that started the publish, and the
+        // caller's own data refetches already cover the outcome.
+        if (s.state !== "running") notified.current = true;
+        setStatus(s);
       })
       .catch(() => {
         if (!cancelled) setStatus(null);

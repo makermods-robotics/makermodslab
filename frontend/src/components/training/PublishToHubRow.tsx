@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useHfAuth } from "@/contexts/HfAuthContext";
@@ -16,9 +17,9 @@ import {
 } from "@/components/ui/popover";
 import { Loader2, Upload as UploadIcon } from "lucide-react";
 
-/** step 0 is the sentinel an imported single-model checkpoint carries (lerobot
- * never saves at step 0) — same label rule as CheckpointDropdown. */
-const stepLabel = (step: number) => (step === 0 ? "latest" : `step ${step}`);
+// step 0 is the sentinel an imported single-model checkpoint carries (lerobot
+// never saves at step 0) — same label rule, and the SAME catalog keys, as
+// CheckpointDropdown (resolved in-component; see stepLabel below).
 
 /**
  * The training dialog's "Publish to Hub" row: pick any subset of a finished
@@ -41,11 +42,19 @@ const PublishToHubRow: React.FC<{
    * header renders as "View on Hub". */
   onPublished: () => void;
 }> = ({ jobId, onPublished }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { auth } = useHfAuth();
   const canUpload = useCanUpload();
   const username = auth.status === "authenticated" ? auth.username : null;
+  const writableNamespaces =
+    auth.status === "authenticated" ? auth.writableNamespaces : [];
+
+  const stepLabel = (step: number) =>
+    step === 0
+      ? t("jobs.checkpointDropdown.latest")
+      : t("jobs.checkpointDropdown.step", { step: String(step) });
 
   const [data, setData] = useState<RunCheckpoints | null>(null);
   const [repoId, setRepoId] = useState("");
@@ -73,22 +82,25 @@ const PublishToHubRow: React.FC<{
   const { publishing, status, publish } = useModelPublish({
     modelId: jobId,
     onDone: (s) => {
-      const n = s.done_steps.length;
       toast({
-        title: `Published ${n} checkpoint${n === 1 ? "" : "s"}`,
+        title: t("training.publish.toast.publishedTitle", {
+          count: s.done_steps.length,
+        }),
         description: (
           <span>
-            {s.repo_id} is on the Hub.{" "}
-            {s.url && (
-              <a
-                href={s.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                View model
-              </a>
-            )}
+            <Trans
+              i18nKey="training.publish.toast.publishedBody"
+              values={{ repoId: s.repo_id ?? "" }}
+              components={[
+                <a
+                  key="0"
+                  href={s.url ?? undefined}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline font-medium"
+                />,
+              ]}
+            />
           </span>
         ),
       });
@@ -98,10 +110,12 @@ const PublishToHubRow: React.FC<{
     },
     onError: (message, s) => {
       const landed = s.done_steps.length;
+      // `message` is the backend's own prose, surfaced verbatim; only the
+      // retry hint appended after it is ours to translate.
       toast({
-        title: "Publish failed",
+        title: t("training.publish.toast.failedTitle"),
         description: landed
-          ? `${message} (${landed} checkpoint${landed === 1 ? "" : "s"} already published — retry the rest.)`
+          ? `${message} ${t("training.publish.toast.failedLanded", { count: landed })}`
           : message,
         variant: "destructive",
       });
@@ -163,21 +177,41 @@ const PublishToHubRow: React.FC<{
   const selectAll = () =>
     setSelected(allSelected ? [] : unpublished.map((c) => c.step));
 
+  // Pre-flight check of the typed repo id, so an unwritable namespace is an
+  // inline message at the input instead of a 403 surfacing minutes later
+  // through publish-status. The VALUE submitted is untouched — this only
+  // gates the button. A bare name (no slash) lands in the user's own
+  // namespace and is always fine; the full grammar check stays server-side
+  // (HFValidationError → 400).
+  const typedRepoId = repoId.trim();
+  const repoIdError = (() => {
+    if (pinnedRepo || !typedRepoId) return null;
+    const parts = typedRepoId.split("/");
+    if (parts.length > 2 || parts.some((p) => p.length === 0)) {
+      return t("training.publish.repoInvalid");
+    }
+    if (parts.length === 2 && !writableNamespaces.includes(parts[0])) {
+      return t("training.publish.repoNotWritable", { namespace: parts[0] });
+    }
+    return null;
+  })();
+
   const onConfirm = async () => {
     // `publishing` only flips once the POST resolves, so a fast second click
     // would fire a second POST and collect a 409 toast. This guard is
     // synchronous.
-    if (selected.length === 0 || submittingRef.current) return;
+    if (selected.length === 0 || repoIdError != null || submittingRef.current)
+      return;
     submittingRef.current = true;
     setOpen(false);
     try {
       const err = await publish(
-        pinnedRepo ?? (repoId.trim() || undefined),
+        pinnedRepo ?? (typedRepoId || undefined),
         [...selected].sort((a, b) => a - b),
       );
       if (err) {
         toast({
-          title: "Publish failed",
+          title: t("training.publish.toast.failedTitle"),
           description: err,
           variant: "destructive",
         });
@@ -193,17 +227,22 @@ const PublishToHubRow: React.FC<{
   const progressPct = total > 0 ? Math.round((status!.done / total) * 100) : 0;
   // One checkpoint has no meaningful intermediate progress — see the bar below.
   const indeterminate = total <= 1;
+  // "label · step" composition: the two halves are each a complete catalog
+  // phrase; the "·" between them is a separator, not grammar.
   const progressLabel =
     (total > 1
-      ? `Uploading ${Math.min((status?.done ?? 0) + 1, total)} of ${total}`
-      : "Uploading") +
+      ? t("training.publish.uploadingOf", {
+          current: Math.min((status?.done ?? 0) + 1, total),
+          total,
+        })
+      : t("training.publish.uploading")) +
     (status?.current_step != null ? ` · ${stepLabel(status.current_step)}` : "");
 
   return (
     <div className="rounded-md border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <span className="eyebrow">Publish to Hub</span>
+          <span className="eyebrow">{t("training.publish.title")}</span>
           {pinnedRepo ? (
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
               <a
@@ -214,14 +253,17 @@ const PublishToHubRow: React.FC<{
               >
                 {pinnedRepo}
               </a>{" "}
+              {"· "}
               {hubUnknown
-                ? "· couldn't check which checkpoints are published"
-                : `· ${publishedCount} of ${checkpoints.length} checkpoints published`}
+                ? t("training.publish.hubUnknownShort")
+                : t("training.publish.publishedOf", {
+                    published: publishedCount,
+                    total: checkpoints.length,
+                  })}
             </p>
           ) : (
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Share this run's checkpoints as a public model on the Hub — every
-              step you pick lands in one repo, under one model card.
+              {t("training.publish.intro")}
             </p>
           )}
         </div>
@@ -238,7 +280,7 @@ const PublishToHubRow: React.FC<{
             <div
               className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
               role="progressbar"
-              aria-label="Publishing checkpoints"
+              aria-label={t("training.publish.publishingAria")}
               aria-valuemin={0}
               aria-valuemax={status?.total ?? 1}
               // Omitted for a single checkpoint: with no byte-level progress
@@ -265,19 +307,22 @@ const PublishToHubRow: React.FC<{
                 className="h-8 shrink-0 gap-1.5 border-teal-500/50 text-teal-700 hover:bg-teal-500/10 dark:text-teal-300"
               >
                 <UploadIcon className="h-3.5 w-3.5" />
-                {pinnedRepo ? "Add checkpoints" : "Upload to Hub"}
+                {pinnedRepo
+                  ? t("training.publish.addCheckpoints")
+                  : t("training.publish.uploadToHub")}
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end" className="w-80 text-xs">
               <div className="space-y-3">
                 {pinnedRepo ? (
                   <p className="leading-snug text-muted-foreground">
-                    Adding to{" "}
-                    <span className="font-mono text-foreground">
-                      {pinnedRepo}
-                    </span>
-                    . A run keeps one repo, so every checkpoint stays under the
-                    same model card.
+                    <Trans
+                      i18nKey="training.publish.addingTo"
+                      values={{ repo: pinnedRepo }}
+                      components={[
+                        <span key="0" className="font-mono text-foreground" />,
+                      ]}
+                    />
                   </p>
                 ) : (
                   <div className="space-y-1">
@@ -285,7 +330,7 @@ const PublishToHubRow: React.FC<{
                       htmlFor={`publish-repo-id-${jobId}`}
                       className="font-normal text-muted-foreground"
                     >
-                      Repo name (optional)
+                      {t("training.publish.repoNameLabel")}
                     </Label>
                     <Input
                       id={`publish-repo-id-${jobId}`}
@@ -294,18 +339,26 @@ const PublishToHubRow: React.FC<{
                       placeholder={placeholder}
                       className="h-7 text-xs"
                     />
-                    <p className="leading-snug text-muted-foreground">
-                      Leave blank to publish as{" "}
-                      <span className="font-mono">{placeholder}</span>. Later
-                      checkpoints go to this same repo.
-                    </p>
+                    {repoIdError ? (
+                      <p className="leading-snug text-destructive">
+                        {repoIdError}
+                      </p>
+                    ) : (
+                      <p className="leading-snug text-muted-foreground">
+                        <Trans
+                          i18nKey="training.publish.leaveBlank"
+                          values={{ placeholder }}
+                          components={[<span key="0" className="font-mono" />]}
+                        />
+                      </p>
+                    )}
                   </div>
                 )}
 
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
                     <Label className="font-normal text-muted-foreground">
-                      Checkpoints
+                      {t("training.publish.checkpointsLabel")}
                     </Label>
                     {unpublished.length > 0 && (
                       <button
@@ -314,15 +367,16 @@ const PublishToHubRow: React.FC<{
                         className="text-[11px] text-primary hover:underline"
                       >
                         {allSelected
-                          ? "Clear all"
-                          : `Select all (${unpublished.length})`}
+                          ? t("training.publish.clearAll")
+                          : t("training.publish.selectAllCount", {
+                              total: unpublished.length,
+                            })}
                       </button>
                     )}
                   </div>
                   {hubUnknown && (
                     <p className="leading-snug text-muted-foreground">
-                      Couldn't reach the Hub to check which checkpoints are
-                      already published — the badges below may be incomplete.
+                      {t("training.publish.hubUnknownDetail")}
                     </p>
                   )}
                   <div className="max-h-44 space-y-0.5 overflow-y-auto rounded border border-border p-1">
@@ -339,7 +393,7 @@ const PublishToHubRow: React.FC<{
                         <span className="flex-1">{stepLabel(c.step)}</span>
                         {c.published && (
                           <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                            published
+                            {t("training.publish.publishedBadge")}
                           </span>
                         )}
                       </label>
@@ -347,15 +401,16 @@ const PublishToHubRow: React.FC<{
                   </div>
                   {selected.length > 1 && (
                     <p className="leading-snug text-muted-foreground">
-                      {selected.length} checkpoints upload one after another —
-                      each is a full copy of the policy weights.
+                      {t("training.publish.multiNote", {
+                        count: selected.length,
+                      })}
                     </p>
                   )}
                   {selected.some(
                     (s) => checkpoints.find((c) => c.step === s)?.published,
                   ) && (
                     <p className="leading-snug text-muted-foreground">
-                      Re-selecting a published checkpoint overwrites it in place.
+                      {t("training.publish.overwriteNote")}
                     </p>
                   )}
                 </div>
@@ -363,13 +418,15 @@ const PublishToHubRow: React.FC<{
                 <Button
                   size="sm"
                   onClick={onConfirm}
-                  disabled={selected.length === 0}
+                  disabled={selected.length === 0 || repoIdError != null}
                   className="h-7 w-full gap-1 text-xs"
                 >
                   <UploadIcon className="h-3 w-3" />
                   {selected.length === 0
-                    ? "Select a checkpoint"
-                    : `Upload ${selected.length} checkpoint${selected.length === 1 ? "" : "s"}`}
+                    ? t("training.publish.selectPrompt")
+                    : t("training.publish.uploadCount", {
+                        count: selected.length,
+                      })}
                 </Button>
               </div>
             </PopoverContent>
@@ -379,9 +436,7 @@ const PublishToHubRow: React.FC<{
 
       {data?.legacy_root_checkpoint && (
         <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-          This repo also holds a checkpoint at its root from an earlier upload.
-          It stays readable, but the step-addressed copies above are what tools
-          load.
+          {t("training.publish.legacyRootNote")}
         </p>
       )}
     </div>
