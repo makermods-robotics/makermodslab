@@ -18,9 +18,13 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
-import { useAvailableCameras } from "@/hooks/useAvailableCameras";
+import { useAvailableCameras, type AvailableCamera } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
-import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
+import {
+  isCameraConnected,
+  isSameCamera,
+  resolveCameraIndex,
+} from "@/lib/cameraResolve";
 import { useEyebrowClass } from "@/hooks/useEyebrowClass";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
@@ -59,9 +63,22 @@ export interface CameraConfig {
   type: string;
   camera_index?: number; // cv2 index — what the recorder opens
   device_id: string; // Browser deviceId matched to the cv2 index by AVFoundation localizedName
-  // Stable OS device identity (AVFoundation uniqueID). The authoritative link
-  // to the physical camera: cv2 indices shift on replug and device names can
-  // collide (two "KD-USB Cameras"), but this survives both.
+  // OS device identity (AVFoundation uniqueID). The best link to the physical
+  // camera we have — cv2 indices shift on replug and device names collide (two
+  // "KD-USB Cameras") — but NOT a device serial, and it does NOT survive a
+  // replug into a different port.
+  //
+  // Measured on the SO-101 rig (2026-09-01): the id is the USB **locationID**
+  // with a per-model constant appended, so it encodes (model, topology
+  // position), not the unit. locationID 0x132200 -> "0x1322002c7f4a60";
+  // 0x1130000 -> "0x11300002c7f4a60". Move a camera to another port, or let a
+  // bus-powered hub enumerate its ports in a different order across a power
+  // cycle, and the id changes for the same physical device.
+  //
+  // A USB serial would be the stable anchor, but these cameras don't have one:
+  // all three report `USB Serial Number = "KD-USB Cameras"`, so keying on it
+  // would collide every unit into a single identity. Don't "fix" this by
+  // switching to serials without re-checking the hardware.
   unique_id?: string;
   width: number;
   height: number;
@@ -118,16 +135,22 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
   // cv2's AVFoundation order is uniqueID-sorted, so plugging/unplugging a
   // device between sessions shifts indices. Refresh each seeded camera's
-  // camera_index by unique_id (exact physical identity) when the record has
-  // one, falling back to the browser device_id for older records — otherwise
-  // the recorder opens the wrong physical device and the dropdown's "already
-  // added" check guards a stale index.
+  // camera_index by unique_id when the record has one, falling back to the
+  // browser device_id for older records — otherwise the recorder opens the
+  // wrong physical device and the "already added" checks guard a stale index.
   //
   // device_id alone is a COIN FLIP when two cameras share a name (twin
   // "KD-USB Cameras"): the deviceId↔index pairing is decided by
   // enumerateDevices() order, which is unrelated to the uniqueID sort and not
   // stable across refreshes. Anchoring on unique_id is what stops this effect
   // from silently rewriting the recorder's index to the other camera.
+  //
+  // Whatever matched, ALL THREE identifiers are written back, not just the
+  // index. Both weaker ids decay — a browser deviceId rotates when site data is
+  // cleared, and unique_id tracks the USB port (see CameraConfig.unique_id) —
+  // and a record only heals while something still matches. Refreshing them at
+  // the moment of a confirmed match is the one chance to do it; leaving a
+  // stale id behind poisons every later comparison for the life of the record.
   useEffect(() => {
     if (availableCameras.length === 0 || cameras.length === 0) return;
     let changed = false;
@@ -139,18 +162,38 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
         (cam.device_id
           ? availableCameras.find((m) => m.deviceId === cam.device_id)
           : undefined);
-      if (match && match.index !== cam.camera_index) {
+      if (!match) return cam;
+      // Only write ids the enumeration actually reported: off macOS uniqueId is
+      // absent, and deviceId is "" when no browser device matched the label.
+      // Clobbering a good saved id with an empty one would lose the anchor.
+      const healed = {
+        ...cam,
+        camera_index: match.index,
+        ...(match.uniqueId ? { unique_id: match.uniqueId } : {}),
+        ...(match.deviceId ? { device_id: match.deviceId } : {}),
+      };
+      if (
+        healed.camera_index !== cam.camera_index ||
+        healed.unique_id !== cam.unique_id ||
+        healed.device_id !== cam.device_id
+      ) {
         changed = true;
-        return { ...cam, camera_index: match.index };
+        return healed;
       }
       return cam;
     });
     if (changed) onCamerasChange(refreshed);
-    // We deliberately don't depend on `cameras`/`onCamerasChange` to avoid
-    // re-running every keystroke in the camera-name input — re-syncing only
-    // when the available-cameras list itself changes is sufficient.
+    // `cameras` IS a dependency: the saved record is fetched, so it usually
+    // lands a tick AFTER the enumeration has settled. Keying only on
+    // `availableCameras` meant the effect had already run (and bailed on the
+    // empty record) by the time the cameras arrived, and never re-ran — so the
+    // dialog spent its whole life comparing against indices stale from disk.
+    // Re-running is safe and converges: the body is a no-op unless an index
+    // actually differs, so the state update it triggers settles on the next
+    // pass. `onCamerasChange` stays out — callers pass an inline lambda, and
+    // depending on it would re-fire this effect on every parent render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [availableCameras]);
+  }, [availableCameras, cameras]);
 
   const addCamera = () => {
     if (!selectedCameraIndex || !cameraName.trim()) {
@@ -178,16 +221,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       return;
     }
 
-    // Block duplicates by unique_id, cv2 index, or browser deviceId — a stale
-    // camera_index in a seeded camera can otherwise let the same physical
-    // device sneak in under a different index. unique_id is checked first
-    // because it's the only one that can't alias between twin cameras.
-    const isDuplicate = cameras.some(
-      (cam) =>
-        (selectedCamera.uniqueId && cam.unique_id === selectedCamera.uniqueId) ||
-        cam.camera_index === selectedCamera.index ||
-        (selectedCamera.deviceId && cam.device_id === selectedCamera.deviceId),
-    );
+    const isDuplicate = cameras.some((cam) => isSameCamera(cam, selectedCamera));
     if (isDuplicate) {
       toast({
         title: t("recording.cameras.toast.duplicateTitle"),
@@ -325,10 +359,11 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             </SelectTrigger>
             <SelectContent className="bg-popover border-border">
               {availableCameras.map((camera) => {
-                const alreadyAdded = cameras.some(
-                  (cam) =>
-                    cam.camera_index === camera.index ||
-                    (camera.deviceId && cam.device_id === camera.deviceId),
+                // Exactly the predicate Add enforces. These used to differ —
+                // the dropdown omitted the unique_id clause — so a row could
+                // pass the picker and then be refused by the Add button.
+                const alreadyAdded = cameras.some((cam) =>
+                  isSameCamera(cam, camera),
                 );
                 return (
                   <SelectItem
