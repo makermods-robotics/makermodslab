@@ -722,10 +722,14 @@ def _swap_node_registry(monkeypatch, registry) -> None:
 
 
 def _stub_hub_status(monkeypatch) -> None:
-    """Keep the registry's remote-dataset preflight off the real Hub."""
+    """Keep the registry's remote-dataset preflight off the real Hub — BOTH
+    probes: the status lookup and the direct emptiness check the preflight
+    makes for an on_hub answer (without the second stub, these tests issue a
+    real get_paths_info request to huggingface.co)."""
     from makermodslab import datasets
 
     monkeypatch.setattr(datasets, "get_hub_status", lambda repo_id: {"status": "on_hub"})
+    monkeypatch.setattr(datasets, "hub_copy_has_data", lambda repo_id, **kwargs: True)
 
 
 def _quiesced_registry(root):
