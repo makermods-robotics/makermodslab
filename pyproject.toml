@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "MakerModsLab"
 version = "0.1.0"
-description = "A web UI interface for policy development — Maker Arm, Metal Arm and SO-101, single or bimanual"
+description = "A web UI interface for policy development. Maker Arm, Metal Arm and SO-101, single or bimanual"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
