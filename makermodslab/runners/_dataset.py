@@ -24,11 +24,14 @@ runners cannot drift on when a push happens or what it looks like.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
-from pathlib import Path
 
-from ..datasets import hub_copy_has_data, hub_repo_exists, push_dataset_to_hub
+from ..datasets import (
+    hub_copy_has_data,
+    hub_repo_exists,
+    local_pushable_copy_exists,
+    push_dataset_to_hub,
+)
 from ..utils.config import with_makermodslab_tag
 
 
