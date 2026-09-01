@@ -3269,7 +3269,7 @@ def test_hub_copy_has_data_loses_the_race_against_an_invalidation() -> None:
     assert ds._HUB_HAS_DATA_CACHE == {}
 
 
-def test_invalidate_hub_status_drops_a_mis_cased_bare_entry() -> None:
+def test_invalidate_hub_status_drops_a_miscased_bare_entry() -> None:
     """The bare branch must casefold too: an unauthenticated session caches
     the caller's own spelling unresolved, and a slash-free key can never be
     matched by the "/<name>" suffix sweep — so a case-sensitive pop would
@@ -3330,7 +3330,7 @@ def test_hub_copy_has_data_failed_probe_is_not_repaid_within_its_ttl() -> None:
     fake_api.get_paths_info.assert_called_once()
 
 
-def test_invalidate_hub_status_drops_a_mis_cased_namespaced_entry() -> None:
+def test_invalidate_hub_status_drops_a_miscased_namespaced_entry() -> None:
     """Entries are keyed by the CANONICAL casing the resolver produced; the
     upload path may hold the local spelling ("MyOrg/pick"). A case-sensitive
     pop would miss the entry and leave a stale "empty" claim serving for the
