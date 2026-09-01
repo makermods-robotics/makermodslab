@@ -192,6 +192,11 @@ export default {
     // it selects no plural form.
     clearAll: "Clear all ({{n}})",
     clearFailed: "Could not clear the cache for {{repoId}}.",
+    // The row's Hub repo exists but holds no dataset (a half-finished
+    // upload), so the dialog's premise — "the Hub copy stays" — is false
+    // for it: the local copy is the only one.
+    notBackedUp:
+      "Upload didn't finish — the Hub repo is empty, so this local copy is the only one. Re-upload before clearing.",
   },
   mergeDatasets: {
     title: "Merge datasets",
@@ -264,6 +269,9 @@ export default {
       localOnly: "Local only",
       unknown: "Hub status unknown",
       upload: "Upload to Hub",
+      // A repo of this name exists on the Hub but holds no dataset — an
+      // upload that died after creating the repo. It is NOT a backup.
+      uploadIncomplete: "Upload didn't finish — nothing on the Hub yet",
       uploadedTitle: "Uploaded to Hub",
       // <0> wraps the link to the Hub page; {{repoId}} is the dataset id.
       uploadedBody: "{{repoId}} is now on the Hub. <0>View dataset</0>",

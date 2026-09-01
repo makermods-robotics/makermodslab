@@ -127,8 +127,15 @@ def invalidate_hub_status(repo_id: str) -> None:
     Dropping a same-named entry belonging to another namespace is harmless: it
     costs one re-check.
     """
+    global _HUB_CACHE_GEN
     with _HUB_STATUS_LOCK:
+        # Bump BEFORE dropping, under the same lock: a hub_copy_has_data or
+        # get_hub_status call whose network read straddles this invalidation
+        # sees a changed generation and discards its (now possibly stale)
+        # answer instead of writing it back into the cache we just cleaned.
+        _HUB_CACHE_GEN += 1
         _drop_resolved_keys(_HUB_STATUS_CACHE, repo_id)
+        _drop_resolved_keys(_HUB_HAS_DATA_CACHE, repo_id)
 
 
 def _drop_resolved_keys(cache: dict[str, Any], repo_id: str) -> None:
@@ -139,11 +146,24 @@ def _drop_resolved_keys(cache: dict[str, Any], repo_id: str) -> None:
     Shared by the hub-status and hub-summary caches, which key the same way.
     Dropping a same-named entry belonging to another namespace is harmless: it
     costs one re-check. Caller holds the matching lock.
+
+    Matching is case-insensitive: entries are keyed by the CANONICAL casing
+    the resolver produced ("myorg/pick"), while the caller may hold the local
+    spelling ("MyOrg/pick") — a case-sensitive pop of a namespaced id would
+    miss the entry and leave the stale answer serving for the process
+    lifetime. Resolving here instead would need a whoami; casefolding costs
+    at worst the same harmless extra drop as the suffix sweep.
     """
-    cache.pop(repo_id, None)
-    if "/" not in repo_id:
-        suffix = f"/{repo_id}"
-        for key in [k for k in cache if k.endswith(suffix)]:
+    lowered = repo_id.casefold()
+    if "/" in repo_id:
+        for key in [k for k in cache if k.casefold() == lowered]:
+            del cache[key]
+    else:
+        # Casefold the bare pop too: an unauthenticated session caches the
+        # caller's own spelling unresolved, and a slash-free key can never be
+        # reached by the suffix sweep below.
+        suffix = f"/{lowered}"
+        for key in [k for k in cache if k.casefold() == lowered or k.casefold().endswith(suffix)]:
             del cache[key]
 
 
@@ -266,13 +286,25 @@ def push_dataset_to_hub(local_repo_id: str, *, tags: list[str] | None, private: 
         "Uploading %s to the Hub as %s (%d episodes)", local_repo_id, hub_repo_id, dataset.num_episodes
     )
     dataset.repo_id = hub_repo_id
-    dataset.push_to_hub(tags=tags, private=private)
+    try:
+        dataset.push_to_hub(tags=tags, private=private)
+    except Exception:
+        # A FAILED push may still have changed the Hub: push_to_hub creates
+        # the repo before sending files, so a death mid-push leaves an empty
+        # repo behind while the status cache still says "local_only" — which
+        # hides the very half-finished state the card warns about. Invalidate
+        # HERE, in the single push function, so every caller's failure path
+        # (the upload worker, record's trailing push, the runners' refill)
+        # surfaces it without each remembering to.
+        invalidate_hub_status(local_repo_id)
+        raise
 
     # The push just falsified both cached Hub facts for this dataset: it may
     # have created the repo (status), and it certainly changed what is inside
-    # it (the summary read from meta/info.json). Invalidating HERE rather than
-    # at each call site is the point of this being the single push: a caller
-    # that forgot would leave the info card insisting "Local only" about a
+    # it (the emptiness answer, and the summary read from meta/info.json).
+    # Invalidating HERE rather than at each call site is the point of this
+    # function being the single push: a caller that forgot would leave the info
+    # card insisting "Local only" — or, worse, "Upload didn't finish" — about a
     # dataset it had just successfully uploaded, for the process lifetime.
     # Callers may still invalidate their own extras (record's listing cache).
     invalidate_hub_status(local_repo_id)
@@ -308,6 +340,94 @@ def hub_repo_exists(repo_id: str) -> bool | None:
     except Exception as exc:
         logger.info("hub repo_exists(%s) failed: %s", hub_repo_id, exc)
         return None
+
+
+# Companion to _HUB_STATUS_CACHE, keyed the same way (RESOLVED lookup id) and
+# dropped by the same invalidation. Both answer questions about the HUB's
+# contents that only a push can change, so they share a lifetime — unlike a
+# fact about the LOCAL copy, which would go stale without any invalidation and
+# has no business being memoized beside them.
+#
+# Values are (claim, expires_at); expires_at None = no expiry (kept only so
+# tests can pin an immortal entry). BOTH definitive answers can be falsified
+# from OUTSIDE the app — a huggingface-cli re-upload fills an "empty" repo, a
+# Hub-web-UI file deletion guts a "has data" one — and neither path calls
+# invalidate_hub_status, so both expire after _HUB_HAS_DATA_TTL_S rather than
+# serving a wrong warning (or, for callers that refuse on it, a wrong refusal)
+# for the process lifetime. A failed probe (None, "no claim") is cached too,
+# for the shorter _HUB_NO_CLAIM_TTL_S: the shared HfApi client has no request
+# timeout, so re-probing a black-holed connection on every call would pin a
+# threadpool worker per poll — one hung probe per repo per minute bounds it.
+_HUB_HAS_DATA_CACHE: dict[str, tuple[bool | None, float | None]] = {}
+_HUB_HAS_DATA_TTL_S = 300.0
+_HUB_NO_CLAIM_TTL_S = 60.0
+# Bumped under _HUB_STATUS_LOCK by every invalidate_hub_status. The network
+# reads in hub_copy_has_data and get_hub_status run OUTSIDE the lock, so
+# without this an answer computed against a repo state that a concurrent push
+# has since changed could be written back AFTER that push's invalidation —
+# resurrecting exactly the stale claim the invalidation removed. The slow
+# reader loses instead: it compares generations before writing and discards
+# its answer on a mismatch.
+_HUB_CACHE_GEN = 0
+
+
+def hub_copy_has_data(repo_id: str, *, fresh: bool = False) -> bool | None:
+    """Does the Hub repo for `repo_id` actually contain a dataset?
+
+    A repo can exist and hold nothing. An upload is several Hub calls — create
+    the repo, then send the files — and when the later ones fail (a dropped
+    connection, or the bare-repo_id 404 that push_dataset_to_hub now prevents)
+    the empty repo created by the first one stays behind. "Exists" then reads
+    as "backed up" for a repo with no data in it, which is the one place this
+    app must not be wrong: it invites deleting the only copy.
+
+    Presence of ``meta/info.json`` is the test — the file lerobot writes for
+    every dataset and the one get_hub_dataset_info reads. The probe is
+    get_paths_info on that single path (one cheap call; a full list_repo_files
+    would fetch thousands of parquet/video entries to answer one membership
+    question). A successful probe finding nothing is proof of an empty repo,
+    not an inference from comparing counts: this deliberately asks whether the
+    Hub copy is USABLE, never whether it matches the local one. That second
+    question needs a record of which repo a local dataset was pushed to, which
+    the app doesn't keep, and guessing at it from episode counts mislabels
+    legitimate states.
+
+    * ``True``  — a dataset is there.
+    * ``False`` — the repo answered successfully and has no dataset in it.
+    * ``None``  — no claim: the probe failed (offline / transport error / repo
+      not visible), so callers must assume nothing.
+
+    Cached per resolved id and dropped by the same invalidate_hub_status;
+    every answer also expires — definitive ones after ``_HUB_HAS_DATA_TTL_S``,
+    a failed probe after ``_HUB_NO_CLAIM_TTL_S`` (see _HUB_HAS_DATA_CACHE for
+    why both). ``fresh=True`` skips the cache READ (the answer still lands in
+    it): a caller deciding whether to WRITE — the runners' push-if-absent —
+    must not act on a cached value, for the same reason hub_repo_exists is
+    uncached.
+    """
+    hub_repo_id = resolve_hub_repo_id(repo_id)
+    if not fresh:
+        with _HUB_STATUS_LOCK:
+            entry = _HUB_HAS_DATA_CACHE.get(hub_repo_id)
+        if entry is not None:
+            claim, expires_at = entry
+            if expires_at is None or time.monotonic() < expires_at:
+                return claim
+    with _HUB_STATUS_LOCK:
+        generation = _HUB_CACHE_GEN
+    try:
+        paths = shared_hf_api().get_paths_info(hub_repo_id, ["meta/info.json"], repo_type="dataset")
+        claim: bool | None = bool(paths)
+        ttl = _HUB_HAS_DATA_TTL_S
+    except Exception as exc:
+        logger.info("hub get_paths_info(%s) failed: %s", hub_repo_id, exc)
+        claim = None
+        ttl = _HUB_NO_CLAIM_TTL_S
+    expires_at = time.monotonic() + ttl
+    with _HUB_STATUS_LOCK:
+        if generation == _HUB_CACHE_GEN:
+            _HUB_HAS_DATA_CACHE[hub_repo_id] = (claim, expires_at)
+    return claim
 
 
 # Short-TTL cache of the merged /datasets listing. Startup + navigation re-hit
@@ -387,7 +507,7 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
     """Where a dataset repo with this id lives.
 
     Returns ``{"repo_id": ..., "status": "on_hub" | "local_only" | "absent" |
-    "unknown", "url": <hub url> | None}``:
+    "unknown", "url": <hub url> | None, "hub_has_data": bool | None}``:
 
     * ``on_hub``     — the repo exists on the Hub.
     * ``local_only`` — NOT on the Hub, but a usable local copy exists (a
@@ -400,6 +520,13 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
       contradictory "not downloaded locally" + "Local only / Upload" pair; the
       distinct status lets the card say "not found" instead.
     * ``unknown``    — offline / unauthenticated / any transport error.
+
+    ``hub_has_data`` qualifies ``on_hub``: False when that repo exists but
+    holds no dataset — a half-finished upload left the empty repo its first
+    call created (see hub_copy_has_data). The card must not call that a backup.
+    It is computed only when there is a LOCAL copy to protect; otherwise, and
+    for every other status, it is None ("no claim"). An empty repo with no
+    local copy is just litter on the Hub, and nothing here depends on it.
 
     Never raises. Definitive Hub answers (``on_hub`` / ``local_only``) are
     memoized per repo_id for the process lifetime; ``"unknown"`` and ``"absent"``
@@ -422,32 +549,66 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
 
     with _HUB_STATUS_LOCK:
         cached = _HUB_STATUS_CACHE.get(hub_repo_id)
+        generation = _HUB_CACHE_GEN
+
     if cached is not None:
-        url = f"https://huggingface.co/datasets/{hub_repo_id}" if cached == "on_hub" else None
-        return {"repo_id": repo_id, "status": cached, "url": url}
-
-    exists = hub_repo_exists(repo_id)
-    if exists is None:
-        # Offline / rate-limited / any other transport error: degrade to
-        # "unknown" without caching so it re-checks once connectivity returns.
-        return {"repo_id": repo_id, "status": "unknown", "url": None}
-
-    if exists:
-        status = "on_hub"
-    elif is_dataset_available_locally(repo_id):
-        # Not on the Hub, but a usable local copy exists — genuinely local-only.
-        status = "local_only"
+        status = cached
     else:
-        # Neither on the Hub nor local: don't mislabel this "local_only".
-        status = "absent"
+        exists = hub_repo_exists(repo_id)
+        if exists is None:
+            # Offline / rate-limited / any other transport error: degrade to
+            # "unknown" without caching so it re-checks once connectivity
+            # returns.
+            status = "unknown"
+        elif exists:
+            status = "on_hub"
+        elif is_dataset_available_locally(repo_id):
+            # Not on the Hub, but a usable local copy exists — genuinely
+            # local-only.
+            status = "local_only"
+        else:
+            # Neither on the Hub nor local: don't mislabel this "local_only".
+            status = "absent"
 
-    with _HUB_STATUS_LOCK:
-        # Cache only the definitive, stable answers; "absent" can flip to local
-        # without a hub-status invalidation, so leave it uncached (like "unknown").
-        if status in ("on_hub", "local_only"):
-            _HUB_STATUS_CACHE[hub_repo_id] = status
-    url = f"https://huggingface.co/datasets/{hub_repo_id}" if exists else None
-    return {"repo_id": repo_id, "status": status, "url": url}
+        with _HUB_STATUS_LOCK:
+            # Cache only the definitive, stable answers; "absent" can flip to
+            # local without a hub-status invalidation, so leave it uncached
+            # (like "unknown"). Gated on the generation captured before the
+            # network read (same straddle rule as hub_copy_has_data): a push
+            # completing mid-read invalidates, and writing our pre-push answer
+            # after that would pin a stale "local_only" for the process
+            # lifetime.
+            if status in ("on_hub", "local_only") and generation == _HUB_CACHE_GEN:
+                _HUB_STATUS_CACHE[hub_repo_id] = status
+
+    # ONE exit for every path: the route's response model silently strips any
+    # field a missed return site omits, so the shape must not be assembled in
+    # more than one place.
+    url = f"https://huggingface.co/datasets/{hub_repo_id}" if status == "on_hub" else None
+    return {
+        "repo_id": repo_id,
+        "status": status,
+        "url": url,
+        "hub_has_data": _hub_has_data_claim(repo_id, status),
+    }
+
+
+def _hub_has_data_claim(repo_id: str, status: str) -> bool | None:
+    """get_hub_status's ``hub_has_data``: the emptiness check, but only where
+    it changes what the user should do.
+
+    Asked only for a repo that IS on the Hub and DOES have a PUSHABLE local
+    copy — the one combination where calling an empty repo a backup could cost
+    data, and the one where the card's attached remedy (the Upload button →
+    push_dataset_to_hub) can actually run. A snapshot-cache-only copy is
+    excluded on purpose: the warning would mislabel an upload that never
+    happened and offer an Upload that cannot push it. Every other case is None,
+    which also spares the probe on the common path (a plain local-only or
+    hub-only dataset).
+    """
+    if status != "on_hub" or not local_pushable_copy_exists(repo_id):
+        return None
+    return hub_copy_has_data(repo_id)
 
 
 class DatasetHubEditError(Exception):
@@ -591,6 +752,33 @@ def _is_dataset_dir(path: Path) -> bool:
         return (path / "meta" / "info.json").is_file()
     except OSError:
         return False
+
+
+def local_pushable_copy_exists(repo_id: str) -> bool:
+    """Is there a FLAT-layout copy of `repo_id` in the lerobot cache — the
+    only form ``push_dataset_to_hub`` can push?
+
+    A snapshot-cache download (a Hub dataset fetched for local use) is
+    deliberately NOT pushable: readable, but not the directory the push path
+    starts from. Shared by the jobs preflight, the runners' refill
+    (runners/_dataset) and the info card's emptiness claim, which must agree
+    with each other — and with LeRobotDataset itself — on what counts as a
+    pushable copy. The root is therefore derived the way lerobot derives
+    HF_LEROBOT_HOME ($HF_LEROBOT_HOME, else $HF_HOME/lerobot, else the
+    default) rather than a literal default that ignores HF_HOME: with only
+    HF_HOME set, a literal probe misses the copy, and callers turn that miss
+    into a wrong 409 or a skipped refill. $HF_LEROBOT_HOME is read per call
+    (tests redirect it after import); the HF_HOME half is huggingface_hub's
+    import-time constant, like every other consumer of it.
+    """
+    env_root = os.environ.get("HF_LEROBOT_HOME")
+    if env_root:
+        root = Path(env_root).expanduser()
+    else:
+        from huggingface_hub.constants import HF_HOME
+
+        root = Path(HF_HOME).expanduser() / "lerobot"
+    return _is_dataset_dir(root / repo_id)
 
 
 def is_dataset_available_locally(repo_id: str) -> bool:

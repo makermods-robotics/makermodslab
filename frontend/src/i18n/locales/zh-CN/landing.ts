@@ -158,6 +158,8 @@ export default {
     clearing: "正在清理…",
     clearAll: "全部清理（{{n}}）",
     clearFailed: "无法清理 {{repoId}} 的缓存。",
+    notBackedUp:
+      "上传未完成——Hub 仓库是空的，本地副本是唯一副本。请先重新上传再清理。",
   },
   mergeDatasets: {
     title: "合并数据集",
@@ -220,6 +222,7 @@ export default {
       localOnly: "仅本地",
       unknown: "Hub 状态未知",
       upload: "上传到 Hub",
+      uploadIncomplete: "上传未完成——Hub 上还没有数据",
       uploadedTitle: "已上传到 Hub",
       uploadedBody: "{{repoId}} 现已在 Hub 上。<0>查看数据集</0>",
       uploadFailedTitle: "上传失败",

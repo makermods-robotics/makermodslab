@@ -149,6 +149,7 @@ def _reset_module_caches() -> None:
 
     with _ds._HUB_STATUS_LOCK:
         _ds._HUB_STATUS_CACHE.clear()
+        _ds._HUB_HAS_DATA_CACHE.clear()
     with _ds._HUB_DATASET_INFO_LOCK:
         _ds._HUB_DATASET_INFO_CACHE.clear()
     with _models._MODEL_HUB_INFO_LOCK:

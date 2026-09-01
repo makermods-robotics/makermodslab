@@ -1562,6 +1562,11 @@ class UploadManager:
             import traceback
 
             logger.error(f"Full traceback: {traceback.format_exc()}")
+            # No invalidation here: push_dataset_to_hub drops the cached Hub
+            # facts on its own failure path (a failed push may still have
+            # CREATED the repo), so every push caller — this worker, record's
+            # trailing push, the runners' refill — surfaces the half-finished
+            # state without each remembering to.
             auth = _upload_auth_error(e)
             with self._lock:
                 self.state = "error"

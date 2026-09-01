@@ -289,6 +289,12 @@ export interface HubStatus {
   repo_id: string;
   status: HubStatusValue;
   url: string | null;
+  /** Qualifies "on_hub": false when that repo exists but holds no dataset —
+   * an upload that died partway leaves behind the empty repo its first call
+   * created. Such a repo is NOT a backup of the local copy, so the card must
+   * not present it as one. null = no claim (not on_hub, no local copy to
+   * protect, or the check couldn't be made). */
+  hub_has_data: boolean | null;
 }
 
 /** Hub existence check, fetched lazily/separately so it never blocks the

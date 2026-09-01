@@ -323,6 +323,30 @@ def test_merge_source_problem_not_found_on_hub(tmp_lerobot_home: Path, monkeypat
     assert "hub" in msg.lower()
 
 
+def test_merge_source_problem_empty_hub_repo_blocks_with_the_real_cause(
+    tmp_lerobot_home: Path, monkeypatch
+) -> None:
+    """A repo left behind by a half-finished upload exists but holds no
+    dataset. Letting it through fails deep in the merge subprocess with a
+    misleading "incomplete or corrupt — re-record it"; the preflight must name
+    the actual state instead."""
+    from huggingface_hub import HfApi
+
+    from makermodslab import merge
+
+    _write_dataset_tree(tmp_lerobot_home, "a/one")
+
+    monkeypatch.setattr(HfApi, "repo_info", lambda self, repo_id, **kwargs: object())
+    # The emptiness probe: meta/info.json is not among the repo's paths.
+    monkeypatch.setattr(HfApi, "get_paths_info", lambda self, repo_id, paths, **kwargs: [])
+
+    msg = merge._merge_source_problem(["a/one", "a/empty-upload"])
+    assert msg is not None
+    assert "a/empty-upload" in msg
+    assert "no data" in msg.lower()
+    assert "re-upload" in msg.lower()
+
+
 def test_merge_source_problem_offline_does_not_block(tmp_lerobot_home: Path, monkeypatch) -> None:
     from huggingface_hub import HfApi
 

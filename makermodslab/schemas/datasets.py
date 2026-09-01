@@ -155,6 +155,12 @@ class DatasetHubStatusResponse(BaseModel):
     repo_id: str
     status: Literal["on_hub", "local_only", "absent", "unknown"]
     url: str | None
+    # Qualifies "on_hub": False when the repo exists but holds no dataset (a
+    # half-finished upload left the empty repo behind — see
+    # datasets.hub_copy_has_data); None = no claim. The response model FILTERS
+    # undeclared fields, so leaving this out silently strips the emptiness
+    # warning the info card and cache dialog render from it.
+    hub_has_data: bool | None
 
 
 class DatasetHubSettingsResponse(BaseModel):
