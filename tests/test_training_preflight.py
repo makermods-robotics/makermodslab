@@ -32,8 +32,19 @@ from fastapi.testclient import TestClient
 
 import makermodslab.datasets as datasets_mod
 import makermodslab.server as server_mod
+from makermodslab.jobs import JobRecord
 
 DATASET_ID = "alice/hub_only_dataset"
+
+
+def _record(config, job_id: str = "job-123") -> JobRecord:
+    """What the stubbed job_registry.start returns: a real JobRecord, because
+    that is the seam's actual return type and POST /jobs/training now declares
+    it as the response_model — a placeholder dict would fail response
+    validation rather than exercise the guard."""
+    return JobRecord(
+        id=job_id, name="ACT", state="running", config=config, output_dir="/tmp/run", started_at=1.0
+    )
 
 
 def _post_local_training(client: TestClient, repo_id: str = DATASET_ID):
@@ -79,7 +90,7 @@ def test_offline_but_available_locally_not_rejected_by_guard(
 
     def _fake_start(config, target):
         started["called"] = True
-        return {"id": "job-123", "name": "ACT", "state": "running"}
+        return _record(config)
 
     monkeypatch.setattr(server_mod.job_registry, "start", _fake_start)
 
@@ -103,7 +114,7 @@ def test_online_hub_only_not_rejected_by_guard(client: TestClient, monkeypatch: 
 
     def _fake_start(config, target):
         started["called"] = True
-        return {"id": "job-123", "name": "ACT", "state": "running"}
+        return _record(config)
 
     monkeypatch.setattr(server_mod.job_registry, "start", _fake_start)
 
@@ -126,7 +137,7 @@ def test_cloud_run_unaffected_by_offline_local_guard(
     monkeypatch.setattr(datasets_mod, "is_dataset_available_locally", _fail_if_checked)
 
     def _fake_start(config, target):
-        return {"id": "job-cloud", "name": "ACT", "state": "running"}
+        return _record(config, job_id="job-cloud")
 
     monkeypatch.setattr(server_mod.job_registry, "start", _fake_start)
 

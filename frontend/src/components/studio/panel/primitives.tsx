@@ -1,4 +1,5 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -7,6 +8,12 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+
+import { useEyebrowClass } from "@/hooks/useEyebrowClass";
+
+// Re-exported from its neutral home so the many existing
+// `from "@/components/studio/panel/primitives"` imports keep working.
+export { useEyebrowClass };
 
 /** Slide animation shared by every studio collapsible — the panels' entry
  * forms and all three libraries. The single home for this animation string;
@@ -21,8 +28,12 @@ export const PanelHeader: React.FC<{
   title: string;
   /** Optional trailing element (e.g. a resolving spinner). */
   children?: React.ReactNode;
-}> = ({ step, title, children }) => (
-  <div className="flex items-baseline gap-2">
+  /** Onboarding tour anchor — a normal-sized element to spotlight, instead of
+   * the full-height panel section (which leaves the Popover callout with no
+   * room to render within the viewport). */
+  dataTour?: string;
+}> = ({ step, title, children, dataTour }) => (
+  <div className="flex items-baseline gap-2" data-tour={dataTour}>
     <span className="font-mono text-xs text-muted-foreground">{step}</span>
     <h2 className="text-base">{title}</h2>
     {children}
@@ -93,12 +104,15 @@ export const FormSection: React.FC<{
   title: string;
   className?: string;
   children: React.ReactNode;
-}> = ({ title, className, children }) => (
-  <section className={cn("space-y-3", className)}>
-    <h3 className="eyebrow">{title}</h3>
-    {children}
-  </section>
-);
+}> = ({ title, className, children }) => {
+  const eyebrow = useEyebrowClass();
+  return (
+    <section className={cn("space-y-3", className)}>
+      <h3 className={eyebrow}>{title}</h3>
+      {children}
+    </section>
+  );
+};
 
 /**
  * The one "Advanced parameters" collapsible, shared by the Collect form and
@@ -110,35 +124,44 @@ export const FormSection: React.FC<{
  * Uncontrolled by default; pass open/onOpenChange to drive it.
  */
 export const AdvancedSection: React.FC<{
-  /** Defaults to "Advanced parameters" — the label used in every panel. */
+  /** Omit for "Advanced parameters" — the label used in every panel. Left
+   * optional (rather than made required) so the default stays in ONE place;
+   * it is resolved below at render time, never as a prop default, which would
+   * freeze the copy at whatever language happened to load first. */
   title?: string;
   /** One line naming what's inside, so the block is skippable unopened. */
   summary?: React.ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   children: React.ReactNode;
-}> = ({ title = "Advanced parameters", summary, open, onOpenChange, children }) => (
-  <Collapsible
-    open={open}
-    onOpenChange={onOpenChange}
-    className="group space-y-3"
-  >
-    <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-left">
-      <span>
-        <span className="eyebrow block">{title}</span>
-        {summary ? (
-          <span className="mt-1 block text-xs text-muted-foreground">
-            {summary}
+}> = ({ title, summary, open, onOpenChange, children }) => {
+  const { t } = useTranslation();
+  const eyebrow = useEyebrowClass();
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={onOpenChange}
+      className="group space-y-3"
+    >
+      <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-left">
+        <span>
+          <span className={cn(eyebrow, "block")}>
+            {title ?? t("studio.common.advancedParameters")}
           </span>
-        ) : null}
-      </span>
-      <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-    </CollapsibleTrigger>
-    <CollapsibleContent className={SLIDE}>
-      <div className="space-y-4 pt-1">{children}</div>
-    </CollapsibleContent>
-  </Collapsible>
-);
+          {summary ? (
+            <span className="mt-1 block text-xs text-muted-foreground">
+              {summary}
+            </span>
+          ) : null}
+        </span>
+        <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className={SLIDE}>
+        <div className="space-y-4 pt-1">{children}</div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+};
 
 /**
  * The robot-readiness warning that opens the Collect and Deploy forms. One

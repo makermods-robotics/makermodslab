@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Plus, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,7 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RobotMode } from "@/hooks/useRobots";
+import { ArmType, RobotMode } from "@/hooks/useRobots";
 import { cn } from "@/lib/utils";
 
 interface CreateRobotDialogProps {
@@ -24,19 +25,70 @@ interface CreateRobotDialogProps {
   /** Optional name to seed the input with (e.g. a fresh name typed in the
    * selector's search box). */
   seedName?: string;
-  onCreateNew: (name: string, mode: RobotMode) => Promise<boolean>;
+  onCreateNew: (
+    name: string,
+    mode: RobotMode,
+    armType: ArmType
+  ) => Promise<boolean>;
 }
 
-const MODE_OPTIONS: { value: RobotMode; label: string; description: string }[] = [
+/**
+ * The arm-layout options. `value` is LOGIC — it is what the form submits and
+ * what the backend stores, so it stays the literal "single"/"bimanual". Only
+ * the label/description halves are display, and they hold catalog KEYS rather
+ * than resolved copy: this array evaluates at import time, so a resolved string
+ * here would freeze whichever language happened to load first.
+ */
+const MODE_OPTIONS: {
+  value: RobotMode;
+  labelKey: string;
+  descriptionKey: string;
+}[] = [
   {
     value: "single",
-    label: "Single arm",
-    description: "One leader + one follower",
+    labelKey: "landing.createRobot.modes.single.label",
+    descriptionKey: "landing.createRobot.modes.single.description",
   },
   {
     value: "bimanual",
-    label: "Bimanual",
-    description: "Two leader/follower pairs (4 arms)",
+    labelKey: "landing.createRobot.modes.bimanual.label",
+    descriptionKey: "landing.createRobot.modes.bimanual.description",
+  },
+];
+
+/**
+ * The hardware-family options. Same logic/display split as MODE_OPTIONS above:
+ * `value` is what the form submits and the backend stores, so it stays the
+ * literal "so101"/"maker"/"metal"; the label/description halves hold catalog
+ * KEYS.
+ *
+ * `icon` is deliberately empty for now — the slot is wired through to the
+ * option button so a mark can be dropped in later without touching layout.
+ * Rendering is skipped entirely while it is null, so nothing reserves space.
+ */
+const ARM_TYPE_OPTIONS: {
+  value: ArmType;
+  labelKey: string;
+  descriptionKey: string;
+  icon: React.ReactNode | null;
+}[] = [
+  {
+    value: "so101",
+    labelKey: "landing.createRobot.armTypes.so101.label",
+    descriptionKey: "landing.createRobot.armTypes.so101.description",
+    icon: null,
+  },
+  {
+    value: "maker",
+    labelKey: "landing.createRobot.armTypes.maker.label",
+    descriptionKey: "landing.createRobot.armTypes.maker.description",
+    icon: null,
+  },
+  {
+    value: "metal",
+    labelKey: "landing.createRobot.armTypes.metal.label",
+    descriptionKey: "landing.createRobot.armTypes.metal.description",
+    icon: null,
   },
 ];
 
@@ -54,8 +106,10 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
   seedName,
   onCreateNew,
 }) => {
+  const { t } = useTranslation();
   const [newName, setNewName] = useState("");
   const [newMode, setNewMode] = useState<RobotMode>(defaultMode);
+  const [newArmType, setNewArmType] = useState<ArmType>("so101");
   const [creating, setCreating] = useState(false);
 
   const nameExists = (name: string) =>
@@ -68,6 +122,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
       const seed = (seedName ?? "").trim();
       setNewName(seed !== "" && !nameExists(seed) ? seed : "");
       setNewMode(defaultMode);
+      setNewArmType("so101");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -82,11 +137,12 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
     try {
       // useRobots handles validation, API errors, and toasts; on success it
       // also selects the new robot. We only manage the dialog here.
-      const ok = await onCreateNew(trimmedNewName, newMode);
+      const ok = await onCreateNew(trimmedNewName, newMode, newArmType);
       if (ok) {
         onOpenChange(false);
         setNewName("");
         setNewMode(defaultMode);
+        setNewArmType("so101");
       }
     } finally {
       setCreating(false);
@@ -101,15 +157,15 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         if (!o) {
           setNewName("");
           setNewMode(defaultMode);
+          setNewArmType("so101");
         }
       }}
     >
       <DialogContent className="bg-popover border-border sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Create a new robot</DialogTitle>
+          <DialogTitle>{t("landing.createRobot.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Choose a name and arm layout. The layout is fixed once created — a
-            bimanual rig is a separate robot.
+            {t("landing.createRobot.description")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -121,7 +177,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         >
           <div>
             <Label htmlFor="new-robot-name" className="text-foreground">
-              Name
+              {t("landing.createRobot.nameLabel")}
             </Label>
             <Input
               id="new-robot-name"
@@ -134,15 +190,63 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
             />
             {newNameExists && (
               <p className="mt-1 text-xs text-destructive">
-                A robot with this name already exists.
+                {t("landing.createRobot.duplicate")}
               </p>
             )}
           </div>
           <div>
-            <Label className="text-foreground">Arm layout</Label>
+            <Label className="text-foreground">
+              {t("landing.createRobot.armTypeLabel")}
+            </Label>
             <div
               role="radiogroup"
-              aria-label="Arm layout"
+              aria-label={t("landing.createRobot.armTypeLabel")}
+              className="mt-1 grid grid-cols-2 gap-2"
+            >
+              {ARM_TYPE_OPTIONS.map((opt) => {
+                const selected = newArmType === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setNewArmType(opt.value)}
+                    className={cn(
+                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      selected
+                        ? "border-primary bg-accent"
+                        : "border-border bg-card hover:bg-accent"
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex min-w-0 items-center gap-2">
+                        {/* Icon slot — empty for now; nothing is rendered (and
+                            so nothing is reserved) until one is supplied. */}
+                        {opt.icon}
+                        <span className="truncate text-sm font-medium text-foreground">
+                          {t(opt.labelKey as never)}
+                        </span>
+                      </span>
+                      {selected && (
+                        <Check className="h-4 w-4 shrink-0 text-primary" />
+                      )}
+                    </div>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {t(opt.descriptionKey as never)}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div>
+            <Label className="text-foreground">
+              {t("landing.createRobot.armLayout")}
+            </Label>
+            <div
+              role="radiogroup"
+              aria-label={t("landing.createRobot.armLayout")}
               className="mt-1 grid grid-cols-2 gap-2"
             >
               {MODE_OPTIONS.map((opt) => {
@@ -163,12 +267,12 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-foreground">
-                        {opt.label}
+                        {t(opt.labelKey as never)}
                       </span>
                       {selected && <Check className="h-4 w-4 text-primary" />}
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">
-                      {opt.description}
+                      {t(opt.descriptionKey as never)}
                     </p>
                   </button>
                 );
@@ -181,16 +285,18 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={!canConfirm}>
               {creating ? (
                 <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Creating…
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />{" "}
+                  {t("landing.createRobot.submitting")}
                 </>
               ) : (
                 <>
-                  <Plus className="w-4 h-4 mr-2" /> Create
+                  <Plus className="w-4 h-4 mr-2" />{" "}
+                  {t("landing.createRobot.submit")}
                 </>
               )}
             </Button>

@@ -6,9 +6,17 @@ import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
 export type RobotMode = "single" | "bimanual";
 
+// ArmType and its capability predicates moved to lib/armTypes.ts so they stay
+// pure and independently testable (this module pulls in the API context on
+// import). Re-exported here because ArmType's importers already use this path.
+import type { ArmType } from "@/lib/armTypes";
+export { isCanArmType, jointsPerArm } from "@/lib/armTypes";
+export type { ArmType } from "@/lib/armTypes";
+
 export interface RobotRecord {
   name: string;
   mode: RobotMode;
+  arm_type: ArmType;
   // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;
@@ -32,47 +40,16 @@ export interface RobotRecord {
   follower_ready: boolean;
 }
 
-// Human-readable diagnosis for a record with `is_clean === false` (or, with
-// scope "follower", `follower_ready === false`). The backend folds ports,
-// calibration assignments, and on-disk calibration files into one boolean, so
-// warning surfaces can't tell WHAT is missing from the flag alone — and blaming
-// "missing a calibration" when only a port is unassigned sends the user to
-// recalibrate an arm that's already calibrated. Returns a predicate to append
-// after the robot's name, e.g. "has no port assigned for the follower arm".
-// `scope` must match the flag being diagnosed: follower-only surfaces
-// (inference/replay) pass "follower" so the message never blames leader-arm
-// gaps their activity doesn't care about.
-export const robotSetupGap = (
-  robot: RobotRecord,
-  scope: "all" | "follower" = "all",
-): string => {
-  const allArms =
-    robot.mode === "bimanual"
-      ? [
-          { label: "left leader", port: robot.leader_port, config: robot.leader_config, follower: false },
-          { label: "left follower", port: robot.follower_port, config: robot.follower_config, follower: true },
-          { label: "right leader", port: robot.right_leader_port, config: robot.right_leader_config, follower: false },
-          { label: "right follower", port: robot.right_follower_port, config: robot.right_follower_config, follower: true },
-        ]
-      : [
-          { label: "leader", port: robot.leader_port, config: robot.leader_config, follower: false },
-          { label: "follower", port: robot.follower_port, config: robot.follower_config, follower: true },
-        ];
-  const arms = scope === "follower" ? allArms.filter((a) => a.follower) : allArms;
-  const armList = (labels: string[]) =>
-    `${labels.join(" and ")} arm${labels.length > 1 ? "s" : ""}`;
-  const noConfig = arms.filter((a) => !a.config?.trim()).map((a) => a.label);
-  const noPort = arms.filter((a) => !a.port?.trim()).map((a) => a.label);
-  const parts: string[] = [];
-  if (noConfig.length) parts.push(`is missing a calibration for the ${armList(noConfig)}`);
-  if (noPort.length) parts.push(`has no port assigned for the ${armList(noPort)}`);
-  if (parts.length === 0) {
-    // Every field is populated, so the backend must have flagged a referenced
-    // calibration file that no longer exists on disk.
-    return "references a calibration file that no longer exists — reassign or recalibrate";
-  }
-  return parts.join(" and ");
-};
+// The setup-gap diagnosis moved to lib/robotSetupGap.ts so it stays a pure,
+// independently testable function (this module pulls in the API context and
+// localStorage on import). Re-exported here because four call sites already
+// import it from useRobots.
+export {
+  robotSetupGap,
+  robotSetupGaps,
+  formatRobotSetupGap,
+} from "@/lib/robotSetupGap";
+export type { ArmKey, RobotSetupGaps } from "@/lib/robotSetupGap";
 
 const SELECTED_KEY = "makermodslab.selectedRobot";
 
@@ -160,7 +137,7 @@ export const useRobots = () => {
     pendingFetches += 1;
     setState({ isLoading: true });
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/robots`);
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots`);
       const data = await res.json();
       const next: Record<string, RobotRecord> = {};
       for (const r of data.robots ?? []) next[r.name] = r;
@@ -192,7 +169,11 @@ export const useRobots = () => {
   }, []);
 
   const createRobot = useCallback(
-    async (rawName: string, mode: RobotMode = "single"): Promise<boolean> => {
+    async (
+      rawName: string,
+      mode: RobotMode = "single",
+      armType: ArmType = "so101"
+    ): Promise<boolean> => {
       const name = rawName.trim();
       if (!name) {
         toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
@@ -203,10 +184,10 @@ export const useRobots = () => {
         return false;
       }
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}?create=true`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ mode, arm_type: armType }),
         });
         if (res.status === 409) {
           toast({
@@ -238,7 +219,7 @@ export const useRobots = () => {
   const deleteRobot = useCallback(
     async (name: string): Promise<boolean> => {
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(name)}`, {
           method: "DELETE",
         });
         // 404 = the record is already gone (deleted elsewhere, or removed on
@@ -283,7 +264,7 @@ export const useRobots = () => {
         return false;
       }
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(oldName)}/rename`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(oldName)}/rename`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ new_name: newName }),

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Check, Globe, HardDrive, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
@@ -10,18 +11,31 @@ import { DatasetInfo, DatasetItem, getDatasetInfo } from "@/lib/replayApi";
 import { formatBytes, formatCount, formatDuration } from "@/lib/datasetFormat";
 import { useHubVideoFilter } from "@/hooks/useHubVideoFilter";
 
+/** The backend's `source` enum → its label KEY. The enum values are data (they
+ * drive the filter and the fetch skip below); only the label is translated, and
+ * the map holds keys rather than resolved strings so it doesn't freeze the
+ * language that happened to load first. */
+const SOURCE_LABEL_KEY = {
+  local: "library.datasets.source.local",
+  hub: "library.datasets.source.hub",
+  both: "library.datasets.source.both",
+} as const;
+
 /** Where a dataset lives: local cache, the Hub, or both. Styled like the job
  * card's status chip (icon + muted bold text, no pill) so the dataset, job,
  * and model cards read as one family. */
 const SourceBadge: React.FC<{ source: DatasetItem["source"] }> = ({
   source,
-}) => (
-  <span className="flex shrink-0 items-center gap-1.5 text-xs font-semibold text-muted-foreground">
-    {source !== "hub" && <HardDrive className="h-3.5 w-3.5" />}
-    {source !== "local" && <Globe className="h-3.5 w-3.5" />}
-    {source === "local" ? "Local" : source === "hub" ? "Hub" : "Local · Hub"}
-  </span>
-);
+}) => {
+  const { t } = useTranslation();
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+      {source !== "hub" && <HardDrive className="h-3.5 w-3.5" />}
+      {source !== "local" && <Globe className="h-3.5 w-3.5" />}
+      {t(SOURCE_LABEL_KEY[source])}
+    </span>
+  );
+};
 
 /** Session-lifetime cache of /datasets/info summaries so collapsing and
  * re-expanding the library (which unmounts the cards) doesn't refetch every
@@ -37,6 +51,7 @@ export const clearDatasetInfoCache = () => infoCache.clear();
  * never fetched (a remote meta.json read per card — the same skip rule as the
  * Train panel's rows); their card says where the dataset lives instead. */
 const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
+  const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
   const [info, setInfo] = useState<DatasetInfo | "error" | null>(
     () => infoCache.get(item.repo_id) ?? null,
@@ -62,7 +77,7 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
   if (item.source === "hub") {
     return (
       <p className="text-[11px] text-muted-foreground">
-        On the Hub — not downloaded locally.
+        {t("library.datasets.hubOnly")}
       </p>
     );
   }
@@ -70,7 +85,7 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
   if (info === "error") {
     return (
       <p className="text-[11px] text-muted-foreground">
-        Couldn't read this dataset's details.
+        {t("library.datasets.detailsError")}
       </p>
     );
   }
@@ -79,7 +94,7 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
     return (
       <div
         className="animate-pulse space-y-1.5"
-        aria-label="Loading dataset details"
+        aria-label={t("library.datasets.loadingDetails")}
       >
         <div className="h-3 w-2/3 rounded bg-muted" />
         <div className="h-3 w-1/2 rounded bg-muted" />
@@ -88,25 +103,48 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
   }
 
   const duration = formatDuration(info.total_frames, info.fps);
+  // MetaRows renders whatever pairs it is handed, so the LABELS are translated
+  // here and the VALUES stay verbatim: camera names, robot type and the task
+  // text are data, and the size is already formatted.
   const rows: Array<[string, string]> = [];
-  if (info.cameras.length > 0) rows.push(["Cameras", info.cameras.join(", ")]);
-  if (info.robot_type) rows.push(["Robot", info.robot_type]);
+  if (info.cameras.length > 0)
+    rows.push([t("library.datasets.meta.cameras"), info.cameras.join(", ")]);
+  if (info.robot_type)
+    rows.push([t("library.datasets.meta.robot"), info.robot_type]);
+  // One task shows the task itself; several collapse to a tally. A real
+  // i18next plural rather than a hand-picked "Task"/"Tasks" pair — Chinese has
+  // one form for both.
   if (info.tasks.length === 1) {
-    rows.push(["Task", info.tasks[0].task]);
+    rows.push([
+      t("library.datasets.meta.task", { count: 1 }),
+      info.tasks[0].task,
+    ]);
   } else if (info.tasks.length > 1) {
-    rows.push(["Tasks", `${info.tasks.length} tasks`]);
+    rows.push([
+      t("library.datasets.meta.task", { count: info.tasks.length }),
+      t("library.datasets.meta.taskCount", { count: info.tasks.length }),
+    ]);
   }
-  if (info.size_bytes != null) rows.push(["Size", formatBytes(info.size_bytes)]);
+  if (info.size_bytes != null)
+    rows.push([t("library.datasets.meta.size"), formatBytes(info.size_bytes)]);
 
   return (
     <div className="space-y-1.5">
       {/* Muted one-liner right under the bold name — the dataset's "ended 3h
           ago": its volume at a glance. */}
       <p className="text-xs text-muted-foreground">
-        {info.total_episodes} episode{info.total_episodes === 1 ? "" : "s"}
-        {" · "}
-        {formatCount(info.total_frames)} frames
-        {duration ? ` · ${duration}` : ""}
+        {[
+          t("library.datasets.episodes", { count: info.total_episodes }),
+          // The frame tally is pre-formatted ("16.7k"), so it goes in under a
+          // name other than `count` — i18next must not try to derive a plural
+          // from a string. `duration` is likewise already formatted.
+          t("library.datasets.frames", {
+            frames: formatCount(info.total_frames),
+          }),
+          duration,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
       </p>
       <MetaRows rows={rows} />
     </div>
@@ -127,88 +165,98 @@ const DatasetCard: React.FC<{
    * Optional: only wired up where the viewer dialog is actually rendered —
    * falls back to select-on-click if absent. */
   onView?: (item: DatasetItem) => void;
-}> = ({ item, selected, onSelect, onView }) => (
-  <div
-    onClick={() => (onView ? onView(item) : onSelect())}
-    className={cn(
-      "flex w-full cursor-pointer flex-col gap-2 overflow-hidden rounded-md border bg-card p-3 text-left transition-colors",
-      selected
-        ? "border-ring bg-primary/5"
-        : "border-border hover:border-muted-foreground/40",
-    )}
-  >
-    <div className="flex w-full items-center justify-between gap-2">
-      <div className="flex min-w-0 items-center gap-2">
-        <SourceBadge source={item.source} />
-        {item.private && (
-          <span
-            className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-muted-foreground"
-            title="Private on the Hub"
-          >
-            <Lock className="h-3 w-3" />
-            private
-          </span>
-        )}
-      </div>
-      <div className="flex shrink-0 items-center gap-0.5">
-        <Check
-          className={cn(
-            "h-4 w-4 shrink-0 text-primary",
-            selected ? "opacity-100" : "opacity-0",
+}> = ({ item, selected, onSelect, onView }) => {
+  const { t } = useTranslation();
+  return (
+    <div
+      onClick={() => (onView ? onView(item) : onSelect())}
+      className={cn(
+        "flex w-full cursor-pointer flex-col gap-2 overflow-hidden rounded-md border bg-card p-3 text-left transition-colors",
+        selected
+          ? "border-ring bg-primary/5"
+          : "border-border hover:border-muted-foreground/40",
+      )}
+    >
+      <div className="flex w-full items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <SourceBadge source={item.source} />
+          {item.private && (
+            <span
+              className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-muted-foreground"
+              title={t("library.datasets.privateTitle")}
+            >
+              <Lock className="h-3 w-3" />
+              {t("library.datasets.private")}
+            </span>
           )}
-        />
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Check
+            className={cn(
+              "h-4 w-4 shrink-0 text-primary",
+              selected ? "opacity-100" : "opacity-0",
+            )}
+          />
+        </div>
+      </div>
+      {/* The repo id is an address — rendered verbatim, never translated, and
+          the title attributes show it whole when the line truncates. */}
+      <div className="w-full">
+        <div
+          className="truncate text-sm font-semibold text-foreground"
+          title={item.repo_id}
+        >
+          {item.repo_id.split("/").pop()}
+        </div>
+        <div
+          className="truncate text-[11px] text-muted-foreground"
+          title={item.repo_id}
+        >
+          {item.repo_id}
+        </div>
+      </div>
+      <DatasetCardDetails item={item} />
+      <div className="mt-auto flex items-center pt-1">
+        <Button
+          size="sm"
+          variant={selected ? "outline" : "default"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect();
+          }}
+          aria-pressed={selected}
+          className={cn(
+            "h-8 gap-1",
+            selected
+              ? "border-ring text-primary hover:bg-primary/10"
+              : "bg-primary text-primary-foreground hover:bg-primary/90",
+          )}
+        >
+          {selected ? (
+            <>
+              <Check className="h-3.5 w-3.5" />{" "}
+              {t("library.datasets.selected")}
+            </>
+          ) : (
+            t("library.datasets.select")
+          )}
+        </Button>
       </div>
     </div>
-    <div className="w-full">
-      <div
-        className="truncate text-sm font-semibold text-foreground"
-        title={item.repo_id}
-      >
-        {item.repo_id.split("/").pop()}
-      </div>
-      <div
-        className="truncate text-[11px] text-muted-foreground"
-        title={item.repo_id}
-      >
-        {item.repo_id}
-      </div>
-    </div>
-    <DatasetCardDetails item={item} />
-    <div className="mt-auto flex items-center pt-1">
-      <Button
-        size="sm"
-        variant={selected ? "outline" : "default"}
-        onClick={(e) => {
-          e.stopPropagation();
-          onSelect();
-        }}
-        aria-pressed={selected}
-        className={cn(
-          "h-8 gap-1",
-          selected
-            ? "border-ring text-primary hover:bg-primary/10"
-            : "bg-primary text-primary-foreground hover:bg-primary/90",
-        )}
-      >
-        {selected ? (
-          <>
-            <Check className="h-3.5 w-3.5" /> Selected
-          </>
-        ) : (
-          "Select"
-        )}
-      </Button>
-    </div>
-  </div>
-);
+  );
+};
 
 /** Where in the library to look: everything, local copies, or Hub uploads. */
 type LibraryFilter = "all" | "local" | "hub";
 
-const FILTERS: Array<{ key: LibraryFilter; label: string }> = [
-  { key: "all", label: "All" },
-  { key: "local", label: "Local" },
-  { key: "hub", label: "Hub" },
+/** `key` is LOGIC — it drives the filter below and must never be translated.
+ * Only `labelKey` is display, and it is a KEY rather than a resolved string:
+ * this array is built at import time, so copy resolved here would freeze
+ * whichever language loaded first. */
+const FILTERS: ReadonlyArray<{ key: LibraryFilter; labelKey: string }> = [
+  { key: "all", labelKey: "library.datasets.filters.all" },
+  { key: "local", labelKey: "library.datasets.filters.local" },
+  { key: "hub", labelKey: "library.datasets.filters.hub" },
 ];
 
 /** The library body: search + location filter over a three-up grid of dataset
@@ -224,6 +272,7 @@ export const DatasetLibraryList: React.FC<{
    * doesn't render that dialog. */
   onView?: (item: DatasetItem) => void;
 }> = ({ datasets, loading, selectedRepoId, onSelect, onView }) => {
+  const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LibraryFilter>("all");
   // Hides a Hub-only row once it's confirmed to have no video — this surface
@@ -241,6 +290,17 @@ export const DatasetLibraryList: React.FC<{
     });
   }, [videoFilteredDatasets, query, filter]);
 
+  // Resolved per render (and per language) rather than baked into FILTERS —
+  // only the pill label is display; `key` stays the untouched filter value.
+  const filters = useMemo(
+    () =>
+      FILTERS.map(({ key, labelKey }) => ({
+        key,
+        label: t(labelKey as never) as string,
+      })),
+    [t],
+  );
+
   if (loading && videoFilteredDatasets.length === 0) {
     return (
       <div
@@ -248,7 +308,7 @@ export const DatasetLibraryList: React.FC<{
           "animate-pulse space-y-2 rounded-md border border-border p-3",
           GRID_MIN_H,
         )}
-        aria-label="Loading datasets"
+        aria-label={t("library.datasets.loadingList")}
       >
         <div className="h-4 w-3/4 rounded bg-muted" />
         <div className="h-4 w-1/2 rounded bg-muted" />
@@ -265,7 +325,7 @@ export const DatasetLibraryList: React.FC<{
           GRID_MIN_H,
         )}
       >
-        No datasets yet. Record your first one above.
+        {t("library.datasets.empty")}
       </div>
     );
   }
@@ -275,8 +335,8 @@ export const DatasetLibraryList: React.FC<{
       <LibraryToolbar
         query={query}
         onQueryChange={setQuery}
-        searchPlaceholder="Search datasets"
-        filters={FILTERS}
+        searchPlaceholder={t("library.datasets.searchPlaceholder")}
+        filters={filters}
         filter={filter}
         onFilterChange={setFilter}
       />
@@ -288,7 +348,7 @@ export const DatasetLibraryList: React.FC<{
             GRID_MIN_H,
           )}
         >
-          No datasets match.
+          {t("library.datasets.noMatch")}
         </p>
       ) : (
         // Two rows by default; anything past that stays behind Show all

@@ -109,3 +109,16 @@ repos:
   #   hooks:
   #     - id: interrogate
   #       args: ["-vv", "--config=pyproject.toml"]
+
+  ##### API contract #####
+  - repo: local
+    hooks:
+      - id: export-openapi
+        name: Regenerate docs/api/openapi.json
+        # Keeps the committed OpenAPI snapshot in the same commit as the code
+        # change that altered the surface; tests/test_api_contract.py enforces
+        # freshness in CI as the backstop.
+        entry: uv run python -m makermodslab.scripts.export_openapi
+        language: system
+        files: ^makermodslab/.*\.py$
+        pass_filenames: false

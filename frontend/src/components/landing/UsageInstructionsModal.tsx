@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +25,7 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
   onOpenChange,
   dismissible = true,
 }) => {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   const blockClose = (e: Event) => {
@@ -55,18 +57,17 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
         <DialogHeader className="text-center sm:text-center min-w-0">
           <DialogTitle className="text-foreground flex items-center justify-center gap-2 text-xl">
             <Terminal className="w-6 h-6" />
-            Get Started with MakerMods Lab
+            {t("landing.usageInstructions.title")}
           </DialogTitle>
           <DialogDescription>
-            MakerMods Lab runs on your machine. Click the command to copy it, then paste
-            in a terminal:
+            {t("landing.usageInstructions.description")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-2 min-w-0">
           <button
             type="button"
             onClick={handleCopy}
-            aria-label="Copy command to clipboard"
+            aria-label={t("landing.usageInstructions.copyAria")}
             className="group relative w-full bg-muted hover:bg-muted/80 rounded-lg border border-border hover:border-foreground/20 text-left transition-colors cursor-pointer"
           >
             <pre className="p-4 pr-12 text-xs sm:text-sm overflow-x-auto whitespace-pre-wrap break-all">
@@ -76,18 +77,18 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
               {copied ? (
                 <>
                   <Check className="w-3.5 h-3.5 text-ok" />
-                  Copied
+                  {t("landing.usageInstructions.copied")}
                 </>
               ) : (
                 <>
                   <Copy className="w-3.5 h-3.5" />
-                  Copy
+                  {t("landing.usageInstructions.copy")}
                 </>
               )}
             </span>
           </button>
           <p className="text-muted-foreground text-sm text-center">
-            After running, your browser will open the local MakerMods Lab app.
+            {t("landing.usageInstructions.afterRunning")}
           </p>
           <Button
             asChild
@@ -95,7 +96,7 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
           >
             <a href={LOCAL_URL} target="_blank" rel="noopener noreferrer">
               <ExternalLink className="w-4 h-4 mr-2" />
-              Open MakerMods Lab
+              {t("landing.usageInstructions.open")}
             </a>
           </Button>
         </div>

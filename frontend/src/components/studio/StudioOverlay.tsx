@@ -1,14 +1,20 @@
 import React, { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
 import RobotCorner from "@/components/launchpad/RobotCorner";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import CollectPanel from "@/components/studio/CollectPanel";
 import TrainPanel from "@/components/studio/TrainPanel";
 import DeployPanel from "@/components/studio/DeployPanel";
 import { JobsDataProvider } from "@/components/jobs/JobsDataContext";
 import { useStudio } from "@/contexts/StudioContext";
+import { useOnboarding } from "@/contexts/OnboardingContext";
+import { studioTour } from "@/lib/onboarding/tours";
+import { useOnceFlag } from "@/lib/onboarding/storage";
+import { useEyebrowClass } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
 
 /**
@@ -18,7 +24,12 @@ import { cn } from "@/lib/utils";
  */
 const StudioOverlay: React.FC = () => {
   const { open, activePanel, closeStudio } = useStudio();
+  const { t } = useTranslation();
+  const eyebrow = useEyebrowClass();
   const overlayRef = useRef<HTMLDivElement>(null);
+  const { seen: hasSeenStudioTour, markSeen: markStudioTourSeen } =
+    useOnceFlag("makerlab:seen-studio-tour");
+  const { start: startTour } = useOnboarding();
 
   // Lock page scroll while the studio is up.
   useEffect(() => {
@@ -28,6 +39,12 @@ const StudioOverlay: React.FC = () => {
     return () => {
       document.body.style.overflow = prev;
     };
+  }, [open]);
+
+  // First time the studio is opened, walk through its three panels.
+  useEffect(() => {
+    if (open && !hasSeenStudioTour) startTour(studioTour, markStudioTourSeen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // ESC closes the studio — unless a dialog above it already handled the key
@@ -54,7 +71,7 @@ const StudioOverlay: React.FC = () => {
     <div
       ref={overlayRef}
       role="dialog"
-      aria-label="Skill studio"
+      aria-label={t("studio.overlay.title")}
       aria-hidden={!open}
       className={cn(
         "fixed inset-0 z-40 flex flex-col bg-background transition-transform duration-500 ease-std motion-reduce:transition-none",
@@ -66,7 +83,9 @@ const StudioOverlay: React.FC = () => {
         <span className="hidden rounded border border-border px-1.5 py-0.5 font-orbitron text-[11px] font-black uppercase tracking-[0.08em] text-muted-foreground sm:inline">
           by MakerMods
         </span>
-        <span className="eyebrow ml-2 hidden md:inline">Skill studio</span>
+        <span className={cn(eyebrow, "ml-2 hidden md:inline")}>
+          {t("studio.overlay.title")}
+        </span>
         <span className="flex-1" />
         {/* Pull down to return to the main menu — mirrors the Launchpad's
             "pull up" arrow at the very bottom of that page. Absolutely
@@ -78,8 +97,8 @@ const StudioOverlay: React.FC = () => {
         <Button
           variant="ghost"
           size="sm"
-          aria-label="Back to main menu"
-          title="Back to main menu"
+          aria-label={t("studio.overlay.backToMenu")}
+          title={t("studio.overlay.backToMenu")}
           onClick={closeStudio}
           className="absolute left-1/2 top-1/2 z-10 h-8 w-8 -translate-x-1/2 -translate-y-1/2 p-0 text-muted-foreground hover:text-foreground"
         >
@@ -88,11 +107,15 @@ const StudioOverlay: React.FC = () => {
         <span className="hidden sm:inline-flex">
           <HfAuthChip />
         </span>
+        {/* Mounted here as well as on the Launchpad: this overlay is
+            `fixed inset-0` and covers the viewport, so the header switcher
+            would otherwise be unreachable while the studio is open. */}
+        <LanguageSwitcher />
         <RobotCorner />
         <Button
           variant="ghost"
           size="sm"
-          aria-label="Close studio"
+          aria-label={t("studio.overlay.close")}
           onClick={closeStudio}
           className="h-8 w-8 p-0"
         >
@@ -105,7 +128,7 @@ const StudioOverlay: React.FC = () => {
       <JobsDataProvider>
       <div className="grid flex-1 grid-cols-1 gap-px overflow-y-auto bg-border lg:grid-cols-3 lg:overflow-hidden">
         <section
-          aria-label="Collect dataset"
+          aria-label={t("studio.overlay.sections.collect")}
           className={cn(
             "flex min-h-0 flex-col bg-background lg:overflow-y-auto",
             activePanel === "collect" && "ring-1 ring-inset ring-ring/20",
@@ -114,7 +137,7 @@ const StudioOverlay: React.FC = () => {
           <CollectPanel />
         </section>
         <section
-          aria-label="Train"
+          aria-label={t("studio.overlay.sections.train")}
           className={cn(
             "flex min-h-0 flex-col bg-background lg:overflow-y-auto",
             activePanel === "train" && "ring-1 ring-inset ring-ring/20",
@@ -123,7 +146,7 @@ const StudioOverlay: React.FC = () => {
           <TrainPanel />
         </section>
         <section
-          aria-label="Deploy policy"
+          aria-label={t("studio.overlay.sections.deploy")}
           className={cn(
             "flex min-h-0 flex-col bg-background lg:overflow-y-auto",
             activePanel === "deploy" && "ring-1 ring-inset ring-ring/20",

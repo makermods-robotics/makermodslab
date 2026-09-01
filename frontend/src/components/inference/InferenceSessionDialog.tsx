@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { CheckCircle2, Loader2, Play, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
@@ -17,7 +18,11 @@ import {
 } from "@/lib/inferenceApi";
 import LogPanel from "@/components/LogPanel";
 import { formatBytes } from "@/lib/formatBytes";
-import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useUnloadWarning } from "@/hooks/useUnloadWarning";
+import { ApiError } from "@/lib/apiClient";
+import { stopSession } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 
 const POLL_MS = 1000;
 
@@ -27,29 +32,29 @@ const POLL_MS = 1000;
 // the still-working phases; terminal phases render steady.
 const PHASE_META: Record<
   InferencePhase,
-  { label: string; tone: "amber" | "green" | "red"; pulse: boolean }
+  { labelKey: string; tone: "amber" | "green" | "red"; pulse: boolean }
 > = {
-  downloading_model: { label: "Downloading model…", tone: "amber", pulse: true },
-  starting: { label: "Starting up…", tone: "amber", pulse: true },
-  loading_policy: { label: "Loading policy…", tone: "amber", pulse: true },
-  connecting: { label: "Connecting to arm…", tone: "amber", pulse: true },
-  running: { label: "Running", tone: "green", pulse: true },
-  stopping: { label: "Stopping…", tone: "amber", pulse: true },
-  stopped: { label: "Stopped", tone: "green", pulse: false },
-  error: { label: "Error — see log", tone: "red", pulse: false },
-  resetting: { label: "Reset the scene", tone: "amber", pulse: false },
-  finished: { label: "Evaluation complete", tone: "green", pulse: false },
-  aborted: { label: "Evaluation aborted", tone: "amber", pulse: false },
+  downloading_model: { labelKey: "inference.phase.downloadingModel", tone: "amber", pulse: true },
+  starting: { labelKey: "inference.phase.starting", tone: "amber", pulse: true },
+  loading_policy: { labelKey: "inference.phase.loadingPolicy", tone: "amber", pulse: true },
+  connecting: { labelKey: "inference.phase.connecting", tone: "amber", pulse: true },
+  running: { labelKey: "inference.phase.running", tone: "green", pulse: true },
+  stopping: { labelKey: "inference.phase.stopping", tone: "amber", pulse: true },
+  stopped: { labelKey: "inference.phase.stopped", tone: "green", pulse: false },
+  error: { labelKey: "inference.phase.error", tone: "red", pulse: false },
+  resetting: { labelKey: "inference.phase.resetting", tone: "amber", pulse: false },
+  finished: { labelKey: "inference.phase.finished", tone: "green", pulse: false },
+  aborted: { labelKey: "inference.phase.aborted", tone: "amber", pulse: false },
 };
 
 // Per-episode verdict styling for the tally + the final per-episode list.
 const RESULT_META: Record<
   EpisodeResult,
-  { label: string; dot: string; text: string }
+  { labelKey: string; dot: string; text: string }
 > = {
-  success: { label: "Success", dot: "bg-ok", text: "text-ok" },
-  failure: { label: "Failure", dot: "bg-muted-foreground", text: "text-muted-foreground" },
-  error: { label: "Error", dot: "bg-destructive", text: "text-destructive" },
+  success: { labelKey: "inference.result.success", dot: "bg-ok", text: "text-ok" },
+  failure: { labelKey: "inference.result.failure", dot: "bg-muted-foreground", text: "text-muted-foreground" },
+  error: { labelKey: "inference.result.error", dot: "bg-destructive", text: "text-destructive" },
 };
 
 function tally(results: EpisodeResult[]): Record<EpisodeResult, number> {
@@ -92,18 +97,24 @@ function formatTime(seconds: number): string {
  * replaces the old /inference page (the polling/safety logic is ported
  * verbatim; every navigate-home became `onExit`). While the run is live
  * (including the connecting/setup window before the first status lands) the
- * dialog can't be dismissed by ESC / outside click / X: leaving stops the arm,
- * so the only exits are the explicit Stop flow, the clean-finish auto-close,
- * or the shared exit guard's confirmed leave. Once the run has ended,
- * dismissal is free.
+ * dialog can't be dismissed by ESC / outside click / X: leaving stops the
+ * arm, so the only in-app exits are the explicit Stop flow and the
+ * clean-finish auto-close. An abandoned page (tab close, crash) is covered by
+ * the session's server-side lease: the missed heartbeats make the server stop
+ * the run. Once the run has ended, dismissal is free.
  */
 const InferenceSessionDialog: React.FC<{
+  /** Identity from POST /api/v1/sessions — this dialog heartbeats its lease
+   * and stops it by id. Null only for defensive robustness (e.g. a stale
+   * launcher); the stop then falls back to the kind-level endpoint. */
+  sessionId: string | null;
   /** Called for every exit — closes the dialog, landing back where the run
    * was launched from. */
   onExit: () => void;
-}> = ({ onExit }) => {
+}> = ({ sessionId, onExit }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [logs, setLogs] = useState("");
   // Which run the fetched log belongs to. Never inferred from the text: the
@@ -130,27 +141,37 @@ const InferenceSessionDialog: React.FC<{
   // Toast it once when first seen so it isn't repeated on every poll.
   const warnedRef = useRef(false);
 
-  // Safety net: a policy must never keep driving the arm with nobody watching.
-  // While a session is active (any phase, INCLUDING downloading_model), an
-  // unintentional exit stops the run — in-app back gets a blocking confirm, a
-  // browser unload fires a best-effort stop beacon. There's no artifact and no
-  // Done/Quit split here: the only semantic is STOP. After the run ends
-  // (inference_active false) the guard disarms and navigation is free.
-  const { markHandled } = useSessionExitGuard({
-    active: status?.inference_active === true,
-    confirmMessage: "Leaving stops the running inference. Continue?",
-    beaconUrl: `${baseUrl}/stop-inference`,
-    onLeave: () => {
-      stopInference(baseUrl, fetchWithHeaders).catch(() => {});
-    },
-    beaconFlagKey: "makermodslab:inference-stopped",
-  });
+  // Safety net: a policy must never keep driving the arm with nobody
+  // watching. That guarantee is server-side now — while the run is live
+  // (treating the pre-first-status window as live, since the launcher just
+  // started it) this tab renews the session's lease, and if the page goes
+  // away the missed heartbeats make the SERVER stop the run. The courtesy
+  // beforeunload only keeps an accidental tab-close from being silent; the
+  // old exit guard's beacon/back-confirm/unmount-stop machinery is retired.
+  const sessionLive = status == null || status.inference_active === true;
+  useSessionHeartbeat(sessionId, tabOwnerId(), sessionLive);
+  useUnloadWarning(sessionLive);
+
+  // Stop this run: by session id when we have one (a 404 means the session is
+  // already gone — fine, the poll shows the ending), else the kind-level stop.
+  const stopThisRun = useCallback(async () => {
+    if (sessionId) {
+      try {
+        await stopSession(baseUrl, fetchWithHeaders, sessionId);
+        return;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return;
+        throw e;
+      }
+    }
+    await stopInference(baseUrl, fetchWithHeaders);
+  }, [sessionId, baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     let cancelled = false;
     const stopIfHung = async () => {
       try {
-        await stopInference(baseUrl, fetchWithHeaders);
+        await stopThisRun();
       } catch {
         // The next status poll will surface the failure if it persists.
       }
@@ -167,7 +188,7 @@ const InferenceSessionDialog: React.FC<{
         if (next.warning && !warnedRef.current) {
           warnedRef.current = true;
           toast({
-            title: "Started with a warning",
+            title: t("inference.toast.startedWarningTitle"),
             description: next.warning,
             duration: 10000,
           });
@@ -196,11 +217,14 @@ const InferenceSessionDialog: React.FC<{
             // toast is the at-a-glance "it broke" signal.
             const failed = next.outcome === "failed";
             toast({
-              title: failed ? "Inference failed" : "Ran with a cleanup warning",
+              title: failed
+                ? t("inference.toast.failedTitle")
+                : t("inference.toast.ranWithWarningTitle"),
+              // next.hint / next.error are backend prose — shown as-is.
               description:
                 next.hint ??
                 next.error?.split("\n").at(-1) ??
-                "See the inference log for details.",
+                t("inference.toast.seeLog"),
               variant: failed ? "destructive" : undefined,
               duration: 10000,
             });
@@ -212,34 +236,32 @@ const InferenceSessionDialog: React.FC<{
           // close. Checked after the failure branch above so a session-level
           // startup failure still renders as an error, not a summary.
           if (next.eval_mode && next.exited) {
-            markHandled();
             exitedRef.current = true;
             doneRef.current = true;
             toast({
               title:
                 next.phase === "aborted"
-                  ? "Evaluation aborted"
-                  : "Evaluation complete",
+                  ? t("inference.toast.evalAbortedTitle")
+                  : t("inference.toast.evalCompleteTitle"),
               description:
                 next.phase === "aborted"
-                  ? "Partial results — no accuracy recorded."
+                  ? t("inference.toast.evalAbortedDescription")
                   : next.accuracy != null
-                    ? `${Math.round(next.accuracy * 100)}% success rate.`
-                    : "No scoreable episodes.",
+                    ? t("inference.toast.evalAccuracy", {
+                        percent: Math.round(next.accuracy * 100),
+                      })
+                    : t("inference.toast.evalNoScoreable"),
               duration: 10000,
             });
             return;
           }
           // A clean finish (completed / user stop): toast + auto-close.
-          // Mark the exit handled so the leave guard doesn't fire a spurious
-          // stop on the imminent unmount.
-          markHandled();
           exitedRef.current = true;
           doneRef.current = true;
           if (next.exited) {
             toast({
-              title: "Inference finished",
-              description: "Run completed.",
+              title: t("inference.toast.finishedTitle"),
+              description: t("inference.toast.finishedDescription"),
             });
           }
           onExit();
@@ -259,7 +281,7 @@ const InferenceSessionDialog: React.FC<{
         ) {
           stopRequestedRef.current = true;
           toast({
-            title: "Inference seems hung",
+            title: t("inference.toast.hungTitle"),
             description: `Rollout past duration by ${Math.round(
               next.rollout_elapsed_s - next.duration_s,
             )}s. Stopping.`,
@@ -270,7 +292,7 @@ const InferenceSessionDialog: React.FC<{
       } catch (e) {
         if (!cancelled) {
           toast({
-            title: "Lost connection to backend",
+            title: t("inference.toast.lostConnectionTitle"),
             description: e instanceof Error ? e.message : String(e),
             variant: "destructive",
           });
@@ -283,23 +305,20 @@ const InferenceSessionDialog: React.FC<{
       cancelled = true;
       clearInterval(id);
     };
-  }, [baseUrl, fetchWithHeaders, onExit, toast, markHandled]);
+  }, [baseUrl, fetchWithHeaders, onExit, toast, stopThisRun]);
 
   // Stops immediately — no confirmation dialog. The follower eases back to its
   // start pose and releases torque; `stopping` guards against double-fires
   // while the request is in flight.
   const handleStop = async () => {
     setStopping(true);
-    // Explicit Stop — mark handled so the leave guard doesn't double-fire while
-    // the run winds down.
-    markHandled();
     try {
-      await stopInference(baseUrl, fetchWithHeaders);
+      await stopThisRun();
       // Status poll will catch the inactive state and close the dialog.
     } catch (e) {
       setStopping(false);
       toast({
-        title: "Stop failed",
+        title: t("inference.toast.stopFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -316,7 +335,7 @@ const InferenceSessionDialog: React.FC<{
       // The status poll picks up the reset phase and the updated tally.
     } catch (e) {
       toast({
-        title: "Couldn't end the episode",
+        title: t("inference.toast.endEpisodeFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -331,7 +350,7 @@ const InferenceSessionDialog: React.FC<{
       await startNextInferenceEpisode(baseUrl, fetchWithHeaders);
     } catch (e) {
       toast({
-        title: "Couldn't start the next episode",
+        title: t("inference.toast.nextEpisodeFailedTitle"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -393,8 +412,8 @@ const InferenceSessionDialog: React.FC<{
   const logIsThisRun =
     logOwner === "active" || (logOwner === "last_run" && !status?.inference_active);
   const logPlaceholder = finishedFailed
-    ? "This run failed before the rollout process started, so it produced no log — see the error above."
-    : "No log yet for this run — it hasn't started producing output.";
+    ? t("inference.log.failedPlaceholder")
+    : t("inference.log.emptyPlaceholder");
   // The live timer/progress block is replaced by the reset screen between
   // episodes and by the summary once an evaluation ends.
   const showTimer = !isFinished && !isResetting;
@@ -419,20 +438,20 @@ const InferenceSessionDialog: React.FC<{
     ? "amber"
     : "green";
   const pillLabel = finishedFailed
-    ? "FAILED"
+    ? t("inference.pill.failed")
     : finishedWarn
-    ? "RAN WITH WARNING"
+    ? t("inference.pill.ranWithWarning")
     : evalAborted
-    ? "ABORTED"
+    ? t("inference.pill.aborted")
     : evalFinished
-    ? "EVALUATION COMPLETE"
+    ? t("inference.pill.evaluationComplete")
     : isResetting
-    ? "RESET THE SCENE"
+    ? t("inference.pill.resetTheScene")
     : isSettingUp
-    ? "SETTING UP"
+    ? t("inference.pill.settingUp")
     : isRunning
-    ? "RUNNING"
-    : "FINISHED";
+    ? t("inference.pill.running")
+    : t("inference.pill.finished");
   const timerSeconds = isRunning ? rolloutElapsed : setupElapsed;
 
   // Granular startup phase (from the same status poll). Suppressed once we're
@@ -476,7 +495,7 @@ const InferenceSessionDialog: React.FC<{
         className="max-h-[92vh] w-max min-w-[min(36rem,95vw)] max-w-[95vw] gap-0 overflow-y-auto p-6"
         aria-describedby={undefined}
       >
-        <DialogTitle className="sr-only">Inference session</DialogTitle>
+        <DialogTitle className="sr-only">{t("inference.dialogTitle")}</DialogTitle>
 
         {!status ? (
           <div className="flex items-center justify-center py-20 text-muted-foreground">
@@ -508,11 +527,17 @@ const InferenceSessionDialog: React.FC<{
                 <div className="flex items-baseline justify-between gap-4">
                   <span className="text-sm font-semibold">
                     {isEvalDone
-                      ? `${episodesTotal ?? results.length} episodes`
-                      : `Episode ${episodeIndex ?? 1} of ${episodesTotal ?? "?"}`}
+                      ? t("inference.eval.episodesTotal", {
+                          count: episodesTotal ?? results.length,
+                        })
+                      : t("inference.eval.episodeProgress", {
+                          index: episodeIndex ?? 1,
+                          total:
+                            episodesTotal ?? t("inference.eval.unknownTotal"),
+                        })}
                   </span>
                   <span className="text-xs text-muted-foreground tabular-nums">
-                    {results.length} done
+                    {t("inference.eval.done", { count: results.length })}
                   </span>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm tabular-nums">
@@ -523,7 +548,7 @@ const InferenceSessionDialog: React.FC<{
                           className={`h-2 w-2 rounded-full ${RESULT_META[key].dot}`}
                         />
                         <span className={RESULT_META[key].text}>
-                          {RESULT_META[key].label}
+                          {t(RESULT_META[key].labelKey as never)}
                         </span>
                         <span className="font-semibold">{counts[key]}</span>
                       </span>
@@ -532,8 +557,7 @@ const InferenceSessionDialog: React.FC<{
                 </div>
                 {counts.error > 0 && (
                   <p className="mt-2 text-xs text-muted-foreground">
-                    Errored episodes are excluded from the accuracy — a hardware
-                    hiccup isn't a policy failure.
+                    {t("inference.eval.errorsExcluded")}
                   </p>
                 )}
               </div>
@@ -550,8 +574,10 @@ const InferenceSessionDialog: React.FC<{
               >
                 {evalAborted ? (
                   <p className="text-sm leading-relaxed text-warn">
-                    Aborted after {results.length} of {episodesTotal ?? "?"}{" "}
-                    episodes — no accuracy recorded for a partial run.
+                    {t("inference.eval.abortedSummary", {
+                      done: results.length,
+                      total: episodesTotal ?? t("inference.eval.unknownTotal"),
+                    })}
                   </p>
                 ) : accuracy != null ? (
                   <div className="text-center">
@@ -559,17 +585,20 @@ const InferenceSessionDialog: React.FC<{
                       {Math.round(accuracy * 100)}%
                     </div>
                     <div className="mt-2 text-sm text-muted-foreground tabular-nums">
-                      {counts.success} / {counts.success + counts.failure}{" "}
-                      episodes succeeded
+                      {t("inference.eval.succeeded", {
+                        success: counts.success,
+                        scored: counts.success + counts.failure,
+                      })}
                       {counts.error > 0
-                        ? ` (${counts.error} excluded as errors)`
+                        ? t("inference.eval.excludedAsErrors", {
+                            count: counts.error,
+                          })
                         : ""}
                     </div>
                   </div>
                 ) : (
                   <p className="text-sm leading-relaxed text-warn">
-                    No scoreable episodes — every episode errored, so there's no
-                    accuracy to report.
+                    {t("inference.eval.noScoreable")}
                   </p>
                 )}
                 {results.length > 0 && (
@@ -584,7 +613,7 @@ const InferenceSessionDialog: React.FC<{
                           className={`h-1.5 w-1.5 rounded-full ${RESULT_META[r].dot}`}
                         />
                         <span className={RESULT_META[r].text}>
-                          {RESULT_META[r].label}
+                          {t(RESULT_META[r].labelKey as never)}
                         </span>
                       </li>
                     ))}
@@ -606,11 +635,12 @@ const InferenceSessionDialog: React.FC<{
                   <>
                     <div className="flex items-center gap-2 text-sm font-semibold text-destructive">
                       <span className="h-2 w-2 rounded-full bg-destructive" />
-                      Episode {results.length} crashed
+                      {t("inference.eval.episodeCrashed", {
+                        index: results.length,
+                      })}
                     </div>
                     <p className="mt-2 text-sm leading-relaxed text-destructive/90">
-                      It counts as neither a success nor a failure. Continue to
-                      run the next episode, or abort the evaluation.
+                      {t("inference.eval.episodeCrashedBody")}
                     </p>
                     {status.hint && (
                       <p className="mt-2 text-sm leading-relaxed text-destructive/90">
@@ -625,10 +655,17 @@ const InferenceSessionDialog: React.FC<{
                   </>
                 ) : (
                   <p className="text-sm leading-relaxed text-warn">
-                    Episode {results.length} recorded as{" "}
-                    <strong>{RESULT_META[results.at(-1) ?? "failure"].label}</strong>
-                    . Rearrange the scene, then start the next episode — there's
-                    no timer, take as long as you need.
+                    <Trans
+                      i18nKey="inference.eval.episodeRecorded"
+                      values={{
+                        index: results.length,
+                        result: t(
+                          RESULT_META[results.at(-1) ?? "failure"]
+                            .labelKey as never,
+                        ),
+                      }}
+                      components={[<span key="0" />, <strong key="1" />]}
+                    />
                   </p>
                 )}
               </div>
@@ -646,7 +683,7 @@ const InferenceSessionDialog: React.FC<{
                   </div>
                   <div className="text-sm text-muted-foreground mt-2">
                     {isSettingUp
-                      ? "Loading policy & connecting hardware…"
+                      ? t("inference.settingUp")
                       : `/ ${formatTime(duration)}`}
                   </div>
                 </div>
@@ -663,7 +700,9 @@ const InferenceSessionDialog: React.FC<{
             )}
 
             <div className="text-xs text-muted-foreground break-all mb-6">
-              policy: {status.policy_ref ?? "(unknown)"}
+              {t("inference.policyRef", {
+                ref: status.policy_ref ?? t("inference.unknownPolicy"),
+              })}
             </div>
 
             {showOutcome && (
@@ -684,7 +723,9 @@ const InferenceSessionDialog: React.FC<{
                       finishedWarn ? "bg-warn" : "bg-destructive"
                     }`}
                   />
-                  {finishedWarn ? "Ran with a cleanup warning" : "Run failed"}
+                  {finishedWarn
+                    ? t("inference.outcome.ranWithWarning")
+                    : t("inference.outcome.runFailed")}
                 </div>
                 {status.hint && (
                   <p
@@ -709,7 +750,7 @@ const InferenceSessionDialog: React.FC<{
                 variant="secondary"
                 className="w-full font-semibold py-6 text-lg"
               >
-                Close
+                {t("inference.button.close")}
               </Button>
             ) : isResetting ? (
               // Reset screen: continue is the primary action, abort stays
@@ -722,11 +763,13 @@ const InferenceSessionDialog: React.FC<{
                 >
                   <Play className="w-5 h-5 mr-2" />
                   {startingNext
-                    ? "Starting…"
-                    : `Start episode ${Math.min(
-                        results.length + 1,
-                        episodesTotal ?? results.length + 1,
-                      )}`}
+                    ? t("inference.button.starting")
+                    : t("inference.button.startEpisode", {
+                        index: Math.min(
+                          results.length + 1,
+                          episodesTotal ?? results.length + 1,
+                        ),
+                      })}
                 </Button>
                 <Button
                   onClick={handleStop}
@@ -735,7 +778,9 @@ const InferenceSessionDialog: React.FC<{
                   className="w-full font-semibold disabled:opacity-50"
                 >
                   <Square className="w-4 h-4 mr-2" />
-                  {stopping ? "Aborting…" : "Abort evaluation"}
+                  {stopping
+                    ? t("inference.button.aborting")
+                    : t("inference.button.abortEvaluation")}
                 </Button>
               </div>
             ) : evalMode ? (
@@ -749,8 +794,8 @@ const InferenceSessionDialog: React.FC<{
                 >
                   <CheckCircle2 className="w-5 h-5 mr-2" />
                   {endingEpisode
-                    ? "Ending episode…"
-                    : "Task succeeded — end episode"}
+                    ? t("inference.button.endingEpisode")
+                    : t("inference.button.taskSucceeded")}
                 </Button>
                 <Button
                   onClick={handleStop}
@@ -759,7 +804,9 @@ const InferenceSessionDialog: React.FC<{
                   className="w-full font-semibold disabled:opacity-50"
                 >
                   <Square className="w-4 h-4 mr-2" />
-                  {stopping ? "Aborting…" : "Abort evaluation"}
+                  {stopping
+                    ? t("inference.button.aborting")
+                    : t("inference.button.abortEvaluation")}
                 </Button>
               </div>
             ) : (
@@ -770,7 +817,9 @@ const InferenceSessionDialog: React.FC<{
                 className="w-full font-semibold py-6 text-lg disabled:opacity-50"
               >
                 <Square className="w-5 h-5 mr-2" />
-                {stopping ? "Stopping…" : "Stop"}
+                {stopping
+                  ? t("inference.button.stopping")
+                  : t("inference.button.stop")}
               </Button>
             )}
 
@@ -782,7 +831,7 @@ const InferenceSessionDialog: React.FC<{
                   }`}
                 />
                 <span className={`font-medium ${PHASE_TEXT[phaseMeta.tone]}`}>
-                  {phaseMeta.label}
+                  {t(phaseMeta.labelKey as never)}
                 </span>
               </div>
             )}
@@ -801,10 +850,15 @@ const InferenceSessionDialog: React.FC<{
                 </div>
                 <div className="text-[11px] tabular-nums text-muted-foreground">
                   {dlDeterminate
-                    ? `${formatBytes(dlDone ?? 0)} / ${formatBytes(dlTotal)}`
+                    ? t("inference.download.progress", {
+                        done: formatBytes(dlDone ?? 0),
+                        total: formatBytes(dlTotal),
+                      })
                     : dlDone != null
-                      ? `${formatBytes(dlDone)} so far`
-                      : "Starting download…"}
+                      ? t("inference.download.soFar", {
+                          done: formatBytes(dlDone),
+                        })
+                      : t("inference.download.starting")}
                 </div>
               </div>
             )}
@@ -812,7 +866,7 @@ const InferenceSessionDialog: React.FC<{
             <div className="mt-4">
               <LogPanel
                 logs={logIsThisRun ? logs : logPlaceholder}
-                title="Inference log"
+                title={t("inference.log.title")}
                 defaultCollapsed
                 wrap={false}
               />

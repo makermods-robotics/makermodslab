@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 interface LogPanelProps {
   /** The full log text to display (newline-separated). */
   logs: string;
-  /** Panel heading, e.g. "Inference log" or "Recording log". */
+  /** Panel heading, e.g. "Inference log" or "Recording log". Callers pass
+   * already-translated text; omitted, it falls back to a generic "Log". */
   title?: string;
   /** Start collapsed. Defaults to expanded. */
   defaultCollapsed?: boolean;
@@ -28,11 +30,13 @@ interface LogPanelProps {
  */
 const LogPanel: React.FC<LogPanelProps> = ({
   logs,
-  title = "Log",
+  title,
   defaultCollapsed = false,
   wrap = true,
   className = "",
 }) => {
+  const { t } = useTranslation();
+  const heading = title ?? t("shared.logPanel.defaultTitle");
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether the view is pinned to the bottom. Starts true; flips false when the
@@ -84,7 +88,9 @@ const LogPanel: React.FC<LogPanelProps> = ({
           {logs ? (
             logs
           ) : (
-            <span className="text-muted-foreground">Waiting for log output…</span>
+            <span className="text-muted-foreground">
+              {t("shared.logPanel.waiting")}
+            </span>
           )}
         </div>
       )}

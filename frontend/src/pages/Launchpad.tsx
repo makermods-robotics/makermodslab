@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronUp, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import Footer from "@/components/Footer";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
@@ -15,8 +17,12 @@ import CollectHandoff from "@/components/studio/CollectHandoff";
 import StudioOverlay from "@/components/studio/StudioOverlay";
 import { useStudio } from "@/contexts/StudioContext";
 import { isHostedSpace } from "@/lib/isHostedSpace";
+import { useOnboarding } from "@/contexts/OnboardingContext";
+import { useOnceFlag } from "@/lib/onboarding/storage";
+import { launchpadTour } from "@/lib/onboarding/tours";
 
 const ON_SPACE = isHostedSpace();
+const ONBOARDING_KEY = "makerlab:onboarding-completed";
 
 /**
  * Layout D "Launchpad" — the single dashboard route. Marketplace-first hero
@@ -29,6 +35,16 @@ const Launchpad = () => {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [search, setSearch] = useState("");
   const { openStudio } = useStudio();
+  const { t } = useTranslation();
+  const { start } = useOnboarding();
+  const { seen, markSeen } = useOnceFlag(ONBOARDING_KEY);
+
+  useEffect(() => {
+    if (!seen) start(launchpadTour, markSeen);
+    // Start exactly once on first mount — re-running on every `seen`/`start`
+    // identity change would restart the tour mid-flow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
@@ -41,13 +57,20 @@ const Launchpad = () => {
           <Button
             variant="ghost"
             size="sm"
+            data-tour="launchpad-library"
             className="h-8 gap-1.5 rounded-full px-3"
             onClick={() => setLibraryOpen(true)}
           >
             <Library className="h-3.5 w-3.5" />
-            My library
+            {t("launchpad.header.myLibrary")}
           </Button>
-          <RobotCorner />
+          <LanguageSwitcher />
+          {/* Wrapped (rather than tagging RobotCorner.tsx itself) since the
+              same component also renders inside StudioOverlay's header —
+              tagging it directly would give the tour two matching elements. */}
+          <div data-tour="launchpad-robot-corner">
+            <RobotCorner />
+          </div>
         </div>
       </header>
 
@@ -74,8 +97,8 @@ const Launchpad = () => {
       <button
         type="button"
         onClick={() => openStudio()}
-        aria-label="Open the skill studio"
-        title="Open the skill studio"
+        aria-label={t("launchpad.header.openStudio")}
+        title={t("launchpad.header.openStudio")}
         className="fixed bottom-3 left-1/2 z-30 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background/90 text-muted-foreground shadow-1 backdrop-blur-sm transition-colors hover:text-foreground"
       >
         <ChevronUp className="h-5 w-5 animate-bounce" />

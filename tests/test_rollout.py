@@ -640,6 +640,22 @@ def test_handle_start_inference_blocked_when_recording_active(monkeypatch) -> No
     assert "Recording" in result["message"]
 
 
+def test_handle_start_inference_blocked_when_a_training_run_is_active(monkeypatch) -> None:
+    """The worst pairing of the six: both want several GB of VRAM.
+
+    The training queue already waits for inference. Until it was mutual, this
+    direction walked straight over a run the watchdog had just promoted — and
+    whichever process lost the OOM lost hours, reported only as "Subprocess
+    exited with code 1" with nothing tying it to this click."""
+    from makermodslab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makermodslab.jobs.training_is_active", lambda: "ACT · user/ds")
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "ACT · user/ds" in result["message"]
+
+
 def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None:
     from makermodslab import rollout
 
@@ -682,6 +698,19 @@ def test_handle_start_inference_blocked_when_wiggle_active(monkeypatch) -> None:
     assert "wiggle" in result["message"].lower()
 
 
+def test_handle_start_inference_blocked_when_replay_active(monkeypatch) -> None:
+    """Replay drives the same follower bus open-loop — inference must refuse
+    to start while it's active, or both threads race to write goal positions
+    to the same servos."""
+    from makermodslab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "replay" in result["message"].lower()
+
+
 def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp_path) -> None:
     """The stop dialog promises the follower eases back to its start pose on
     teardown. That behaviour is lerobot's `return_to_initial_position`, which
@@ -698,7 +727,7 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     from makermodslab import rollout
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg, arm_type="so101": cfg)
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
     monkeypatch.setattr(
@@ -2781,7 +2810,7 @@ def test_eval_start_spawns_the_runner_with_stdin_left_open(monkeypatch, tmp_path
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name: name)
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
     monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
@@ -2839,7 +2868,7 @@ def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name: name)
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name, arm_type="so101": name)
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
     monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
@@ -3058,7 +3087,7 @@ def test_start_inference_clears_the_previous_runs_log_pointer(monkeypatch, tmp_p
     from makermodslab.rollout import InferenceRequest
 
     monkeypatch.setattr(rollout, "_last_log_path", "/tmp/some-previous-run.log")
-    monkeypatch.setattr(rollout, "_arm_count_mismatch", lambda mode, dim: "nope")
+    monkeypatch.setattr(rollout, "_arm_count_mismatch", lambda mode, dim, arm_type="so101": "nope")
 
     # Built inline rather than via a shared helper so this case stays
     # self-contained on this branch.

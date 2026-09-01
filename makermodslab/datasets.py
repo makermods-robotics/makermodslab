@@ -20,6 +20,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -95,13 +96,22 @@ _HUB_FANOUT_MAX_WORKERS = 8
 # fast and degrades to "whatever the finished authors returned".
 _HUB_FANOUT_TIMEOUT_S = 5.0
 
-# In-process cache of Hub existence checks, keyed by repo_id. /whoami-v2 and
-# repo-existence lookups hit the network, so the info card fetches this lazily
-# and we memoize the "on Hub" answer for the process lifetime. A successful
-# upload invalidates the entry (see invalidate_hub_status), so the card can
-# flip Local only -> On Hub without waiting for a cache expiry. "unknown" (the
-# offline/unauthenticated/error degrade) is never cached, so connectivity
-# returning is picked up on the next check.
+# In-process cache of Hub existence checks, keyed by the id actually LOOKED UP
+# on the Hub (see resolve_hub_repo_id). /whoami-v2 and repo-existence lookups
+# hit the network, so the info card fetches this lazily and we memoize the "on
+# Hub" answer for the process lifetime. A successful upload invalidates the
+# entry (see invalidate_hub_status), so the card can flip Local only -> On Hub
+# without waiting for a cache expiry. "unknown" (the offline/unauthenticated/
+# error degrade) is never cached, so connectivity returning is picked up on the
+# next check.
+#
+# Keying by the RESOLVED id (not the caller's bare one) is load-bearing: the
+# answer for a bare id depends on who is logged in, and the token can change
+# mid-process (the UI has an in-app login — see handle_hf_login). Keyed by the
+# bare id, a "local_only" fetched before login would survive the login and keep
+# an already-uploaded dataset reading "Local only" for the process lifetime,
+# and logging in as a different account would keep serving the previous
+# account's answer.
 _HUB_STATUS_CACHE: dict[str, str] = {}
 _HUB_STATUS_LOCK = threading.Lock()
 
@@ -109,9 +119,195 @@ _HUB_STATUS_LOCK = threading.Lock()
 def invalidate_hub_status(repo_id: str) -> None:
     """Drop the cached Hub-existence answer for `repo_id`. Called after a
     successful upload so the next /datasets/hub-status re-checks (and sees
-    the freshly pushed repo)."""
+    the freshly pushed repo).
+
+    Callers pass the id they hold — bare or namespaced. Entries are keyed by
+    the RESOLVED lookup id, so a bare id also drops every "<namespace>/<id>"
+    entry (whichever namespace was logged in when the answer was cached).
+    Dropping a same-named entry belonging to another namespace is harmless: it
+    costs one re-check.
+    """
     with _HUB_STATUS_LOCK:
-        _HUB_STATUS_CACHE.pop(repo_id, None)
+        _drop_resolved_keys(_HUB_STATUS_CACHE, repo_id)
+
+
+def _drop_resolved_keys(cache: dict[str, Any], repo_id: str) -> None:
+    """Remove `repo_id` from a cache keyed by RESOLVED lookup id, plus — when
+    the caller's id is bare — every "<namespace>/<repo_id>" entry it could have
+    resolved to (whichever namespace was logged in when the answer was cached).
+
+    Shared by the hub-status and hub-summary caches, which key the same way.
+    Dropping a same-named entry belonging to another namespace is harmless: it
+    costs one re-check. Caller holds the matching lock.
+    """
+    cache.pop(repo_id, None)
+    if "/" not in repo_id:
+        suffix = f"/{repo_id}"
+        for key in [k for k in cache if k.endswith(suffix)]:
+            del cache[key]
+
+
+@dataclass(frozen=True)
+class HubDatasetId:
+    """How one local dataset id maps onto the Hub.
+
+    Two facts, produced together because they are answers to the same lookup
+    and MUST NOT be derived separately:
+
+    * ``repo_id``   — the id to ADDRESS the repo by. Every literal-lookup Hub
+      call (``repo_exists``, ``dataset_info``, ``hf_hub_download``, …) wants
+      this and nothing else.
+    * ``writable``  — whether this token may write to that namespace. Only
+      callers about to MUTATE the repo (rename's ``move_repo``) care.
+    * ``namespace`` — the canonical namespace of ``repo_id``, so a caller
+      building a SIBLING id (rename's target name) doesn't re-split the
+      string and re-derive the casing.
+
+    The two answers genuinely diverge for a third-party dataset: ``lerobot/pusht``
+    is already the right id to READ, and can never be written to. Returning
+    them from one place is what keeps a read path and a write path from
+    disagreeing about the same dataset in the same process.
+    """
+
+    repo_id: str
+    namespace: str | None
+    writable: bool
+
+
+def resolve_hub_dataset_id(repo_id: str, who: dict[str, Any] | None) -> HubDatasetId:
+    """THE mapping from a local dataset id to its Hub identity. One
+    implementation, no exceptions — see HubDatasetId for what it returns.
+
+    A locally-recorded dataset's repo_id is bare (no "namespace/" prefix) —
+    the only form the app naturally has for it, since local dataset
+    directories aren't namespaced. Some Hub APIs resolve a bare id to the
+    caller's own namespace (``create_repo``, ``delete_repo``) and some do a
+    literal lookup that 404s on it (``repo_exists``, ``dataset_info``,
+    ``update_repo_settings``, ``snapshot_download``, ``hf_hub_download``).
+    Resolving up front makes every call agree on one repo.
+
+    Also canonicalises the CASING of an already-namespaced id the account can
+    write to: a locally-recorded "MyOrg/foo" must reach the Hub as the
+    canonical "myorg/foo" the account actually owns. An id in someone else's
+    namespace (a downloaded third-party dataset like ``lerobot/pusht``) is
+    returned untouched and marked unwritable — it is already the right id, and
+    ownership is irrelevant to *reading* it.
+
+    `who` is a ``cached_whoami()`` payload, or None for "no Hub identity" —
+    passed IN rather than fetched here on purpose. A caller that must fail
+    closed on a transient whoami failure (rename, via ``fail_on_error=True``)
+    would otherwise have a second, silently-degrading lookup happen underneath
+    it and reach a different conclusion than the check it just made.
+
+    Unauthenticated returns the id unchanged and unwritable: read callers
+    degrade rather than raise, write callers skip the Hub.
+    """
+    if who is None:
+        return HubDatasetId(repo_id=repo_id, namespace=None, writable=False)
+    if "/" not in repo_id:
+        # A bare id lives under the user's own account. `writable_namespaces`
+        # always contains whoami's own name, so this is a lookup, not a
+        # special case — going through the same helper keeps one rule.
+        namespace = canonical_writable_namespace(who, who["name"]) or who["name"]
+        return HubDatasetId(repo_id=f"{namespace}/{repo_id}", namespace=namespace, writable=True)
+    namespace, name = repo_id.split("/", 1)
+    canonical = canonical_writable_namespace(who, namespace)
+    if canonical is None:
+        return HubDatasetId(repo_id=repo_id, namespace=namespace, writable=False)
+    return HubDatasetId(repo_id=f"{canonical}/{name}", namespace=canonical, writable=True)
+
+
+def resolve_hub_repo_id(repo_id: str) -> str:
+    """The id to address `repo_id` by on the Hub, resolved against whoever is
+    logged in now. The read path's projection of ``resolve_hub_dataset_id`` —
+    keep it a projection, so addressing can never drift from permission.
+
+    NOT an ownership check: it answers "what is this repo called", not "may I
+    change it". A caller that needs the second question — rename's move_repo,
+    which must skip the Hub step rather than target a namespace it can't touch
+    — calls ``resolve_hub_dataset_id`` and reads ``.writable``.
+    """
+    return resolve_hub_dataset_id(repo_id, cached_whoami()).repo_id
+
+
+def push_dataset_to_hub(local_repo_id: str, *, tags: list[str] | None, private: bool) -> str:
+    """Push the local dataset at `local_repo_id` to the Hub. Returns the Hub id
+    it landed under.
+
+    The one place that works around ``LeRobotDataset.push_to_hub``'s split
+    behaviour on a bare repo_id. Inside a single push_to_hub call, create_repo
+    resolves a bare id to the caller's namespace and creates the repo THERE,
+    while the upload_folder and card/tag calls right after it reuse the bare id
+    literally and 404 against it — leaving a freshly-created empty repo behind
+    and reporting failure. Resolving up front makes every call inside push
+    target one repo.
+
+    ``dataset.repo_id`` is assigned rather than passed because push_to_hub
+    takes no repo_id argument — it reads the attribute. That's a reach into
+    lerobot's object, which is exactly why it lives here once instead of at
+    each upload site; when lerobot resolves this upstream, one function
+    changes.
+
+    Raises RuntimeError when there's no Hub identity to resolve a bare id
+    against. Unlike the read paths, an upload cannot degrade: with no token
+    there is nowhere to push, and a bare create_repo would fail anyway with a
+    far less legible error.
+    """
+    from lerobot.datasets import LeRobotDataset
+
+    hub_repo_id = resolve_hub_repo_id(local_repo_id)
+    if "/" not in hub_repo_id:
+        # Keep this wording aligned with record._upload_auth_error so the
+        # upload worker returns the friendly login instruction + docs link.
+        raise RuntimeError("You must be authenticated with the Hugging Face Hub")
+
+    dataset = LeRobotDataset(local_repo_id)
+    logger.info(
+        "Uploading %s to the Hub as %s (%d episodes)", local_repo_id, hub_repo_id, dataset.num_episodes
+    )
+    dataset.repo_id = hub_repo_id
+    dataset.push_to_hub(tags=tags, private=private)
+
+    # The push just falsified both cached Hub facts for this dataset: it may
+    # have created the repo (status), and it certainly changed what is inside
+    # it (the summary read from meta/info.json). Invalidating HERE rather than
+    # at each call site is the point of this being the single push: a caller
+    # that forgot would leave the info card insisting "Local only" about a
+    # dataset it had just successfully uploaded, for the process lifetime.
+    # Callers may still invalidate their own extras (record's listing cache).
+    invalidate_hub_status(local_repo_id)
+    invalidate_hub_dataset_info(local_repo_id)
+    return hub_repo_id
+
+
+def hub_repo_exists(repo_id: str) -> bool | None:
+    """Does a dataset repo with this id exist on the Hub?
+
+    THE Hub-existence check for the app. Every caller asking this question goes
+    through here, so there is one transport call, one error taxonomy and one
+    answer — the info card (get_hub_status), the merge preflight
+    (_merge_source_problem) and the cloud runner's push-if-absent each grew
+    their own, and once a bare id needed resolving they could disagree about
+    the same dataset in the same process.
+
+    * ``True``  — the repo exists and this token can see it.
+    * ``False`` — confirmed absent. Private-without-auth is indistinguishable
+      from missing at the API and lands here too; both mean "this caller
+      cannot use it".
+    * ``None``  — couldn't tell (offline, rate-limited, any transport error).
+      "No claim", NOT a soft False: callers must not block, refuse or
+      overwrite on None.
+
+    Never raises, and deliberately uncached — get_hub_status layers its
+    memoization on top, which is what a read path wants and what a caller
+    about to WRITE must not have.
+    """
+    hub_repo_id = resolve_hub_repo_id(repo_id)
+    try:
+        return shared_hf_api().repo_exists(hub_repo_id, repo_type="dataset")
+    except Exception as exc:
+        logger.info("hub repo_exists(%s) failed: %s", hub_repo_id, exc)
+        return None
 
 
 # Short-TTL cache of the merged /datasets listing. Startup + navigation re-hit
@@ -210,21 +406,30 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
     are NOT cached (a later record/merge/download can make an ``absent`` dataset
     appear locally without a hub-status invalidation, and a transient failure
     should self-heal) so both re-check on the next call.
+
+    The existence question itself goes to ``hub_repo_exists`` (shared with the
+    merge preflight), which resolves a bare or mis-cased repo_id — a literal
+    lookup on the caller's own id would 404 against a dataset that IS on the
+    Hub. The returned ``url`` is built from the same resolved id. The public
+    contract is unchanged: the returned ``repo_id`` is always exactly what was
+    passed in.
     """
-    url = f"https://huggingface.co/datasets/{repo_id}"
+    # Keyed by the RESOLVED id so an answer never outlives the auth state it
+    # was derived from — logging in (or switching account) misses the cache and
+    # re-checks rather than serving the previous namespace's answer. The key IS
+    # the Hub id, so the url is derivable from it and needn't be cached too.
+    hub_repo_id = resolve_hub_repo_id(repo_id)
 
     with _HUB_STATUS_LOCK:
-        cached = _HUB_STATUS_CACHE.get(repo_id)
+        cached = _HUB_STATUS_CACHE.get(hub_repo_id)
     if cached is not None:
-        return {"repo_id": repo_id, "status": cached, "url": url if cached == "on_hub" else None}
+        url = f"https://huggingface.co/datasets/{hub_repo_id}" if cached == "on_hub" else None
+        return {"repo_id": repo_id, "status": cached, "url": url}
 
-    api = shared_hf_api()
-    try:
-        exists = api.repo_exists(repo_id, repo_type="dataset")
-    except Exception as exc:
+    exists = hub_repo_exists(repo_id)
+    if exists is None:
         # Offline / rate-limited / any other transport error: degrade to
         # "unknown" without caching so it re-checks once connectivity returns.
-        logger.info("hub-status repo_exists(%s) failed: %s", repo_id, exc)
         return {"repo_id": repo_id, "status": "unknown", "url": None}
 
     if exists:
@@ -240,8 +445,9 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
         # Cache only the definitive, stable answers; "absent" can flip to local
         # without a hub-status invalidation, so leave it uncached (like "unknown").
         if status in ("on_hub", "local_only"):
-            _HUB_STATUS_CACHE[repo_id] = status
-    return {"repo_id": repo_id, "status": status, "url": url if exists else None}
+            _HUB_STATUS_CACHE[hub_repo_id] = status
+    url = f"https://huggingface.co/datasets/{hub_repo_id}" if exists else None
+    return {"repo_id": repo_id, "status": status, "url": url}
 
 
 class DatasetHubEditError(Exception):
@@ -310,11 +516,12 @@ def get_hub_settings(repo_id: str) -> dict[str, Any]:
     """
     if hf_hub_offline():
         raise DatasetHubEditError(400, "The Hub is offline — dataset settings can't be read right now.")
+    hub_repo_id = resolve_hub_repo_id(repo_id)
     api = shared_hf_api()
     try:
-        info = api.dataset_info(repo_id)
+        info = api.dataset_info(hub_repo_id)
     except Exception as exc:
-        logger.info("dataset_info(%s) failed: %s", repo_id, exc)
+        logger.info("dataset_info(%s) failed: %s", hub_repo_id, exc)
         raise _hub_edit_error(exc) from exc
     return {
         "repo_id": repo_id,
@@ -335,11 +542,12 @@ def set_dataset_visibility(repo_id: str, private: bool) -> dict[str, Any]:
         raise DatasetHubEditError(
             400, "The Hub is offline — you can't change a dataset's visibility right now."
         )
+    hub_repo_id = resolve_hub_repo_id(repo_id)
     api = shared_hf_api()
     try:
-        api.update_repo_settings(repo_id, private=private, repo_type="dataset")
+        api.update_repo_settings(hub_repo_id, private=private, repo_type="dataset")
     except Exception as exc:
-        logger.info("update_repo_settings(%s, private=%s) failed: %s", repo_id, private, exc)
+        logger.info("update_repo_settings(%s, private=%s) failed: %s", hub_repo_id, private, exc)
         raise _hub_edit_error(exc) from exc
 
     invalidate_hub_status(repo_id)
@@ -360,10 +568,11 @@ def set_dataset_tags(repo_id: str, tags: list[str]) -> dict[str, Any]:
     if hf_hub_offline():
         raise DatasetHubEditError(400, "The Hub is offline — you can't edit a dataset's tags right now.")
     final_tags = with_makermodslab_tag(tags)
+    hub_repo_id = resolve_hub_repo_id(repo_id)
     try:
-        metadata_update(repo_id, {"tags": final_tags}, repo_type="dataset", overwrite=True)
+        metadata_update(hub_repo_id, {"tags": final_tags}, repo_type="dataset", overwrite=True)
     except Exception as exc:
-        logger.info("metadata_update(%s, tags=%s) failed: %s", repo_id, final_tags, exc)
+        logger.info("metadata_update(%s, tags=%s) failed: %s", hub_repo_id, final_tags, exc)
         raise _hub_edit_error(exc) from exc
 
     invalidate_hub_status(repo_id)
@@ -727,13 +936,14 @@ def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
         return None
     if not _hub_dataset_has_video(repo_id):
         return None
+    hub_repo_id = resolve_hub_repo_id(repo_id)
     try:
-        info_path = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+        info_path = hf_hub_download(hub_repo_id, filename="meta/info.json", repo_type="dataset")
         root = Path(info_path).parents[1]  # strip "meta/info.json"'s 2 path parts
-        files = shared_hf_api().list_repo_files(repo_id, repo_type="dataset")
+        files = shared_hf_api().list_repo_files(hub_repo_id, repo_type="dataset")
         for f in files:
             if f.startswith("meta/episodes/") and f.endswith(".parquet"):
-                hf_hub_download(repo_id, filename=f, repo_type="dataset")
+                hf_hub_download(hub_repo_id, filename=f, repo_type="dataset")
     except Exception as exc:
         logger.info("hub episode metadata fetch for %s failed: %s", repo_id, exc)
         return None
@@ -854,7 +1064,11 @@ def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Pat
     rel_video_path = Path("videos") / video_key / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.mp4"
     if is_hub:
         try:
-            return Path(hf_hub_download(repo_id, filename=str(rel_video_path), repo_type="dataset"))
+            return Path(
+                hf_hub_download(
+                    resolve_hub_repo_id(repo_id), filename=str(rel_video_path), repo_type="dataset"
+                )
+            )
         except Exception as exc:
             logger.info("hub video chunk fetch for %s failed: %s", repo_id, exc)
             return None
@@ -899,7 +1113,11 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
     rel_data_path = Path("data") / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
     if is_hub:
         try:
-            data_path = Path(hf_hub_download(repo_id, filename=str(rel_data_path), repo_type="dataset"))
+            data_path = Path(
+                hf_hub_download(
+                    resolve_hub_repo_id(repo_id), filename=str(rel_data_path), repo_type="dataset"
+                )
+            )
         except Exception as exc:
             logger.info("hub data chunk fetch for %s failed: %s", repo_id, exc)
             return None
@@ -935,6 +1153,88 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
     }
 
 
+def get_episode_action_series(repo_id: str, episode_index: int) -> dict[str, Any] | None:
+    """Per-frame timestamp + ``action`` for one episode — the commanded
+    values, for driving a real robot during hardware replay (see
+    makermodslab/replay.py). Deliberately separate from
+    get_episode_joint_series (which reads observation.state, for the
+    viewer's chart display only): the two columns are usually close but not
+    identical, and the chart's reference trace intentionally keeps showing
+    observation.state unchanged even when a hardware replay is using this
+    function's action data to actually drive the arm.
+
+    None if it can't be resolved/read (not local, not the v3.0 parquet
+    layout, or the episode doesn't exist) — same semantics as
+    get_episode_joint_series, including the Hub data-chunk fallback.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    is_hub = path is None
+    if is_hub:
+        path = _ensure_hub_episodes_root(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    action_names = ((info.get("features") or {}).get("action") or {}).get("names") or []
+
+    episode_rows = _read_episode_rows(
+        path / "meta", columns=["episode_index", "data/chunk_index", "data/file_index"]
+    )
+    if episode_rows is None:
+        return None
+    row = next((r for r in episode_rows if _safe_int(r.get("episode_index")) == episode_index), None)
+    if row is None or row.get("data/chunk_index") is None or row.get("data/file_index") is None:
+        return None
+    chunk_index, file_index = _safe_int(row["data/chunk_index"]), _safe_int(row["data/file_index"])
+    if chunk_index is None or file_index is None:
+        logger.warning("Malformed data chunk/file index for %s episode %d", repo_id, episode_index)
+        return None
+
+    rel_data_path = Path("data") / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
+    if is_hub:
+        try:
+            data_path = Path(
+                hf_hub_download(
+                    resolve_hub_repo_id(repo_id), filename=str(rel_data_path), repo_type="dataset"
+                )
+            )
+        except Exception as exc:
+            logger.info("hub data chunk fetch for %s failed: %s", repo_id, exc)
+            return None
+    else:
+        data_path = path / rel_data_path
+        if not data_path.is_file():
+            return None
+    try:
+        table = pq.read_table(data_path, columns=["episode_index", "timestamp", "action"])
+    except Exception as e:
+        logger.warning(f"Could not read {data_path}: {e}")
+        return None
+
+    frames = sorted(
+        (
+            (float(ts), [float(v) for v in action])
+            for ep, ts, action in zip(
+                table.column("episode_index").to_pylist(),
+                table.column("timestamp").to_pylist(),
+                table.column("action").to_pylist(),
+                strict=True,
+            )
+            if _safe_int(ep) == episode_index
+        ),
+        key=lambda pair: pair[0],
+    )
+    if not frames:
+        return None
+    return {
+        "action_names": [str(n) for n in action_names],
+        "timestamps": [t for t, _ in frames],
+        "values": [v for _, v in frames],
+    }
+
+
 # In-process cache of per-repo Hub dataset summaries (the /datasets/info hub
 # fallback), mirroring _HUB_STATUS_CACHE conventions: successful answers are
 # memoized for the process lifetime; the offline/error degrade is NEVER cached,
@@ -946,9 +1246,13 @@ _HUB_DATASET_INFO_LOCK = threading.Lock()
 
 def invalidate_hub_dataset_info(repo_id: str) -> None:
     """Drop the cached Hub summary for `repo_id`, so the next /datasets/info
-    re-fetches its meta/info.json (e.g. after an upload changed it)."""
+    re-fetches its meta/info.json (e.g. after an upload changed it).
+
+    Keyed by the resolved lookup id like the hub-status cache, so a bare id
+    also drops its "<namespace>/<repo_id>" entries — see invalidate_hub_status.
+    """
     with _HUB_DATASET_INFO_LOCK:
-        _HUB_DATASET_INFO_CACHE.pop(repo_id, None)
+        _drop_resolved_keys(_HUB_DATASET_INFO_CACHE, repo_id)
 
 
 def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
@@ -968,16 +1272,21 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     if hf_hub_offline():
         return None
 
+    # Resolved, and cached under the id actually fetched: hf_hub_download is a
+    # literal lookup, so a bare id needs the namespace — and which namespace
+    # depends on who is logged in. See resolve_hub_repo_id / _HUB_STATUS_CACHE.
+    hub_repo_id = resolve_hub_repo_id(repo_id)
+
     with _HUB_DATASET_INFO_LOCK:
-        cached = _HUB_DATASET_INFO_CACHE.get(repo_id)
+        cached = _HUB_DATASET_INFO_CACHE.get(hub_repo_id)
     if cached is not None:
         return dict(cached)
 
     try:
-        path = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+        path = hf_hub_download(hub_repo_id, filename="meta/info.json", repo_type="dataset")
         info = json.loads(Path(path).read_text())
     except Exception as exc:
-        logger.info("hub dataset info fetch for %s failed: %s", repo_id, exc)
+        logger.info("hub dataset info fetch for %s failed: %s", hub_repo_id, exc)
         return None
 
     features = info.get("features") or {}
@@ -996,7 +1305,7 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     }
 
     with _HUB_DATASET_INFO_LOCK:
-        _HUB_DATASET_INFO_CACHE[repo_id] = dict(row)
+        _HUB_DATASET_INFO_CACHE[hub_repo_id] = dict(row)
     return row
 
 
@@ -1010,10 +1319,15 @@ def is_dataset_private(repo_id: str) -> bool | None:
     it's safe to show."""
     if hf_hub_offline():
         return None
+    # Resolved for the same reason every other dataset-scoped Hub call is: a
+    # bare local id ("pick-cube") is not a Hub address, and answering "is it
+    # private" about the wrong repo is exactly the failure this gate exists to
+    # prevent. See resolve_hub_repo_id.
+    hub_repo_id = resolve_hub_repo_id(repo_id)
     try:
-        info = shared_hf_api().dataset_info(repo_id, expand=["private"])
+        info = shared_hf_api().dataset_info(hub_repo_id, expand=["private"])
     except Exception as exc:
-        logger.info("dataset_info(%s) failed while checking privacy: %s", repo_id, exc)
+        logger.info("dataset_info(%s) failed while checking privacy: %s", hub_repo_id, exc)
         return None
     return bool(getattr(info, "private", False))
 
@@ -1045,7 +1359,9 @@ def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
         return None
     else:
         try:
-            local = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+            local = hf_hub_download(
+                resolve_hub_repo_id(repo_id), filename="meta/info.json", repo_type="dataset"
+            )
             info = json.loads(Path(local).read_text())
         except Exception as exc:
             logger.info("dataset features fetch for %s failed: %s", repo_id, exc)
@@ -1105,16 +1421,21 @@ def _dataset_in_use(repo_id: str) -> str | None:
     if mgr.state == "running" and mgr.output_repo_id == repo_id:
         return "A merge is producing this dataset right now. Wait for it to finish first."
 
-    # Local training: a running local job whose config trains on this dataset.
+    # Local training: a running OR QUEUED local job whose config trains on this
+    # dataset. Queued counts because a queued run has already been validated
+    # against this dataset (the submit-time preflight even confirms it is on
+    # disk) and will train on it when the slot frees, but nothing re-checks at
+    # launch — so renaming or deleting it here produced a bare "exited with
+    # code 1" hours later, with nothing tying the failure to this action. Before
+    # the queue existed a second local submit was refused outright, so a
+    # not-yet-started consumer of a dataset could not exist. Asked of the
+    # registry EXACTLY (one snapshot under its lock) rather than scanned off a
+    # `list(limit=…)` page, where an active run past the page size was
+    # invisible.
     from .jobs import job_registry
 
-    for record in job_registry.list(limit=200):
-        if (
-            record.state == "running"
-            and record.runner == "local"
-            and record.config.dataset_repo_id == repo_id
-        ):
-            return "A local training run is using this dataset. Stop it first."
+    if job_registry.local_dataset_in_use(repo_id):
+        return "A local training run is using this dataset, or is queued to. Stop or cancel it first."
 
     return None
 
@@ -1195,9 +1516,10 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     if not _is_dataset_dir(src):
         raise DatasetRenameError(404, f"Dataset '{repo_id}' not found in the local cache")
 
-    # The namespace prefix is fixed — swap only the final path segment.
+    # The namespace prefix is fixed — swap only the final path segment. This is
+    # the LOCAL id: it keeps the caller's own casing, because the directory is
+    # the user's own. The Hub-side ids are resolved separately below.
     namespace = repo_id.rsplit("/", 1)[0] if "/" in repo_id else None
-    local_name = repo_id.rsplit("/", 1)[1] if namespace else repo_id
     new_repo_id = f"{namespace}/{new_name}" if namespace else new_name
     if new_repo_id == repo_id:
         # No-op: nothing moved anywhere, so no Hub copy went stale.
@@ -1249,38 +1571,46 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     hub_state = "skipped"
     hub_repo_id: str | None = None
     hub_new_repo_id: str | None = None
-    if whoami_info is not None:
-        requested_namespace = namespace or whoami_info["name"]
-        # Resolve to whoami's own spelling, not the local directory's — a
-        # locally-recorded "MyOrg/foo" would otherwise hit the Hub as
-        # "MyOrg" instead of the canonical "myorg" the account actually owns.
-        hub_namespace = canonical_writable_namespace(whoami_info, requested_namespace)
-        if hub_namespace is None:
-            # Someone else's namespace (a downloaded third-party dataset, or
-            # an org this token doesn't have write access to). move_repo there
-            # can never succeed, so the Hub step is skipped — hub_state stays
-            # "skipped" — but the local rename below still goes ahead.
-            logger.info(
-                "rename: '%s' belongs to '%s' on the Hub, which this account can't write to "
-                "— renaming the local copy only",
-                repo_id,
-                requested_namespace,
-            )
-        else:
-            hub_repo_id = f"{hub_namespace}/{local_name}"
-            hub_new_repo_id = f"{hub_namespace}/{new_name}"
+    # The SAME resolution every read path uses — rename just reads the other
+    # half of the answer. `.repo_id` canonicalises casing (a locally-recorded
+    # "MyOrg/foo" must hit the Hub as the "myorg" the account actually owns)
+    # and qualifies a bare id under the user's account; `.writable` gates the
+    # Hub step. Deriving either of those here again is how the rename path and
+    # the read paths end up disagreeing about the same dataset.
+    #
+    # `whoami_info` is passed in rather than re-fetched so the fail-closed
+    # check just above governs this resolution too.
+    hub_id = resolve_hub_dataset_id(repo_id, whoami_info)
+    if hub_id.writable:
+        hub_repo_id = hub_id.repo_id
+        # The target keeps the SOURCE's canonical namespace — building it from
+        # the local directory's casing would land the repo somewhere else.
+        hub_new_repo_id = f"{hub_id.namespace}/{new_name}"
+    else:
+        # Either unauthenticated (no credential to move a repo with), or
+        # someone else's namespace: a downloaded third-party dataset, or an
+        # org this token has no write access to. move_repo can never succeed
+        # in any of those, so the Hub step is skipped — hub_state stays
+        # "skipped" — but the local rename below still goes ahead, since the
+        # DIRECTORY is the user's own and moving it needs no Hub permission.
+        # Failing the whole operation shut would break renaming a
+        # never-uploaded dataset while logged out, the case least deserving of
+        # a Hub error.
+        logger.info(
+            "rename: the Hub step for '%s' is skipped (namespace '%s' is not writable by this "
+            "account, or there is no token) — renaming the local copy only",
+            repo_id,
+            hub_id.namespace or "<unauthenticated>",
+        )
 
-    # Unauthenticated (no token): there's no Hub identity to resolve ownership
-    # against and no credential to move a repo with, so skip the Hub entirely
-    # and do the local-only rename this function has always done. Failing shut
-    # would break renaming a never-uploaded dataset while logged out, which is
-    # the case least deserving of a Hub error.
-    hub_repo_exists = False
+    # NB: a plain `hub_repo_exists` local here would shadow the module-level
+    # function of that name for this whole scope.
+    hub_copy_exists = False
     if hub_repo_id is not None and hf_hub_offline():
         logger.info("rename: HF_HUB_OFFLINE is set — renaming %s locally only", repo_id)
     elif hub_repo_id is not None:
         try:
-            hub_repo_exists = api.repo_exists(hub_repo_id, repo_type="dataset")
+            hub_copy_exists = api.repo_exists(hub_repo_id, repo_type="dataset")
         except Exception as exc:
             logger.warning("rename: repo_exists(%s) failed: %s", hub_repo_id, exc)
             raise DatasetRenameError(
@@ -1289,10 +1619,10 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
                 "was renamed. Check your connection and try again. Setting HF_HUB_OFFLINE=1 "
                 "renames the local copy only and leaves any Hub copy under the old name.",
             ) from exc
-        if not hub_repo_exists:
+        if not hub_copy_exists:
             hub_state = "none"
 
-    if hub_repo_exists:
+    if hub_copy_exists:
         try:
             new_taken = api.repo_exists(hub_new_repo_id, repo_type="dataset")
         except Exception as exc:
@@ -1318,7 +1648,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> dict[str, Any]:
     try:
         os.rename(src, dst)
     except OSError as exc:
-        if hub_repo_exists:
+        if hub_copy_exists:
             # The Hub already moved, so the two copies have diverged. Try to put
             # the Hub back rather than leaving the user with a dataset renamed
             # in one place only — a best-effort undo of the one step that did
@@ -1570,7 +1900,10 @@ def _fetch_dataset_snapshot(repo_id: str) -> None:
     NOT achieve (that cache isn't walked by the listing). Invalidates the
     hub-status + listing caches so the flip shows immediately."""
     target = _lerobot_cache_root() / repo_id
-    snapshot_download(repo_id, repo_type="dataset", local_dir=str(target))
+    # The Hub is addressed by the RESOLVED id (snapshot_download is a literal
+    # lookup — a bare id 404s), while the local directory keeps the id the
+    # caller passed, matching the flat layout every other local path uses.
+    snapshot_download(resolve_hub_repo_id(repo_id), repo_type="dataset", local_dir=str(target))
     invalidate_hub_status(repo_id)
     invalidate_dataset_listing_cache()
     # The card flips from the hub summary to full local detail — drop the

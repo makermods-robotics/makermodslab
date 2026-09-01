@@ -1,7 +1,9 @@
 import React from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import UrdfViewer from "../UrdfViewer";
+import JointAngleReadout from "./JointAngleReadout";
 import Logo from "@/components/Logo";
 
 interface VisualizerPanelProps {
@@ -9,6 +11,14 @@ interface VisualizerPanelProps {
   className?: string;
   /** Render a second arm viewer (driven by the "joints_right" stream). */
   bimanual?: boolean;
+  /**
+   * Show the numeric joint readout instead of the 3D model.
+   *
+   * Set for a Maker arm: the only URDF that ships is the SO-101's, and the
+   * Maker arm is a different 7-DOF geometry, so the viewer would animate the
+   * wrong arm with wrong values. See JointAngleReadout.
+   */
+  readoutOnly?: boolean;
   /** Optional content rendered as a column beside the 3D viewer (e.g. a camera panel). */
   rightSlot?: React.ReactNode;
 }
@@ -17,8 +27,10 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   onGoBack,
   className,
   bimanual = false,
+  readoutOnly = false,
   rightSlot,
 }) => {
+  const { t } = useTranslation();
   return (
     <div
       className={cn(
@@ -30,12 +42,14 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
         <div className="flex items-center gap-4 mb-4">
           <Logo iconOnly={true} />
           <div className="w-px h-6 bg-border" />
-          <h2 className="text-xl font-medium text-foreground">Teleoperation</h2>
+          <h2 className="text-xl font-medium text-foreground">
+            {t("shared.visualizer.heading")}
+          </h2>
           <Button
             onClick={onGoBack}
             className="ml-auto bg-destructive text-destructive-foreground hover:bg-destructive/90 flex-shrink-0"
           >
-            Done
+            {t("shared.visualizer.done")}
           </Button>
         </div>
         {/* No standing torque warning here: stops are graceful (the arm
@@ -45,21 +59,33 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
         {bimanual ? (
           <div className="flex-1 flex flex-col sm:flex-row gap-2 min-h-[50vh] lg:min-h-0">
             <div className="flex-1 flex flex-col">
-              <span className="text-xs text-muted-foreground mb-1">Left arm</span>
+              <span className="text-xs text-muted-foreground mb-1">
+                {t("shared.visualizer.leftArm")}
+              </span>
               <div className="flex-1 bg-background rounded border border-border min-h-[25vh]">
-                <UrdfViewer jointsKey="joints" />
+                {readoutOnly ? (
+                  <JointAngleReadout jointsKey="joints_deg" />
+                ) : (
+                  <UrdfViewer jointsKey="joints" />
+                )}
               </div>
             </div>
             <div className="flex-1 flex flex-col">
-              <span className="text-xs text-muted-foreground mb-1">Right arm</span>
+              <span className="text-xs text-muted-foreground mb-1">
+                {t("shared.visualizer.rightArm")}
+              </span>
               <div className="flex-1 bg-background rounded border border-border min-h-[25vh]">
-                <UrdfViewer jointsKey="joints_right" />
+                {readoutOnly ? (
+                  <JointAngleReadout jointsKey="joints_deg_right" />
+                ) : (
+                  <UrdfViewer jointsKey="joints_right" />
+                )}
               </div>
             </div>
           </div>
         ) : (
           <div className="flex-1 bg-background rounded border border-border min-h-[50vh] lg:min-h-0">
-            <UrdfViewer />
+            {readoutOnly ? <JointAngleReadout /> : <UrdfViewer />}
           </div>
         )}
       </div>

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { ExternalLink, Heart, Play, Sparkles } from "lucide-react";
 import {
   Dialog,
@@ -10,6 +11,9 @@ import { Button } from "@/components/ui/button";
 import { useStudio } from "@/contexts/StudioContext";
 import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
+import { cn } from "@/lib/utils";
 import { useRobots } from "@/hooks/useRobots";
 import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelInfo, ModelItem, getModelInfo } from "@/lib/modelsApi";
@@ -19,10 +23,10 @@ import {
   classifySkill,
   formatCount,
   isWipSkillId,
-  skillAuthorLabel,
+  skillDisplayAuthorLabel,
+  skillDisplayTitle,
   skillNamespace,
   skillThumbnail,
-  skillTitle,
 } from "@/components/launchpad/SkillCard";
 
 const formatBytes = (bytes: number | null | undefined): string => {
@@ -52,6 +56,8 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   open,
   onOpenChange,
 }) => {
+  const { t } = useTranslation();
+  const { language } = useLanguage();
   const { openStudio } = useStudio();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { auth } = useHfAuth();
@@ -59,7 +65,8 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   const [info, setInfo] = useState<ModelInfo | null>(null);
 
   const username = auth.status === "authenticated" ? auth.username : null;
-  const robotName = selectedRecord?.name ?? "robot";
+  // The robot's own name is data; only the no-robot-selected fallback is copy.
+  const robotName = selectedRecord?.name ?? t("dialogs.skillDetail.robotFallback");
 
   // Lazily enrich with /models/info while the dialog is open — a hub-only row's
   // list entry has null dataset/steps that model_info can recover (base dataset
@@ -105,7 +112,8 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   const isWip = isWipSkillId(model.id);
   const badge = isWip ? "wip" : classifySkill(model, username);
-  const author = skillAuthorLabel(model);
+  const title = skillDisplayTitle(t, model);
+  const author = skillDisplayAuthorLabel(t, model);
   // "by <org>" reads right only for a real namespace — a bare local run and a
   // WIP preview both carry a standalone label instead.
   const hasAuthor = !isWip && skillNamespace(model) !== null;
@@ -118,9 +126,12 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   const stats: string[] = [];
   if (policy) stats.push(policy);
-  if (steps != null) stats.push(`${formatCount(steps)} steps`);
+  // `steps` and the byte size arrive pre-formatted — the catalog only supplies
+  // the words around them.
+  if (steps != null)
+    stats.push(t("dialogs.skillDetail.steps", { steps: formatCount(steps) }));
   if (sizeBytes != null) stats.push(formatBytes(sizeBytes));
-  if (model.private) stats.push("private");
+  if (model.private) stats.push(t("dialogs.skillDetail.private"));
 
   // Only a Hub-ONLY model needs the repo-id (lazy-import) path. A model with a
   // local copy (`local` or `both`) already has a job registry entry — its run
@@ -152,7 +163,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="font-display tracking-tight">
-            {skillTitle(model)}
+            {title}
           </DialogTitle>
         </DialogHeader>
 
@@ -160,27 +171,35 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
           {skillThumbnail(model) ? (
             <img
               src={skillThumbnail(model)}
-              alt={`${skillTitle(model)} rollout preview`}
+              alt={t("dialogs.skillDetail.previewAlt", { title })}
               className="aspect-[4/3] w-full rounded-md object-cover"
             />
           ) : (
             <div
               className="media-slot aspect-[4/3] w-full"
-              data-label="rollout preview"
+              data-label={t("dialogs.skillDetail.previewPlaceholder")}
             />
           )}
           <div className="flex flex-col">
             <div className="mb-2 flex flex-wrap items-center gap-1.5">
               <SkillBadgePill badge={badge} />
               {model.source === "both" && (
-                <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
-                  Local + Hub
+                <span
+                  className={cn(
+                    "rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold text-muted-foreground",
+                    // `uppercase` does nothing to Chinese, but the
+                    // letter-spacing that pairs with it does — both come off
+                    // together (mirrors SkillBadgePill).
+                    isCaselessScript(language) ? "" : "uppercase tracking-[0.06em]",
+                  )}
+                >
+                  {t("dialogs.skillDetail.localAndHub")}
                 </span>
               )}
             </div>
 
             <p className="mb-1 font-mono text-xs text-muted-foreground">
-              {hasAuthor ? `by ${author}` : author}
+              {hasAuthor ? t("dialogs.skillDetail.byAuthor", { author }) : author}
             </p>
             {stats.length > 0 && (
               <p className="mb-2 text-sm text-muted-foreground">
@@ -190,13 +209,25 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
             {dataset && (
               <div className="mb-3">
                 <p className="text-sm text-muted-foreground">
-                  <span className="text-foreground">Trained on</span>{" "}
-                  <span className="font-mono">{dataset}</span>
+                  <Trans
+                    i18nKey="dialogs.skillDetail.trainedOn"
+                    values={{ dataset }}
+                    components={[
+                      <span key="0" className="text-foreground" />,
+                      <span key="1" className="font-mono" />,
+                    ]}
+                  />
                 </p>
                 {datasetEpisodes && (
                   <p className="text-xs text-muted-foreground">
-                    {datasetEpisodes.length}
-                    {datasetTotalEpisodes != null ? ` of ${datasetTotalEpisodes}` : ""} episodes
+                    {datasetTotalEpisodes != null
+                      ? t("dialogs.skillDetail.episodeSubsetOfTotal", {
+                          used: datasetEpisodes.length,
+                          total: datasetTotalEpisodes,
+                        })
+                      : t("dialogs.skillDetail.episodeSubset", {
+                          used: datasetEpisodes.length,
+                        })}
                   </p>
                 )}
               </div>
@@ -205,13 +236,13 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
             <div className="mt-auto flex flex-col gap-2 pt-2">
               {isWip ? (
                 <p className="rounded-md border border-warn/40 px-3 py-2 text-sm text-warn">
-                  Not trained yet — this skill is still in development.
+                  {t("dialogs.skillDetail.notTrained")}
                 </p>
               ) : (
                 <>
                   <Button onClick={handleRun} className="w-full gap-2">
                     <Play className="h-4 w-4" />
-                    Run on {robotName}
+                    {t("dialogs.skillDetail.run", { robot: robotName })}
                   </Button>
                   <Button
                     variant="outline"
@@ -219,14 +250,14 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
                     className="w-full gap-2"
                   >
                     <Sparkles className="h-4 w-4" />
-                    Fine-tune this skill
+                    {t("dialogs.skillDetail.fineTune")}
                   </Button>
                 </>
               )}
               <div className="flex gap-2">
                 <span className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
                   <Heart className="h-4 w-4" />
-                  Likes unavailable
+                  {t("dialogs.skillDetail.likesUnavailable")}
                 </span>
                 {hubRepoId && (
                   <a
@@ -236,7 +267,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
                     className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm text-foreground transition-colors hover:bg-accent"
                   >
                     <ExternalLink className="h-4 w-4" />
-                    View on HF Hub
+                    {t("dialogs.skillDetail.viewOnHub")}
                   </a>
                 )}
               </div>

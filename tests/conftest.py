@@ -15,12 +15,34 @@
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+# Redirect the module-level `job_registry` singleton away from real training
+# history. This CANNOT be a fixture: `makermodslab.jobs` resolves
+# `_DEFAULT_OUTPUT_ROOT` from this variable at import time and constructs the
+# singleton (watchdog and all) at module scope, so by the time any fixture runs
+# the root is already bound. conftest is imported before test modules, which is
+# the only hook early enough.
+#
+# Without it the singleton points at ~/.cache/huggingface/lerobot/outputs/train,
+# and any test that drives it writes job records into the developer's real
+# history — and, because that registry's watchdog is a live thread, can promote
+# an injected `queued` record and spawn an ACTUAL lerobot subprocess against it.
+# `setdefault` so an explicit root set by the caller still wins.
+_TEST_OUTPUT_ROOT = tempfile.mkdtemp(prefix="makermodslab-tests-")
+if os.environ.setdefault("MAKERMODSLAB_OUTPUT_ROOT", _TEST_OUTPUT_ROOT) == _TEST_OUTPUT_ROOT:
+    atexit.register(shutil.rmtree, _TEST_OUTPUT_ROOT, ignore_errors=True)
+else:  # pragma: no cover - only when the caller pinned a root themselves
+    shutil.rmtree(_TEST_OUTPUT_ROOT, ignore_errors=True)
 
 
 @pytest.fixture
@@ -52,9 +74,23 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     robot_dir = cache / "calibration" / "robots" / "so101_follower"
     leader_cfg_dir = cache / "configs" / "so_leader"
     follower_cfg_dir = cache / "configs" / "so_follower"
+    # The Maker arm's calibration libraries. Separate directories from the
+    # SO-101 pair, so they need their own redirect — without it any test that
+    # touches a Maker calibration writes into the developer's real ~/.cache.
+    maker_leader_cfg_dir = cache / "configs" / "rebot_102_leader"
+    maker_follower_cfg_dir = cache / "configs" / "maker_follower"
     port_dir = cache / "ports"
     robots_dir = cache / "robots"
-    for d in (teleop_dir, robot_dir, leader_cfg_dir, follower_cfg_dir, port_dir, robots_dir):
+    for d in (
+        teleop_dir,
+        robot_dir,
+        leader_cfg_dir,
+        follower_cfg_dir,
+        maker_leader_cfg_dir,
+        maker_follower_cfg_dir,
+        port_dir,
+        robots_dir,
+    ):
         d.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(cfg, "CALIBRATION_BASE_PATH_TELEOP", str(teleop_dir))
@@ -64,6 +100,8 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
     monkeypatch.setattr(cfg, "LEADER_CONFIG_PATH", str(leader_cfg_dir))
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_PATH", str(follower_cfg_dir))
+    monkeypatch.setattr(cfg, "MAKER_LEADER_CONFIG_PATH", str(maker_leader_cfg_dir))
+    monkeypatch.setattr(cfg, "MAKER_FOLLOWER_CONFIG_PATH", str(maker_follower_cfg_dir))
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
@@ -85,6 +123,8 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # BiSO staging root — without this, any bimanual staging test writes into the
     # developer's real ~/.cache dir.
     monkeypatch.setattr(cfg, "MAKERMODSLAB_BISO_STAGING_PATH", str(cache / "makermodslab_biso"))
+    # Persisted node-registry peer list.
+    monkeypatch.setattr(cfg, "NODES_FILE", str(cache / "nodes.json"))
 
     return cache
 

@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Trash2 } from "lucide-react";
 import {
   Popover,
@@ -48,6 +49,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   hideSearch = false,
   children,
 }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -93,16 +95,22 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
     >
       <span className="min-w-0 flex-1 break-all">{d.repo_id}</span>
       {d.source === "both" && (
-        <span className="shrink-0 text-xs text-muted-foreground">local + hub</span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {t("landing.picker.localAndHub")}
+        </span>
       )}
       {d.private && (
-        <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">private</span>
+        <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
+          {t("landing.picker.private")}
+        </span>
       )}
       {onDeleteItem && (
         <button
           type="button"
-          aria-label={`Delete ${d.repo_id}`}
-          title="Delete…"
+          aria-label={t("landing.datasetPicker.deleteAria", {
+            repoId: d.repo_id,
+          })}
+          title={t("landing.picker.deleteTitle")}
           // cmdk/Radix act on pointerdown AND the click would bubble to the
           // CommandItem's onSelect — guard both so the trash never also
           // selects the row or closes the popover on its own.
@@ -137,7 +145,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
         <Command>
           {!hideSearch && (
             <CommandInput
-              placeholder="Search datasets…"
+              placeholder={t("landing.datasetPicker.searchPlaceholder")}
               value={query}
               onValueChange={setQuery}
             />
@@ -146,17 +154,17 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
             {datasets.length === 0 && (
               <CommandEmpty className="py-4 text-sm text-muted-foreground text-center">
                 {loading
-                  ? "Loading datasets…"
-                  : "No datasets yet. Use “Add dataset” to record, download, or import one."}
+                  ? t("landing.datasetPicker.loading")
+                  : t("landing.datasetPicker.empty")}
               </CommandEmpty>
             )}
             {hubDatasets.length > 0 && (
-              <CommandGroup heading="Hugging Face">
+              <CommandGroup heading={t("landing.picker.huggingFace")}>
                 {hubDatasets.map(renderItem)}
               </CommandGroup>
             )}
             {localDatasets.length > 0 && (
-              <CommandGroup heading="Local">
+              <CommandGroup heading={t("landing.picker.local")}>
                 {localDatasets.map(renderItem)}
               </CommandGroup>
             )}

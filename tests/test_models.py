@@ -2397,3 +2397,153 @@ def test_resolve_pretrained_dir_skips_a_half_written_newest_checkpoint(tmp_lerob
     (partial / "config.json").write_text(json.dumps({"type": "act"}))
 
     assert m._resolve_pretrained_dir(root) == good.resolve()
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (PR #83 queue): /models/delete vs the training queue.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_local_model_refuses_a_queued_run_instead_of_cancelling_it(registry) -> None:
+    """POST /models/delete with a QUEUED run's id used to silently cancel the
+    queued run and answer {deleted: true}: the registry's delete() guard only
+    refuses `running`, so a queued record sailed through `job_registry.delete`
+    and left the queue — a cancel the user never asked for, reported as a
+    model deletion. Only terminal runs (done / interrupted / failed) hold
+    deletable artifacts; everything else is refused with a coded 409 naming
+    the queue as the place to act."""
+    from makermodslab.models import ModelError, delete_local_model
+
+    _seed_run(registry, "queued_run", state="queued", with_checkpoint=False)
+    registry._records["queued_run"].queue_seq = 10
+    # A real queued record always has its job dir (start() claims it at submit).
+    (registry._output_root / "queued_run").mkdir(parents=True)
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("queued_run")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.not_terminal"
+    assert "queue" in ei.value.message.lower()
+    # The run is still queued — nothing was cancelled or removed.
+    assert registry._records["queued_run"].state == "queued"
+    assert (registry._output_root / "queued_run").exists()
+
+
+def test_delete_local_model_running_refusal_carries_the_same_code(registry) -> None:
+    """The running-run refusal is the same condition (not terminal yet), so it
+    speaks the same code. Message unchanged — codes are additive."""
+    from makermodslab.models import ModelError, delete_local_model
+
+    _seed_run(registry, "live_run2", state="running")
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("live_run2")
+    assert ei.value.status == 409
+    assert ei.value.code == "job.not_terminal"
+
+
+def test_models_delete_route_forwards_the_refusal_code(client, monkeypatch, tmp_path) -> None:
+    """The HTTP layer must not drop the code: the 409 body carries `code`
+    beside the legacy string `detail` (the ApiError shape every coded refusal
+    uses)."""
+    from makermodslab.jobs import JobRecord, JobRegistry, job_registry
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(JobRegistry, "_drain_queue", lambda self: None)
+    record = JobRecord(
+        id="queued-on-wire",
+        name="queued-on-wire",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir=str(tmp_path / "queued-on-wire" / "run"),
+        started_at=0.0,
+        runner="local",
+        queue_seq=10,
+    )
+    original = dict(job_registry._records)
+    try:
+        job_registry._records["queued-on-wire"] = record
+        resp = client.post("/models/delete", json={"id": "queued-on-wire"})
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["code"] == "job.not_terminal"
+        assert isinstance(body["detail"], str)
+        assert job_registry._records["queued-on-wire"].state == "queued"
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
+
+
+def test_delete_local_model_names_the_queued_finetune_instead_of_502ing(registry) -> None:
+    """JobRegistry.delete raises JobSourceOfQueuedRunError when a QUEUED run
+    froze this run's checkpoint path at submit time. models.py didn't catch
+    it, so the refusal fell into the catch-all and surfaced as a 502 'Failed
+    to delete model' — a deliberate guard reported as an infrastructure
+    failure. Same 409 + job.has_queued_dependents the /jobs route emits."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
+
+    _seed_run(registry, "src_run", state="done")
+    registry._records["queued_ft"] = JobRecord(
+        id="queued_ft",
+        name="queued_ft",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/pick", finetune_from_job_id="src_run"),
+        output_dir=str(registry._output_root / "queued_ft" / "run"),
+        started_at=2.0,
+        runner="local",
+        queue_seq=10,
+    )
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("src_run")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.has_queued_dependents"
+    assert "queued_ft" in ei.value.message
+    # The source run — and the checkpoint the queued fine-tune will read — is
+    # untouched.
+    assert "src_run" in registry._records
+    assert (registry._output_root / "src_run").exists()
+
+
+def test_delete_downloaded_model_refuses_when_a_queued_run_reads_it(registry, tmp_lerobot_home: Path) -> None:
+    """The downloaded/imported branch of delete_local_model checked only the
+    live-inference guard (_model_in_use) — a QUEUED run whose frozen
+    policy_pretrained_path points inside the store dir sailed past it, and the
+    rmtree pulled the base out from under a run that fails at launch, hours
+    later, with a path nobody could tie to this click. Same guard, same 409 +
+    job.has_queued_dependents as every other queued-dependency refusal."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
+
+    model_dir = _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/base")
+    registry._records["queued_ft"] = JobRecord(
+        id="queued_ft",
+        name="queued_ft",
+        state="queued",
+        config=TrainingRequest(
+            dataset_repo_id="user/pick",
+            policy_pretrained_path=str(model_dir.resolve()),
+        ),
+        output_dir=str(registry._output_root / "queued_ft" / "run"),
+        started_at=1.0,
+        runner="local",
+        queue_seq=10,
+    )
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("user/base")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.has_queued_dependents"
+    assert "queued_ft" in ei.value.message
+    assert model_dir.exists(), "the refusal must leave the checkpoint on disk"
+
+    # Without the dependent, the delete works exactly as before.
+    del registry._records["queued_ft"]
+    result = delete_local_model("user/base")
+    assert result["deleted"] is True
+    assert not model_dir.exists()

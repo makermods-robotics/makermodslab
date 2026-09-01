@@ -713,15 +713,17 @@ def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
     _make_dataset(tmp_lerobot_home, "makermods/train_ds", episodes=1)
 
     # _dataset_in_use imports job_registry from .jobs lazily (datasets<->record
-    # cycle), so patch it at its source module.
+    # cycle), so patch it at its source module. The registry answers via
+    # local_dataset_in_use (exact scan; matching covered by
+    # test_dataset_in_use_sees_every_active_run_not_a_page).
     from makermodslab import jobs
 
-    job = MagicMock()
-    job.state = "running"
-    job.runner = "local"
-    job.config.dataset_repo_id = "makermods/train_ds"
     with (
-        patch.object(jobs.job_registry, "list", return_value=[job]),
+        patch.object(
+            jobs.job_registry,
+            "local_dataset_in_use",
+            side_effect=lambda repo_id: repo_id == "makermods/train_ds",
+        ),
         pytest.raises(DatasetRenameError) as exc,
     ):
         rename_local_dataset("makermods/train_ds", "renamed")
@@ -1850,18 +1852,20 @@ def test_excluded_episodes_corrupt_file_degrades_to_empty(excluded_episodes_file
 
 
 def test_excluded_episodes_endpoints_round_trip(client: TestClient, excluded_episodes_file: Path) -> None:
-    resp = client.get("/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    """v1-only surface (see test_api_contract.V1_ONLY_ROUTES) — there is no
+    flat mirror to exercise."""
+    resp = client.get("/api/v1/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
     assert resp.status_code == 200
     assert resp.json() == {"repo_id": "alice/pick", "episode_indices": []}
 
     resp = client.put(
-        "/datasets/excluded-episodes",
+        "/api/v1/datasets/excluded-episodes",
         json={"repo_id": "alice/pick", "episode_indices": [2, 0]},
     )
     assert resp.status_code == 200
     assert resp.json() == {"success": True, "repo_id": "alice/pick", "episode_indices": [0, 2]}
 
-    resp = client.get("/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
+    resp = client.get("/api/v1/datasets/excluded-episodes", params={"repo_id": "alice/pick"})
     assert resp.json()["episode_indices"] == [0, 2]
 
 
@@ -2663,6 +2667,90 @@ def test_get_episode_joint_series_hub_fallback_degrades_on_download_failure(
         assert ds.get_episode_joint_series("alice/hub_only", 0) is None
 
 
+def test_get_episode_action_series_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos", "gripper.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0],
+                "timestamp": [0.0, 0.033],
+                "action": [[10.0, 50.0], [10.5, 51.0]],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+
+    with patch("makermodslab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_action_series("alice/local", 0)
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result["action_names"] == ["shoulder_pan.pos", "gripper.pos"]
+    assert result["timestamps"] == [0.0, 0.033]
+    assert result["values"] == [[10.0, 50.0], [10.5, 51.0]]
+
+
+def test_get_episode_action_series_returns_none_on_malformed_chunk_index(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Mirrors get_episode_joint_series's malformed-index guard — a corrupt
+    or adversarial Hub dataset must 404 gracefully, not raise, since this
+    now feeds a hardware-driving code path."""
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [float("nan")], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 0) is None
+
+
+def test_get_episode_action_series_missing_episode_returns_none(tmp_lerobot_home: Path) -> None:
+    from makermodslab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"action": {"names": ["shoulder_pan.pos"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "timestamp": [0.0], "action": [[1.0]]}),
+        data_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_action_series("alice/local", 7) is None
+
+
 # ---------------------------------------------------------------------------
 # End-to-end route coverage for Hub dataset viewer — Tasks 1–5 integrated
 # through the real FastAPI routes without production code changes.
@@ -2764,3 +2852,234 @@ def test_hub_dataset_viewer_endpoints_404_without_video(
 
     assert resp.status_code == 404
     dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info
+
+
+# --- Hub identity: resolve_hub_repo_id + hub_repo_exists --------------------
+#
+# Every Hub call in the app addresses a dataset through resolve_hub_repo_id and
+# asks whether it exists through hub_repo_exists, so both contracts are pinned
+# here once rather than at each call site.
+
+
+def test_resolve_hub_repo_id_qualifies_a_bare_id() -> None:
+    """A locally-recorded dataset's id has no namespace — the literal-lookup
+    Hub calls would 404 on it."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}):
+        assert ds.resolve_hub_repo_id("pick") == "alice/pick"
+
+
+def test_resolve_hub_repo_id_canonicalises_casing_of_an_owned_namespace() -> None:
+    """A locally-recorded "MyOrg/foo" must reach the Hub as the canonical
+    "myorg/foo" the account actually owns."""
+    from makermodslab import datasets as ds
+
+    who = {"name": "alice", "orgs": [{"name": "myorg", "roleInGroup": "write"}]}
+    with patch("makermodslab.datasets.cached_whoami", return_value=who):
+        assert ds.resolve_hub_repo_id("MyOrg/foo") == "myorg/foo"
+
+
+def test_resolve_hub_repo_id_leaves_a_third_party_id_alone() -> None:
+    """A downloaded third-party dataset is already the right id; ownership is
+    irrelevant to reading it."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}):
+        assert ds.resolve_hub_repo_id("lerobot/pusht") == "lerobot/pusht"
+
+
+def test_resolve_hub_repo_id_degrades_when_unauthenticated() -> None:
+    """No token → no namespace to resolve against. Callers degrade rather than
+    raise."""
+    from makermodslab import datasets as ds
+
+    with patch("makermodslab.datasets.cached_whoami", return_value=None):
+        assert ds.resolve_hub_repo_id("pick") == "pick"
+
+
+def test_hub_repo_exists_looks_up_the_resolved_id() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert ds.hub_repo_exists("pick") is True
+
+    fake_api.repo_exists.assert_called_once_with("alice/pick", repo_type="dataset")
+
+
+def test_hub_repo_exists_returns_none_on_transport_error() -> None:
+    """Offline / rate-limited / anything else is "no claim" (None), never a
+    soft False — callers must not block or overwrite on it."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = OSError("connection failed")
+    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.hub_repo_exists("alice/pick") is None
+
+
+def test_get_hub_status_url_uses_the_resolved_id() -> None:
+    """A url built from the bare id would 404."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = ds.get_hub_status("pick")
+
+    # The public contract is unchanged: repo_id echoes back exactly as passed.
+    assert result["repo_id"] == "pick"
+    assert result["status"] == "on_hub"
+    assert result["url"] == "https://huggingface.co/datasets/alice/pick"
+
+
+def test_get_hub_status_cache_does_not_survive_an_account_switch() -> None:
+    """Keyed by the resolved id, so an answer never outlives the auth state it
+    came from — logging in as someone else re-checks instead of serving the
+    previous account's answer."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert ds.get_hub_status("pick")["url"].endswith("alice/pick")
+
+    fake_api.repo_exists.return_value = False
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "bob", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.is_dataset_available_locally", return_value=True),
+    ):
+        assert ds.get_hub_status("pick")["status"] == "local_only"
+
+    assert fake_api.repo_exists.call_args_list[-1].args[0] == "bob/pick"
+
+
+def test_invalidate_hub_status_from_a_bare_id_drops_the_namespaced_entry() -> None:
+    """The upload path holds the bare id; the cache is keyed by the resolved
+    one. Without the suffix sweep the card would stay on "Local only"."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_status_cache()
+    ds._HUB_STATUS_CACHE["alice/pick"] = "local_only"
+    ds._HUB_STATUS_CACHE["alice/other"] = "on_hub"
+
+    ds.invalidate_hub_status("pick")
+
+    assert "alice/pick" not in ds._HUB_STATUS_CACHE
+    assert ds._HUB_STATUS_CACHE["alice/other"] == "on_hub"
+
+
+def test_get_hub_settings_reads_the_resolved_id() -> None:
+    """dataset_info is a literal-lookup call: the editor is offered exactly
+    when get_hub_status says on_hub, so it must resolve the same way or 404 on
+    a dataset the card just said is on the Hub."""
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = MagicMock(private=False, tags=["makermods"])
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        result = ds.get_hub_settings("pick")
+
+    fake_api.dataset_info.assert_called_once_with("alice/pick")
+    # The public contract is unchanged: repo_id echoes back as passed.
+    assert result["repo_id"] == "pick"
+
+
+def test_set_dataset_visibility_writes_to_the_resolved_id() -> None:
+    from makermodslab import datasets as ds
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        ds.set_dataset_visibility("pick", True)
+
+    fake_api.update_repo_settings.assert_called_once_with("alice/pick", private=True, repo_type="dataset")
+
+
+def test_get_hub_dataset_info_caches_under_the_resolved_id(tmp_path: Path) -> None:
+    """Keyed by the id actually fetched, so the summary can't outlive the auth
+    state it came from — and a bare-id invalidation still finds it."""
+    from makermodslab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = tmp_path / "info.json"
+    meta.write_text(json.dumps({"total_episodes": 3, "total_frames": 90, "fps": 30, "features": {}}))
+
+    with (
+        patch("makermodslab.datasets.hf_hub_offline", return_value=False),
+        patch("makermodslab.datasets.cached_whoami", return_value={"name": "alice", "orgs": []}),
+        patch("makermodslab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+    ):
+        assert ds.get_hub_dataset_info("pick")["total_episodes"] == 3
+
+    assert dl.call_args.args[0] == "alice/pick"
+    assert "alice/pick" in ds._HUB_DATASET_INFO_CACHE
+
+    # The upload path holds the bare id; the sweep must still find the entry.
+    ds.invalidate_hub_dataset_info("pick")
+    assert ds._HUB_DATASET_INFO_CACHE == {}
+
+
+def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path) -> None:
+    """_dataset_in_use scanned `job_registry.list(limit=200)` — a PAGE — so an
+    active local run past the 200th record was invisible and its dataset
+    could be renamed or deleted out from under it. The check now asks the
+    registry exactly (one snapshot under the lock), so no depth of queue or
+    history can hide a consumer."""
+    from unittest.mock import patch as _patch
+
+    from makermodslab import jobs
+    from makermodslab.datasets import _dataset_in_use
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    with _patch.object(JobRegistry, "_start_watchdog", lambda self: None):
+        reg = JobRegistry(tmp_lerobot_home / "outputs" / "train")
+
+    # 201 queued runs on other datasets ahead of the one that matters.
+    for i in range(201):
+        reg._records[f"q{i:03d}"] = JobRecord(
+            id=f"q{i:03d}",
+            name=f"q{i:03d}",
+            state="queued",
+            config=TrainingRequest(dataset_repo_id="user/other"),
+            output_dir=str(reg._output_root / f"q{i:03d}" / "run"),
+            started_at=float(i),
+            runner="local",
+            queue_seq=i + 1,
+        )
+    reg._records["target"] = JobRecord(
+        id="target",
+        name="target",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/held"),
+        output_dir=str(reg._output_root / "target" / "run"),
+        started_at=999.0,
+        runner="local",
+        queue_seq=999,
+    )
+
+    with _patch.object(jobs, "job_registry", reg):
+        assert _dataset_in_use("user/held") is not None
+        assert _dataset_in_use("user/untouched") is None

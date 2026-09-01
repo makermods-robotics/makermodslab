@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { LIBRARY_GRID, LIBRARY_GRID_COLS } from "./LibraryToolbar";
@@ -73,6 +74,7 @@ const CappedGrid: React.FC<{
   onExpandedChange,
   onOverflowChange,
 }) => {
+  const { t } = useTranslation();
   const [expandedState, setExpandedState] = useState(false);
   const expanded = expandedProp ?? expandedState;
   const setExpanded = (value: boolean) => {
@@ -127,7 +129,12 @@ const CappedGrid: React.FC<{
               expanded && "rotate-180",
             )}
           />
-          {expanded ? "Show less" : `Show all ${items.length}`}
+          {expanded
+            ? t("library.grid.showLess")
+            : /* `total`, not i18next's `count`: this is a tally, not a plural
+                 switch, and the row cap it counts against is measured, not
+                 fixed. */
+              t("library.grid.showAll", { total: items.length })}
         </button>
       ) : reserveRows && footerSpacer ? (
         <div aria-hidden className="h-[1.875rem]" />

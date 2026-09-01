@@ -223,7 +223,7 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("platform.system", lambda: "Windows")
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     request = record.RecordingRequest(
@@ -253,7 +253,7 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
 
     staged: dict = {}
 
-    def _fake_stage(base, leader_left, leader_right, follower_left, follower_right):
+    def _fake_stage(base, leader_left, leader_right, follower_left, follower_right, arm_type="so101"):
         staged.update(
             base=base,
             leader=(leader_left, leader_right),
@@ -1457,7 +1457,7 @@ def test_reset_phase_globals_reset_on_both_call_sites(
     monkeypatch.setattr(record, "_reset_loop_with_pause", _spy_reset_loop)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     call_count = [0]
@@ -1512,7 +1512,7 @@ def test_reset_phase_preamble_preserves_pause_armed_during_recording(
     monkeypatch.setattr(record, "_reset_loop_with_pause", _spy_reset_loop)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     monkeypatch.setattr(record.time, "time", lambda: 42.0)
 
@@ -1541,7 +1541,7 @@ def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobo
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
@@ -1557,7 +1557,7 @@ def test_record_refuses_eval_prefixed_repo_id(monkeypatch: pytest.MonkeyPatch, t
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     for repo_id in ("eval_ds", "tester/eval_ds"):
         bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
@@ -1574,7 +1574,7 @@ def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
@@ -1595,7 +1595,7 @@ def test_record_captures_pose_per_follower_excluding_gripper(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     positions = {
         "shoulder_pan": 1111,
@@ -1624,7 +1624,7 @@ def test_record_double_stop_skips_the_return(monkeypatch: pytest.MonkeyPatch, tm
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -1645,7 +1645,7 @@ def test_record_error_path_skips_return_and_releases(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -1667,7 +1667,7 @@ def test_stop_during_recording_phase_discards_episode_no_reset(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -1694,7 +1694,7 @@ def test_stop_wins_over_skip_when_both_set_in_same_episode(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
 
@@ -1738,7 +1738,9 @@ def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch
     ds = _fake_dataset()
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
     invalidated: list[str] = []
-    monkeypatch.setattr("makermodslab.record.invalidate_hub_status", invalidated.append)
+    # The push invalidates the cached Hub facts from inside push_dataset_to_hub
+    # (the single push home), not from this call site — see its docstring.
+    monkeypatch.setattr("makermodslab.datasets.invalidate_hub_status", invalidated.append)
 
     mgr = UploadManager()
     # Nothing else is writing this dataset — _dataset_in_use must return None.
@@ -1758,6 +1760,67 @@ def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch
     kwargs = ds.push_to_hub.call_args.kwargs
     assert kwargs["private"] is True
     assert "x" in kwargs["tags"]
+
+
+def test_upload_manager_qualifies_bare_repo_id_with_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locally-recorded dataset's repo_id has no "namespace/" prefix.
+
+    Inside one push_to_hub call, create_repo resolves a bare id to the caller's
+    namespace and creates the repo there, while the upload_folder and card
+    calls right after it reuse the bare id literally and 404 against it —
+    stranding an empty repo. push_dataset_to_hub qualifies it up front so every
+    call inside the push targets the same repo, and the success url names the
+    repo that actually exists.
+    """
+    from makermodslab.record import UploadManager, UploadRequest
+
+    ds = _fake_dataset()
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
+    monkeypatch.setattr("makermodslab.datasets.cached_whoami", lambda: {"name": "makermods", "orgs": []})
+
+    mgr = UploadManager()
+    result = mgr.start(UploadRequest(dataset_repo_id="flat_local_dataset", tags=[], private=False))
+    assert result["started"] is True
+
+    _join_upload(mgr)
+    status = mgr.get_status()
+    assert status["state"] == "done"
+    # The dataset's repo_id was rewritten to the qualified form before the push.
+    assert ds.repo_id == "makermods/flat_local_dataset"
+    assert status["dataset_url"] == "https://huggingface.co/datasets/makermods/flat_local_dataset"
+
+
+def test_upload_manager_bare_repo_id_unauthenticated_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no Hub login there is no namespace to qualify a bare repo_id with.
+
+    Unlike the read paths, which degrade to a literal lookup, an upload must
+    refuse: pushing the bare id is precisely what strands an empty repo. The
+    raise lands on the worker's except path as state "error", not as an
+    unhandled thread exception.
+    """
+    from makermodslab.record import UploadManager, UploadRequest
+
+    ds = _fake_dataset()
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
+    monkeypatch.setattr("makermodslab.datasets.cached_whoami", lambda: None)
+
+    mgr = UploadManager()
+    result = mgr.start(UploadRequest(dataset_repo_id="flat_local_dataset", tags=[], private=False))
+    assert result["started"] is True
+
+    _join_upload(mgr)
+    status = mgr.get_status()
+    assert status["state"] == "error"
+    assert "hf auth login" in status["message"]
+    assert status["dataset_url"] is None
+    # Bailing out before the push is the point: no repo is created, so there is
+    # no empty-repo litter to clean up before the user retries after logging in.
+    ds.push_to_hub.assert_not_called()
+    # The explicit pre-push auth refusal follows the same friendly path as a
+    # 401 raised from inside push_to_hub().
+    assert status["docs_url"].startswith("https://huggingface.co/docs")
 
 
 def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2059,6 +2122,7 @@ def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.Mon
         "success": False,
         "status_code": 409,
         "message": "Calibration is currently active. Stop it first.",
+        "code": "robot.busy.calibration",
     }
 
 
@@ -2073,6 +2137,7 @@ def test_start_recording_blocked_when_auto_calibration_active(monkeypatch: pytes
         "success": False,
         "status_code": 409,
         "message": "Auto-calibration is currently active. Stop it first.",
+        "code": "robot.busy.auto_calibration",
     }
 
 
@@ -2087,6 +2152,27 @@ def test_start_recording_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPa
         "success": False,
         "status_code": 409,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+        "code": "robot.busy.wiggle",
+    }
+
+
+def test_start_recording_blocked_when_replay_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recording must refuse to start while a hardware replay owns the same
+    serial bus."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr("makermodslab.replay.replay_active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+    # status_code was missing from this refusal until the error-code pass:
+    # server.py's `result.get("status_code", 500)` fallback turned it into an
+    # HTTP 500. It is a 409 like every other reciprocal-check refusal.
+    assert result == {
+        "success": False,
+        "status_code": 409,
+        "message": "Replay is currently active. Stop it first.",
+        "code": "robot.busy.replay",
     }
 
 
@@ -2217,6 +2303,31 @@ def test_start_recording_rejects_with_409_when_inference_active(
     assert result["success"] is False
     assert result["status_code"] == 409
     assert "Inference is currently active" in result["message"]
+
+
+def test_start_recording_rejects_with_409_when_a_training_run_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Training stayed outside the robot mutex for as long as a run could only
+    begin from an explicit submit — the user was present and knew what else they
+    had running. The queue starts runs from a watchdog thread with nobody at the
+    keyboard, so the gate has to be mutual: the queue already waits for a
+    recording session, and now a recording session waits for it."""
+    import makermodslab.jobs as jobs
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(jobs, "training_is_active", lambda: "ACT · user/ds")
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "ACT · user/ds" in result["message"]
 
 
 def test_start_recording_rejects_with_400_for_invalid_dataset_name(
@@ -2359,7 +2470,7 @@ def test_create_record_config_resolves_cameras_from_the_robot_record(
     )
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     config = record.create_record_config(
@@ -2752,7 +2863,7 @@ def test_transient_connect_failure_retries_inside_the_reconnecting_phase(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 
@@ -2786,7 +2897,7 @@ def test_transient_connect_failure_gives_up_after_max_attempts(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 
@@ -2819,7 +2930,7 @@ def test_non_transient_connect_failure_tears_down_without_retrying(
 
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 
@@ -2844,7 +2955,7 @@ def test_teleop_connect_failure_releases_both_devices(
     open for the rest of the process and the next session dies on the leak."""
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     seen = _spy_teardowns(monkeypatch)
 

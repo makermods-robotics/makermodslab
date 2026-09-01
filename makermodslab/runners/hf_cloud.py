@@ -39,17 +39,55 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from huggingface_hub import get_token
-from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
+from ..datasets import resolve_hub_repo_id
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
-from ..utils.config import with_makermodslab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
+from ._dataset import ensure_dataset_on_hub
 
 logger = logging.getLogger(__name__)
 
 LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
+
+# Hub job label carrying the run's identity. Every MakerMods Lab cloud run uses
+# the same image, so without it a job's only Hub-side identifier is
+# LEROBOT_IMAGE — and a job launched from another machine (no local JobRecord
+# to match it against) shows up in the library titled
+# "huggingface/lerobot-gpu:latest" like every other one. The label travels with
+# the job itself, so any machine signed into the account can name it.
+# Read back by _hub_job_run_name in server.py.
+#
+# This is OUR key, deliberately kept alongside run_job's own `name` (below).
+# `name` defaults to a value derived from the image when the caller omits it
+# ("lerobot-gpu-latest-<hash>"), so a `name` read back off a job is not
+# necessarily one we chose; _RUN_LABEL is unambiguous.
+# NO DOT. The Hub serialises each label into a single "key=value" tag and
+# validates that tag against [alphanumeric - _ =]. A dot used to be accepted
+# and no longer is, so the original "makermodslab.run" started failing
+# submission outright with:
+#   Bad Request: `tags` must be 1-256 characters and contain only
+#   alphanumeric characters, '-', '_', or '='
+_RUN_LABEL = "makermodslab_run"
+
+# Read-only: the dotted key every job submitted before that rename carries.
+# Dropping it would un-name the entire existing cloud backlog in the jobs UI.
+_LEGACY_RUN_LABELS = ("makermodslab.run",)
+
+# The charset the Hub accepts in the "key=value" tag a label becomes. Checked
+# BEFORE submission (see _run_job_naming_kwargs) so a non-conforming label is
+# dropped rather than 400-ing the whole job — the same trade the signature
+# probe below already makes: a job listed under its image name beats no job.
+_LABEL_CHARSET_RE = re.compile(r"^[A-Za-z0-9\-_]+$")
+
+# The Hub rejects a label whose key or value exceeds 100 characters. A job id is
+# built from a _SLUG_RE-sanitised dataset name (jobs._generate_job_id), so its
+# charset already conforms — only the length can overrun, via a very long
+# dataset name. NOTE the publish repo id is deliberately NOT labelled: it
+# contains a "/", which the Hub refuses, and _hub_job_run_name can already
+# recover the run name from argv anyway.
+_MAX_LABEL_LEN = 100
 
 # The :latest image ships whatever lerobot was current when it was built —
 # which drifts from the pin in our pyproject.toml that build_training_command's
@@ -57,9 +95,12 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 # The wrapper therefore pip-installs the exact pin (below) before launching
 # the trainer, so container and host agree on the CLI surface.
 
-# Extras from the pyproject pin that only matter on the host machine (serial
-# motor buses). Dropped from the container install.
-_HOST_ONLY_EXTRAS = frozenset({"feetech"})
+# Extras from the pyproject pin that only matter on the host machine — every
+# motor-bus stack: feetech (SO-101 serial), maker/damiao/robstride/metal
+# (CAN), rebot (FashionStar UART). Dropped from the container install: the
+# training pod has no arms attached, so they are dead weight per job at best
+# and a platform-specific resolve failure at worst.
+_HOST_ONLY_EXTRAS = frozenset({"feetech", "maker", "damiao", "robstride", "metal", "rebot"})
 
 # policy_type -> lerobot extra that carries the policy's model dependencies
 # at the pinned ref (e.g. transformers for smolvla). Policies without an
@@ -583,6 +624,47 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
     return HF_JOB_TIMEOUT
 
 
+def _run_job_naming_kwargs(api, job_id: str) -> dict:
+    """run_job kwargs that give the submitted job `job_id` as its name.
+
+    Two of them, doing different jobs:
+    - `name` is what the Hub's own jobs UI displays. Left unset it defaults to
+      a value derived from the image ("lerobot-gpu-latest-<hash>"), which is
+      why untitled runs are indistinguishable on huggingface.co too.
+    - `labels[_RUN_LABEL]` is the copy _hub_job_run_name reads back, kept
+      separate because a `name` may be that image-derived default rather than
+      ours.
+
+    Both are probed on run_job's signature first: huggingface_hub is an
+    unpinned transitive dependency (it arrives via the lerobot pin), so the
+    installed version is not ours to guarantee, and passing an unsupported
+    kwarg would raise TypeError and take down cloud training entirely — far
+    worse than a job that merely lists under its image name.
+
+    An over-long or non-conforming id is left unnamed rather than truncated or
+    sent anyway: the Hub caps a label at _MAX_LABEL_LEN and validates its
+    charset, and a rejected label fails the WHOLE submission with a 400 —
+    while _hub_job_run_name's argv fallback recovers the name in full anyway.
+    Degrading to an unnamed job is strictly better than no job.
+    """
+    if len(job_id) > _MAX_LABEL_LEN or not _LABEL_CHARSET_RE.match(job_id):
+        logger.warning(
+            "Job id %r cannot be used as a Hub label; submitting unnamed "
+            "(the run name is still recoverable from the job's argv)",
+            job_id,
+        )
+        return {}
+    params: set[str] = set()
+    with contextlib.suppress(Exception):
+        params = set(inspect.signature(api.run_job).parameters)
+    kwargs: dict = {}
+    if "labels" in params:
+        kwargs["labels"] = {_RUN_LABEL: job_id}
+    if "name" in params:
+        kwargs["name"] = job_id
+    return kwargs
+
+
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and
 # may drop during long runs (NAT eviction, laptop sleep, proxy idle timeout)
@@ -699,7 +781,15 @@ class HfCloudJobRunner:
 
         # Cloud pods can't see the host's LeRobot cache. If the dataset
         # only exists locally, push it to the Hub before submitting.
-        self._ensure_dataset_on_hub(config.dataset_repo_id)
+        #
+        # A locally-recorded dataset's id is bare; the pod has no local cache to
+        # fall back on and no namespace to guess from, so it must be handed the
+        # namespaced id or the job dies resolving the dataset. Resolve once here
+        # and pin it into the config, which is both what build_training_command
+        # emits and what JobRecord.config persists as "what actually ran".
+        local_dataset_repo_id = config.dataset_repo_id
+        config.dataset_repo_id = resolve_hub_repo_id(local_dataset_repo_id)
+        self._ensure_dataset_on_hub(local_dataset_repo_id, config.dataset_repo_id)
 
         # Mutate the config so build_training_command emits the right flags.
         # The mutated config is what gets persisted in JobRecord.config, so
@@ -773,12 +863,23 @@ class HfCloudJobRunner:
                 )
             secrets["WANDB_API_KEY"] = wandb_key
 
+        # Stamp the run's identity onto the job itself. job_id is the slug the
+        # library already titles local records by ("<name>_<timestamp>"), so a
+        # named job reads the same whichever machine is looking at it.
+        naming_kwargs = _run_job_naming_kwargs(self._api, job_id)
+        if not naming_kwargs:
+            logger.warning(
+                "Could not name HF job for %s Hub-side; it will be titled from its argv instead",
+                job_id,
+            )
+
         job = self._api.run_job(
             image=LEROBOT_IMAGE,
             command=wrapped_command,
             flavor=self._flavor,
             secrets=secrets,
             timeout=resolve_job_timeout(config),
+            **naming_kwargs,
         )
         self._hf_job_id = job.id
         self._hf_job_url = getattr(job, "url", None)
@@ -827,42 +928,11 @@ class HfCloudJobRunner:
         except Exception as exc:
             logger.warning("Could not write upload log line: %s", exc)
 
-    def _ensure_dataset_on_hub(self, repo_id: str) -> None:
-        """If the dataset is local-only, push it to the Hub.
-
-        The cloud pod resolves the dataset by repo_id; it can't see the
-        host's `~/.cache/huggingface/lerobot`. We push synchronously and
-        let any failure bubble up — JobRegistry.start marks the record
-        as failed with the exception message.
-        """
-        try:
-            self._api.dataset_info(repo_id)
-            return
-        except RepositoryNotFoundError:
-            pass
-
-        cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-        if not (cache_root / repo_id / "meta" / "info.json").is_file():
-            # Neither local nor on Hub. Let the trainer surface the error
-            # — same behaviour as before.
-            return
-
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (public)...")
-        from lerobot.datasets import LeRobotDataset
-
-        try:
-            # Public by default: MakerMods Lab's global policy is that datasets it pushes
-            # to the Hub are public and carry the required org/product tags (see
-            # with_makermodslab_tag / REQUIRED_HUB_TAGS). This implicit cloud-run upload
-            # follows that same default so all MakerMods Lab-produced datasets are
-            # discoverable. (This intentionally reverses the earlier private
-            # default — an implicit upload of a local-only dataset is now public.)
-            LeRobotDataset(repo_id).push_to_hub(tags=with_makermodslab_tag(None), private=False)
-        except Exception as exc:
-            msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
-            self._log_line(f"[upload] {msg}")
-            raise RuntimeError(msg) from exc
-        self._log_line(f"[upload] dataset {repo_id} uploaded.")
+    def _ensure_dataset_on_hub(self, local_repo_id: str, hub_repo_id: str) -> None:
+        """If the dataset is local-only, push it to the Hub — the shared
+        remote-runner rule; see runners/_dataset.ensure_dataset_on_hub for the
+        full contract (what pushes, what abstains, and why)."""
+        ensure_dataset_on_hub(local_repo_id, hub_repo_id, self._log_line)
 
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the

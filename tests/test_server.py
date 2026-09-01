@@ -55,8 +55,11 @@ REQUIRED_PATHS = {
 
 def test_app_exposes_required_endpoints() -> None:
     from makermodslab.server import app
+    from tests.test_api_contract import _walk_routes
 
-    paths = {route.path for route in app.routes}
+    # _walk_routes traverses FastAPI >= 0.138's lazy _IncludedRouter entries;
+    # a bare {route.path for route in app.routes} no longer sees the API routes.
+    paths = {path for path, _ in _walk_routes(app.routes)}
     missing = REQUIRED_PATHS - paths
     assert not missing, f"missing routes: {missing}"
 
@@ -99,6 +102,41 @@ def test_shutdown_stops_active_teleoperation(monkeypatch: pytest.MonkeyPatch) ->
 
     assert released.is_set(), "shutdown returned without waiting for teleoperation to finish releasing"
     assert teleop.teleoperation_active is False
+    worker.join(timeout=2.0)
+
+
+def test_shutdown_stops_active_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server restart mid-replay must wait for the worker to actually
+    finish releasing the arm — same class of bug I8 fixed for teleoperation
+    (a plain kill or --reload restart otherwise orphans the in-process
+    worker thread mid-motion, with no return-to-rest and no torque release)."""
+    import makermodslab.record as record
+    import makermodslab.replay as replay
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    released = threading.Event()
+
+    def _worker() -> None:
+        while replay.replay_active:
+            time.sleep(0.01)
+        released.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(replay, "replay_active", True)
+    monkeypatch.setattr(replay, "replay_thread", worker)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(server_mod, "manager", None)
+    worker.start()
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert released.is_set(), "shutdown returned without waiting for replay to finish releasing"
+    assert replay.replay_active is False
     worker.join(timeout=2.0)
 
 
@@ -267,8 +305,9 @@ def test_delete_in_use_calibration_config_unassigns_robots(
     robots_dir = tmp_lerobot_home / "robots"
     robots_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
-    # server.py binds LEADER_CONFIG_PATH at import; repoint it at the tmp dir.
-    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+    # No server-side repoint needed: the route resolves the dir through
+    # cfg.calibration_dir_for_device, which reads cfg's globals at call time
+    # and tmp_lerobot_home has already pointed those at the tmp dir.
 
     config_file = Path(cfg.LEADER_CONFIG_PATH) / "mycal.json"
     config_file.write_text("{}")
@@ -291,7 +330,6 @@ def test_delete_in_use_calibration_config_unassigns_robots(
 def test_delete_unused_calibration_config_reports_no_unassignments(
     client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
     config_file = Path(cfg.LEADER_CONFIG_PATH) / "spare.json"
     config_file.write_text("{}")
 
@@ -453,7 +491,7 @@ def test_download_calibration_config_returns_file(
     leader_dir.mkdir()
     (leader_dir / "armA.json").write_text('{"shoulder_pan": {"id": 1}}')
     # server.py binds its own LEADER_CONFIG_PATH at import — patch that one.
-    monkeypatch.setattr("makermodslab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makermodslab.utils.config.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/armA/download")
     assert response.status_code == 200
@@ -469,7 +507,7 @@ def test_download_calibration_config_accepts_dot_json_suffix(
     leader_dir = tmp_path / "leader"
     leader_dir.mkdir()
     (leader_dir / "so101.json").write_text('{"shoulder_pan": {"id": 1}}')
-    monkeypatch.setattr("makermodslab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makermodslab.utils.config.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/so101.json/download")
     assert response.status_code == 200
@@ -481,7 +519,7 @@ def test_download_calibration_config_missing_returns_404(
 ) -> None:
     leader_dir = tmp_path / "leader"
     leader_dir.mkdir()
-    monkeypatch.setattr("makermodslab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makermodslab.utils.config.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/nope/download")
     assert response.status_code == 404
@@ -1229,6 +1267,208 @@ def test_list_hub_jobs_keeps_dismissals_when_listing_fails(
     assert resp.status_code == 200
     assert resp.json()["jobs"] == []
     assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+
+# --- Hub job run names -----------------------------------------------------
+#
+# Every cloud run launches on the same image, so a job the local registry
+# doesn't know about (launched from another machine) would otherwise be titled
+# "huggingface/lerobot-gpu:latest" in the library, like every other one.
+# _hub_job_run_name recovers a real name from the job itself.
+
+
+def _job_with(**attrs):
+    """A _FakeHubJob carrying extra JobInfo attributes (labels, command, …)."""
+    job = _FakeHubJob("job-x", "COMPLETED")
+    for k, v in attrs.items():
+        setattr(job, k, v)
+    return job
+
+
+def test_hub_job_run_name_prefers_submission_label() -> None:
+    job = _job_with(
+        labels={"makermodslab_run": "act_cube_2026-08-01_12-00-00"},
+        command=["python", "-c", "…", "--", "--policy.repo_id", "makermods/other_name"],
+    )
+    assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
+
+
+def test_hub_job_run_name_still_reads_the_legacy_dotted_label() -> None:
+    """The dotted key was renamed because the Hub started rejecting a
+    "key=value" tag containing a dot. Every job submitted before that rename
+    still carries it, and dropping the read would un-name the whole existing
+    cloud backlog in the jobs UI."""
+    job = _job_with(
+        labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"},
+        command=["python", "-c", "…"],
+    )
+    assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
+
+
+def test_hub_job_run_name_falls_back_to_repo_id_in_argv() -> None:
+    # The backlog: jobs submitted before labelling existed still carry their
+    # publish target in argv, and its slug is the run id.
+    job = _job_with(
+        command=["python", "-c", "…", "--", "--policy.repo_id", "makermods/act_cube_2026-08-01_12-00-00"]
+    )
+    assert server_mod._hub_job_run_name(job) == "act_cube_2026-08-01_12-00-00"
+
+
+def test_hub_job_run_name_reads_equals_form_and_arguments_list() -> None:
+    job = _job_with(command=None, arguments=["--policy.repo_id=makermods/smolvla_fold_2026-08-02_09-00-00"])
+    assert server_mod._hub_job_run_name(job) == "smolvla_fold_2026-08-02_09-00-00"
+
+
+def test_hub_job_run_name_is_none_when_nothing_identifies_the_run() -> None:
+    # A foreign job on the same account: no label, no --policy.repo_id. The
+    # card keeps its image-name fallback rather than inventing a name.
+    assert server_mod._hub_job_run_name(_job_with(labels={}, command=["python", "train.py"])) is None
+    assert server_mod._hub_job_run_name(_FakeHubJob("bare", "COMPLETED")) is None  # no attrs at all
+
+
+def test_hub_job_run_name_ignores_blank_label_and_trailing_flag() -> None:
+    # A blank label must not win over the argv fallback, and a dangling
+    # --policy.repo_id with no value must not index past the end.
+    job = _job_with(
+        labels={"makermodslab.run": "   "},
+        command=["--policy.repo_id", "makermods/act_x_2026-08-01_12-00-00"],
+    )
+    assert server_mod._hub_job_run_name(job) == "act_x_2026-08-01_12-00-00"
+    assert server_mod._hub_job_run_name(_job_with(command=["--policy.repo_id"])) is None
+
+
+def test_list_hub_jobs_exposes_the_run_name(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    named = _job_with(labels={"makermodslab.run": "act_cube_2026-08-01_12-00-00"})
+    named.id = "job-named"
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([named]))
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"][0]["name"] == "act_cube_2026-08-01_12-00-00"
+
+
+# --- Hub job run identity --------------------------------------------------
+#
+# A cloud run stores its whole trainer invocation on the job, so what a foreign
+# run trains is already in the listing we fetch. _hub_job_identity reads it back
+# so a run launched on another machine (same HF account) renders with the
+# policy/dataset/steps a tracked run shows, not just an image name.
+
+
+def test_hub_job_identity_reads_the_trainer_argv() -> None:
+    job = _job_with(
+        command=[
+            "python",
+            "-c",
+            "<wrapper source>",
+            "lerobot@abc123",
+            "--",
+            "python",
+            "-m",
+            "lerobot.scripts.lerobot_train",
+            "--dataset.repo_id",
+            "makermods/cube",
+            "--policy.type",
+            "act",
+            "--steps",
+            "10000",
+            "--policy.repo_id",
+            "makermods/act_cube_2026-08-01_12-00-00",
+        ]
+    )
+    assert server_mod._hub_job_identity(job) == {
+        "policy_type": "act",
+        "dataset": "makermods/cube",
+        "total_steps": 10000,
+        "hf_repo_id": "makermods/act_cube_2026-08-01_12-00-00",
+    }
+
+
+def test_hub_job_identity_ignores_wrapper_side_directives() -> None:
+    # Everything before the bare "--" is the wrapper's, not the trainer's. A
+    # --resume-from there must not be mistaken for trainer argv, and a flag
+    # appearing ONLY before the sentinel is not answered at all.
+    job = _job_with(
+        command=[
+            "python",
+            "-c",
+            "<wrapper source>",
+            "--resume-from=makermods/act_cube@checkpoints/last",
+            "--policy.type",
+            "smolvla",
+            "--",
+            "--policy.type",
+            "act",
+        ]
+    )
+    assert server_mod._hub_job_identity(job)["policy_type"] == "act"
+
+
+def test_hub_job_identity_is_all_null_for_a_resumed_run() -> None:
+    # build_training_command passes --config_path instead of --policy.type /
+    # --dataset.repo_id on a resume (lerobot rebuilds those from the
+    # checkpoint), so a continuation legitimately answers only repo and steps.
+    job = _job_with(
+        command=[
+            "--",
+            "--config_path=/tmp/ckpt/train_config.json",
+            "--resume",
+            "true",
+            "--steps",
+            "20000",
+            "--policy.repo_id",
+            "makermods/act_cube_2026-08-01_12-00-00",
+        ]
+    )
+    assert server_mod._hub_job_identity(job) == {
+        "policy_type": None,
+        "dataset": None,
+        "total_steps": 20000,
+        "hf_repo_id": "makermods/act_cube_2026-08-01_12-00-00",
+    }
+
+
+def test_hub_job_identity_survives_junk_without_raising() -> None:
+    # This decorates a listing; it must never be able to 500 it. A
+    # non-integer --steps, a valueless flag, a flag whose value is the next
+    # flag, and a job with no argv attributes at all all degrade to null.
+    assert server_mod._hub_job_identity(_FakeHubJob("bare", "COMPLETED"))["total_steps"] is None
+    junk = _job_with(
+        command=["--", "--steps", "soon", "--policy.type", "--dataset.repo_id", "--policy.repo_id"]
+    )
+    assert server_mod._hub_job_identity(junk) == {
+        "policy_type": None,
+        "dataset": None,
+        "total_steps": None,
+        "hf_repo_id": None,
+    }
+
+
+def test_hub_job_identity_reads_equals_form_and_arguments_list() -> None:
+    job = _job_with(command=None, arguments=["--policy.type=act", "--steps=500"])
+    identity = server_mod._hub_job_identity(job)
+    assert identity["policy_type"] == "act"
+    assert identity["total_steps"] == 500
+
+
+def test_list_hub_jobs_exposes_the_run_identity(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    job = _job_with(
+        command=["--", "--policy.type", "act", "--dataset.repo_id", "makermods/cube", "--steps", "10000"]
+    )
+    job.id = "job-identified"
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([job]))
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    row = resp.json()["jobs"][0]
+    assert row["policy_type"] == "act"
+    assert row["dataset"] == "makermods/cube"
+    assert row["total_steps"] == 10000
+    # A row that answers none of them still serializes every key (the response
+    # model declares them; exclude_unset must not drop a legitimate null).
+    assert row["hf_repo_id"] is None
 
 
 def test_dismiss_hub_job_rejects_blank_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:

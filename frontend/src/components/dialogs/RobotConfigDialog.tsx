@@ -1,10 +1,5 @@
-import {
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-  useMemo,
-} from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -57,7 +52,16 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useUnloadWarning } from "@/hooks/useUnloadWarning";
+import { ApiError } from "@/lib/apiClient";
+import {
+  startSession,
+  stopSession,
+  getCurrentSession,
+  formatSessionHeld,
+} from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration, {
   CameraConfig,
@@ -69,14 +73,32 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { PanelHeader, SLIDE } from "@/components/studio/panel/primitives";
-import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
+import {
+  RobotRecord,
+  formatRobotSetupGap,
+  isCanArmType,
+} from "@/hooks/useRobots";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 
+// Wire text: matched with startsWith() against the backend's own error string,
+// so this must stay byte-identical to what the server sends. Never translated;
+// the heading rendered for it is `robotConfig.calib.discontinuityTitle`.
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
 interface CalibrationStatus {
   calibration_active: boolean;
-  status: string; // "idle", "connecting", "recording", "completed", "error", "stopping"
+  /**
+   * SO-101 range sweep: "idle" | "connecting" | "recording" | "completed" |
+   * "error" | "stopping".
+   *
+   * CAN zero-pose flow: "idle" | "connecting" | "awaiting_zero" | "saving" |
+   * "completed" | "error" | "stopping". `/calibration-status` serves whichever
+   * flow is live from one endpoint; the two payloads are field-compatible
+   * where they overlap.
+   */
+  status: string;
   device_type: string | null;
   error: string | null;
   message: string;
@@ -87,15 +109,12 @@ interface CalibrationStatus {
     string,
     { min: number; max: number; current: number }
   > | null;
-}
-
-interface CalibrationRequest {
-  device_type: string; // "robot" or "teleop"
-  port: string;
-  config_file: string;
-  robot_name: string | null;
-  overwrite?: boolean; // must be true to replace an existing config of the same name
-  arm?: "left" | "right"; // which arm of a bimanual robot ("left" = the single pair)
+  /**
+   * Zero-pose flow only: the arm is connected with torque OFF and we are
+   * waiting for the user to pose it by hand. Always false on the SO-101 sweep
+   * (the backend defaults it), which is what lets the panel switch on it.
+   */
+  awaiting_pose?: boolean;
 }
 
 // One selectable (device_type, arm) slot — shared by the Device step's card
@@ -132,6 +151,7 @@ const ArmSlotCard = ({
   configured: boolean;
   onSelect: () => void;
 }) => {
+  const { t } = useTranslation();
   // A saved port that isn't currently detected outranks "ready": the arm may
   // be unplugged (or moved to another port, or renamed by the OS), and a green
   // check there reads as "connected, all good" when nothing is on that bus.
@@ -159,8 +179,8 @@ const ArmSlotCard = ({
         {undetected ? (
           <span
             role="img"
-            aria-label="Saved port not currently detected"
-            title="Saved port not currently detected — plug in the arm and rescan"
+            aria-label={t("robotConfig.slotCard.undetectedLabel")}
+            title={t("robotConfig.slotCard.undetectedTitle")}
             className="shrink-0 text-warn"
           >
             <AlertTriangle aria-hidden className="h-4 w-4" />
@@ -178,7 +198,7 @@ const ArmSlotCard = ({
           port && !undetected ? "text-muted-foreground" : "text-warn/80",
         )}
       >
-        {port || "no port assigned"}
+        {port || t("robotConfig.slotCard.noPort")}
       </p>
     </button>
   );
@@ -222,10 +242,13 @@ export interface RobotConfigDialogProps {
  * control sizes).
  *
  * The whole window body mounts fresh per open and unmounts on close — that is
- * what makes the page semantics carry over: camera streams release, the
- * session exit guard's unmount cleanup aborts a live manual calibration, and
- * every draft resets. A running batch auto-calibration intentionally survives
- * close (it's a backend subprocess) and resumes its panel on reopen.
+ * what makes the page semantics carry over: camera streams release and every
+ * draft resets. Closing during a live MANUAL calibration confirms an explicit
+ * abort (stop by session id); any other abandonment (route change, tab gone)
+ * is covered by the session lease — missed heartbeats make the SERVER stop
+ * the session. A running batch auto-calibration survives close only as long
+ * as its lease: reopening resumes the panel (and the heartbeat) while it
+ * lives.
  */
 const RobotConfigDialog = ({
   open,
@@ -247,6 +270,8 @@ const RobotConfigWindow = ({
 }) => {
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { t } = useTranslation();
+  const { language } = useLanguage();
 
   const demoVideoRef = useRef<HTMLDivElement>(null);
 
@@ -289,6 +314,16 @@ const RobotConfigWindow = ({
   const [abortPromptOpen, setAbortPromptOpen] = useState(false);
 
   const isBimanual = robot?.mode === "bimanual";
+  // The hardware family this robot is. Gates three things in this window:
+  // which calibration flow the Calibrate step runs (a CAN arm — Maker or
+  // Metal — has no range sweep and no automatic calibration, only a zero
+  // pose), which port detection endpoint runs, and which calibration library
+  // the config lists and file actions address. Records written before the
+  // Maker arm existed read back as "so101", so the fallback here is only for
+  // the pre-fetch render where `robot` is still null.
+  const armType = robot?.arm_type ?? "so101";
+  const isCanArm = isCanArmType(armType);
+  const isMetalArm = armType === "metal";
   // In single (or left) mode the primary leader/follower fields are used; in
   // bimanual mode the right arm uses the right_* fields. Maps the current
   // device_type + arm to the record's port and config field names.
@@ -318,9 +353,27 @@ const RobotConfigWindow = ({
   // per-session staging copy on the backend, not by the on-disk name). Default
   // to the in-use config for this slot, else a per-arm suggestion so a fresh
   // bimanual robot doesn't propose the same name for all four slots.
+  //
+  // The CAN families mint the arm type into the default ("<name>_maker" /
+  // "<name>_metal") because their Star-leader calibrations share ONE library
+  // directory while the presets' zero poses differ — an unsuffixed default
+  // would let a Maker robot and a Metal robot silently share a zero that is
+  // wrong for one of them. Mirrors the server's default_slot_config_name()
+  // in makermodslab/utils/config.py — change both together. (The explicit
+  // config_file this window sends at calibration start WINS over the server's
+  // own default, so the two must agree.)
+  const defaultBaseName = robotName
+    ? isCanArm
+      ? `${robotName}_${armType}`
+      : robotName
+    : "";
   const defaultConfigName = assignedConfig?.trim()
     ? assignedConfig
-    : ((isBimanual ? `${robotName}_${arm}` : robotName) ?? "");
+    : defaultBaseName
+      ? isBimanual
+        ? `${defaultBaseName}_${arm}`
+        : defaultBaseName
+      : "";
 
   // No name is chosen in the UI. Calibration always saves to the robot's own
   // default config name for this slot and silently replaces it (see overwrite
@@ -341,7 +394,9 @@ const RobotConfigWindow = ({
   // targets: if device/arm changes while a panel is open (e.g. via the step-01
   // selector), the panel follows to the matching calibration-file row.
   useEffect(() => {
-    setNewCalibFor((prev) => (prev && prev !== configField ? configField : prev));
+    setNewCalibFor((prev) =>
+      prev && prev !== configField ? configField : prev,
+    );
   }, [configField]);
 
   // Toggle a row's "New calibration" panel. Opening retargets the calibration
@@ -387,14 +442,21 @@ const RobotConfigWindow = ({
   const portFieldLabel = (field: keyof RobotRecord): string => {
     switch (field) {
       case "leader_port":
-        return isBimanual ? "Left Leader" : "Leader";
+        return t(
+          isBimanual ? "robotConfig.arm.leftLeader" : "robotConfig.arm.leader",
+        );
       case "follower_port":
-        return isBimanual ? "Left Follower" : "Follower";
+        return t(
+          isBimanual
+            ? "robotConfig.arm.leftFollower"
+            : "robotConfig.arm.follower",
+        );
       case "right_leader_port":
-        return "Right Leader";
+        return t("robotConfig.arm.rightLeader");
       case "right_follower_port":
-        return "Right Follower";
+        return t("robotConfig.arm.rightFollower");
       default:
+        // Field name, not copy — a developer-facing fallback.
         return String(field);
     }
   };
@@ -492,7 +554,7 @@ const RobotConfigWindow = ({
         ? [
             {
               key: "teleop:left",
-              label: "Left Leader",
+              label: t("robotConfig.arm.leftLeader"),
               device: "teleop",
               arm: "left",
               cfgField: "leader_config",
@@ -500,7 +562,7 @@ const RobotConfigWindow = ({
             },
             {
               key: "robot:left",
-              label: "Left Follower",
+              label: t("robotConfig.arm.leftFollower"),
               device: "robot",
               arm: "left",
               cfgField: "follower_config",
@@ -508,7 +570,7 @@ const RobotConfigWindow = ({
             },
             {
               key: "teleop:right",
-              label: "Right Leader",
+              label: t("robotConfig.arm.rightLeader"),
               device: "teleop",
               arm: "right",
               cfgField: "right_leader_config",
@@ -516,7 +578,7 @@ const RobotConfigWindow = ({
             },
             {
               key: "robot:right",
-              label: "Right Follower",
+              label: t("robotConfig.arm.rightFollower"),
               device: "robot",
               arm: "right",
               cfgField: "right_follower_config",
@@ -526,7 +588,7 @@ const RobotConfigWindow = ({
         : [
             {
               key: "teleop:left",
-              label: "Leader",
+              label: t("robotConfig.arm.leader"),
               device: "teleop",
               arm: "left",
               cfgField: "leader_config",
@@ -534,21 +596,21 @@ const RobotConfigWindow = ({
             },
             {
               key: "robot:left",
-              label: "Follower",
+              label: t("robotConfig.arm.follower"),
               device: "robot",
               arm: "left",
               cfgField: "follower_config",
               portField: "follower_port",
             },
           ],
-    [isBimanual],
+    [isBimanual, t],
   );
 
   const fetchRobot = useCallback(async (): Promise<RobotRecord | null> => {
     if (!robotName) return null;
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+        `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
       );
       if (!res.ok) return null;
       const data = await res.json();
@@ -567,28 +629,31 @@ const RobotConfigWindow = ({
   const openCalibrationFolder = useCallback(
     async (device: "teleop" | "robot") => {
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/open-calibration-folder`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ device_type: device }),
-        });
+        const res = await fetchWithHeaders(
+          `${baseUrl}/api/v1/open-calibration-folder`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ device_type: device, arm_type: armType }),
+          },
+        );
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.opened) {
           toast({
-            title: "Couldn't open folder",
+            title: t("robotConfig.files.toast.openFolderFailedTitle"),
             description: data.message,
             variant: "destructive",
           });
         }
       } catch (e) {
         toast({
-          title: "Couldn't open folder",
+          title: t("robotConfig.files.toast.openFolderFailedTitle"),
           description: String(e),
           variant: "destructive",
         });
       }
     },
-    [baseUrl, fetchWithHeaders, toast],
+    [baseUrl, fetchWithHeaders, toast, t, armType],
   );
 
   // List the USB-serial ports for the dropdown (filtered to arm-like devices by
@@ -596,7 +661,7 @@ const RobotConfigWindow = ({
   const fetchPorts = useCallback(async () => {
     setPortsLoading(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/available-ports`);
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/available-ports`);
       const data = await res.json();
       setAvailablePorts(Array.isArray(data.ports) ? data.ports : []);
     } catch (e) {
@@ -659,16 +724,15 @@ const RobotConfigWindow = ({
   );
   const [isPolling, setIsPolling] = useState(false);
 
-  // Manual (step-by-step) calibration liveness, in state so the shared exit
-  // guard below can react to it. Set optimistically at start (so a close in the
-  // sub-second before the first status poll still aborts) and cleared when the
-  // session reaches a terminal status.
+  // Manual (step-by-step) calibration liveness. Set optimistically at start
+  // (so the abort prompt already guards a close in the sub-second before the
+  // first status poll) and cleared when the session reaches a terminal
+  // status.
   //
-  // Scope note: this guards the MANUAL flow ONLY. The batch auto-calibration
-  // subprocess is deliberately designed to SURVIVE close — it resumes on
-  // remount (see the batch-status resume/poll effects) — so it is intentionally
-  // NOT aborted on close. Aborting it here would break that resume feature; a
-  // running batch is stopped only via its explicit "Stop all" button.
+  // Scope note: this tracks the MANUAL flow ONLY. The batch auto-calibration
+  // subprocess resumes its panel on remount (see the batch-status
+  // resume/poll effects) and is stopped only via its explicit "Stop all"
+  // button — or by its lease, once nobody renews it.
   const [manualCalibLive, setManualCalibLive] = useState(false);
   useEffect(() => {
     if (calibrationStatus.calibration_active) {
@@ -680,29 +744,27 @@ const RobotConfigWindow = ({
     }
   }, [calibrationStatus.calibration_active, calibrationStatus.status]);
 
-  // Shared leave safety net (same hook as Recording & Inference). Manual
-  // calibration holds the serial port in a singleton that would otherwise block
-  // the next start ("Calibration already active"); an unintentional exit aborts
-  // it. In the window this covers tab close/reload (beacon) and the window's
-  // own unmount-on-close cleanup. The arm is LIMP during manual range recording
-  // (torque is disabled), so this is a clean teardown, not a mid-motion stop.
-  // The abort reuses the module's existing /stop-calibration teardown.
-  const { markHandled: markCalibHandled } = useSessionExitGuard({
-    active: manualCalibLive,
-    confirmMessage:
-      "Leaving aborts this calibration — nothing will be saved and the arm is released. Continue?",
-    beaconUrl: `${baseUrl}/stop-calibration`,
-    onLeave: () => {
-      fetchWithHeaders(`${baseUrl}/stop-calibration`, { method: "POST" }).catch(
-        (e) => console.error("Failed to stop calibration on leave:", e),
-      );
-    },
-    beaconFlagKey: "makermodslab:calibration-stopped",
-  });
+  // Session identities from POST /api/v1/sessions — the last browser exit
+  // guard (useSessionExitGuard: beforeunload beacon + popstate sentinel +
+  // unmount-stop) retired when calibration joined the sessions surface. The
+  // lease is THE safety net now: while a flow is live this window renews it
+  // (~20s heartbeats), and an abandoned page — tab closed, wifi died, route
+  // changed away — makes the SERVER stop the session when the heartbeats
+  // stop. What remains browser-side is a courtesy native confirm so an
+  // accidental ⌘W isn't silent. (The manual-calibration arm is LIMP — torque
+  // off — so a lease-timeout stop is a clean teardown, not a mid-motion
+  // halt; a batch auto-cal stop runs the script's own graceful stop.)
+  const [calibSessionId, setCalibSessionId] = useState<string | null>(null);
+  const [autoCalSessionId, setAutoCalSessionId] = useState<string | null>(null);
+  useSessionHeartbeat(calibSessionId, tabOwnerId(), manualCalibLive);
+  useSessionHeartbeat(autoCalSessionId, tabOwnerId(), batchAutoCal.active);
+  useUnloadWarning(manualCalibLive || batchAutoCal.active);
 
   const pollStatus = async () => {
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/calibration-status`);
+      const response = await fetchWithHeaders(
+        `${baseUrl}/api/v1/calibration-status`,
+      );
       if (response.ok) {
         const status = await response.json();
         setCalibrationStatus(status);
@@ -724,33 +786,35 @@ const RobotConfigWindow = ({
   const handleWiggle = async () => {
     if (!port) {
       toast({
-        title: "Missing port",
-        description:
-          "Enter or detect the port first, then wiggle to confirm the arm.",
+        title: t("robotConfig.port.toast.missingPortTitle"),
+        description: t("robotConfig.port.toast.missingPortWiggle"),
         variant: "destructive",
       });
       return;
     }
     setWiggling(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/wiggle`, {
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/wiggle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ port }),
       });
       const data = await res.json();
       if (data.success) {
-        toast({ title: "Wiggling gripper", description: data.message });
+        toast({
+          title: t("robotConfig.port.toast.wiggleStartedTitle"),
+          description: data.message,
+        });
       } else {
         toast({
-          title: "Wiggle failed",
+          title: t("robotConfig.port.toast.wiggleFailedTitle"),
           description: data.message,
           variant: "destructive",
         });
       }
     } catch (e) {
       toast({
-        title: "Wiggle failed",
+        title: t("robotConfig.port.toast.wiggleFailedTitle"),
         description: String(e),
         variant: "destructive",
       });
@@ -775,15 +839,75 @@ const RobotConfigWindow = ({
   // this slot had no port the swap degenerates to a take-with-warning that
   // leaves the other slot empty. Confirm/messaging happen in
   // handleConfirmPortAssign.
+  /**
+   * Find the port for the currently selected CAN arm slot (Maker or Metal).
+   *
+   * Two strategies, cheapest first:
+   *
+   * 1. **Probe.** A CAN rig's follower and leader speak different protocols
+   *    on different adapters (RobStride or Damiao over CAN vs FashionStar
+   *    over UART), so simply asking each port which one answers identifies
+   *    them with no gesture at all. Used whenever the probe finds exactly ONE
+   *    port for this side — which is the whole single-arm case.
+   * 2. **Gesture.** A bimanual rig has two identical arms per side, so the
+   *    probe finds two ports and cannot say which is left and which is right.
+   *    Only the user knows, so fall back to watching for a hand swing, exactly
+   *    as the SO-101 flow does. (The server refuses this for a Metal FOLLOWER
+   *    — the Damiao handshake energizes the motors — and its refusal message
+   *    is surfaced by handleDetect's failure toast like any other.)
+   *
+   * Both requests carry the robot's arm_type: the endpoints default to
+   * "maker", and a Metal port answers a Metal probe, not a Maker one.
+   *
+   * Returns the same `{success, port, message}` shape as /identify-arm so the
+   * caller's assignment/confirmation path is untouched.
+   */
+  const detectCanArmPort = async () => {
+    const probeRes = await fetchWithHeaders(
+      `${baseUrl}/api/v1/maker/probe-ports`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // No ports listed = probe every detected port.
+        body: JSON.stringify({ arm_type: armType }),
+      },
+    );
+    const probe = await probeRes.json().catch(() => ({}));
+    const candidates: string[] =
+      (deviceType === "teleop" ? probe?.leader_ports : probe?.follower_ports) ??
+      [];
+
+    if (candidates.length === 1) {
+      return {
+        success: true,
+        port: candidates[0],
+        message: probe.message,
+      };
+    }
+
+    // Zero candidates (nothing answered) or several (a bimanual rig): the
+    // gesture is the only thing that can resolve it. Its own message covers
+    // the nothing-found case too, so the probe's is not surfaced here.
+    const res = await fetchWithHeaders(`${baseUrl}/api/v1/maker/identify-arm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_type: deviceType, arm_type: armType }),
+    });
+    return await res.json();
+  };
+
   const handleDetect = async () => {
     setDetecting(true);
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/identify-arm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}), // empty = watch all detected ports
-      });
-      const data = await res.json();
+      const data = isCanArm
+        ? await detectCanArmPort()
+        : await (
+            await fetchWithHeaders(`${baseUrl}/api/v1/identify-arm`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({}), // empty = watch all detected ports
+            })
+          ).json();
       if (data.success && data.port) {
         // Which OTHER slot (if any) currently holds the detected port? Reuses
         // the same portFields set the dropdown uses (right_* only in bimanual),
@@ -812,14 +936,14 @@ const RobotConfigWindow = ({
         });
       } else {
         toast({
-          title: "No arm detected",
+          title: t("robotConfig.port.toast.noArmTitle"),
           description: data.message,
           variant: "destructive",
         });
       }
     } catch (e) {
       toast({
-        title: "Detect failed",
+        title: t("robotConfig.port.toast.detectFailedTitle"),
         description: String(e),
         variant: "destructive",
       });
@@ -853,13 +977,27 @@ const RobotConfigWindow = ({
       if (nextRobot) {
         if (prompt.swapPort) {
           toast({
-            title: detected ? "Arm identified — ports swapped" : "Ports swapped",
-            description: `${detected ? `${prompt.message} ` : ""}${prompt.port} is now this arm's; the ${prompt.releasedLabel} took ${prompt.swapPort}.`,
+            title: detected
+              ? t("robotConfig.port.toast.swappedDetectedTitle")
+              : t("robotConfig.port.toast.swappedTitle"),
+            description: `${detected ? `${prompt.message} ` : ""}${t(
+              "robotConfig.port.toast.swappedDescription",
+              {
+                port: prompt.port,
+                released: prompt.releasedLabel ?? "",
+                swapPort: prompt.swapPort,
+              },
+            )}`,
           });
         } else {
           toast({
-            title: detected ? "Arm identified — port moved" : "Port moved",
-            description: `${detected ? `${prompt.message} ` : ""}${prompt.port} was assigned to the ${prompt.releasedLabel}; moved it here. The ${prompt.releasedLabel} now needs a port.`,
+            title: detected
+              ? t("robotConfig.port.toast.movedDetectedTitle")
+              : t("robotConfig.port.toast.movedTitle"),
+            description: `${detected ? `${prompt.message} ` : ""}${t(
+              "robotConfig.port.toast.movedDescription",
+              { port: prompt.port, released: prompt.releasedLabel ?? "" },
+            )}`,
           });
         }
       }
@@ -867,10 +1005,14 @@ const RobotConfigWindow = ({
     } else {
       persistPort(prompt.port);
       toast({
-        title: detected ? "Arm identified" : "Port assigned",
+        title: detected
+          ? t("robotConfig.port.toast.identifiedTitle")
+          : t("robotConfig.port.toast.assignedTitle"),
         description: detected
-          ? `${prompt.message} Port assigned to this arm.`
-          : `${prompt.port} assigned to this arm.`,
+          ? `${prompt.message} ${t("robotConfig.port.toast.identifiedDescription")}`
+          : t("robotConfig.port.toast.assignedDescription", {
+              port: prompt.port,
+            }),
       });
     }
   };
@@ -880,9 +1022,7 @@ const RobotConfigWindow = ({
   // (same dialog as Detect). Picking a free port assigns immediately.
   const handleSelectPort = (nextPort: string) => {
     const conflictingField = robot
-      ? portFields.find(
-          (f) => f !== portField && draftPort(f) === nextPort,
-        )
+      ? portFields.find((f) => f !== portField && draftPort(f) === nextPort)
       : undefined;
     if (conflictingField) {
       const currentPort = draftPort(portField);
@@ -978,7 +1118,7 @@ const RobotConfigWindow = ({
     (async () => {
       try {
         const res = await fetchWithHeaders(
-          `${baseUrl}/auto-calibration-batch-status`,
+          `${baseUrl}/api/v1/auto-calibration-batch-status`,
         );
         const data = await res.json();
         setBatchAutoCal(data);
@@ -988,6 +1128,24 @@ const RobotConfigWindow = ({
           // expand one (any row works; the batch is multi-arm) so the running
           // batch is visible on reopen.
           setNewCalibFor((prev) => prev ?? "leader_config");
+          // Recover the run's session id so this window can resume renewing
+          // its lease (the previous window's heartbeats died with it) and
+          // stop it by id. Only when the lease is this tab's — or absent —
+          // so a resumed heartbeat can never 409 against another owner.
+          try {
+            const { session } = await getCurrentSession(
+              baseUrl,
+              fetchWithHeaders,
+            );
+            if (
+              session?.kind === "auto_calibration" &&
+              (session.lease === null || session.owner === tabOwnerId())
+            ) {
+              setAutoCalSessionId(session.id);
+            }
+          } catch {
+            // identity is a nicety here — the kind-level stop still works
+          }
         }
       } catch {
         // ignore
@@ -1011,7 +1169,7 @@ const RobotConfigWindow = ({
     const id = setInterval(async () => {
       try {
         const res = await fetchWithHeaders(
-          `${baseUrl}/auto-calibration-batch-status`,
+          `${baseUrl}/api/v1/auto-calibration-batch-status`,
         );
         const data: BatchAutoCalStatus = await res.json();
         setBatchAutoCal(data);
@@ -1020,12 +1178,17 @@ const RobotConfigWindow = ({
           fetchRobot();
           if (data.failed === 0) {
             toast({
-              title: `Auto-calibrated ${data.completed} arm(s)`,
+              title: t("robotConfig.batch.toast.finishedTitle", {
+                count: data.completed,
+              }),
             });
           } else {
             toast({
-              title: "Batch auto-calibration finished with issues",
-              description: `${data.completed} completed, ${data.failed} failed/stopped.`,
+              title: t("robotConfig.batch.toast.issuesTitle"),
+              description: t("robotConfig.batch.summary", {
+                completed: data.completed,
+                failed: data.failed,
+              }),
               variant: data.completed > 0 ? "default" : "destructive",
             });
           }
@@ -1035,7 +1198,7 @@ const RobotConfigWindow = ({
       }
     }, 700);
     return () => clearInterval(id);
-  }, [batchAutoCal.active, baseUrl, fetchWithHeaders, fetchRobot, toast]);
+  }, [batchAutoCal.active, baseUrl, fetchWithHeaders, fetchRobot, toast, t]);
 
   const startBatchAutoCalibration = async () => {
     setBatchAutoCalPromptOpen(false);
@@ -1043,8 +1206,8 @@ const RobotConfigWindow = ({
     const slots = selectedBatchSlots;
     if (slots.length === 0) {
       toast({
-        title: "No arms selected",
-        description: "Tick at least one arm to auto-calibrate.",
+        title: t("robotConfig.batch.toast.noArmsTitle"),
+        description: t("robotConfig.batch.toast.noArmsDescription"),
         variant: "destructive",
       });
       return;
@@ -1055,8 +1218,10 @@ const RobotConfigWindow = ({
     const missingPort = slots.find((s) => !slotPort(s));
     if (missingPort) {
       toast({
-        title: "Arm has no detected port",
-        description: `${missingPort.label} has no port that's currently plugged in — assign/reconnect it above before starting.`,
+        title: t("robotConfig.batch.toast.noPortTitle"),
+        description: t("robotConfig.batch.toast.noPortDescription", {
+          arm: missingPort.label,
+        }),
         variant: "destructive",
       });
       return;
@@ -1064,8 +1229,8 @@ const RobotConfigWindow = ({
     const ports = slots.map((s) => slotPort(s));
     if (new Set(ports).size !== ports.length) {
       toast({
-        title: "Duplicate port",
-        description: "Each arm needs its own serial port.",
+        title: t("robotConfig.batch.toast.duplicatePortTitle"),
+        description: t("robotConfig.batch.toast.duplicatePortDescription"),
         variant: "destructive",
       });
       return;
@@ -1083,49 +1248,49 @@ const RobotConfigWindow = ({
     }));
 
     try {
-      const res = await fetchWithHeaders(
-        `${baseUrl}/start-auto-calibration-batch`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          // Each arm saves to its own default name, so replacing that arm's
-          // existing calibration is the expected outcome — overwrite is always
-          // on and the old name-taken confirmation is gone. motor_power is the
-          // torque slider's CURRENT position (draft, not the saved record) so
-          // what the user sees is what the calibration drives at.
-          body: JSON.stringify({
-            robot_name: robotName,
-            overwrite: true,
-            arms,
-            motor_power: motorPercent,
-          }),
+      // Start through the sessions surface: robot NAME plus the per-arm
+      // slots. Each arm's port/save-name still travel explicitly — they are
+      // this window's resolved values (detected ports, unsaved drafts
+      // included), which is why the calibration kinds' options may carry
+      // them. Each arm saves to its own default name, so replacing that
+      // arm's existing calibration is the expected outcome — overwrite is
+      // always on and the old name-taken confirmation is gone. motor_power
+      // is the torque slider's CURRENT position (draft, not the saved
+      // record) so what the user sees is what the calibration drives at.
+      // The owner attaches the lease the heartbeat above renews.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "auto_calibration",
+        robot: robotName,
+        owner: tabOwnerId(),
+        options: {
+          arms,
+          overwrite: true,
+          motor_power: motorPercent,
         },
-      );
-      const data = await res.json();
-      if (data.success) {
-        setBatchAutoCal({
-          active: true,
-          arms: [],
-          total: data.total ?? arms.length,
-          completed: 0,
-          failed: 0,
-          logs: [],
-        });
-        toast({
-          title: `Auto-calibration started on ${data.launched ?? arms.length} arm(s)`,
-          description: "The arms are moving — keep the workspace clear.",
-        });
-      } else {
-        toast({
-          title: "Couldn't start auto-calibration",
-          description: data.message,
-          variant: "destructive",
-        });
-      }
+      });
+      setAutoCalSessionId(session.id);
+      setBatchAutoCal({
+        active: true,
+        arms: [],
+        total: arms.length,
+        completed: 0,
+        failed: 0,
+        logs: [],
+      });
+      toast({
+        title: t("robotConfig.batch.toast.startedTitle", {
+          count: arms.length,
+        }),
+        description: t("robotConfig.batch.toast.startedDescription"),
+      });
     } catch (e) {
       toast({
-        title: "Couldn't start auto-calibration",
-        description: String(e),
+        title: t("robotConfig.batch.toast.startFailedTitle"),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; every other coded refusal shows the server's own prose.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof ApiError ? (e.detail ?? e.message) : String(e)),
         variant: "destructive",
       });
     }
@@ -1133,7 +1298,19 @@ const RobotConfigWindow = ({
 
   const stopBatchAutoCalibration = async () => {
     try {
-      await fetchWithHeaders(`${baseUrl}/stop-auto-calibration-batch`, {
+      // Stop by session id when this window started (or recovered) it; a 404
+      // means the run already ended. The kind-level stop covers a batch whose
+      // session id we never learned.
+      if (autoCalSessionId) {
+        try {
+          await stopSession(baseUrl, fetchWithHeaders, autoCalSessionId);
+          return;
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 404) return;
+          throw e;
+        }
+      }
+      await fetchWithHeaders(`${baseUrl}/api/v1/stop-auto-calibration-batch`, {
         method: "POST",
       });
     } catch (e) {
@@ -1144,102 +1321,131 @@ const RobotConfigWindow = ({
   const handleStartCalibration = async () => {
     if (!robotName) {
       toast({
-        title: "No robot selected",
-        description:
-          "Open Robot settings from the robot menu (⚙ Robot settings).",
+        title: t("robotConfig.calib.toast.noRobotTitle"),
+        description: t("robotConfig.calib.toast.noRobotDescription"),
         variant: "destructive",
       });
       return;
     }
     if (!port) {
       toast({
-        title: "Missing port",
-        description: "Set the device's serial port before starting.",
+        title: t("robotConfig.calib.toast.missingPortTitle"),
+        description: t("robotConfig.calib.toast.missingPortDescription"),
         variant: "destructive",
       });
       return;
     }
 
-    const request: CalibrationRequest = {
-      device_type: deviceType,
-      port: port,
-      config_file: calibrationConfigName,
-      robot_name: robotName,
-      // The name is always the robot's own default for this slot, so replacing
-      // its existing calibration is the expected outcome — overwrite is always
-      // on and the old name-taken confirmation prompt is gone. To keep the old
-      // calibration, rename it afterward via the per-side rename feature.
-      overwrite: true,
-      arm,
-    };
-
-    // Optimistically mark as active so the leave guard will fire even if the
-    // user closes the window before the backend reports calibration_active=true.
-    // Reverted below if the start request fails.
+    // Optimistically mark as active so the abort prompt already guards a
+    // close before the backend reports calibration_active=true. Reverted
+    // below if the start request fails.
     setManualCalibLive(true);
 
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/start-calibration`, {
-        method: "POST",
-        body: JSON.stringify(request),
+      // Start through the sessions surface: robot NAME + the slot
+      // (device_type/arm) plus this window's port pick and save name — the
+      // port may be an unsaved draft, which is why calibration's options
+      // carry it (the backend writes it into the record on success). The
+      // owner attaches the lease the heartbeat above renews.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "calibration",
+        robot: robotName,
+        owner: tabOwnerId(),
+        options: {
+          device_type: deviceType as "robot" | "teleop",
+          arm,
+          port,
+          config_file: calibrationConfigName,
+          // The name is always the robot's own default for this slot, so
+          // replacing its existing calibration is the expected outcome —
+          // overwrite is always on and the old name-taken confirmation
+          // prompt is gone. To keep the old calibration, rename it afterward
+          // via the per-side rename feature.
+          overwrite: true,
+        },
       });
-
-      const result = await response.json();
-
-      if (result.success) {
+      setCalibSessionId(session.id);
+      toast({
+        title: t("robotConfig.calib.toast.startedTitle"),
+        // `deviceType` is the backend enum ("teleop"/"robot") — the VALUE is
+        // untouched; only its rendered label is localized, falling back to
+        // the raw string for anything unmapped.
+        description: t("robotConfig.calib.toast.startedDescription", {
+          device: t(`robotConfig.deviceValue.${deviceType}` as never, {
+            defaultValue: deviceType,
+          }),
+        }),
+      });
+      setIsPolling(true);
+    } catch (error) {
+      setManualCalibLive(false);
+      if (error instanceof ApiError) {
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; every other coded refusal shows the server's own prose.
         toast({
-          title: "Calibration Started",
-          description: `Calibration started for ${deviceType}`,
+          title: t("robotConfig.calib.toast.startFailedTitle"),
+          description:
+            formatSessionHeld(t, error) ??
+            error.detail ??
+            t("robotConfig.calib.toast.startFailedFallback"),
+          variant: "destructive",
         });
-        setIsPolling(true);
       } else {
-        setManualCalibLive(false);
+        console.error("Error starting calibration:", error);
         toast({
-          title: "Calibration Failed",
-          description: result.message || "Failed to start calibration",
+          title: t("robotConfig.calib.toast.errorTitle"),
+          description: t("robotConfig.calib.toast.startError"),
           variant: "destructive",
         });
       }
-    } catch (error) {
-      setManualCalibLive(false);
-      console.error("Error starting calibration:", error);
-      toast({
-        title: "Error",
-        description: "Failed to start calibration",
-        variant: "destructive",
-      });
     }
   };
 
   const handleStopCalibration = async () => {
-    // Explicit Cancel — mark handled so the leave guard doesn't also fire while
-    // the session winds down (the hook re-arms for any later calibration).
-    markCalibHandled();
     try {
-      const response = await fetchWithHeaders(`${baseUrl}/stop-calibration`, {
-        method: "POST",
-      });
-
-      const result = await response.json();
+      // Stop by session id (a 404 means the session already ended — fine);
+      // fall back to the kind-level stop when this window never started one
+      // (e.g. a calibration left running by another tab). `result` is
+      // calibrate.py's own stop-handler response either way.
+      let result: { success?: boolean; message?: string };
+      if (calibSessionId) {
+        try {
+          ({ result } = (await stopSession(
+            baseUrl,
+            fetchWithHeaders,
+            calibSessionId,
+          )) as { result: { success?: boolean; message?: string } });
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 404)) throw e;
+          result = { success: true };
+        }
+      } else {
+        const response = await fetchWithHeaders(
+          `${baseUrl}/api/v1/stop-calibration`,
+          { method: "POST" },
+        );
+        result = await response.json();
+      }
 
       if (result.success) {
         // The 200ms polling interval will pick up the stopped state.
         toast({
-          title: "Calibration Stopped",
-          description: "Calibration has been stopped",
+          title: t("robotConfig.calib.toast.stoppedTitle"),
+          description: t("robotConfig.calib.toast.stoppedDescription"),
         });
       } else {
         toast({
-          title: "Error",
-          description: result.message || "Failed to stop calibration",
+          title: t("robotConfig.calib.toast.errorTitle"),
+          description:
+            result.message || t("robotConfig.calib.toast.stopFailedFallback"),
           variant: "destructive",
         });
       }
     } catch (error) {
       console.error("Error stopping calibration:", error);
       toast({
-        title: "Error",
-        description: "Failed to stop calibration",
+        title: t("robotConfig.calib.toast.errorTitle"),
+        description: t("robotConfig.calib.toast.stopFailedFallback"),
         variant: "destructive",
       });
     }
@@ -1250,7 +1456,7 @@ const RobotConfigWindow = ({
 
     try {
       const response = await fetchWithHeaders(
-        `${baseUrl}/complete-calibration-step`,
+        `${baseUrl}/api/v1/complete-calibration-step`,
         { method: "POST" },
       );
 
@@ -1258,21 +1464,22 @@ const RobotConfigWindow = ({
 
       if (data.success) {
         toast({
-          title: "Step Completed",
+          title: t("robotConfig.calib.toast.stepCompletedTitle"),
           description: data.message,
         });
       } else {
         toast({
-          title: "Step Failed",
-          description: data.message || "Could not complete step",
+          title: t("robotConfig.calib.toast.stepFailedTitle"),
+          description:
+            data.message || t("robotConfig.calib.toast.stepFailedFallback"),
           variant: "destructive",
         });
       }
     } catch (error) {
       console.error("Error completing step:", error);
       toast({
-        title: "Error",
-        description: "Could not complete calibration step",
+        title: t("robotConfig.calib.toast.errorTitle"),
+        description: t("robotConfig.calib.toast.stepError"),
         variant: "destructive",
       });
     }
@@ -1402,7 +1609,8 @@ const RobotConfigWindow = ({
     () =>
       !!robot &&
       Object.entries(portDraft).some(
-        ([f, v]) => (v ?? "") !== ((robot[f as keyof RobotRecord] as string) || ""),
+        ([f, v]) =>
+          (v ?? "") !== ((robot[f as keyof RobotRecord] as string) || ""),
       ),
     [portDraft, robot],
   );
@@ -1425,7 +1633,7 @@ const RobotConfigWindow = ({
     setSaving(true);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+        `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1440,18 +1648,19 @@ const RobotConfigWindow = ({
         setPortDraft({});
         setCameras((data.robot as RobotRecord).cameras ?? []);
         setJustSaved(true);
-        toast({ title: "Changes saved" });
+        toast({ title: t("robotConfig.window.toast.saved") });
       } else {
         // Surface the backend guard (e.g. duplicate-port 409) and stay put.
         toast({
-          title: "Couldn't save changes",
-          description: data.message || "Failed to save the configuration.",
+          title: t("robotConfig.window.toast.saveFailedTitle"),
+          description:
+            data.message || t("robotConfig.window.toast.saveFailedFallback"),
           variant: "destructive",
         });
       }
     } catch (e) {
       toast({
-        title: "Couldn't save changes",
+        title: t("robotConfig.window.toast.saveFailedTitle"),
         description: String(e),
         variant: "destructive",
       });
@@ -1470,6 +1679,7 @@ const RobotConfigWindow = ({
     baseUrl,
     fetchWithHeaders,
     toast,
+    t,
   ]);
 
   // Every close vector (Quit button, X, Esc, overlay click) funnels here.
@@ -1492,29 +1702,70 @@ const RobotConfigWindow = ({
     onOpenChange(false);
   }, [onOpenChange]);
 
-  // Confirmed abort-and-close: just close — the exit guard's unmount cleanup
-  // POSTs /stop-calibration (the same teardown a page navigation triggered).
+  // Confirmed abort-and-close: fire the stop explicitly, then close. The
+  // retired exit guard used to do this from its unmount cleanup; without it
+  // the lease would still safety-stop the abandoned session, but the user
+  // asked for the abort NOW — the arm shouldn't sit claimed for the lease
+  // timeout. Best-effort: a failure here is the lease's problem.
   const confirmAbortAndClose = useCallback(() => {
     setAbortPromptOpen(false);
+    const stop = calibSessionId
+      ? stopSession(baseUrl, fetchWithHeaders, calibSessionId).then(() => {})
+      : fetchWithHeaders(`${baseUrl}/api/v1/stop-calibration`, {
+          method: "POST",
+        }).then(() => {});
+    stop.catch((e) => console.error("Failed to stop calibration on close:", e));
     onOpenChange(false);
-  }, [onOpenChange]);
+  }, [onOpenChange, calibSessionId, baseUrl, fetchWithHeaders]);
 
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {
       case "idle":
-        return { color: "bg-muted-foreground", text: "Idle" };
+        return {
+          color: "bg-muted-foreground",
+          text: t("robotConfig.calib.status.idle"),
+        };
       case "connecting":
-        return { color: "bg-warn", text: "Connecting" };
+        return {
+          color: "bg-warn",
+          text: t("robotConfig.calib.status.connecting"),
+        };
       case "recording":
-        return { color: "bg-info", text: "Recording ranges" };
+        return {
+          color: "bg-info",
+          text: t("robotConfig.calib.status.recording"),
+        };
+      // Zero-pose flow (CAN arms) — see CalibrationStatus.status.
+      case "awaiting_zero":
+        return {
+          color: "bg-info",
+          text: t("robotConfig.calib.status.awaitingZero"),
+        };
+      case "saving":
+        return {
+          color: "bg-warn",
+          text: t("robotConfig.calib.status.saving"),
+        };
       case "completed":
-        return { color: "bg-ok", text: "Completed" };
+        return {
+          color: "bg-ok",
+          text: t("robotConfig.calib.status.completed"),
+        };
       case "error":
-        return { color: "bg-destructive", text: "Error" };
+        return {
+          color: "bg-destructive",
+          text: t("robotConfig.calib.status.error"),
+        };
       case "stopping":
-        return { color: "bg-warn", text: "Stopping" };
+        return {
+          color: "bg-warn",
+          text: t("robotConfig.calib.status.stopping"),
+        };
       default:
-        return { color: "bg-muted-foreground", text: "Unknown" };
+        return {
+          color: "bg-muted-foreground",
+          text: t("robotConfig.calib.status.unknown"),
+        };
     }
   };
 
@@ -1530,7 +1781,7 @@ const RobotConfigWindow = ({
     <div className="ml-6 mt-2 space-y-3 rounded-md border border-border bg-muted/20 p-3">
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold text-foreground">
-          New calibration — {rowLabel}
+          {t("robotConfig.calib.panelTitle", { row: rowLabel })}
         </span>
         <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
           <span
@@ -1551,7 +1802,7 @@ const RobotConfigWindow = ({
               className="w-full"
             >
               <Square className="mr-2 h-4 w-4" />
-              Cancel calibration
+              {t("robotConfig.calib.cancel")}
             </Button>
           ) : batchAutoCal.active ? (
             <Button
@@ -1561,8 +1812,8 @@ const RobotConfigWindow = ({
             >
               <Square className="mr-2 h-4 w-4" />
               {batchAutoCal.total === 1
-                ? "Stop auto-calibration"
-                : "Stop all auto-calibration"}
+                ? t("robotConfig.batch.stopSingle")
+                : t("robotConfig.batch.stopAll")}
             </Button>
           ) : (
             // Auto-calibrate is the default calibration mode: it's the
@@ -1570,29 +1821,51 @@ const RobotConfigWindow = ({
             // through the batch's pre-start confirmation (the multi-arm
             // picker is the header's "Calibrate all"). Manual step-by-step
             // calibration stays fully available as the secondary button.
+            //
+            // A CAN arm (Maker, Metal) has NEITHER of those. Auto-calibration drives the
+            // arm under torque against its stops and writes Feetech EEPROM —
+            // there is no CAN equivalent — and it needs no range sweep at all,
+            // because its joint limits are fixed constants. Its one flow is
+            // the zero pose, so it gets a single primary button.
             <>
-              <Button
-                onClick={() => rowSlot && handleAutoCalibrateSlot(rowSlot)}
-                className="w-full"
-                disabled={!robotName || !rowSlot || !slotPort(rowSlot)}
-                title={
-                  rowSlot && slotPort(rowSlot)
-                    ? `Auto-calibrate ${rowSlot.label} on ${slotPort(rowSlot)} — the arm will move on its own`
-                    : "No detected port for this arm — assign or reconnect it above"
-                }
-              >
-                <Wand2 className="mr-2 h-4 w-4" />
-                Auto-calibrate
-              </Button>
-              <Button
-                onClick={() => handleStartCalibration()}
-                variant="outline"
-                disabled={!robotName || !deviceType || !portDetected}
-                className="w-full"
-              >
-                <Play className="mr-2 h-4 w-4" />
-                Calibrate manually
-              </Button>
+              {isCanArm ? (
+                <Button
+                  onClick={() => handleStartCalibration()}
+                  disabled={!robotName || !deviceType || !portDetected}
+                  className="w-full"
+                >
+                  <Play className="mr-2 h-4 w-4" />
+                  {t("robotConfig.calib.zeroPose.start")}
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    onClick={() => rowSlot && handleAutoCalibrateSlot(rowSlot)}
+                    className="w-full"
+                    disabled={!robotName || !rowSlot || !slotPort(rowSlot)}
+                    title={
+                      rowSlot && slotPort(rowSlot)
+                        ? t("robotConfig.calib.autoTitle", {
+                            arm: rowSlot.label,
+                            port: slotPort(rowSlot),
+                          })
+                        : t("robotConfig.calib.autoDisabledTitle")
+                    }
+                  >
+                    <Wand2 className="mr-2 h-4 w-4" />
+                    {t("robotConfig.calib.auto")}
+                  </Button>
+                  <Button
+                    onClick={() => handleStartCalibration()}
+                    variant="outline"
+                    disabled={!robotName || !deviceType || !portDetected}
+                    className="w-full"
+                  >
+                    <Play className="mr-2 h-4 w-4" />
+                    {t("robotConfig.calib.manual")}
+                  </Button>
+                </>
+              )}
             </>
           )}
 
@@ -1611,19 +1884,16 @@ const RobotConfigWindow = ({
               <div className="flex items-center gap-2 text-sm font-medium text-foreground">
                 <Wand2 className="h-4 w-4" />
                 {!batchAutoCalOpen && batchAutoCal.total === 1
-                  ? "Auto-calibration"
-                  : "Multi-arm auto-calibration"}
+                  ? t("robotConfig.batch.titleSingle")
+                  : t("robotConfig.batch.titleMulti")}
               </div>
               {batchAutoCalOpen && !batchAutoCal.active ? (
                 <>
                   <p className="text-xs text-muted-foreground">
-                    Pick the arms to calibrate. Each runs its own hands-off
-                    calibration <strong>at the same time</strong> on its
-                    assigned port — one arm failing doesn't stop the
-                    others. Ports come from each arm's assignment above; an
-                    arm with no port yet can't be picked. Each arm replaces
-                    its own existing calibration; rename any of them
-                    afterward from the calibration list above.
+                    <Trans
+                      i18nKey="robotConfig.batch.pickerIntro"
+                      components={[<strong key="0" />]}
+                    />
                   </p>
                   <div className="space-y-2">
                     {armSlots.map((slot) => {
@@ -1668,8 +1938,8 @@ const RobotConfigWindow = ({
                             {hasPort
                               ? assignedPort
                               : savedButUndetected
-                                ? "port not detected"
-                                : "no port — assign above"}
+                                ? t("robotConfig.batch.portUndetected")
+                                : t("robotConfig.batch.portMissing")}
                           </span>
                         </label>
                       );
@@ -1682,8 +1952,9 @@ const RobotConfigWindow = ({
                       className="flex-1"
                     >
                       <Wand2 className="mr-2 h-4 w-4" />
-                      Auto-calibrate {selectedBatchSlots.length || 0} arm
-                      {selectedBatchSlots.length === 1 ? "" : "s"}
+                      {t("robotConfig.batch.start", {
+                        count: selectedBatchSlots.length || 0,
+                      })}
                     </Button>
                     <Button
                       onClick={() => {
@@ -1696,18 +1967,17 @@ const RobotConfigWindow = ({
                       variant="outline"
                       className="shrink-0"
                     >
-                      Cancel
+                      {t("common.cancel")}
                     </Button>
                   </div>
                 </>
               ) : batchAutoCal.active ? (
                 <p className="text-xs text-muted-foreground">
-                  {batchAutoCal.completed + batchAutoCal.failed} of{" "}
-                  {batchAutoCal.total} done —{" "}
-                  {batchAutoCal.total === 1
-                    ? "the arm is moving"
-                    : "the arms are moving"}
-                  . Keep the workspace clear.
+                  {t("robotConfig.batch.progress", {
+                    count: batchAutoCal.total,
+                    done: batchAutoCal.completed + batchAutoCal.failed,
+                    total: batchAutoCal.total,
+                  })}
                 </p>
               ) : null}
 
@@ -1735,19 +2005,21 @@ const RobotConfigWindow = ({
                         title={a.error ?? undefined}
                       >
                         {a.status === "completed"
-                          ? "✓ done"
+                          ? t("robotConfig.batch.armStatus.completed")
                           : a.status === "failed"
-                            ? "✗ failed"
+                            ? t("robotConfig.batch.armStatus.failed")
                             : a.status === "stopped"
-                              ? "stopped"
-                              : "running…"}
+                              ? t("robotConfig.batch.armStatus.stopped")
+                              : t("robotConfig.batch.armStatus.running")}
                       </span>
                     </div>
                   ))}
                   {!batchAutoCal.active && batchAutoCal.total > 0 && (
                     <p className="pt-1 text-xs text-muted-foreground">
-                      {batchAutoCal.completed} completed,{" "}
-                      {batchAutoCal.failed} failed/stopped.
+                      {t("robotConfig.batch.summary", {
+                        completed: batchAutoCal.completed,
+                        failed: batchAutoCal.failed,
+                      })}
                     </p>
                   )}
                 </div>
@@ -1773,7 +2045,7 @@ const RobotConfigWindow = ({
                     size="sm"
                     className="shrink-0"
                   >
-                    Dismiss
+                    {t("robotConfig.batch.dismiss")}
                   </Button>
                 </div>
               )}
@@ -1790,10 +2062,7 @@ const RobotConfigWindow = ({
             <Alert className="border-warn/40 bg-warn/10 text-warn">
               <AlertTriangle className="h-4 w-4" />
               <AlertDescription>
-                Motor torque is off — the arm won't hold its pose during
-                calibration, and stays limp after you cancel or finish.
-                Keep it low and supported so it can't drop onto the table
-                edge.
+                {t("robotConfig.calib.torqueOffWarning")}
               </AlertDescription>
             </Alert>
           )}
@@ -1802,7 +2071,78 @@ const RobotConfigWindow = ({
             <Alert className="border-warn/40 bg-warn/10 text-warn">
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
-                Connecting to the device. Please ensure it's connected.
+                {t("robotConfig.calib.connecting")}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Zero-pose calibration (CAN arms). One step, no range sweep: the
+              arm's joint limits are fixed constants, so all this establishes
+              is where zero is. Torque is off for the whole wait — the user is
+              physically moving the arm — and the live readout below is a pure
+              read of where each joint currently sits. The pose text is per
+              FAMILY — the two zero poses are opposites on the gripper (Maker:
+              fully open; Metal: closed), so each renders its own key (the
+              localized twin of the server's status message). */}
+          {calibrationStatus.status === "awaiting_zero" && (
+            <div className="space-y-3">
+              <Alert className="border-info/40 bg-info/10 text-info">
+                <Activity className="h-4 w-4" />
+                <AlertDescription>
+                  {isMetalArm
+                    ? t("robotConfig.calib.zeroPose.instructionsMetal")
+                    : t("robotConfig.calib.zeroPose.instructions")}
+                </AlertDescription>
+              </Alert>
+
+              {calibrationStatus.current_positions &&
+                Object.keys(calibrationStatus.current_positions).length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Activity className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-sm font-medium text-foreground">
+                        {t("robotConfig.calib.zeroPose.liveAngles")}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                      {Object.entries(calibrationStatus.current_positions).map(
+                        ([motor, angle]) => (
+                          <div
+                            key={motor}
+                            className="flex items-baseline justify-between gap-2 border-b border-border/50 py-0.5"
+                          >
+                            {/* Motor names are DATA (they key the calibration
+                                file and the dataset's feature columns), so they
+                                render verbatim in every language. */}
+                            <span className="truncate font-mono text-xs text-muted-foreground">
+                              {motor}
+                            </span>
+                            <span className="shrink-0 font-mono text-xs tabular-nums text-foreground">
+                              {angle.toFixed(1)}&deg;
+                            </span>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </div>
+                )}
+
+              <Button
+                onClick={handleCompleteStep}
+                disabled={!calibrationStatus.calibration_active}
+                className="w-full bg-ok text-primary-foreground hover:bg-ok/90"
+              >
+                <CheckCircle className="mr-2 h-4 w-4" />
+                {t("robotConfig.calib.zeroPose.confirm")}
+              </Button>
+            </div>
+          )}
+
+          {calibrationStatus.status === "saving" && (
+            <Alert className="border-warn/40 bg-warn/10 text-warn">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                {t("robotConfig.calib.zeroPose.saving")}
               </AlertDescription>
             </Alert>
           )}
@@ -1813,7 +2153,7 @@ const RobotConfigWindow = ({
                 <div className="flex items-center gap-2">
                   <Activity className="h-4 w-4 text-muted-foreground" />
                   <span className="text-sm font-medium text-foreground">
-                    Live position data
+                    {t("robotConfig.calib.liveData")}
                   </span>
                 </div>
                 <div className="rounded-md border border-border bg-muted/30 p-4">
@@ -1842,7 +2182,9 @@ const RobotConfigWindow = ({
                                 {rangeComplete && (
                                   <CheckCircle
                                     className="h-4 w-4 text-ok"
-                                    aria-label="Range complete"
+                                    aria-label={t(
+                                      "robotConfig.calib.rangeComplete",
+                                    )}
                                   />
                                 )}
                               </div>
@@ -1913,16 +2255,15 @@ const RobotConfigWindow = ({
                     ) : (
                       <AlertCircle className="mr-2 h-4 w-4" />
                     )}
-                    Save calibration
+                    {t("robotConfig.calib.save")}
                   </Button>
                   <Alert className="border-info/40 bg-info/10 text-info">
                     <Activity className="h-4 w-4" />
                     <AlertDescription>
-                      <strong>Important:</strong> Move each joint through
-                      its full range — <strong>except the wrist roll</strong>
-                      : leave it near the middle. It rotates continuously
-                      and its range is set automatically. A check appears
-                      next to each joint once its range is wide enough.
+                      <Trans
+                        i18nKey="robotConfig.calib.rangeHint"
+                        components={[<strong key="0" />, <strong key="1" />]}
+                      />
                     </AlertDescription>
                   </Alert>
                 </div>
@@ -1933,69 +2274,67 @@ const RobotConfigWindow = ({
             <Alert className="border-ok/40 bg-ok/10 text-ok">
               <CheckCircle className="h-4 w-4" />
               <AlertDescription>
-                Calibration completed successfully!
+                {t("robotConfig.calib.completed")}
               </AlertDescription>
             </Alert>
           )}
 
           {calibrationStatus.status === "error" &&
             calibrationStatus.error &&
-            (calibrationStatus.error.startsWith(
-              DISCONTINUITY_ERROR_PREFIX,
-            ) ? (
+            (calibrationStatus.error.startsWith(DISCONTINUITY_ERROR_PREFIX) ? (
               <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
                 <XCircle className="h-4 w-4" />
                 <AlertDescription>
                   <div className="mb-1 text-base font-semibold">
-                    Motor discontinuity detected
+                    {t("robotConfig.calib.discontinuityTitle")}
                   </div>
-                  <div>
-                    Make sure to start the calibration with the robot in a
-                    middle position — all joints in the middle of their
-                    ranges. See the calibration demo beside for the correct
-                    starting pose.
-                  </div>
+                  <div>{t("robotConfig.calib.discontinuityBody")}</div>
                 </AlertDescription>
               </Alert>
             ) : (
               <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
                 <XCircle className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>Error:</strong> {calibrationStatus.error}
+                  <strong>{t("robotConfig.calib.errorLabel")}</strong>{" "}
+                  {calibrationStatus.error}
                 </AlertDescription>
               </Alert>
             ))}
-
         </div>
 
         {/* The demo is big, so it sits beside the main vertical instead of
-            pushing the controls down. */}
-        <div
-          ref={demoVideoRef}
-          className="space-y-2 self-start rounded-md border border-border bg-muted/30 p-3"
-        >
-          <h3 className="eyebrow">Calibration demo</h3>
-          <div className="overflow-hidden rounded-md bg-muted">
-            <video className="h-auto w-full" controls preload="auto" muted>
-              <source
-                src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                type="video/mp4"
-              />
-              <p className="py-4 text-center text-sm text-muted-foreground">
-                Your browser does not support the video tag.
-                <br />
-                <a
-                  href="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                  className="underline"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Click here to view the calibration video
-                </a>
-              </p>
-            </video>
+            pushing the controls down. Hidden on a CAN arm: the clip is
+            lerobot's SO-101 range sweep, which is both the wrong arm and the
+            wrong procedure for a zero pose — showing it would actively
+            mis-instruct. */}
+        {!isCanArm && (
+          <div
+            ref={demoVideoRef}
+            className="space-y-2 self-start rounded-md border border-border bg-muted/30 p-3"
+          >
+            <h3 className="eyebrow">{t("robotConfig.calib.demoTitle")}</h3>
+            <div className="overflow-hidden rounded-md bg-muted">
+              <video className="h-auto w-full" controls preload="auto" muted>
+                <source
+                  src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
+                  type="video/mp4"
+                />
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  {t("robotConfig.calib.videoUnsupported")}
+                  <br />
+                  <a
+                    href="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
+                    className="underline"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {t("robotConfig.calib.videoLink")}
+                  </a>
+                </p>
+              </video>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Auto-calibration drive torque lives under Advanced parameters
@@ -2004,14 +2343,17 @@ const RobotConfigWindow = ({
           persisted on Save. Manual calibration and regular sessions
           don't use it. Full panel width, below the controls/demo grid,
           so expanding it grows the panel evenly instead of stretching
-          only the left column. */}
-      {robot && (
+          only the left column. Hidden on a CAN arm — the slider's only
+          consumer is the auto-calibration subprocess, which that arm has no
+          equivalent of, and its drive effort comes from the MIT follow gains
+          set at connect() instead. */}
+      {robot && !isCanArm && (
         <Collapsible className="group space-y-3">
           <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
             <span className="text-left">
-              <span className="block">Advanced parameters</span>
+              <span className="block">{t("robotConfig.advanced.title")}</span>
               <span className="block text-xs font-normal text-muted-foreground">
-                Auto-calibration torque
+                {t("robotConfig.advanced.subtitle")}
               </span>
             </span>
             <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
@@ -2019,7 +2361,7 @@ const RobotConfigWindow = ({
           <CollapsibleContent className={SLIDE}>
             <div className="space-y-2">
               <Label htmlFor="motorPower" className="text-sm font-medium">
-                Auto-calibration torque
+                {t("robotConfig.advanced.torqueLabel")}
               </Label>
               <div className="flex items-center gap-3">
                 <input
@@ -2037,7 +2379,7 @@ const RobotConfigWindow = ({
                   }}
                   list="motorTorqueTicks"
                   className="h-1.5 flex-1 cursor-pointer accent-primary"
-                  aria-label="Auto-calibration torque (Torque_Limit register, 0-1000 scale)"
+                  aria-label={t("robotConfig.advanced.torqueSliderLabel")}
                 />
                 <datalist id="motorTorqueTicks">
                   {/* The vendored script's stock torque, as a reference tick. */}
@@ -2048,9 +2390,14 @@ const RobotConfigWindow = ({
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
-                Raw servo <code>Torque_Limit</code> (tick = stock{" "}
-                {DEFAULT_TORQUE_LIMIT_REF}) — lower is gentler; below{" "}
-                {TORQUE_LIMIT_MIN} the arm can't lift itself.
+                <Trans
+                  i18nKey="robotConfig.advanced.torqueHint"
+                  values={{
+                    ref: DEFAULT_TORQUE_LIMIT_REF,
+                    min: TORQUE_LIMIT_MIN,
+                  }}
+                  components={[<code key="0" />]}
+                />
               </p>
             </div>
           </CollapsibleContent>
@@ -2069,15 +2416,12 @@ const RobotConfigWindow = ({
       <DialogContent className="flex h-[85vh] max-w-3xl flex-col gap-0 overflow-hidden p-0">
         {/* Window title bar */}
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
-          <p className="eyebrow">
-            ports · calibration · cameras · motor power
-          </p>
+          <p className="eyebrow">{t("robotConfig.window.eyebrow")}</p>
           <DialogTitle className="pt-1 text-base font-semibold">
-            Robot settings — {robotName}
+            {t("robotConfig.window.title", { name: robotName })}
           </DialogTitle>
           <DialogDescription className="sr-only">
-            Configure ports, calibration, cameras, and motor power for{" "}
-            {robotName}.
+            {t("robotConfig.window.srDescription", { name: robotName })}
           </DialogDescription>
         </DialogHeader>
 
@@ -2085,13 +2429,13 @@ const RobotConfigWindow = ({
         <div className="flex-1 divide-y divide-border overflow-y-auto px-6">
           {/* 01 · Device */}
           <section className="space-y-4 py-5">
-            <PanelHeader step="01" title="Device" />
+            <PanelHeader step="01" title={t("robotConfig.device.step")} />
             <div className="space-y-2">
-              <Label>Device</Label>
+              <Label>{t("robotConfig.device.label")}</Label>
               {isBimanual ? (
                 <div
                   role="radiogroup"
-                  aria-label="Device and arm"
+                  aria-label={t("robotConfig.device.groupBimanual")}
                   className="grid grid-cols-2 gap-3"
                 >
                   <div className="space-y-2">
@@ -2138,7 +2482,7 @@ const RobotConfigWindow = ({
               ) : (
                 <div
                   role="radiogroup"
-                  aria-label="Device"
+                  aria-label={t("robotConfig.device.groupSingle")}
                   className="grid grid-cols-2 gap-3"
                 >
                   {armSlots.map((slot) => (
@@ -2160,15 +2504,15 @@ const RobotConfigWindow = ({
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="port">Port</Label>
+              <Label htmlFor="port">{t("robotConfig.port.label")}</Label>
               <div className="flex flex-wrap gap-2">
                 <Select value={port} onValueChange={handleSelectPort}>
                   <SelectTrigger id="port" className="min-w-[200px] flex-1">
                     <SelectValue
                       placeholder={
                         availablePorts.length
-                          ? "Select a port"
-                          : "No arms detected — plug in & refresh"
+                          ? t("robotConfig.port.select")
+                          : t("robotConfig.port.none")
                       }
                     />
                   </SelectTrigger>
@@ -2183,8 +2527,15 @@ const RobotConfigWindow = ({
                           <span className="flex items-center gap-2 font-mono text-xs">
                             {p}
                             {usedByOtherArm && (
-                              <span className="rounded border border-warn/40 px-1 font-body text-[10px] uppercase tracking-wide text-warn">
-                                other arm
+                              <span
+                                className={cn(
+                                  "rounded border border-warn/40 px-1 font-body text-[10px] text-warn",
+                                  isCaselessScript(language)
+                                    ? ""
+                                    : "uppercase tracking-wide",
+                                )}
+                              >
+                                {t("robotConfig.port.otherArm")}
                               </span>
                             )}
                           </span>
@@ -2214,8 +2565,8 @@ const RobotConfigWindow = ({
                     calibrationStatus.calibration_active ||
                     batchAutoCal.active
                   }
-                  title="Clear port — release it without assigning another"
-                  aria-label="Clear port"
+                  title={t("robotConfig.port.clearTitle")}
+                  aria-label={t("robotConfig.port.clear")}
                   className="shrink-0 text-muted-foreground hover:text-destructive"
                 >
                   <Trash2 className="h-4 w-4" />
@@ -2226,8 +2577,8 @@ const RobotConfigWindow = ({
                   size="icon"
                   onClick={fetchPorts}
                   disabled={portsLoading}
-                  title="Rescan ports"
-                  aria-label="Rescan ports"
+                  title={t("robotConfig.port.rescan")}
+                  aria-label={t("robotConfig.port.rescan")}
                   className="shrink-0 text-muted-foreground hover:text-foreground"
                 >
                   <RefreshCw
@@ -2247,7 +2598,7 @@ const RobotConfigWindow = ({
                     calibrationStatus.calibration_active ||
                     batchAutoCal.active
                   }
-                  title="Identify by hand: swing the arm's base wide, both left and right"
+                  title={t("robotConfig.port.detectTitle")}
                   className="w-28 shrink-0"
                 >
                   {detecting ? (
@@ -2255,44 +2606,57 @@ const RobotConfigWindow = ({
                   ) : (
                     <Hand className="mr-1 h-4 w-4" />
                   )}
-                  {detecting ? "Watching…" : "Detect"}
+                  {detecting
+                    ? t("robotConfig.port.detecting")
+                    : t("robotConfig.port.detect")}
                 </Button>
                 <p className="min-w-[200px] flex-1 text-xs text-muted-foreground">
-                  Identify by hand — swing the arm's base wide to the left AND
-                  the right (10–15° past where it started, each way); the port
-                  that moves is assigned. Small wiggles won't register.
+                  {isMetalArm
+                    ? t("robotConfig.port.detectHelpMetal")
+                    : isCanArm
+                      ? t("robotConfig.port.detectHelpMaker")
+                      : t("robotConfig.port.detectHelp")}
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleWiggle}
-                  disabled={
-                    !port ||
-                    wiggling ||
-                    detecting ||
-                    calibrationStatus.calibration_active ||
-                    batchAutoCal.active
-                  }
-                  title="Move the gripper on this port to see which arm it is"
-                  className="w-28 shrink-0"
-                >
-                  <Hand className="mr-1 h-4 w-4" />
-                  {wiggling ? "Wiggling…" : "Wiggle"}
-                </Button>
-                <p className="min-w-[200px] flex-1 text-xs text-muted-foreground">
-                  Confirms an arm is on this port — briefly drives its gripper
-                  so you can see which arm responds.
-                </p>
-              </div>
+              {/* Wiggle drives the gripper through Feetech registers to show
+                  which arm is on a port. A CAN rig needs no such
+                  confirmation — its follower and leader answer different
+                  protocols, so Detect already identifies each unambiguously —
+                  and the CAN/UART buses have no equivalent write anyway. */}
+              {!isCanArm && (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleWiggle}
+                    disabled={
+                      !port ||
+                      wiggling ||
+                      detecting ||
+                      calibrationStatus.calibration_active ||
+                      batchAutoCal.active
+                    }
+                    title={t("robotConfig.port.wiggleTitle")}
+                    className="w-28 shrink-0"
+                  >
+                    <Hand className="mr-1 h-4 w-4" />
+                    {wiggling
+                      ? t("robotConfig.port.wiggling")
+                      : t("robotConfig.port.wiggle")}
+                  </Button>
+                  <p className="min-w-[200px] flex-1 text-xs text-muted-foreground">
+                    {t("robotConfig.port.wiggleHelp")}
+                  </p>
+                </div>
+              )}
               {detecting && (
                 <p className="text-xs text-ok">
-                  Swing the base of the arm wide — clearly past its starting
-                  point both left and right. A small or one-sided wiggle is
-                  ignored (that's how bumps are filtered out). The port that
-                  sees the motion will be assigned to this arm.
+                  {isMetalArm
+                    ? t("robotConfig.port.detectLiveMetal")
+                    : isCanArm
+                      ? t("robotConfig.port.detectLiveMaker")
+                      : t("robotConfig.port.detectLive")}
                 </p>
               )}
             </div>
@@ -2302,33 +2666,40 @@ const RobotConfigWindow = ({
           {robot && (
             <section className="space-y-3 py-5">
               <div className="flex items-center gap-2">
-                <PanelHeader step="02" title="Calibration files" />
+                <PanelHeader step="02" title={t("robotConfig.files.step")} />
                 {/* The multi-arm entry point: same batch flow as a row's own
                     "Auto-calibrate" (which does its arm alone), but
                     pre-selecting every detected arm and opening the picker so
-                    the selection can be reviewed before confirming. */}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="ml-auto h-6 gap-1.5 px-2 text-xs"
-                  onClick={handleCalibrateAll}
-                  disabled={
-                    !robotName ||
-                    !anyArmAvailable ||
-                    calibrationStatus.calibration_active ||
-                    batchAutoCal.active
-                  }
-                  title={
-                    anyArmAvailable
-                      ? "Select every detected arm for auto-calibration"
-                      : "No arms detected — plug in an arm and rescan"
-                  }
-                >
-                  <Wand2 className="h-4 w-4" />
-                  Calibrate all
-                </Button>
+                    the selection can be reviewed before confirming.
+                    Hidden entirely on a CAN arm, which has no automatic
+                    calibration to batch — each arm's zero pose has to be set
+                    by hand anyway, so there is nothing to run concurrently. */}
+                {!isCanArm && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ml-auto h-6 gap-1.5 px-2 text-xs"
+                    onClick={handleCalibrateAll}
+                    disabled={
+                      !robotName ||
+                      !anyArmAvailable ||
+                      calibrationStatus.calibration_active ||
+                      batchAutoCal.active
+                    }
+                    title={
+                      anyArmAvailable
+                        ? t("robotConfig.files.calibrateAllTitle")
+                        : t("robotConfig.files.calibrateAllDisabledTitle")
+                    }
+                  >
+                    <Wand2 className="h-4 w-4" />
+                    {t("robotConfig.files.calibrateAll")}
+                  </Button>
+                )}
                 {/* One folder per device type — both same-side slots share a
-                    single directory (so101_leader / so101_follower), so a
+                    single directory (so_leader / so_follower for an SO-101;
+                    maker_follower or metal_follower for the CAN followers,
+                    with rebot_102_leader SHARED by both CAN leaders), so a
                     single leader + follower pair covers single AND bimanual
                     modes (no per-slot duplication). */}
                 <Button
@@ -2336,22 +2707,22 @@ const RobotConfigWindow = ({
                   variant="ghost"
                   className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
                   onClick={() => openCalibrationFolder("teleop")}
-                  aria-label="Open leader calibrations folder"
-                  title="Open leader calibrations folder"
+                  aria-label={t("robotConfig.files.openLeaderFolder")}
+                  title={t("robotConfig.files.openLeaderFolder")}
                 >
                   <FolderOpen className="h-4 w-4" />
-                  Leader
+                  {t("robotConfig.files.leader")}
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
                   className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
                   onClick={() => openCalibrationFolder("robot")}
-                  aria-label="Open follower calibrations folder"
-                  title="Open follower calibrations folder"
+                  aria-label={t("robotConfig.files.openFollowerFolder")}
+                  title={t("robotConfig.files.openFollowerFolder")}
                 >
                   <FolderOpen className="h-4 w-4" />
-                  Follower
+                  {t("robotConfig.files.follower")}
                 </Button>
               </div>
               {(isBimanual
@@ -2360,34 +2731,34 @@ const RobotConfigWindow = ({
                   // SLOT (not the name) decides which arm the file drives.
                   ([
                     {
-                      label: "Left Leader (Teleoperator)",
+                      labelKey: "robotConfig.files.row.leftLeader",
                       device: "teleop",
                       cfgField: "leader_config",
                     },
                     {
-                      label: "Left Follower (Robot)",
+                      labelKey: "robotConfig.files.row.leftFollower",
                       device: "robot",
                       cfgField: "follower_config",
                     },
                     {
-                      label: "Right Leader (Teleoperator)",
+                      labelKey: "robotConfig.files.row.rightLeader",
                       device: "teleop",
                       cfgField: "right_leader_config",
                     },
                     {
-                      label: "Right Follower (Robot)",
+                      labelKey: "robotConfig.files.row.rightFollower",
                       device: "robot",
                       cfgField: "right_follower_config",
                     },
                   ] as const)
                 : ([
                     {
-                      label: "Leader (Teleoperator)",
+                      labelKey: "robotConfig.files.row.leader",
                       device: "teleop",
                       cfgField: "leader_config",
                     },
                     {
-                      label: "Follower (Robot)",
+                      labelKey: "robotConfig.files.row.follower",
                       device: "robot",
                       cfgField: "follower_config",
                     },
@@ -2428,8 +2799,11 @@ const RobotConfigWindow = ({
                   (s) => s.cfgField === row.cfgField,
                 );
                 const isNewCalibOpen = newCalibFor === row.cfgField;
+                const rowLabel = t(row.labelKey);
                 return (
-                  <div key={row.label}>
+                  // Keyed on the config field, not the label — the label is
+                  // localized and would remount the row on a language switch.
+                  <div key={row.cfgField}>
                     <div className="flex items-center gap-2 text-sm">
                       {cfg ? (
                         <CheckCircle className="h-4 w-4 text-ok" />
@@ -2437,14 +2811,17 @@ const RobotConfigWindow = ({
                         <Circle className="h-4 w-4 text-muted-foreground" />
                       )}
                       <span
-                        className={cfg ? "text-foreground" : "text-muted-foreground"}
+                        className={
+                          cfg ? "text-foreground" : "text-muted-foreground"
+                        }
                       >
-                        {row.label}
+                        {rowLabel}
                       </span>
                     </div>
                     <div className="flex items-start gap-2">
                       <div className="min-w-0 flex-1">
                         <CalibrationLibrary
+                          armType={armType}
                           device={row.device}
                           assignedConfig={cfg}
                           configField={row.cfgField}
@@ -2466,23 +2843,19 @@ const RobotConfigWindow = ({
                         variant={isNewCalibOpen ? "secondary" : "outline"}
                         className="mt-1 shrink-0"
                         onClick={() =>
-                          toggleNewCalibration(
-                            row.cfgField,
-                            row.device,
-                            rowArm,
-                          )
+                          toggleNewCalibration(row.cfgField, row.device, rowArm)
                         }
                         aria-expanded={isNewCalibOpen}
-                        title="Create a new calibration for this arm"
+                        title={t("robotConfig.files.newCalibrationTitle")}
                       >
                         <Plus className="mr-1 h-4 w-4" />
-                        New calibration
+                        {t("robotConfig.files.newCalibration")}
                       </Button>
                     </div>
                     {/* Slides open in place, like the studio's entry forms. */}
                     <Collapsible open={isNewCalibOpen}>
                       <CollapsibleContent className={SLIDE}>
-                        {newCalibrationPanel(row.label, rowSlot)}
+                        {newCalibrationPanel(rowLabel, rowSlot)}
                       </CollapsibleContent>
                     </Collapsible>
                   </div>
@@ -2494,19 +2867,21 @@ const RobotConfigWindow = ({
           {/* 03 · Cameras */}
           <section className="space-y-4 py-5">
             <div className="flex items-center gap-2">
-              <PanelHeader step="03" title="Attached cameras" />
+              <PanelHeader step="03" title={t("robotConfig.cameras.step")} />
               <div className="ml-auto flex items-center gap-2">
                 <Label
                   htmlFor="cameras-toggle"
                   className="cursor-pointer text-sm text-muted-foreground"
                 >
-                  {camerasActive ? "On" : "Off"}
+                  {camerasActive
+                    ? t("robotConfig.cameras.on")
+                    : t("robotConfig.cameras.off")}
                 </Label>
                 <Switch
                   id="cameras-toggle"
                   checked={camerasActive}
                   onCheckedChange={handleCamerasActiveChange}
-                  aria-label="Turn cameras on or off"
+                  aria-label={t("robotConfig.cameras.toggleLabel")}
                 />
               </div>
             </div>
@@ -2520,24 +2895,23 @@ const RobotConfigWindow = ({
               <div className="space-y-3 rounded-md border border-border bg-muted/30 p-6 text-center">
                 <Camera className="mx-auto h-10 w-10 text-muted-foreground" />
                 <div className="space-y-1">
-                  <p className="font-medium text-foreground">Cameras are off</p>
+                  <p className="font-medium text-foreground">
+                    {t("robotConfig.cameras.offTitle")}
+                  </p>
                   <p className="mx-auto max-w-md text-sm text-muted-foreground">
-                    Turn cameras on to scan for connected devices and preview
-                    them. The browser may briefly open a camera to read device
-                    labels, and configured cameras stay active while previews
-                    are visible; your browser will ask for camera permission.
-                    Nothing is recorded.
+                    {t("robotConfig.cameras.offDescription")}
                   </p>
                   {cameras.length > 0 && (
                     <p className="pt-1 text-xs text-muted-foreground">
-                      {cameras.length} camera
-                      {cameras.length === 1 ? "" : "s"} saved to this robot.
+                      {t("robotConfig.cameras.saved", {
+                        count: cameras.length,
+                      })}
                     </p>
                   )}
                 </div>
                 <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
                   <ShieldQuestion className="h-3.5 w-3.5" />
-                  You'll be asked to grant camera access.
+                  {t("robotConfig.cameras.permissionHint")}
                 </p>
               </div>
             )}
@@ -2559,14 +2933,16 @@ const RobotConfigWindow = ({
             }`}
           >
             {isDirty
-              ? "Unsaved changes"
+              ? t("robotConfig.window.unsaved")
               : robot && !robot.is_clean
-                ? `Saved — but this robot ${robotSetupGap(robot)}`
-                : "All changes saved"}
+                ? t("robotConfig.window.savedWithGap", {
+                    gap: formatRobotSetupGap(t, robot),
+                  })
+                : t("robotConfig.window.allSaved")}
           </span>
           <div className="flex gap-2">
             <Button variant="outline" onClick={requestClose}>
-              Quit
+              {t("robotConfig.window.quit")}
             </Button>
             <Button onClick={handleSave} disabled={!isDirty || saving}>
               {saving ? (
@@ -2574,7 +2950,11 @@ const RobotConfigWindow = ({
               ) : (
                 <CheckCircle className="mr-2 h-4 w-4" />
               )}
-              {saving ? "Saving…" : justSaved && !isDirty ? "Saved ✓" : "Save"}
+              {saving
+                ? t("robotConfig.window.saving")
+                : justSaved && !isDirty
+                  ? t("robotConfig.window.justSaved")
+                  : t("robotConfig.window.save")}
             </Button>
           </div>
         </div>
@@ -2589,25 +2969,25 @@ const RobotConfigWindow = ({
                   makes the one-arm wording the common case. */}
               <DialogTitle>
                 {selectedBatchSlots.length === 1
-                  ? `Auto-calibrate ${selectedBatchSlots[0]?.label ?? "this arm"} — it will move`
-                  : "Auto-calibrate multiple arms — they will move"}
+                  ? t("robotConfig.batch.prompt.titleSingle", {
+                      arm:
+                        selectedBatchSlots[0]?.label ??
+                        t("robotConfig.batch.prompt.titleFallbackArm"),
+                    })
+                  : t("robotConfig.batch.prompt.titleMulti")}
               </DialogTitle>
               <DialogDescription>
                 {selectedBatchSlots.length === 1 ? (
-                  <>
-                    This arm will <strong>move on its own under power</strong>{" "}
-                    to find each joint's range. Clear the workspace and keep
-                    hands away from it. It replaces its own existing
-                    calibration.
-                  </>
+                  <Trans
+                    i18nKey="robotConfig.batch.prompt.bodySingle"
+                    components={[<strong key="0" />]}
+                  />
                 ) : (
-                  <>
-                    {selectedBatchSlots.length} arms will{" "}
-                    <strong>move on their own under power</strong> at the same
-                    time to find each joint's range. Clear the workspace and
-                    keep hands away from every arm. Each arm replaces its own
-                    existing calibration.
-                  </>
+                  <Trans
+                    i18nKey="robotConfig.batch.prompt.bodyMulti"
+                    values={{ count: selectedBatchSlots.length }}
+                    components={[<strong key="0" />]}
+                  />
                 )}
               </DialogDescription>
             </DialogHeader>
@@ -2616,10 +2996,10 @@ const RobotConfigWindow = ({
                 variant="outline"
                 onClick={() => setBatchAutoCalPromptOpen(false)}
               >
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button onClick={() => startBatchAutoCalibration()}>
-                Start auto-calibration
+                {t("robotConfig.batch.prompt.confirm")}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -2635,57 +3015,67 @@ const RobotConfigWindow = ({
             <AlertDialogHeader>
               <AlertDialogTitle>
                 {portAssignPrompt?.swapPort
-                  ? "Swap ports?"
+                  ? t("robotConfig.portAssign.swapTitle")
                   : portAssignPrompt?.source === "detect"
-                    ? "Assign detected port?"
-                    : "Assign port?"}
+                    ? t("robotConfig.portAssign.detectTitle")
+                    : t("robotConfig.portAssign.assignTitle")}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {portAssignPrompt?.source === "detect"
-                  ? "Detected "
-                  : "Assign "}
-                <span className="font-mono text-foreground">
-                  {portAssignPrompt?.port}
-                </span>{" "}
-                {portAssignPrompt?.source === "detect"
-                  ? "— assign it to the "
-                  : "to the "}
-                <strong>{portAssignPrompt?.targetLabel}</strong>?
+                <Trans
+                  i18nKey={
+                    portAssignPrompt?.source === "detect"
+                      ? "robotConfig.portAssign.leadDetect"
+                      : "robotConfig.portAssign.leadAssign"
+                  }
+                  values={{
+                    port: portAssignPrompt?.port,
+                    target: portAssignPrompt?.targetLabel,
+                  }}
+                  components={[
+                    <span key="0" className="font-mono text-foreground" />,
+                    <strong key="1" />,
+                  ]}
+                />
                 {portAssignPrompt?.releasedLabel &&
                   (portAssignPrompt.swapPort ? (
                     <>
                       {" "}
-                      It's currently assigned to the{" "}
-                      <strong>{portAssignPrompt.releasedLabel}</strong>;
-                      confirming swaps them — the{" "}
-                      <strong>{portAssignPrompt.releasedLabel}</strong> takes
-                      this arm's current port{" "}
-                      <span className="font-mono text-foreground">
-                        {portAssignPrompt.swapPort}
-                      </span>{" "}
-                      in exchange, so neither arm is left without a port.
+                      <Trans
+                        i18nKey="robotConfig.portAssign.swapClause"
+                        values={{
+                          released: portAssignPrompt.releasedLabel,
+                          swapPort: portAssignPrompt.swapPort,
+                        }}
+                        components={[
+                          <strong key="0" />,
+                          <strong key="1" />,
+                          <span
+                            key="2"
+                            className="font-mono text-foreground"
+                          />,
+                        ]}
+                      />
                     </>
                   ) : (
                     <>
                       {" "}
-                      It's currently assigned to the{" "}
-                      <strong>{portAssignPrompt.releasedLabel}</strong>; this
-                      arm has no port to swap back, so confirming moves it here
-                      and leaves the{" "}
-                      <strong>{portAssignPrompt.releasedLabel}</strong> without
-                      a port.
+                      <Trans
+                        i18nKey="robotConfig.portAssign.takeClause"
+                        values={{ released: portAssignPrompt.releasedLabel }}
+                        components={[<strong key="0" />, <strong key="1" />]}
+                      />
                     </>
                   ))}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
               <AlertDialogAction onClick={handleConfirmPortAssign}>
                 {portAssignPrompt?.swapPort
-                  ? "Swap ports"
+                  ? t("robotConfig.portAssign.confirmSwap")
                   : portAssignPrompt?.releasedLabel
-                    ? "Move & assign"
-                    : "Assign port"}
+                    ? t("robotConfig.portAssign.confirmMove")
+                    : t("robotConfig.portAssign.confirmAssign")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
@@ -2694,20 +3084,22 @@ const RobotConfigWindow = ({
         <AlertDialog open={quitPromptOpen} onOpenChange={setQuitPromptOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+              <AlertDialogTitle>
+                {t("robotConfig.window.discard.title")}
+              </AlertDialogTitle>
               <AlertDialogDescription>
-                You have unsaved configuration changes (ports, cameras, or
-                motor torque). Closing now discards them — nothing was written
-                to the robot. Save first to keep them.
+                {t("robotConfig.window.discard.description")}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>Keep editing</AlertDialogCancel>
+              <AlertDialogCancel>
+                {t("robotConfig.window.discard.cancel")}
+              </AlertDialogCancel>
               <AlertDialogAction
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                 onClick={confirmQuit}
               >
-                Discard &amp; quit
+                {t("robotConfig.window.discard.confirm")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
@@ -2716,20 +3108,22 @@ const RobotConfigWindow = ({
         <AlertDialog open={abortPromptOpen} onOpenChange={setAbortPromptOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Abort calibration?</AlertDialogTitle>
+              <AlertDialogTitle>
+                {t("robotConfig.window.abort.title")}
+              </AlertDialogTitle>
               <AlertDialogDescription>
-                A manual calibration is running. Closing aborts it — nothing
-                will be saved and the arm is released (it's limp; keep it
-                supported).
+                {t("robotConfig.window.abort.description")}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>Keep calibrating</AlertDialogCancel>
+              <AlertDialogCancel>
+                {t("robotConfig.window.abort.cancel")}
+              </AlertDialogCancel>
               <AlertDialogAction
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                 onClick={confirmAbortAndClose}
               >
-                Abort &amp; close
+                {t("robotConfig.window.abort.confirm")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

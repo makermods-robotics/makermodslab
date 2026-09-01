@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import {
   AlertTriangle,
   Download,
@@ -24,7 +25,8 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useStudio } from "@/contexts/StudioContext";
 import { useInferenceSession } from "@/contexts/InferenceSessionContext";
-import { useRobots, robotSetupGap } from "@/hooks/useRobots";
+import { useRobots, jointsPerArm } from "@/hooks/useRobots";
+import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
 import {
   JobCheckpoint,
@@ -35,9 +37,10 @@ import {
 import {
   InferenceStatus,
   getInferenceStatus,
-  startInference,
   stopInference,
 } from "@/lib/inferenceApi";
+import { startSession, formatSessionHeld } from "@/lib/sessionApi";
+import { tabOwnerId } from "@/lib/sessionOwner";
 import { JobRecord, getJob, jobDisplayName, listJobs } from "@/lib/jobsApi";
 import { ModelItem, getModels } from "@/lib/modelsApi";
 import { findJobForModel, importSourceForModel } from "@/lib/inferenceLaunch";
@@ -54,12 +57,17 @@ import {
   PanelEntryDot,
   PanelHeader,
   RobotStatus,
+  useEyebrowClass,
 } from "@/components/studio/panel/primitives";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
 import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
+import MilestoneReveal from "@/components/onboarding/MilestoneReveal";
+import { useOnceFlag } from "@/lib/onboarding/storage";
 
 /**
  * Studio panel 3 · Deploy — run a skill (local trained checkpoint or an
@@ -99,12 +107,15 @@ const CameraThumbnail: React.FC<{
   uniqueId?: string;
   paused: boolean;
 }> = ({ cameraIndex, uniqueId, paused }) => {
+  const { t } = useTranslation();
   if (paused || cameraIndex === undefined) {
     return (
       <div className="flex h-24 w-32 flex-col items-center justify-center rounded border border-border bg-muted">
         <VideoOff className="mb-1 h-5 w-5 text-muted-foreground" />
         <span className="text-[10px] text-muted-foreground">
-          {paused ? "Released" : "No preview"}
+          {paused
+            ? t("studio.deploy.thumbnail.released")
+            : t("studio.deploy.thumbnail.noPreview")}
         </span>
       </div>
     );
@@ -169,10 +180,14 @@ function cameraMappings(
 }
 
 const DeployPanel: React.FC = () => {
+  const { t } = useTranslation();
+  const { language } = useLanguage();
+  const isCJK = isCaselessScript(language);
+  const eyebrow = useEyebrowClass();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { open, deployPrefill, clearDeployPrefill } = useStudio();
-  const { openInferenceSession } = useInferenceSession();
+  const { openInferenceSession, sessionOpen } = useInferenceSession();
   const { selectedRecord: robot } = useRobots();
   // Reuse the shared lazy-import (husk-repo messaging + idempotent registration)
   // so a Hub skill resolves to a pseudo-job exactly as the Jobs cards do.
@@ -199,7 +214,7 @@ const DeployPanel: React.FC = () => {
   // between each and an accuracy at the end. Clamped again server-side.
   const [evalEpisodes, setEvalEpisodes] = useState(1);
   // Inference engine A/B. "sync" is the server default and the historical
-  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
   // ACT temporal ensembling. Held as (on, coeff) rather than `number | null`
@@ -243,6 +258,23 @@ const DeployPanel: React.FC = () => {
   // rollout is actually active.
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [stopping, setStopping] = useState(false);
+
+  // Edge-triggered "consume once": handleStart sets the pending flag, and the
+  // effect below latches it into showDeployMilestone the first time the live
+  // InferenceSessionDialog closes, then clears the pending flag so it can't
+  // re-trigger — sessionOpen cycling true→false again later (a normal
+  // redeploy from this same panel) must not resurrect this banner.
+  const { seen: hasSeenDeployMilestone, markSeen: markDeployMilestoneSeen } =
+    useOnceFlag("makerlab:milestone-first-deploy");
+  const [deployMilestonePending, setDeployMilestonePending] = useState(false);
+  const [showDeployMilestone, setShowDeployMilestone] = useState(false);
+
+  useEffect(() => {
+    if (!sessionOpen && deployMilestonePending) {
+      setShowDeployMilestone(true);
+      setDeployMilestonePending(false);
+    }
+  }, [sessionOpen, deployMilestonePending]);
 
   // The settings block (robot, checkpoint, run parameters, cameras) collapses
   // as one so a configured deploy can be folded down to picker + actions.
@@ -342,7 +374,8 @@ const DeployPanel: React.FC = () => {
       } catch (e) {
         if (!cancelled) {
           toast({
-            title: "Couldn't load the skill",
+            title: t("studio.deploy.toast.loadSkillFailed"),
+            // The thrown error's own text — shown exactly as raised.
             description: e instanceof Error ? e.message : String(e),
             variant: "destructive",
           });
@@ -364,6 +397,7 @@ const DeployPanel: React.FC = () => {
     importSource,
     clearDeployPrefill,
     toast,
+    t,
   ]);
 
   // Manual skill pick: resolve the chosen model to a launchable job (its own
@@ -534,12 +568,19 @@ const DeployPanel: React.FC = () => {
 
   // Arm-count mismatch between CHECKPOINT and ROBOT — client mirror of the
   // server's `_arm_count_mismatch` 409 guard. (Ported verbatim.)
-  const SO101_DOF = 6;
+  //
+  // Per-arm DOF is a property of the ROBOT, not a constant: an SO-101 arm is
+  // 6-DOF and a CAN arm (Maker, Metal) 7 (six joints plus its permanent
+  // gripper). Measured against 6, a 7-dim CAN checkpoint is not a clean
+  // multiple, so checkpointArms would resolve to null and this guard would
+  // silently go quiet on exactly the mismatch it exists to catch. Mirrors the
+  // server's `_ARM_STATE_DIMS` in rollout.py — change both together.
+  const armDof = jointsPerArm(robot?.arm_type);
   const checkpointDim =
     policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
   const checkpointArms =
-    checkpointDim != null && checkpointDim % SO101_DOF === 0
-      ? checkpointDim / SO101_DOF
+    checkpointDim != null && checkpointDim % armDof === 0
+      ? checkpointDim / armDof
       : null;
   const checkpointIsBimanual = checkpointArms != null && checkpointArms >= 2;
   const robotCheckpointArmMismatch =
@@ -598,7 +639,7 @@ const DeployPanel: React.FC = () => {
       setCheckingExtra(true);
       try {
         const r = await fetchWithHeaders(
-          `${baseUrl}/system/policy-extra/${policyConfig.policy_type}`,
+          `${baseUrl}/api/v1/system/policy-extra/${policyConfig.policy_type}`,
         );
         if (r.ok) {
           const extra = await r.json();
@@ -650,29 +691,35 @@ const DeployPanel: React.FC = () => {
       }
     }
     try {
-      await startInference(baseUrl, fetchWithHeaders, {
-        follower_port: robot.follower_port,
-        follower_config: robot.follower_config,
-        policy_ref: selectedRef,
-        task,
-        camera_bindings: cameraBindingPayload,
-        camera_dims: cameraDimsPayload,
-        duration_s: durationS,
-        mode: robot.mode,
-        right_follower_port: robot.right_follower_port,
-        right_follower_config: robot.right_follower_config,
-        robot_name: robot.name,
-        checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-        eval_episodes: evalEpisodes,
-        inference_engine: inferenceEngine,
-        // ACT-only, and only while the switch is on — otherwise omitted so the
-        // checkpoint's own (ensembling-off) config stands.
-        temporal_ensemble_coeff:
-          isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+      // Robot NAME + policy-shaped options only — ports, configs, mode and
+      // the camera devices behind the bindings resolve server-side from the
+      // saved record. The owner attaches the lease the session dialog renews.
+      const { session } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "inference",
+        robot: robot.name,
+        owner: tabOwnerId(),
+        options: {
+          policy_ref: selectedRef,
+          task,
+          camera_bindings: cameraBindingPayload,
+          camera_dims: cameraDimsPayload,
+          duration_s: durationS,
+          checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+          eval_episodes: evalEpisodes,
+          inference_engine: inferenceEngine,
+          // ACT-only, and only while the switch is on — otherwise omitted so
+          // the checkpoint's own (ensembling-off) config stands.
+          temporal_ensemble_coeff:
+            isAct && temporalEnsemble ? temporalEnsembleCoeff : undefined,
+        },
       });
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
-      openInferenceSession();
+      openInferenceSession(session.id);
+      if (!hasSeenDeployMilestone) {
+        setDeployMilestonePending(true);
+        markDeployMilestoneSeen();
+      }
       // The POST claims the inference slot synchronously, so a status fetch
       // issued now reflects THIS run — hand the released-previews / disabled-
       // Start duty from `submitting` to `inferenceActive` (kept fresh by the
@@ -686,8 +733,12 @@ const DeployPanel: React.FC = () => {
       setSubmitting(false);
     } catch (e) {
       toast({
-        title: "Couldn't start inference",
-        description: e instanceof Error ? e.message : String(e),
+        title: t("studio.deploy.toast.startFailed"),
+        // 409 session.held renders as the shared localized "robot is busy"
+        // line; everything else is the server's raw error text.
+        description:
+          formatSessionHeld(t, e) ??
+          (e instanceof Error ? e.message : String(e)),
         variant: "destructive",
       });
       // Failure: bring the previews back so the user can adjust.
@@ -699,10 +750,13 @@ const DeployPanel: React.FC = () => {
     setStopping(true);
     try {
       await stopInference(baseUrl, fetchWithHeaders);
-      toast({ title: "Stopping inference", description: "The rollout is winding down." });
+      toast({
+        title: t("studio.deploy.toast.stoppingTitle"),
+        description: t("studio.deploy.toast.stoppingBody"),
+      });
     } catch (e) {
       toast({
-        title: "Stop failed",
+        title: t("studio.deploy.toast.stopFailed"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -719,7 +773,7 @@ const DeployPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="3" title="Run">
+      <PanelHeader step="3" title={t("studio.deploy.title")} dataTour="studio-deploy">
         {resolving ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         ) : null}
@@ -751,28 +805,35 @@ const DeployPanel: React.FC = () => {
               {selectedSkillLabel ? (
                 <DisplayName name={selectedSkillLabel} className="min-w-0" />
               ) : (
-                <SelectValue placeholder="Pick a skill" />
+                <SelectValue placeholder={t("studio.deploy.picker.placeholder")} />
               )}
             </SelectTrigger>
             <SelectContent>
               {modelsLoading ? (
                 <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                  Loading skills…
+                  {t("studio.deploy.picker.loading")}
                 </div>
               ) : models.length === 0 ? (
                 <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                  No trained or imported skills yet
+                  {t("studio.deploy.picker.empty")}
                 </div>
               ) : (
                 models.map((m) => (
                   <SelectItem key={m.id} value={m.id}>
                     <DisplayName name={m.name} className="min-w-0" />
-                    <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {/* `uppercase` is a no-op on Chinese but the tracking is
+                        not — drop both together on a caseless script. */}
+                    <span
+                      className={cn(
+                        "ml-2 text-[10px] text-muted-foreground",
+                        isCJK ? "" : "uppercase tracking-wide",
+                      )}
+                    >
                       {m.source === "hub"
-                        ? "hub"
+                        ? t("studio.deploy.source.hub")
                         : m.source === "both"
-                          ? "local · hub"
-                          : "local"}
+                          ? t("studio.deploy.source.both")
+                          : t("studio.deploy.source.local")}
                     </span>
                   </SelectItem>
                 ))
@@ -796,16 +857,15 @@ const DeployPanel: React.FC = () => {
             }}
             disabled={resolving}
             className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            title="Import skill"
-            aria-label="Import skill"
+            title={t("studio.deploy.picker.import")}
+            aria-label={t("studio.deploy.picker.import")}
           >
             <Download className="h-3.5 w-3.5" />
           </Button>
         </div>
         {!selectedJob ? (
           <p className="text-xs text-muted-foreground">
-            Pick a trained checkpoint or an imported Hub skill to run on your
-            robot.
+            {t("studio.deploy.picker.hint")}
           </p>
         ) : null}
       </div>
@@ -822,7 +882,7 @@ const DeployPanel: React.FC = () => {
       {selectedJob ? (
         <div className="space-y-5">
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Run this skill on your robot, then start inference.
+            {t("studio.deploy.intro")}
           </p>
 
           {/* Robot readiness — a warning, not a parameter, so no eyebrow. A
@@ -830,28 +890,33 @@ const DeployPanel: React.FC = () => {
               selection and its arm layout. */}
           <RobotStatus ready={!!robot && robot.follower_ready}>
             {!robot ? (
-              <>
-                Select a robot to run on — use the robot menu in the top-right
-                corner of this window.
-              </>
+              t("studio.deploy.noRobot")
             ) : (
-              <>
-                <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
-                Open Robot settings before running inference. (Inference only
-                uses the follower arm{isBimanual ? "s" : ""} — leader setup
-                isn't needed.)
-              </>
+              /* The plural is on the follower ARM count — 2 for a bimanual
+                 robot, 1 otherwise. The number itself is never printed; it
+                 only picks the variant, replacing the old `{s}` splice. */
+              <Trans
+                i18nKey="studio.deploy.robotNotReady"
+                count={isBimanual ? 2 : 1}
+                values={{
+                  name: robot.name,
+                  gap: formatRobotSetupGap(t, robot, "follower"),
+                }}
+                components={[<strong key="0" />]}
+              />
             )}
           </RobotStatus>
 
           {/* Checkpoint ------------------------------------------------------- */}
           <div className="space-y-2">
-            <Label htmlFor="deploy-checkpoint">Checkpoint</Label>
+            <Label htmlFor="deploy-checkpoint">
+              {t("studio.deploy.checkpoint.label")}
+            </Label>
             {checkpoints.length === 0 ? (
                 <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
-                    No checkpoints available for this skill yet.
+                    {t("studio.deploy.checkpoint.none")}
                   </AlertDescription>
                 </Alert>
               ) : (
@@ -871,23 +936,21 @@ const DeployPanel: React.FC = () => {
                 <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
-                    {checkpointIsBimanual ? (
-                      <>
-                        This checkpoint was trained on a{" "}
-                        <strong>bimanual robot</strong> ({checkpointDim}-dim state,{" "}
-                        {checkpointArms} arms), but <strong>{robot?.name}</strong> is
-                        a single-arm robot. Pick a single-arm checkpoint, or select a
-                        bimanual robot from the top-right robot menu.
-                      </>
-                    ) : (
-                      <>
-                        This checkpoint was trained on a{" "}
-                        <strong>single-arm robot</strong> ({checkpointDim}-dim
-                        state), but <strong>{robot?.name}</strong> is a bimanual
-                        robot. Pick a bimanual checkpoint, or select a single-arm
-                        robot from the top-right robot menu.
-                      </>
-                    )}
+                    {/* Each branch is one complete key rather than shared
+                        fragments, so a translator owns the whole sentence. */}
+                    <Trans
+                      i18nKey={
+                        checkpointIsBimanual
+                          ? "studio.deploy.armMismatch.bimanualCheckpoint"
+                          : "studio.deploy.armMismatch.singleCheckpoint"
+                      }
+                      values={{
+                        dim: checkpointDim,
+                        arms: checkpointArms,
+                        name: robot?.name,
+                      }}
+                      components={[<strong key="0" />, <strong key="1" />]}
+                    />
                   </AlertDescription>
                 </Alert>
               ) : null}
@@ -900,20 +963,27 @@ const DeployPanel: React.FC = () => {
             <>
               {policyConfig.requires_task ? (
                 <div className="space-y-2">
-                  <Label htmlFor="deploy-task">Task description</Label>
+                  <Label htmlFor="deploy-task">
+                    {t("studio.deploy.task.label")}
+                  </Label>
                   <Input
                     id="deploy-task"
                     value={task}
                     onChange={(e) => setTask(e.target.value)}
-                    placeholder="e.g., pick up the red block"
+                    placeholder={t("studio.deploy.task.placeholder")}
                   />
                   <p className="text-xs text-muted-foreground">
-                    This policy is language-conditioned ({policyConfig.policy_type}).
+                    {/* The policy type is an identifier — rendered verbatim. */}
+                    {t("studio.deploy.task.hint", {
+                      policyType: policyConfig.policy_type ?? "",
+                    })}
                   </p>
                 </div>
               ) : null}
               <div className="space-y-2">
-                <Label htmlFor="deploy-duration">Max duration (s)</Label>
+                <Label htmlFor="deploy-duration">
+                  {t("studio.deploy.duration.label")}
+                </Label>
                 <NumberInput
                   id="deploy-duration"
                   min={1}
@@ -923,12 +993,13 @@ const DeployPanel: React.FC = () => {
                   }}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Per episode. An episode that runs this long without you
-                  calling it a success counts as a failure.
+                  {t("studio.deploy.duration.hint")}
                 </p>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="deploy-episodes">Episodes</Label>
+                <Label htmlFor="deploy-episodes">
+                  {t("studio.deploy.episodes.label")}
+                </Label>
                 <NumberInput
                   id="deploy-episodes"
                   min={1}
@@ -940,12 +1011,16 @@ const DeployPanel: React.FC = () => {
                 />
                 <p className="text-xs text-muted-foreground">
                   {evalEpisodes > 1
-                    ? `Evaluation run: ${evalEpisodes} episodes with a reset between each, scored into an accuracy.`
-                    : "Leave at 1 for a single run. More than 1 starts a scored evaluation."}
+                    ? t("studio.deploy.episodes.evalHint", {
+                        episodes: evalEpisodes,
+                      })
+                    : t("studio.deploy.episodes.hint")}
                 </p>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="deploy-engine">Inference engine</Label>
+                <Label htmlFor="deploy-engine">
+                  {t("studio.deploy.engine.label")}
+                </Label>
                 <Select
                   value={inferenceEngine}
                   onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
@@ -954,46 +1029,50 @@ const DeployPanel: React.FC = () => {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="sync">Sync (default)</SelectItem>
+                    {/* Option VALUES ("sync" / "rtc") are what the backend
+                        parses — only the labels are translated. */}
+                    <SelectItem value="sync">
+                      {t("studio.deploy.engine.sync")}
+                    </SelectItem>
                     <SelectItem value="rtc">
-                      RTC — experimental, smoother control
+                      {t("studio.deploy.engine.rtc")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   {inferenceEngine === "rtc"
-                    ? "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result."
-                    : "One policy forward per control step. The arm pauses briefly between action chunks."}
+                    ? t("studio.deploy.engine.rtcHint")
+                    : t("studio.deploy.engine.syncHint")}
                 </p>
               </div>
             </>
           ) : null}
 
           {/* Cameras — a repeater, so it keeps its eyebrow. ------------------ */}
-          <FormSection title="Cameras">
+          <FormSection title={t("studio.deploy.cameras.title")}>
               {policyConfigLoading ? (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Reading policy config…
+                  {t("studio.deploy.cameras.loading")}
                 </div>
               ) : policyConfigError ? (
                 <Alert variant="destructive">
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
-                    Couldn't load policy config: {policyConfigError}
+                    {/* The error text is the backend's own — passed through. */}
+                    {t("studio.deploy.cameras.configError", {
+                      error: policyConfigError,
+                    })}
                   </AlertDescription>
                 </Alert>
               ) : !policyConfig ? null : cameraMap.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
-                  This policy doesn't use cameras.
+                  {t("studio.deploy.cameras.none")}
                 </p>
               ) : (
                 <div className="space-y-3">
                   <p className="text-xs text-muted-foreground">
-                    Bind one of this robot's cameras to each name the policy was
-                    trained with. Which camera and how it's opened come from the
-                    robot (edit in Robot settings); the capture resolution comes
-                    from the checkpoint.
+                    {t("studio.deploy.cameras.intro")}
                   </p>
                   {cameraMap.map((m) => {
                     const dims = policyConfig.image_features[m.feature];
@@ -1007,20 +1086,25 @@ const DeployPanel: React.FC = () => {
                         <div className="flex-1">
                           <Label className="text-sm font-medium">{m.display}</Label>
                           <p className="text-xs text-muted-foreground">
-                            Captures at {dims.width}×{dims.height} — the
-                            policy's resolution
+                            {t("studio.deploy.cameras.captures", {
+                              width: dims.width,
+                              height: dims.height,
+                            })}
                           </p>
                           {boundCamera &&
                           (boundCamera.width !== dims.width ||
                             boundCamera.height !== dims.height) ? (
                             <p className="text-xs text-muted-foreground">
-                              ({boundCamera.name} is set to {boundCamera.width}×
-                              {boundCamera.height} in Robot settings)
+                              {t("studio.deploy.cameras.mismatch", {
+                                name: boundCamera.name,
+                                width: boundCamera.width,
+                                height: boundCamera.height,
+                              })}
                             </p>
                           ) : null}
                           {boundCamera && !connected ? (
                             <p className="text-xs text-destructive">
-                              Disconnected — reconnect it before starting
+                              {t("studio.deploy.cameras.disconnected")}
                             </p>
                           ) : null}
                         </div>
@@ -1029,13 +1113,14 @@ const DeployPanel: React.FC = () => {
                           onValueChange={(v) => onCameraBindingChange(m.requestKey, v)}
                         >
                           <SelectTrigger className="w-52">
-                            <SelectValue placeholder="Select a camera" />
+                            <SelectValue
+                              placeholder={t("studio.deploy.cameras.select")}
+                            />
                           </SelectTrigger>
                           <SelectContent>
                             {robotCameras.length === 0 ? (
                               <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                                This robot has no cameras — add them in Robot
-                                settings
+                                {t("studio.deploy.cameras.robotHasNone")}
                               </div>
                             ) : (
                               robotCameras.map((cam) => (
@@ -1071,11 +1156,13 @@ const DeployPanel: React.FC = () => {
             <AdvancedSection
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}
-              summary="Temporal ensembling for ACT"
+              summary={t("studio.deploy.advanced.summary")}
             >
               <div className="space-y-6">
                 <section className="space-y-3">
-                  <h4 className="eyebrow">Action selection</h4>
+                  <h4 className={eyebrow}>
+                    {t("studio.deploy.advanced.actionSelection")}
+                  </h4>
                   <div className="flex items-center gap-3">
                     <Switch
                       id="deploy-temporal-ensemble"
@@ -1084,19 +1171,16 @@ const DeployPanel: React.FC = () => {
                       className="data-[state=checked]:bg-primary"
                     />
                     <Label htmlFor="deploy-temporal-ensemble">
-                      Temporal ensembling
+                      {t("studio.deploy.advanced.temporalEnsemble")}
                     </Label>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Averages the overlapping action chunks the policy predicts
-                    at each step instead of executing one chunk open-loop —
-                    smoother motion, but the policy runs every control step, so
-                    it is slower.
+                    {t("studio.deploy.advanced.temporalEnsembleHint")}
                   </p>
                   {temporalEnsemble ? (
                     <div className="space-y-2">
                       <Label htmlFor="deploy-temporal-ensemble-coeff">
-                        Ensemble coefficient
+                        {t("studio.deploy.advanced.coeffLabel")}
                       </Label>
                       <NumberInput
                         id="deploy-temporal-ensemble-coeff"
@@ -1105,7 +1189,10 @@ const DeployPanel: React.FC = () => {
                         min={0}
                         value={temporalEnsembleCoeff}
                         onChange={setTemporalEnsembleCoeff}
-                        placeholder={`${DEFAULT_TEMPORAL_ENSEMBLE_COEFF} (ACT paper default)`}
+                        placeholder={t(
+                          "studio.deploy.advanced.coeffPlaceholder",
+                          { value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF },
+                        )}
                         aria-invalid={temporalEnsembleInvalid}
                         className={cn(
                           "w-40",
@@ -1114,13 +1201,13 @@ const DeployPanel: React.FC = () => {
                       />
                       {temporalEnsembleInvalid ? (
                         <p className="text-xs text-destructive">
-                          Enter a number greater than 0.
+                          {t("studio.deploy.advanced.coeffInvalid")}
                         </p>
                       ) : (
                         <p className="text-xs text-muted-foreground">
-                          Weights are exp(-coeff × age): higher favours the
-                          newest prediction, lower averages more evenly. The
-                          ACT paper uses {DEFAULT_TEMPORAL_ENSEMBLE_COEFF}.
+                          {t("studio.deploy.advanced.coeffHint", {
+                            value: DEFAULT_TEMPORAL_ENSEMBLE_COEFF,
+                          })}
                         </p>
                       )}
                     </div>
@@ -1132,6 +1219,21 @@ const DeployPanel: React.FC = () => {
         </div>
       ) : null}
 
+      {/* Deploy-started milestone — the effect above latches this true the
+          first time the live InferenceSessionDialog closes after handleStart
+          sets deployMilestonePending. Gated on the latched flag alone (not
+          live on !sessionOpen) so a later, unrelated session close (a normal
+          redeploy from this same panel — the banner's own copy invites
+          exactly that) can't resurrect an already-dismissed-or-shown
+          banner. */}
+      {showDeployMilestone && (
+        <MilestoneReveal
+          title={t("studio.deploy.milestone.title")}
+          description={t("studio.deploy.milestone.description")}
+          onDismiss={() => setShowDeployMilestone(false)}
+        />
+      )}
+
       {/* Actions — pinned directly above the skill library. Side by side so
           the row sits level with Collect's and Train's single Start. -------- */}
       <div className="mt-auto flex gap-2 pt-2">
@@ -1142,12 +1244,14 @@ const DeployPanel: React.FC = () => {
         >
           <Play className="h-4 w-4" />
           {submitting
-            ? "Starting…"
+            ? t("studio.deploy.actions.starting")
             : checkingExtra
-              ? "Checking…"
+              ? t("studio.deploy.actions.checking")
               : evalEpisodes > 1
-                ? `Start evaluation (${evalEpisodes})`
-                : "Start inference"}
+                ? t("studio.deploy.actions.startEval", {
+                    episodes: evalEpisodes,
+                  })
+                : t("studio.deploy.actions.start")}
         </Button>
         <Button
           onClick={handleStop}
@@ -1156,7 +1260,9 @@ const DeployPanel: React.FC = () => {
           className="flex-1 gap-2"
         >
           <Square className="h-4 w-4" />
-          {stopping ? "Stopping…" : "Stop inference"}
+          {stopping
+            ? t("studio.deploy.actions.stopping")
+            : t("studio.deploy.actions.stop")}
         </Button>
       </div>
 
