@@ -591,6 +591,11 @@ const DeployPanel: React.FC = () => {
   // and passing --policy.temporal_ensemble_coeff to one would fail the
   // rollout's config parse. Show the control only for ACT checkpoints.
   const isAct = policyConfig?.policy_type === "act";
+  // RTC regenerates chunks through lerobot's flow-matching processor, a path
+  // ACT checkpoints don't have — running them under RTC breaks at rollout.
+  // Derived (not a state reset) so the forced value also covers the submit
+  // that races the policy-config fetch.
+  const effectiveEngine = isAct ? "sync" : inferenceEngine;
   // Empty field or a non-positive number: the backend rejects it (weights are
   // exp(-coeff * i)), so block Start rather than round-trip a 400.
   const temporalEnsembleInvalid =
@@ -697,7 +702,7 @@ const DeployPanel: React.FC = () => {
         robot_name: robot.name,
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
         eval_episodes: evalEpisodes,
-        inference_engine: inferenceEngine,
+        inference_engine: effectiveEngine,
         // ACT-only, and only while the switch is on — otherwise omitted so the
         // checkpoint's own (ensembling-off) config stands.
         temporal_ensemble_coeff:
@@ -1008,7 +1013,7 @@ const DeployPanel: React.FC = () => {
                   {t("studio.deploy.engine.label")}
                 </Label>
                 <Select
-                  value={inferenceEngine}
+                  value={effectiveEngine}
                   onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
                 >
                   <SelectTrigger id="deploy-engine">
@@ -1020,15 +1025,17 @@ const DeployPanel: React.FC = () => {
                     <SelectItem value="sync">
                       {t("studio.deploy.engine.sync")}
                     </SelectItem>
-                    <SelectItem value="rtc">
+                    <SelectItem value="rtc" disabled={isAct}>
                       {t("studio.deploy.engine.rtc")}
                     </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  {inferenceEngine === "rtc"
-                    ? t("studio.deploy.engine.rtcHint")
-                    : t("studio.deploy.engine.syncHint")}
+                  {isAct
+                    ? t("studio.deploy.engine.actHint")
+                    : effectiveEngine === "rtc"
+                      ? t("studio.deploy.engine.rtcHint")
+                      : t("studio.deploy.engine.syncHint")}
                 </p>
               </div>
             </>

@@ -277,6 +277,8 @@ export default {
         "One policy forward per control step. The arm pauses briefly between action chunks.",
       rtcHint:
         "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
+      actHint:
+        "Not available for ACT checkpoints — RTC regenerates chunks through a flow-matching step that ACT doesn't have. ACT runs use Sync.",
     },
     cameras: {
       title: "Cameras",

@@ -306,6 +306,8 @@ export default {
     engineRtc: "RTC —— 实验性，控制更平滑",
     engineRtcHint:
       "Real-Time Chunking 让推理与运动重叠，消除动作块之间的停顿。它同时改变了动作的生成方式 —— 在采信结果前请与 Sync 对比。",
+    engineActHint:
+      "ACT 检查点不可用 —— RTC 通过流匹配（flow-matching）步骤重新生成动作块，而 ACT 没有这一步骤。ACT 将使用 Sync 运行。",
     engineSyncHint: "每个控制步进行一次策略前向计算。机械臂在动作块之间会短暂停顿。",
     camerasSection: "摄像头",
     policyConfigLoading: "正在读取策略配置…",

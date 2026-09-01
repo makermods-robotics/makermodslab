@@ -202,6 +202,8 @@ export default {
         "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
       rtcHint:
         "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
+      actHint:
+        "ACT 检查点不可用 — RTC 通过流匹配（flow-matching）步骤重新生成动作块，而 ACT 没有这一步骤。ACT 将使用 Sync 运行。",
     },
     cameras: {
       title: "摄像头",

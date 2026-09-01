@@ -394,6 +394,11 @@ const InferenceModal: React.FC<Props> = ({
   // and passing --policy.temporal_ensemble_coeff to one would fail the
   // rollout's config parse. Show the control only for ACT checkpoints.
   const isAct = policyConfig?.policy_type === "act";
+  // RTC regenerates chunks through lerobot's flow-matching processor, a path
+  // ACT checkpoints don't have — running them under RTC breaks at rollout.
+  // Derived (not a state reset) so the forced value also covers the submit
+  // that races the policy-config fetch. Mirrors DeployPanel.
+  const effectiveEngine = isAct ? "sync" : inferenceEngine;
   // Empty field or a non-positive number: the backend rejects it (weights are
   // exp(-coeff * i)), so block Start rather than round-trip a 400.
   const temporalEnsembleInvalid =
@@ -470,7 +475,7 @@ const InferenceModal: React.FC<Props> = ({
         // same arm-count guard authoritatively (null when the checkpoint omits
         // observation.state — the server then defers to its shape check).
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-        inference_engine: inferenceEngine,
+        inference_engine: effectiveEngine,
         // ACT-only, and only while the switch is on — otherwise omitted so the
         // checkpoint's own (ensembling-off) config stands.
         temporal_ensemble_coeff:
@@ -652,7 +657,7 @@ const InferenceModal: React.FC<Props> = ({
                 {t("landing.inference.engineLabel")}
               </Label>
               <Select
-                value={inferenceEngine}
+                value={effectiveEngine}
                 onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
               >
                 <SelectTrigger id="inference-engine">
@@ -664,15 +669,17 @@ const InferenceModal: React.FC<Props> = ({
                   <SelectItem value="sync">
                     {t("landing.inference.engineSync")}
                   </SelectItem>
-                  <SelectItem value="rtc">
+                  <SelectItem value="rtc" disabled={isAct}>
                     {t("landing.inference.engineRtc")}
                   </SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                {inferenceEngine === "rtc"
-                  ? t("landing.inference.engineRtcHint")
-                  : t("landing.inference.engineSyncHint")}
+                {isAct
+                  ? t("landing.inference.engineActHint")
+                  : effectiveEngine === "rtc"
+                    ? t("landing.inference.engineRtcHint")
+                    : t("landing.inference.engineSyncHint")}
               </p>
             </div>
           </div>

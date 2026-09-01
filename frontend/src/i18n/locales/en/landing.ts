@@ -366,6 +366,8 @@ export default {
     engineRtc: "RTC — experimental, smoother control",
     engineRtcHint:
       "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
+    engineActHint:
+      "Not available for ACT checkpoints — RTC regenerates chunks through a flow-matching step that ACT doesn't have. ACT runs use Sync.",
     engineSyncHint:
       "One policy forward per control step. The arm pauses briefly between action chunks.",
     camerasSection: "Cameras",
