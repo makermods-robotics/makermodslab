@@ -27,7 +27,7 @@ export const useRealTimeJoints = ({
   jointsKey = "joints",
 }: UseRealTimeJointsProps) => {
   const { wsBaseUrl } = useApi();
-  const finalWebSocketUrl = websocketUrl || `${wsBaseUrl}/ws/joint-data`;
+  const finalWebSocketUrl = websocketUrl || `${wsBaseUrl}/api/v1/ws/joint-data`;
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);

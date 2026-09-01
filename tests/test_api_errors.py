@@ -43,6 +43,7 @@ DOMAINS = frozenset(
         "checkpoint",
         "session",
         "node",
+        "system",
         "internal",
     ]
 )
@@ -50,6 +51,10 @@ DOMAINS = frozenset(
 # The mutual-exclusion matrix (CLAUDE.md "State model & mutual exclusion"),
 # plus the post-session release grace. A new robot-driving feature must add
 # its discriminant here AND reciprocal-check refusals in every peer.
+# `training` joined with the local training queue (PR #83): a queued run can
+# start from the watchdog with nobody at the keyboard, so the features refuse
+# while a local training holds the machine (jobs.training_is_active) and the
+# queue waits while any feature does (JobRegistry._robot_busy).
 BUSY_DISCRIMINANTS = frozenset(
     [
         "recording",
@@ -60,6 +65,7 @@ BUSY_DISCRIMINANTS = frozenset(
         "auto_calibration",
         "wiggle",
         "releasing",
+        "training",
     ]
 )
 
@@ -127,6 +133,18 @@ def test_teleop_start_refusals_carry_codes_manager_features(monkeypatch, manager
     assert result["code"] == expected_code
 
 
+def test_teleop_start_refusal_carries_training_code(monkeypatch):
+    """The training half of the mutex speaks the same code language: a live
+    local training run refuses a feature start with robot.busy.training."""
+    from makermodslab import jobs
+    from makermodslab.teleoperate import handle_start_teleoperation
+
+    monkeypatch.setattr(jobs, "training_is_active", lambda: "ACT · user/ds")
+    result = handle_start_teleoperation(_teleop_request())
+    assert result["success"] is False
+    assert result["code"] == "robot.busy.training"
+
+
 def test_replay_start_refusal_carries_code(monkeypatch):
     from makermodslab.replay import ReplayRequest, handle_start_replay
 
@@ -136,6 +154,18 @@ def test_replay_start_refusal_carries_code(monkeypatch):
     )
     assert result["success"] is False
     assert result["code"] == "robot.busy.recording"
+
+
+def test_replay_start_refusal_carries_training_code(monkeypatch):
+    from makermodslab import jobs
+    from makermodslab.replay import ReplayRequest, handle_start_replay
+
+    monkeypatch.setattr(jobs, "training_is_active", lambda: "ACT · user/ds")
+    result = handle_start_replay(
+        ReplayRequest(repo_id="u/d", episode_index=0, follower_port="/dev/null-f", follower_config="fc")
+    )
+    assert result["success"] is False
+    assert result["code"] == "robot.busy.training"
 
 
 def test_endpoint_propagates_code(client, monkeypatch):
@@ -150,6 +180,18 @@ def test_endpoint_propagates_code(client, monkeypatch):
     body = resp.json()
     assert body["code"] == "robot.busy.recording"
     assert isinstance(body["detail"], str)  # legacy shape untouched
+
+
+def test_schema_level_422_carries_request_validation_code(client):
+    """FastAPI's own 422 (RequestValidationError) rides with request.validation
+    beside its untouched pydantic error list, so an SDK never has to sniff the
+    status code. The oversized reorder body (past the 512-id bound) is the
+    queue's own instance of this refusal."""
+    resp = client.post("/api/v1/jobs/queue/reorder", json={"job_ids": [f"j{i}" for i in range(513)]})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "request.validation"
+    assert isinstance(body["detail"], list)  # FastAPI's shape, untouched
 
 
 def test_sessions_surface_uses_reserved_codes(client, monkeypatch):

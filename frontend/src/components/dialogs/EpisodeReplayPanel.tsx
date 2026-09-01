@@ -130,7 +130,7 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
       // Robot NAME + episode selection only — the follower port/config
       // resolve server-side from the saved record. The owner attaches the
       // lease the heartbeat above renews while the replay plays.
-      const session = await startSession(baseUrl, fetchWithHeaders, {
+      const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "replay",
         robot: selectedRecord.name,
         owner: tabOwnerId(),
@@ -140,6 +140,15 @@ const EpisodeReplayPanel: React.FC<EpisodeReplayPanelProps> = ({
         },
       });
       setSessionId(session.id);
+      if (warnings?.length) {
+        // Warn-but-allow arm-identity finding: the replay RUNS, but the user
+        // should see it. Backend prose, rendered verbatim.
+        toast({
+          title: t("dialogs.replay.toast.startedWarningTitle"),
+          description: warnings.join(" "),
+          duration: 8000,
+        });
+      }
     } catch (e) {
       toast({
         title: t("dialogs.replay.toast.startFailedTitle"),

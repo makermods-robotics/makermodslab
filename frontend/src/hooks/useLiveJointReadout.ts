@@ -38,7 +38,7 @@ export function useLiveJointReadout(enabled: boolean): {
       if (intentionallyClosedRef.current) return;
       let ws: WebSocket;
       try {
-        ws = new WebSocket(`${wsBaseUrl}/ws/joint-data`);
+        ws = new WebSocket(`${wsBaseUrl}/api/v1/ws/joint-data`);
       } catch {
         scheduleReconnect();
         return;

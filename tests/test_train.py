@@ -514,3 +514,22 @@ def test_hf_job_timeout_never_leaks_into_training_argv() -> None:
 
     assert not any("timeout" in tok.lower() for tok in cmd)
     assert "3h30m" not in cmd
+
+
+def test_build_training_command_video_backend_override():
+    """The local runner passes video_backend="pyav" when torchcodec's native
+    libs don't load on the host (missing FFmpeg); None leaves lerobot's own
+    default in charge. Emitted on the resume branch too — the checkpoint
+    records the ORIGINAL host's backend, and a resume can land elsewhere."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(dataset_repo_id="user/ds")
+    cmd = build_training_command(req, "out", video_backend="pyav")
+    i = cmd.index("--dataset.video_backend")
+    assert cmd[i + 1] == "pyav"
+    assert "--dataset.video_backend" not in build_training_command(req, "out")
+
+    resumed = TrainingRequest(dataset_repo_id="user/ds", resume=True, config_path="c/train_config.json")
+    rcmd = build_training_command(resumed, "out", video_backend="pyav")
+    assert rcmd[rcmd.index("--dataset.video_backend") + 1] == "pyav"
+    assert "--dataset.video_backend" not in build_training_command(resumed, "out")

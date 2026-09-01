@@ -63,6 +63,12 @@ export default {
     done: "Done",
     leftArm: "Left arm",
     rightArm: "Right arm",
+    // Shown in the 3D viewer's place on a Maker arm, which has no URDF yet.
+    jointAngles: "Live joint angles",
+    waitingForJoints: "Waiting for joint data…",
+    // Family-neutral on purpose: the readout serves every CAN arm (Maker,
+    // Metal), and none of them ships a URDF yet.
+    noModel: "No 3D model is available for this arm yet.",
   },
   urdf: {
     switchedDefaultTitle: "Switched to default model",

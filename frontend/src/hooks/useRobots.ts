@@ -6,9 +6,17 @@ import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
 export type RobotMode = "single" | "bimanual";
 
+// ArmType and its capability predicates moved to lib/armTypes.ts so they stay
+// pure and independently testable (this module pulls in the API context on
+// import). Re-exported here because ArmType's importers already use this path.
+import type { ArmType } from "@/lib/armTypes";
+export { isCanArmType, jointsPerArm } from "@/lib/armTypes";
+export type { ArmType } from "@/lib/armTypes";
+
 export interface RobotRecord {
   name: string;
   mode: RobotMode;
+  arm_type: ArmType;
   // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;
@@ -129,7 +137,7 @@ export const useRobots = () => {
     pendingFetches += 1;
     setState({ isLoading: true });
     try {
-      const res = await fetchWithHeaders(`${baseUrl}/robots`);
+      const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots`);
       const data = await res.json();
       const next: Record<string, RobotRecord> = {};
       for (const r of data.robots ?? []) next[r.name] = r;
@@ -161,7 +169,11 @@ export const useRobots = () => {
   }, []);
 
   const createRobot = useCallback(
-    async (rawName: string, mode: RobotMode = "single"): Promise<boolean> => {
+    async (
+      rawName: string,
+      mode: RobotMode = "single",
+      armType: ArmType = "so101"
+    ): Promise<boolean> => {
       const name = rawName.trim();
       if (!name) {
         toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
@@ -172,10 +184,10 @@ export const useRobots = () => {
         return false;
       }
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}?create=true`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ mode, arm_type: armType }),
         });
         if (res.status === 409) {
           toast({
@@ -207,7 +219,7 @@ export const useRobots = () => {
   const deleteRobot = useCallback(
     async (name: string): Promise<boolean> => {
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(name)}`, {
           method: "DELETE",
         });
         // 404 = the record is already gone (deleted elsewhere, or removed on
@@ -252,7 +264,7 @@ export const useRobots = () => {
         return false;
       }
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(oldName)}/rename`, {
+        const res = await fetchWithHeaders(`${baseUrl}/api/v1/robots/${encodeURIComponent(oldName)}/rename`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ new_name: newName }),

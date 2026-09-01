@@ -1,7 +1,16 @@
 import i18n from "@/i18n";
 import { ApiError, Fetcher, apiRequest } from "./apiClient";
 
-export type JobState = "running" | "done" | "failed" | "interrupted";
+// "queued" is LOCAL-ONLY: the run was accepted and validated, and waits for
+// the one local training slot (PR #83 — a busy slot queues, it never refuses).
+export type JobState = "queued" | "running" | "done" | "failed" | "interrupted";
+
+/** States a run can never leave — the record is history, so delete is safe to
+ * offer. The complement ("queued" / "running") is still doing (or about to do)
+ * work and takes Stop/Cancel instead. */
+export function isTerminalJobState(state: JobState): boolean {
+  return state === "done" || state === "failed" || state === "interrupted";
+}
 
 export interface TrainingMetrics {
   current_step: number;
@@ -28,6 +37,9 @@ export type MetricsHistoryPoint = {
 // these; defaults on the server fill in the rest.
 export interface TrainingRequest {
   dataset_repo_id: string;
+  // Episode indices to train on; omitted ⇒ every episode (see
+  // TrainingConfig.dataset_episodes).
+  dataset_episodes?: number[];
   policy_type: string;
   // Optional user-supplied display name; blank ⇒ backend auto-names the run.
   job_name?: string;
@@ -77,8 +89,14 @@ export interface TrainingRequest {
   optimizer_weight_decay?: number;
   optimizer_grad_clip_norm?: number;
   use_policy_training_preset: boolean;
-  // Optional target for runner dispatch; omitted ⇒ local.
-  target?: { runner: "local" | "hf_cloud"; flavor?: string };
+  // Optional target for runner dispatch; omitted ⇒ local. "lan_node" routes
+  // the run to a registered peer and REQUIRES node_instance_id (the backend
+  // refuses it missing with 422 request.validation).
+  target?: {
+    runner: "local" | "hf_cloud" | "lan_node";
+    flavor?: string;
+    node_instance_id?: string;
+  };
   // HF Cloud only: optional override for the HF Jobs timeout, as a duration
   // string ("2h", "45m", "3h30m"). Omitted ⇒ backend falls back to its
   // default. The backend validates the format and ignores it for local runs.
@@ -101,6 +119,10 @@ export interface JobRecord {
   // hub repo id never change). Null/absent ⇒ show `name`.
   display_name?: string | null;
   state: JobState;
+  // 1-based position in the local training queue, DERIVED server-side per
+  // response (never trust a stale copy — anything ahead starting shifts it).
+  // 0 ⇒ not queued. Absent only on an older backend; treat as 0.
+  queue_position?: number;
   config: TrainingRequest;
   output_dir: string;
   started_at: number;
@@ -108,7 +130,12 @@ export interface JobRecord {
   exit_code: number | null;
   error_message: string | null;
   metrics: TrainingMetrics;
-  runner: "local" | "hf_cloud" | "imported";
+  runner: "local" | "hf_cloud" | "imported" | "lan_node";
+  // lan_node runs only: which peer executes the run. The id is the routing
+  // key; the URL is a snapshot of where the peer was when the run launched
+  // (it survives the node leaving the registry). Null/absent elsewhere.
+  node_instance_id?: string | null;
+  node_url?: string | null;
   hf_job_id: string | null;
   hf_flavor: string | null;
   hf_repo_id: string | null;
@@ -294,6 +321,7 @@ export function jobDisplayName(job: JobRecord): string {
  * through `useTranslation()` at render time instead.
  */
 export const JOB_STATE_LABELS = {
+  queued: "jobs.jobState.queued",
   running: "jobs.jobState.running",
   done: "jobs.jobState.done",
   failed: "jobs.jobState.failed",
@@ -329,15 +357,68 @@ export async function renameJob(
   });
 }
 
+/** Stop a running job — or cancel a queued one: they are the same request on
+ * the wire. `expectState` is the optimistic-concurrency precondition: pass the
+ * state the UI was showing when it drew the button, so a Cancel drawn against
+ * a stale queue can't SIGTERM a run the watchdog promoted in the meantime
+ * (the backend answers 409 job.state_changed instead). */
 export async function stopJob(
   baseUrl: string,
   fetcher: Fetcher,
   id: string,
+  expectState?: JobState,
 ): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/api/v1/jobs/${id}/stop`, {
-    method: "POST",
-    action: "Stop job",
-  });
+  const query = expectState
+    ? `?expect_state=${encodeURIComponent(expectState)}`
+    : "";
+  return apiRequest<JobRecord>(
+    baseUrl,
+    fetcher,
+    `/api/v1/jobs/${id}/stop${query}`,
+    {
+      method: "POST",
+      action: "Stop job",
+    },
+  );
+}
+
+/** The WHOLE local training queue, in the order it will run, each record
+ * annotated with its 1-based queue_position. Uncapped, unlike listJobs —
+ * the queue is the machine's plan, and reorder needs the full id list. */
+export async function listJobQueue(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<JobRecord[]> {
+  const body = await apiRequest<{ jobs: JobRecord[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/jobs/queue",
+    { signal, action: "List job queue" },
+  );
+  return body.jobs;
+}
+
+/** Set the order of the local training queue. `jobIds` must be the COMPLETE
+ * current queue (a partial list is refused); a list that no longer matches
+ * the live queue comes back 409 with code job.queue_stale — refetch and retry,
+ * nothing else clears it. Returns the queue in its new order. */
+export async function reorderJobQueue(
+  baseUrl: string,
+  fetcher: Fetcher,
+  jobIds: string[],
+): Promise<JobRecord[]> {
+  const body = await apiRequest<{ jobs: JobRecord[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/jobs/queue/reorder",
+    {
+      method: "POST",
+      body: { job_ids: jobIds },
+      action: "Reorder job queue",
+    },
+  );
+  return body.jobs;
 }
 
 export async function deleteJob(
@@ -418,6 +499,14 @@ export interface HubJob {
   status: { stage: string; message: string | null } | null;
   owner: string | null;
   url: string;
+  // What the run trains, recovered Hub-side from the job's own argv
+  // (_hub_job_identity). Each is independently null: a RESUMED cloud run passes
+  // --config_path instead of --policy.type/--dataset.repo_id, so it reports a
+  // repo and a step target with no policy or dataset.
+  policy_type: string | null;
+  dataset: string | null;
+  total_steps: number | null;
+  hf_repo_id: string | null;
 }
 
 // Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,

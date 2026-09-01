@@ -32,10 +32,13 @@ def test_build_install_cmd_contains_pip_and_package() -> None:
 def test_build_install_cmd_uses_current_python_when_no_uv(monkeypatch) -> None:
     import shutil
 
+    from makermodslab.utils import system
     from makermodslab.utils.system import _build_install_cmd
 
-    # If uv is not on PATH, command must use sys.executable.
+    # If uv is not on PATH (nor at any standard install location), the
+    # command must use sys.executable.
     monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(system, "_UV_FALLBACK_PATHS", ())
     cmd = _build_install_cmd("lerobot[training]")
     assert cmd[0] == sys.executable
     assert "pip" in cmd
@@ -266,3 +269,181 @@ def test_policy_extra_route_known_and_core(client) -> None:
     assert smol["install_target"] == "lerobot[smolvla]"
     core = client.get("/system/policy-extra/act").json()
     assert core["needs_extra"] is False
+
+
+# --- self-restart (POST /api/v1/system/restart) --------------------------------
+
+
+def test_build_install_cmd_falls_back_to_known_uv_locations(monkeypatch, tmp_path) -> None:
+    """A headless server started over ssh/nohup gets a PATH without
+    ~/.local/bin — uv must still be found at its standard install target,
+    because a uv venv has no pip to fall back to."""
+    import shutil
+
+    from makermodslab.utils import system
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text("#!/bin/sh\n")
+    fake_uv.chmod(0o755)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(system, "_UV_FALLBACK_PATHS", (str(fake_uv),))
+    cmd = system._build_install_cmd("lerobot[smolvla]")
+    assert cmd[0] == str(fake_uv)
+    assert "--python" in cmd and sys.executable in cmd
+
+
+def test_install_in_progress_reports_the_live_package(monkeypatch) -> None:
+    from makermodslab.utils import system
+
+    assert system.install_in_progress() is None
+    mgr = system.InstallManager("lerobot[smolvla]")
+    mgr.state = "installing"
+    monkeypatch.setitem(system._policy_install_managers, "lerobot[smolvla]", mgr)
+    assert system.install_in_progress() == "lerobot[smolvla]"
+
+
+def test_restart_supported_only_for_entry_point_argv(monkeypatch) -> None:
+    """Only a launch we KNOW re-runs the launcher (argv[0] is one of our entry
+    points) may execv; a dev reload worker or a bare `python -m` must not."""
+    from makermodslab.utils import system
+
+    monkeypatch.setattr(sys, "argv", ["/some/.venv/bin/makermodslab", "--lan"])
+    supported, why = system.restart_supported()
+    assert supported is True and why == ""
+
+    monkeypatch.setattr(sys, "argv", ["/some/.venv/bin/makermodslab-station"])
+    assert system.restart_supported()[0] is True
+
+    monkeypatch.setattr(sys, "argv", ["-c"])  # a multiprocessing spawn worker
+    supported, why = system.restart_supported()
+    assert supported is False
+    assert "entry point" in why
+
+
+def test_restart_supported_posix_only(monkeypatch) -> None:
+    from makermodslab.utils import system
+
+    monkeypatch.setattr(system.os, "name", "nt")
+    monkeypatch.setattr(sys, "argv", ["C:/venv/Scripts/makermodslab"])
+    supported, why = system.restart_supported()
+    assert supported is False
+    assert "platform" in why
+
+
+def test_schedule_restart_execs_same_argv(monkeypatch) -> None:
+    """The re-exec must reproduce this exact process: same interpreter, same
+    argv — that is the whole restart contract."""
+    from makermodslab.utils import system
+
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/makermodslab", "--lan", "--bind", "tailscale0"])
+    calls: list[tuple[str, list[str]]] = []
+    thread = system.schedule_restart(delay_s=0, execv=lambda exe, argv: calls.append((exe, argv)))
+    thread.join(timeout=5)
+    assert calls == [
+        (sys.executable, [sys.executable, "/venv/bin/makermodslab", "--lan", "--bind", "tailscale0"])
+    ]
+
+
+def test_restart_route_refuses_while_a_feature_holds_the_robot(client, monkeypatch) -> None:
+    """Killing the server mid-flow drops the hardware threads with it, so the
+    refusal carries the holder's own busy discriminant."""
+    from makermodslab import server
+
+    monkeypatch.setattr(server, "held_by", lambda: "teleoperation")
+    resp = client.post("/api/v1/system/restart")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "robot.busy.teleoperation"
+
+
+def test_restart_route_refuses_while_training_runs(client, monkeypatch) -> None:
+    from makermodslab import server
+
+    monkeypatch.setattr(server, "held_by", lambda: None)
+    monkeypatch.setattr(server, "training_is_active", lambda: "act_so101_run")
+    resp = client.post("/api/v1/system/restart")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "robot.busy.training"
+
+
+def test_restart_route_refuses_while_an_install_runs(client, monkeypatch) -> None:
+    """Re-exec would orphan the pip subprocess mid-write — refuse until it
+    finishes."""
+    from makermodslab import server
+
+    monkeypatch.setattr(server, "held_by", lambda: None)
+    monkeypatch.setattr(server, "training_is_active", lambda: None)
+    monkeypatch.setattr(server.job_registry, "list_queue", lambda: [])
+    monkeypatch.setattr(server, "install_in_progress", lambda: "lerobot[smolvla]")
+    resp = client.post("/api/v1/system/restart")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "system.install_in_progress"
+    assert "lerobot[smolvla]" in resp.json()["detail"]
+
+
+def test_restart_route_refuses_with_a_queued_run(client, monkeypatch) -> None:
+    """The loader retires queued records on startup — a restart would silently
+    eat the queue, so it refuses instead."""
+    from makermodslab import server
+
+    monkeypatch.setattr(server, "held_by", lambda: None)
+    monkeypatch.setattr(server, "training_is_active", lambda: None)
+    monkeypatch.setattr(server.job_registry, "list_queue", lambda: [object()])
+    resp = client.post("/api/v1/system/restart")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "robot.busy.training"
+    assert "queued" in resp.json()["detail"]
+
+
+def test_restart_route_refuses_when_unsupported(client, monkeypatch) -> None:
+    """Under pytest argv[0] is not a launcher entry point, so the REAL
+    restart_supported refuses — no monkeypatching the gate itself."""
+    from makermodslab import server
+
+    monkeypatch.setattr(server, "held_by", lambda: None)
+    monkeypatch.setattr(server, "training_is_active", lambda: None)
+    monkeypatch.setattr(server.job_registry, "list_queue", lambda: [])
+    resp = client.post("/api/v1/system/restart")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "system.restart_unsupported"
+
+
+def test_restart_route_answers_then_schedules(client, monkeypatch) -> None:
+    from makermodslab import server
+
+    monkeypatch.setattr(server, "held_by", lambda: None)
+    monkeypatch.setattr(server, "training_is_active", lambda: None)
+    monkeypatch.setattr(server.job_registry, "list_queue", lambda: [])
+    monkeypatch.setattr(server, "restart_supported", lambda: (True, ""))
+    scheduled: list[int] = []
+    monkeypatch.setattr(server, "schedule_restart", lambda: scheduled.append(1))
+    resp = client.post("/api/v1/system/restart")
+    assert resp.status_code == 200
+    assert resp.json()["restarting"] is True
+    assert scheduled == [1]
+
+
+def test_restart_route_is_v1_only(client) -> None:
+    """New surface never lands on the frozen flat mount."""
+    resp = client.post("/system/restart")
+    assert resp.status_code in {404, 405}
+
+
+def test_torchcodec_probe_caches_and_reports(monkeypatch):
+    from makermodslab.utils import system as sysmod
+
+    calls = []
+    monkeypatch.setattr(sysmod, "_torchcodec_cache", sysmod._TORCHCODEC_UNPROBED)
+    monkeypatch.setattr(sysmod, "_probe_torchcodec_uncached", lambda: calls.append(1) or False)
+    assert sysmod.torchcodec_loads() is False
+    assert sysmod.torchcodec_loads() is False
+    assert len(calls) == 1
+
+
+def test_torchcodec_probe_subprocess_failure_means_unusable(monkeypatch):
+    from makermodslab.utils import system as sysmod
+
+    def boom(*a, **k):
+        raise OSError("no interpreter")
+
+    monkeypatch.setattr(sysmod.subprocess, "run", boom)
+    assert sysmod._probe_torchcodec_uncached() is False

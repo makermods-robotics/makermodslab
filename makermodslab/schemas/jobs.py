@@ -54,6 +54,7 @@ __all__ = [
     "JobCheckpointsResponse",
     "JobListResponse",
     "JobLogsResponse",
+    "JobQueueResponse",
     "JobMetricsHistoryResponse",
     "JobRecord",
     "LogLine",
@@ -66,6 +67,17 @@ __all__ = [
 class JobListResponse(BaseModel):
     """server.py list_jobs — JobRegistry.list() records (checkpoint_count and
     the resume lineage annotated at read time), newest first."""
+
+    jobs: list[JobRecord]
+
+
+class JobQueueResponse(BaseModel):
+    """server.py list_job_queue / reorder_job_queue — the WHOLE local training
+    queue (JobRegistry.list_queue / reorder_queue), in the order it will run,
+    each record annotated with its 1-based queue_position. Same JobRecord model
+    as the history list — a queued record is uniform-with-defaults, not a
+    different shape — but the ordering contract differs (run order, uncapped),
+    which is why this is not JobListResponse."""
 
     jobs: list[JobRecord]
 
@@ -125,7 +137,15 @@ class HubJobItem(BaseModel):
     """One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is
     always present; the nullables mirror huggingface_hub's JobInfo (docker_image
     and space_id are mutually exclusive on the Hub side, status/owner can be
-    absent objects → null, name is _hub_job_run_name's best effort)."""
+    absent objects → null, name is _hub_job_run_name's best effort).
+
+    The trailing four are the run's identity, recovered from the job's own argv
+    by _hub_job_identity so a run launched on another machine reads like a
+    tracked one. Each is independently nullable and for a real reason: a RESUMED
+    cloud run carries `--config_path` instead of `--policy.type` /
+    `--dataset.repo_id`, so it reports a repo and a step target with no policy
+    or dataset. They are decoration on a listing — never identity — so a row
+    that answers none of them still renders."""
 
     id: str
     name: str | None
@@ -136,6 +156,10 @@ class HubJobItem(BaseModel):
     status: HubJobStatus | None
     owner: str | None
     url: str
+    policy_type: str | None
+    dataset: str | None
+    total_steps: int | None
+    hf_repo_id: str | None
 
 
 class HubModelItem(BaseModel):

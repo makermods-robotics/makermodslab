@@ -891,3 +891,143 @@ def test_stop_is_a_noop_before_submission(tmp_path) -> None:
 
     assert api.cancelled == []
     assert runner.terminal_stage() is None
+
+
+# --- _ensure_dataset_on_hub: an empty Hub repo counts as absent -------------
+
+
+def _ensure_runner(tmp_path):
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "t4-small")
+    runner._api = MagicMock()
+    return runner
+
+
+def _local_dataset(tmp_path, monkeypatch, repo_id: str) -> None:
+    """A local copy the runner can find, so the push path is reachable."""
+    meta = tmp_path / "cache" / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text("{}")
+    monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path / "cache"))
+
+
+def test_ensure_dataset_on_hub_refills_an_existing_but_empty_repo(tmp_path, monkeypatch) -> None:
+    """An upload that died after create_repo leaves an empty repo behind. The
+    old "the repo exists, skip the push" check then sent the pod at a dataset
+    with no files in it. Refilling needs nothing from the user, so it happens
+    silently rather than as a refusal they'd have to act on."""
+    runner = _ensure_runner(tmp_path)
+    _local_dataset(tmp_path, monkeypatch, "pick")
+
+    pushed = []
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_repo_exists", lambda *a, **k: True)
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_copy_has_data", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "makermodslab.runners._dataset.push_dataset_to_hub",
+        lambda local, **k: pushed.append(local) or "alice/pick",
+    )
+
+    runner._ensure_dataset_on_hub("pick", "alice/pick")
+    assert pushed == ["pick"]
+
+
+def test_ensure_dataset_on_hub_skips_a_populated_repo(tmp_path, monkeypatch) -> None:
+    runner = _ensure_runner(tmp_path)
+    _local_dataset(tmp_path, monkeypatch, "pick")
+
+    pushed = []
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_repo_exists", lambda *a, **k: True)
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_copy_has_data", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "makermodslab.runners._dataset.push_dataset_to_hub",
+        lambda local, **k: pushed.append(local) or "alice/pick",
+    )
+
+    runner._ensure_dataset_on_hub("pick", "alice/pick")
+    assert pushed == []
+
+
+def test_ensure_dataset_on_hub_leaves_the_hub_alone_when_it_cannot_tell(tmp_path, monkeypatch) -> None:
+    """Transport error → no claim. Pushing into a repo we couldn't verify is
+    worse than a pod that fails resolving a dataset."""
+    runner = _ensure_runner(tmp_path)
+    _local_dataset(tmp_path, monkeypatch, "pick")
+
+    pushed = []
+    monkeypatch.setattr("makermodslab.runners._dataset.hub_repo_exists", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "makermodslab.runners._dataset.push_dataset_to_hub",
+        lambda local, **k: pushed.append(local) or "alice/pick",
+    )
+
+    runner._ensure_dataset_on_hub("pick", "alice/pick")
+    assert pushed == []
+
+
+# ---------------------------------------------------------------------------
+# Job labelling: the tag the Hub actually validates
+# ---------------------------------------------------------------------------
+
+
+class _ApiWithLabels:
+    """Stand-in whose run_job signature advertises labels + name."""
+
+    @staticmethod
+    def run_job(image, command, flavor, labels=None, name=None):  # pragma: no cover - signature only
+        raise AssertionError("not called")
+
+
+def test_the_run_label_conforms_to_the_hub_tag_charset() -> None:
+    """Regression: the label key used to be "makermodslab.run". The Hub
+    serialises each label into a single "key=value" tag and validates it
+    against [alphanumeric - _ =]; a dot is no longer accepted, so submission
+    failed outright with `tags` must be ... alphanumeric, '-', '_', or '='.
+    """
+    import re
+
+    from makermodslab.runners.hf_cloud import _RUN_LABEL, _run_job_naming_kwargs
+
+    hub_tag_rule = re.compile(r"^[A-Za-z0-9\-_=]{1,256}$")
+    job_id = "act_cube_2026-08-01_12-00-00"
+
+    kwargs = _run_job_naming_kwargs(_ApiWithLabels, job_id)
+
+    assert "." not in _RUN_LABEL
+    for key, value in kwargs["labels"].items():
+        assert hub_tag_rule.match(f"{key}={value}"), f"{key}={value} would be rejected by the Hub"
+
+
+def test_a_non_conforming_job_id_is_submitted_unnamed_rather_than_rejected() -> None:
+    """A label the Hub would refuse fails the WHOLE submission with a 400, so
+    dropping it is strictly better than sending it — the run name is still
+    recoverable from the job's argv. Same trade the signature probe makes."""
+    from makermodslab.runners.hf_cloud import _run_job_naming_kwargs
+
+    assert _run_job_naming_kwargs(_ApiWithLabels, "act cube/with bad chars") == {}
+    assert _run_job_naming_kwargs(_ApiWithLabels, "a" * 200) == {}
+
+
+def test_a_conforming_job_id_is_still_labelled_and_named() -> None:
+    from makermodslab.runners.hf_cloud import _RUN_LABEL, _run_job_naming_kwargs
+
+    kwargs = _run_job_naming_kwargs(_ApiWithLabels, "act_cube_2026-08-01_12-00-00")
+
+    assert kwargs["labels"] == {_RUN_LABEL: "act_cube_2026-08-01_12-00-00"}
+    assert kwargs["name"] == "act_cube_2026-08-01_12-00-00"
+
+
+def test_cloud_lerobot_spec_drops_every_hardware_bus_extra() -> None:
+    """The container trains on GPUs with no arms attached: every motor-bus
+    extra is host-only, not just feetech. `maker`/`damiao` (CAN) and `rebot`
+    (FashionStar UART) pull python-can/motorbridge stacks the pod can't use —
+    dead weight per job at best, a platform-specific resolve failure at worst.
+    """
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
+
+    extras = _spec_extras(cloud_lerobot_spec("act"))
+    assert extras.isdisjoint({"feetech", "maker", "rebot", "damiao", "robstride", "metal"})
+    assert "training" in extras

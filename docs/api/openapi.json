@@ -483,6 +483,17 @@
       "DatasetHubStatusResponse": {
         "description": "datasets.py get_hub_status — url is null (not absent) for every status\nexcept on_hub, so None must NOT be excluded on this route.",
         "properties": {
+          "hub_has_data": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Has Data"
+          },
           "repo_id": {
             "title": "Repo Id",
             "type": "string"
@@ -512,7 +523,8 @@
         "required": [
           "repo_id",
           "status",
-          "url"
+          "url",
+          "hub_has_data"
         ],
         "title": "DatasetHubStatusResponse",
         "type": "object"
@@ -1066,6 +1078,49 @@
         "title": "EpisodeSummary",
         "type": "object"
       },
+      "ExcludedEpisodesRequest": {
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesRequest",
+        "type": "object"
+      },
+      "ExcludedEpisodesResponse": {
+        "description": "server.py datasets_excluded_episodes — the episode indices left OUT of\nthe training subset for one dataset. Empty list when nothing is excluded;\nthe dataset itself is untouched (curation, not deletion).",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesResponse",
+        "type": "object"
+      },
       "ExtraStatus": {
         "properties": {
           "available": {
@@ -1263,7 +1318,7 @@
         "type": "object"
       },
       "HubJobItem": {
-        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).",
+        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).\n\nThe trailing four are the run's identity, recovered from the job's own argv\nby _hub_job_identity so a run launched on another machine reads like a\ntracked one. Each is independently nullable and for a real reason: a RESUMED\ncloud run carries `--config_path` instead of `--policy.type` /\n`--dataset.repo_id`, so it reports a repo and a step target with no policy\nor dataset. They are decoration on a listing — never identity — so a row\nthat answers none of them still renders.",
         "properties": {
           "created_at": {
             "anyOf": [
@@ -1275,6 +1330,17 @@
               }
             ],
             "title": "Created At"
+          },
+          "dataset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset"
           },
           "docker_image": {
             "anyOf": [
@@ -1297,6 +1363,17 @@
               }
             ],
             "title": "Flavor"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
           },
           "id": {
             "title": "Id",
@@ -1324,6 +1401,17 @@
             ],
             "title": "Owner"
           },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
           "space_id": {
             "anyOf": [
               {
@@ -1345,6 +1433,17 @@
               }
             ]
           },
+          "total_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Steps"
+          },
           "url": {
             "title": "Url",
             "type": "string"
@@ -1359,7 +1458,11 @@
           "flavor",
           "status",
           "owner",
-          "url"
+          "url",
+          "policy_type",
+          "dataset",
+          "total_steps",
+          "hf_repo_id"
         ],
         "title": "HubJobItem",
         "type": "object"
@@ -1542,6 +1645,11 @@
       },
       "InferenceRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "camera_bindings": {
             "additionalProperties": {
               "type": "string"
@@ -1797,6 +1905,23 @@
         "title": "JobMetricsHistoryResponse",
         "type": "object"
       },
+      "JobQueueResponse": {
+        "description": "server.py list_job_queue / reorder_job_queue — the WHOLE local training\nqueue (JobRegistry.list_queue / reorder_queue), in the order it will run,\neach record annotated with its 1-based queue_position. Same JobRecord model\nas the history list — a queued record is uniform-with-defaults, not a\ndifferent shape — but the ordering contract differs (run order, uncapped),\nwhich is why this is not JobListResponse.",
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobRecord"
+            },
+            "title": "Jobs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "jobs"
+        ],
+        "title": "JobQueueResponse",
+        "type": "object"
+      },
       "JobRecord": {
         "properties": {
           "ancestor_ids": {
@@ -1987,6 +2112,38 @@
             ],
             "title": "Process Pid"
           },
+          "queue_position": {
+            "default": 0,
+            "title": "Queue Position",
+            "type": "integer"
+          },
+          "queue_seq": {
+            "default": 0,
+            "title": "Queue Seq",
+            "type": "integer"
+          },
+          "queued_hub_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued Hub Ref"
+          },
+          "queued_resume_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued Resume Ref"
+          },
           "remote_job_id": {
             "anyOf": [
               {
@@ -2015,6 +2172,7 @@
           },
           "state": {
             "enum": [
+              "queued",
               "running",
               "done",
               "failed",
@@ -2062,6 +2220,152 @@
           "message"
         ],
         "title": "LogLine",
+        "type": "object"
+      },
+      "MakerIdentifyArmRequest": {
+        "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "required": [
+          "device_type"
+        ],
+        "title": "MakerIdentifyArmRequest",
+        "type": "object"
+      },
+      "MakerIdentifyArmResponse": {
+        "description": "maker_ports.identify_maker_arm_by_motion — which port saw the gesture.\n\n`port` is absent on failure rather than null, so the route excludes None.\n`skipped` lists ports that could not be opened (usually the other half of\nthe rig, which speaks a different protocol).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "skipped": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "MakerIdentifyArmResponse",
+        "type": "object"
+      },
+      "MakerProbePortsRequest": {
+        "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "title": "MakerProbePortsRequest",
+        "type": "object"
+      },
+      "MakerProbePortsResponse": {
+        "description": "maker_ports.probe_maker_ports — which ports answered which protocol.\n\nEvery list is always present (empty rather than absent) so a client can\nread them unconditionally; `message` is always a human-readable summary,\nincluding on the nothing-found path.",
+        "properties": {
+          "follower_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Follower Ports",
+            "type": "array"
+          },
+          "leader_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Leader Ports",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "unknown_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Ports",
+            "type": "array"
+          }
+        },
+        "required": [
+          "success",
+          "follower_ports",
+          "leader_ports",
+          "unknown_ports",
+          "message"
+        ],
+        "title": "MakerProbePortsResponse",
         "type": "object"
       },
       "MergeLogEntry": {
@@ -2304,7 +2608,7 @@
         "type": "object"
       },
       "ModelInfoResponse": {
-        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.",
+        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.\n``dataset_episodes`` is absent only on that file-tree fallback.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2316,6 +2620,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -2448,7 +2766,7 @@
         "type": "object"
       },
       "ModelListItem": {
-        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
+        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\n``dataset_episodes`` (the training-episode subset, privacy-gated by\nmodels._gate_dataset_episodes) is set by the two local producers and is\nabsent on a Hub-seeded row, which never reads a checkpoint's\ntrain_config.json.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2460,6 +2778,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -2827,7 +3159,7 @@
         "type": "object"
       },
       "NodeEntry": {
-        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started. capabilities is\na plain dict, not HealthCapabilities — it's the PEER's self-reported\nblock, and a version-skewed peer must not fail our response validation.\nlast_verified_at is the server's monotonic registry clock (ordering and\nfreshness relative to other entries, not wall-clock time).",
+        "description": "One node (nodes.py PeerNode.to_dict; server.py list_nodes for self).\n\nNulls are meaningful, so None is never excluded: url is null only on the\nself entry (a server doesn't know its own external address); instance_id,\nversion, capabilities and last_verified_at are null on a saved peer that\nhasn't completed a handshake since this process started — and on a\ndiscovered candidate the verify handshake hasn't confirmed yet, which\nadditionally carries status \"pending\" (never \"pending\" with a non-null\ninstance_id). capabilities is a plain dict, not HealthCapabilities — it's\nthe PEER's self-reported block, and a version-skewed peer must not fail\nour response validation. last_verified_at is the server's monotonic\nregistry clock (ordering and freshness relative to other entries, not\nwall-clock time); last_seen_at is its wall-clock sibling — epoch seconds\nof the same last successful handshake, null until one happens (and always\nnull on the self entry), so clients can render \"last seen X ago\". source\nsays how the entry got here: \"manual\" for the self entry and hand-added\npeers (the only ones persisted), a source id for discovery-source\ncandidates.",
         "properties": {
           "capabilities": {
             "anyOf": [
@@ -2856,6 +3188,17 @@
             "title": "Is Self",
             "type": "boolean"
           },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
           "last_verified_at": {
             "anyOf": [
               {
@@ -2878,10 +3221,19 @@
             ],
             "title": "Name"
           },
+          "source": {
+            "enum": [
+              "manual",
+              "tailscale"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "ok",
-              "unreachable"
+              "unreachable",
+              "pending"
             ],
             "title": "Status",
             "type": "string"
@@ -2917,13 +3269,15 @@
           "capabilities",
           "status",
           "last_verified_at",
-          "is_self"
+          "last_seen_at",
+          "is_self",
+          "source"
         ],
         "title": "NodeEntry",
         "type": "object"
       },
       "NodeListResponse": {
-        "description": "server.py list_nodes — the self entry first, then registered peers.",
+        "description": "server.py list_nodes — the self entry first, then registered peers.\n\n`sources` (additive) is the list of registered discovery-source ids —\n[\"tailscale\"] when the server was started with --discover-tailscale, []\notherwise — so a client can tell \"no peers found\" apart from \"discovery\nis not even on\" instead of promising discovery that will never happen.",
         "properties": {
           "nodes": {
             "items": {
@@ -2931,10 +3285,18 @@
             },
             "title": "Nodes",
             "type": "array"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sources",
+            "type": "array"
           }
         },
         "required": [
-          "nodes"
+          "nodes",
+          "sources"
         ],
         "title": "NodeListResponse",
         "type": "object"
@@ -2961,6 +3323,11 @@
       },
       "OpenCalibrationFolderRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "device_type": {
             "title": "Device Type",
             "type": "string"
@@ -3093,6 +3460,11 @@
       },
       "RecordingRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "dataset_repo_id": {
             "title": "Dataset Repo Id",
             "type": "string"
@@ -3222,6 +3594,55 @@
         "title": "RecordingRequest",
         "type": "object"
       },
+      "ReleaseCanTorqueRequest": {
+        "properties": {
+          "arm_type": {
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "port": {
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm_type",
+          "port"
+        ],
+        "title": "ReleaseCanTorqueRequest",
+        "type": "object"
+      },
+      "ReleaseCanTorqueResponse": {
+        "description": "can_recovery.handle_release_can_torque — the crash-recovery release.\n\n`problems` is always present (empty on success) so a client can render\nthe loud per-bus alarms unconditionally.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "problems"
+        ],
+        "title": "ReleaseCanTorqueResponse",
+        "type": "object"
+      },
       "RenameJobBody": {
         "properties": {
           "new_name": {
@@ -3235,8 +3656,31 @@
         "title": "RenameJobBody",
         "type": "object"
       },
+      "ReorderQueueRequest": {
+        "properties": {
+          "job_ids": {
+            "items": {
+              "maxLength": 200,
+              "type": "string"
+            },
+            "maxItems": 512,
+            "title": "Job Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_ids"
+        ],
+        "title": "ReorderQueueRequest",
+        "type": "object"
+      },
       "ReplayRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "episode_index": {
             "title": "Episode Index",
             "type": "integer"
@@ -3271,6 +3715,24 @@
           "follower_config"
         ],
         "title": "ReplayRequest",
+        "type": "object"
+      },
+      "RestartResponse": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "restarting": {
+            "title": "Restarting",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "restarting",
+          "message"
+        ],
+        "title": "RestartResponse",
         "type": "object"
       },
       "RobotPortResponse": {
@@ -3621,15 +4083,23 @@
               "teleoperation",
               "recording",
               "inference",
-              "replay"
+              "replay",
+              "calibration",
+              "auto_calibration"
             ],
             "title": "Kind",
             "type": "string"
           },
           "lease_timeout_s": {
-            "default": 60.0,
-            "title": "Lease Timeout S",
-            "type": "number"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Timeout S"
           },
           "options": {
             "additionalProperties": true,
@@ -3661,9 +4131,24 @@
         "type": "object"
       },
       "SessionStartResponse": {
+        "description": "`warnings` relays the feature start handler's warn-but-allow findings\n(teleoperation/replay arm-identity checks: the session RUNS, but e.g. the\nservos' EEPROM disagrees with the saved calibration file). Backend prose,\nrendered verbatim; null when the start raised none — kinds whose warnings\nsurface via status polling (recording, inference) keep them there.",
         "properties": {
           "session": {
             "$ref": "#/components/schemas/SessionInfo"
+          },
+          "warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warnings"
           }
         },
         "required": [
@@ -3689,6 +4174,33 @@
           "result"
         ],
         "title": "SessionStopResponse",
+        "type": "object"
+      },
+      "SetExcludedEpisodesResponse": {
+        "description": "server.py datasets_set_excluded_episodes — echoes the set actually\npersisted (re-read from disk), not the caller's input.",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "SetExcludedEpisodesResponse",
         "type": "object"
       },
       "SuccessRepoIdResponse": {
@@ -3748,6 +4260,11 @@
       },
       "TeleoperateRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "follower_config": {
             "title": "Follower Config",
             "type": "string"
@@ -3873,6 +4390,7 @@
         "properties": {
           "batch_size": {
             "default": 8,
+            "exclusiveMinimum": 0.0,
             "title": "Batch Size",
             "type": "integer"
           },
@@ -3929,6 +4447,7 @@
           },
           "env_eval_freq": {
             "default": 0,
+            "minimum": 0.0,
             "title": "Env Eval Freq",
             "type": "integer"
           },
@@ -3956,11 +4475,13 @@
           },
           "eval_batch_size": {
             "default": 50,
+            "exclusiveMinimum": 0.0,
             "title": "Eval Batch Size",
             "type": "integer"
           },
           "eval_n_episodes": {
             "default": 10,
+            "exclusiveMinimum": 0.0,
             "title": "Eval N Episodes",
             "type": "integer"
           },
@@ -4015,11 +4536,13 @@
           },
           "log_freq": {
             "default": 50,
+            "exclusiveMinimum": 0.0,
             "title": "Log Freq",
             "type": "integer"
           },
           "num_workers": {
             "default": 4,
+            "minimum": 0.0,
             "title": "Num Workers",
             "type": "integer"
           },
@@ -4114,6 +4637,7 @@
           },
           "policy_type": {
             "default": "act",
+            "pattern": "^[a-z0-9_]+$",
             "title": "Policy Type",
             "type": "string"
           },
@@ -4194,6 +4718,7 @@
           },
           "save_freq": {
             "default": 1000,
+            "exclusiveMinimum": 0.0,
             "title": "Save Freq",
             "type": "integer"
           },
@@ -4211,6 +4736,7 @@
           },
           "steps": {
             "default": 10000,
+            "exclusiveMinimum": 0.0,
             "title": "Steps",
             "type": "integer"
           },
@@ -4576,6 +5102,48 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/arms/release-torque": {
+      "post": {
+        "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
+        "operationId": "release_can_torque",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseCanTorqueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseCanTorqueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Can Torque",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/auto-calibration-batch-status": {
       "get": {
         "description": "Per-arm status + logs and overall counts for a batch auto-calibration.",
@@ -4667,6 +5235,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4703,6 +5281,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -4764,6 +5352,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4809,6 +5407,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -4858,6 +5466,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -4897,7 +5515,7 @@
     },
     "/api/v1/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status",
         "responses": {
           "200": {
@@ -4968,7 +5586,7 @@
     },
     "/api/v1/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step",
         "responses": {
           "200": {
@@ -5305,6 +5923,89 @@
           }
         },
         "summary": "Datasets Episodes",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
+    "/api/v1/datasets/excluded-episodes": {
+      "get": {
+        "description": "Episode indices the user excluded from training for this dataset\n(curation, not deletion — see set_excluded_episodes). Empty list for a\ndataset with no exclusions.",
+        "operationId": "datasets_excluded_episodes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Excluded Episodes",
+        "tags": [
+          "datasets"
+        ]
+      },
+      "put": {
+        "description": "Replace the excluded-episode set for one dataset. NEVER deletes or\nmutates the dataset — the viewer computes the training subset from this\nand sends it as dataset_episodes when launching a run.",
+        "operationId": "datasets_set_excluded_episodes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExcludedEpisodesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Set Excluded Episodes",
         "tags": [
           "datasets"
         ]
@@ -6178,6 +6879,70 @@
         ]
       }
     },
+    "/api/v1/jobs/queue": {
+      "get": {
+        "description": "The whole local training queue, in the order it will run.\n\nSeparate from `GET /jobs` because that is a capped, newest-first PAGE of\nhistory and this is a complete list. Deriving the queue from that page was\nwrong twice over: a queued record carries its SUBMIT time, so queued runs\ncrowd the top of the page and pushed the actually-running job off it, and\npast the page size the queue itself was truncated — which silently dropped\nthe runs at the HEAD of the line and made every reorder a 409, since\n`reorder_queue` requires the whole list.",
+        "operationId": "list_job_queue",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Job Queue",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/v1/jobs/queue/reorder": {
+      "post": {
+        "description": "Set the order of the local training queue.\n\nLocal runs are one-at-a-time, so a second Start enqueues rather than\nfailing; this is how the user changes their mind about what goes next.\nOnly queued jobs can be reordered — the run already on the GPU is not in\nthe list, and a job that started while the drag was in flight makes the\nrequest stale (409).",
+        "operationId": "reorder_job_queue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderQueueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reorder Job Queue",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/v1/jobs/runners/hardware": {
       "get": {
         "description": "Return HF Jobs flavor catalog + auth state for the TargetCard.\n\nBoth the flavors list and the whoami result are cached in-process to\nkeep this endpoint cheap (it can be re-fetched whenever auth state\nchanges). The whoami cache is invalidated on login.",
@@ -6621,6 +7386,7 @@
     },
     "/api/v1/jobs/{job_id}/stop": {
       "post": {
+        "description": "Stop a running job, or cancel a queued one.\n\n`expect_state` is optional and is the caller's precondition: pass the state\nthe UI was showing when it drew the button. Cancel and kill are the same\nrequest here, so a Cancel drawn against a stale queue would otherwise\nSIGTERM a run the watchdog promoted in the meantime.\n\nTyped as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value\nused to reach the comparison, fail it, and come back as a 409 saying the job\n\"changed while you were looking at it\" — reporting a client's typo as a race,\nwhich no retry can ever clear. It is now a 422, and `/openapi.json`\nadvertises the real member set instead of \"any string\".",
         "operationId": "stop_job",
         "parameters": [
           {
@@ -6630,6 +7396,29 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
             }
           }
         ],
@@ -6658,6 +7447,90 @@
         "summary": "Stop Job",
         "tags": [
           "jobs"
+        ]
+      }
+    },
+    "/api/v1/maker/identify-arm": {
+      "post": {
+        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes.",
+        "operationId": "identify_maker_arm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerIdentifyArmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerIdentifyArmResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Identify Maker Arm",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/maker/probe-ports": {
+      "post": {
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).",
+        "operationId": "probe_maker_arm_ports",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerProbePortsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerProbePortsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Probe Maker Arm Ports",
+        "tags": [
+          "system"
         ]
       }
     },
@@ -6814,7 +7687,7 @@
     },
     "/api/v1/models/delete": {
       "post": {
-        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training; 502 on a delete failure.",
+        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training or queued (job.not_terminal —\nonly a terminal run has artifacts to delete; a queued run is cancelled on\nthe jobs surface, never through here); 502 on a delete failure.",
         "operationId": "models_delete",
         "requestBody": {
           "content": {
@@ -7230,8 +8103,20 @@
     },
     "/api/v1/nodes": {
       "get": {
-        "description": "All known nodes: this server first (is_self=true, built from the same\nhealth fields the handshake reads, so clients render one uniform list),\nthen every registered peer. Peers whose last probe is older than the TTL\nare re-verified inline; a peer that fails re-verification is reported\n`unreachable` but kept until explicitly removed.",
+        "description": "All known nodes: this server first (is_self=true, built from the same\nhealth fields the handshake reads, so clients render one uniform list),\nthen every registered peer. Peers whose last probe is older than the TTL\nare re-verified inline; a peer that fails re-verification is reported\n`unreachable` but kept until explicitly removed. `sources` names the\nregistered discovery sources, so a client can tell \"no peers\" apart from\n\"discovery is off\". ?force=true is the manual-refresh contract: this one\npass bypasses the TTL — discovery runs now and every known entry is\nprobed now — so a refresh button answers with the world as it is, not as\nit was up to TTL seconds ago.",
         "operationId": "list_nodes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -7242,6 +8127,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Nodes",
@@ -7328,6 +8223,513 @@
           }
         },
         "summary": "Remove Node",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs": {
+      "get": {
+        "description": "Server-to-server workload proxy: the peer's own typed GET /api/v1/jobs,\nreturned verbatim (the browser talks to ITS server; only servers talk to\npeers). The response reuses JobListResponse because the peer runs this\nsame code — and on version skew the stance is passthrough: a newer peer's\nadditive fields are dropped by the model, never an error, so the proxy\ndoesn't break the moment one machine updates first. 404 node.not_found\nfor an unknown instance_id; 502 node.unreachable when the peer doesn't\nanswer (short timeout — a peer that can't list its jobs promptly is as\ngood as down for scheduling purposes).",
+        "operationId": "get_node_jobs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Jobs",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/queue": {
+      "get": {
+        "description": "The peer's own typed GET /api/v1/jobs/queue, passed through — the EXACT\nqueue. The sibling jobs proxy reads the peer's default jobs page, which is\nlimited and can undercount queued runs on a busy peer; a client that shows\na queued count reads this instead. Same passthrough/version-skew stance\nand error mapping as the jobs proxy.",
+        "operationId": "get_node_queue",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Queue",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}": {
+      "delete": {
+        "description": "Forward a delete to the peer (terminal runs only — the peer refuses the\nrest). Same passthrough stance as the stop above: the peer's coded\nrefusals (409 job.has_children / job.has_queued_dependents, 404\njob.not_found, …) keep THEIR status and body; only transport-level failure\nis 502 node.unreachable, and 404 node.not_found names an unknown node.",
+        "operationId": "delete_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Node Job",
+        "tags": [
+          "nodes"
+        ]
+      },
+      "get": {
+        "description": "Drill-in proxy: the peer's own GET /api/v1/jobs/{job_id}, passed\nthrough verbatim (same passthrough/version-skew stance as the jobs proxy —\na newer peer's additive fields are dropped by the model, never an error).\n404 node.not_found for an unknown instance_id; 502 node.unreachable for\nANY failure to read the peer, its own 404 for an unknown job included.",
+        "operationId": "get_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Job",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}/logs": {
+      "get": {
+        "description": "The peer's own GET /api/v1/jobs/{job_id}/logs, passed through. The peer\ndrains its runner's live queue per call, so this proxy is inherently\nincremental — each call returns only the lines that arrived since the last\none, whoever made it. Same error mapping as the record proxy above.",
+        "operationId": "get_node_job_logs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobLogsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Job Logs",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/jobs/{job_id}/stop": {
+      "post": {
+        "description": "Forward a stop/cancel to the peer, `expect_state` precondition included.\n\nError stance — subtly different from the GET proxies, where any HTTP error\ncounts as unreachable: a stop is a request the peer may REFUSE for its own\nreasons (409 job.state_changed / job.has_queued_dependents, 404\njob.not_found, …), and those coded refusals pass through with the PEER's\nstatus and body, never re-wrapped as 502. Only transport-level failure is\n502 node.unreachable; 404 node.not_found still names an unknown NODE.",
+        "operationId": "stop_node_job",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Node Job",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}": {
+      "get": {
+        "description": "Environment proxy: the peer's own GET /api/v1/system/policy-extra/\n{policy_type}, passed through — whether the extra the policy needs is\nimportable in THE PEER's environment, the one an offloaded run imports\nfrom (the local answer is irrelevant to it). Same error mapping as the\nother GET proxies: 404 node.not_found for an unknown instance_id, 502\nnode.unreachable for ANY failure to read the peer.",
+        "operationId": "get_node_policy_extra",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyExtraStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Policy Extra",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install": {
+      "post": {
+        "description": "Forward the install to the peer: `pip install lerobot[<extra>]` runs\nTHERE, in the environment its training subprocesses import from. Mutation\nstance, like the stop/delete proxies: the peer's own refusals keep THEIR\nstatus and body; only transport-level failure is 502 node.unreachable,\nand 404 node.not_found names an unknown node.",
+        "operationId": "install_node_policy_extra",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Node Policy Extra",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install-status": {
+      "get": {
+        "description": "The peer's own install-status, passed through. The peer drains pending\npip log lines per call, so this proxy is inherently incremental — like\nthe job-log proxy. Same error mapping as the GET proxies.",
+        "operationId": "get_node_policy_extra_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Policy Extra Status",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/restart": {
+      "post": {
+        "description": "Forward a restart to the peer (its own POST /api/v1/system/restart).\n200 means the peer ANSWERED and scheduled its re-exec — expect it to flap\nunreachable for a few seconds; the registry's probes pick it back up. The\npeer's coded refusals (409 session.held / robot.busy.training /\nsystem.restart_unsupported — or a plain 404 from a peer too old to have\nthe endpoint) pass through with THEIR status and body; only transport\nfailure is 502 node.unreachable.",
+        "operationId": "restart_node",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Node",
         "tags": [
           "nodes"
         ]
@@ -7758,7 +9160,7 @@
     },
     "/api/v1/sessions": {
       "post": {
-        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds this phase: teleoperation, recording, inference, replay.\nCalibration, auto-calibration and wiggle sessions are still started\nthrough their legacy wizard/flow endpoints — the identity tracker observes\nthem all the same, so they appear in /sessions/current and can be stopped\nby id.\n\n201 returns the session identity; 409 session.held (details name the\nholder) when any session already holds the hardware; 404 robot.not_found;\n400 robot.not_ready (readiness is scoped to the arms the kind drives —\ninference/replay never open the leader bus); 422 request.validation for\noptions that don't fit the kind, an empty/oversized owner, or a\nlease_timeout_s outside 10–600. Other feature refusals pass through with\ntheir existing statuses and codes.\n\n`owner` attaches a lease: heartbeat within `lease_timeout_s` (default\n60s) or the session is safety-stopped. No owner, no lease, no\ntimeout-stop — legacy-started and owner-less sessions are never killed.",
+        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds: teleoperation, recording, inference, replay,\ncalibration, auto_calibration. Only wiggle still starts through its\nlegacy flow endpoint (seconds of open-loop motion, no stop handler) —\nthe identity tracker observes it all the same. Calibration's mid-session\nwizard controls (complete-calibration-step, the status polls) stay on\ntheir existing endpoints, like recording's pause/rerecord.\n\n201 returns the session identity plus optional `warnings` — warn-but-\nallow findings from the feature's start (teleoperation/replay\narm-identity checks) that the legacy start responses used to carry; 409\nsession.held (details name the holder) when any session already holds\nthe hardware; 404 robot.not_found; 400 robot.not_ready (readiness is\nscoped to the arms the kind drives — inference/replay never open the\nleader bus; the calibration kinds need only a port per targeted slot);\n422 request.validation for options that don't fit the kind, an\nempty/oversized owner, or a lease_timeout_s outside 10–600. Other\nfeature refusals pass through with their existing statuses and codes.\n\n`owner` attaches a lease: heartbeat within `lease_timeout_s` (default\n60s) or the session is safety-stopped. No owner, no lease, no\ntimeout-stop — legacy-started and owner-less sessions are never killed.",
         "operationId": "start_session",
         "requestBody": {
           "content": {
@@ -7992,7 +9394,7 @@
     },
     "/api/v1/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration",
         "requestBody": {
           "content": {
@@ -8172,7 +9574,7 @@
     },
     "/api/v1/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration",
         "responses": {
           "200": {
@@ -8444,6 +9846,28 @@
           }
         },
         "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/restart": {
+      "post": {
+        "description": "Re-exec this server process in place (same argv/env/PID), so a remote\noperator — the node-proxy POST /api/v1/nodes/{id}/restart — can bounce a\nheadless station without a shell on it. Answers FIRST, re-execs after a\nshort grace delay so this response reaches the client.\n\nRefusals, all 409: a live robot flow (robot.busy.<feature> — killing the\nserver mid-flow drops the hardware threads with it), a running or queued\ntraining run (robot.busy.training — the loader retires both on startup),\nand a process that cannot safely re-exec (system.restart_unsupported: a\ndev reload worker, a non-entry-point launch, or Windows).",
+        "operationId": "restart_server",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Restart Server",
         "tags": [
           "system"
         ]
@@ -8834,6 +10258,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8870,6 +10304,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -8931,6 +10375,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8976,6 +10430,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -9025,6 +10489,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -9064,7 +10538,7 @@
     },
     "/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status_calibration_status_get",
         "responses": {
           "200": {
@@ -9135,7 +10609,7 @@
     },
     "/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step_complete_calibration_step_post",
         "responses": {
           "200": {
@@ -10788,6 +12262,7 @@
     },
     "/jobs/{job_id}/stop": {
       "post": {
+        "description": "Stop a running job, or cancel a queued one.\n\n`expect_state` is optional and is the caller's precondition: pass the state\nthe UI was showing when it drew the button. Cancel and kill are the same\nrequest here, so a Cancel drawn against a stale queue would otherwise\nSIGTERM a run the watchdog promoted in the meantime.\n\nTyped as `JobState`, not `str`, to match `JobRegistry.stop`: an unknown value\nused to reach the comparison, fail it, and come back as a 409 saying the job\n\"changed while you were looking at it\" — reporting a client's typo as a race,\nwhich no retry can ever clear. It is now a 422, and `/openapi.json`\nadvertises the real member set instead of \"any string\".",
         "operationId": "stop_job_jobs__job_id__stop_post",
         "parameters": [
           {
@@ -10797,6 +12272,29 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expect_state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "done",
+                    "failed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expect State"
             }
           }
         ],
@@ -10938,7 +12436,7 @@
     },
     "/models/delete": {
       "post": {
-        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training; 502 on a delete failure.",
+        "description": "Delete a local model — its training run's output dir (strictly sandboxed\nunder outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404\nunknown; 409 when the run is still training or queued (job.not_terminal —\nonly a terminal run has artifacts to delete; a queued run is cancelled on\nthe jobs surface, never through here); 502 on a delete failure.",
         "operationId": "models_delete_models_delete_post",
         "requestBody": {
           "content": {
@@ -11787,7 +13285,7 @@
     },
     "/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration_start_calibration_post",
         "requestBody": {
           "content": {
@@ -11967,7 +13465,7 @@
     },
     "/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration_stop_calibration_post",
         "responses": {
           "200": {

@@ -21,17 +21,26 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from lerobot.robots import make_robot_from_config
 from lerobot.robots.bi_so_follower import BiSOFollower
 from lerobot.robots.so_follower import SO101Follower
+from lerobot.teleoperators import make_teleoperator_from_config
 from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
 from lerobot.utils.errors import DeviceNotConnectedError
 
 from .api_errors import ErrorCode
+from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
+from .maker_rest_pose import (
+    capture_maker_pose,
+    maker_follower_arms,
+    return_maker_arms_to_rest,
+)
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .session_events import notify_session_changed
+from .torque import de_energize_can_device, release_maker_torque
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
@@ -349,6 +358,12 @@ class TeleoperateRequest(BaseModel):
     # decides the on-disk staging dir, not which calibration drives which arm.
     # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
     robot_name: str = ""
+    # Hardware family: "so101" (Feetech serial) or "maker" (RobStride CAN
+    # follower + Star Arm 102 leader). Decides which lerobot config classes the
+    # robot factory builds, which calibration library the names resolve in, and
+    # which of the Feetech-only safety helpers apply. Defaults to so101 so a
+    # request from a client that predates the Maker arm is unchanged.
+    arm_type: str = "so101"
     # Escape hatch for the arm-identity guard (see makermodslab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
@@ -417,6 +432,42 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
     except Exception as e:
         logger.error(f"Error getting joint positions: {e}")
         return {urdf[0]: 0.0 for urdf in _SO101_URDF_JOINTS.values()}
+
+
+def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
+    """Live joint angles (degrees) of a Maker follower, keyed by motor name.
+
+    The URDF path above cannot serve a Maker arm: `_SO101_URDF_JOINTS` maps six
+    SO-101 motors onto the one URDF that ships with MakerMods Lab
+    (`frontend/public/so-101-urdf`), and there is no Maker URDF yet. The Maker
+    arm also has a seventh joint (`wrist_yaw`) with no counterpart in that
+    model, so feeding its angles to the SO-101 viewer would animate the wrong
+    arm with silently wrong values — worse than showing nothing.
+
+    So Maker sessions broadcast this instead: the raw per-joint angles the
+    frontend renders as a numeric readout while the 3D viewer stays hidden.
+    Values are already in degrees (the Maker follower's native unit) and keyed
+    by motor name, with the bimanual `left_`/`right_` prefix stripped.
+    """
+    try:
+        observation = robot.get_observation()
+    except Exception as e:
+        logger.error(f"Error reading Maker joint positions: {e}")
+        return {}
+    out: dict[str, float] = {}
+    for key, value in observation.items():
+        if not key.endswith(".pos"):
+            continue
+        motor = key[: -len(".pos")]
+        if prefix:
+            if not motor.startswith(prefix):
+                continue
+            motor = motor[len(prefix) :]
+        elif motor.startswith(("left_", "right_")):
+            continue
+        if isinstance(value, (int, float)):
+            out[motor] = float(value)
+    return out
 
 
 def _device_buses(device) -> list:
@@ -779,6 +830,86 @@ def _connect_bimanual(request: TeleoperateRequest):
         raise
 
 
+def _can_family_label(request) -> str:
+    """Human name of a CAN request's follower family, for messages and logs."""
+    return "Metal" if getattr(request, "arm_type", None) == "metal" else "Maker"
+
+
+def _connect_can(request: TeleoperateRequest):
+    """Connect a CAN follower (Maker or Metal) + Star Arm 102 leader pair.
+
+    Deliberately much shorter than the SO-101 path above, because the CAN
+    devices' own ``connect()`` already does everything that path hand-rolls:
+    it opens the bus, loads and registers the calibration, writes the MIT
+    follow gains, and enables torque. Re-implementing that here would only
+    add ways to diverge from it.
+
+    ``calibrate=False`` is not optional. lerobot's default is True, and on an
+    uncalibrated device that path calls ``calibrate()``, which blocks on
+    ``input()`` — in a headless worker thread that is an unkillable hang, not
+    an error. MakerMods Lab has already guaranteed a calibration file exists by
+    this point (``setup_calibration_files`` raises when it does not), so the
+    flag only ever suppresses a prompt that should be unreachable.
+
+    A failed FOLLOWER connect runs ``de_energize_can_device`` before raising,
+    and it is load-bearing on Metal, not belt-and-braces: the Damiao
+    handshake IS the motor enable command sent motor by motor, so a handshake
+    that raises partway has energized the motors that DID answer while
+    ``is_connected`` still reads False — the state every register-era cleanup
+    helper skips. (MakerFollower.connect() also cleans up after itself;
+    MetalFollower.connect() does not, so the explicit release here is the
+    only one Metal gets.)
+
+    None of the Feetech preflights run: see arm_capabilities.uses_feetech_bus.
+    Returns (robot, teleop_device, warnings) to match _connect_bimanual.
+    """
+    family = _can_family_label(request)
+    if request.mode == "bimanual":
+        robot_config, teleop_config = build_bimanual_configs(request)
+    else:
+        robot_config, teleop_config = build_single_configs(request)
+
+    # lerobot's own factories rather than a hardcoded class per branch: the
+    # CAN leaders have no device class of their own (the `_maker`/`_metal`
+    # variants are CONFIG-only presets that all resolve to RebotArm102Leader /
+    # BiRebot102Leader), so dispatching on the registered `config.type` is the
+    # only mapping guaranteed to stay correct if that changes upstream.
+    robot = make_robot_from_config(robot_config)
+    teleop_device = make_teleoperator_from_config(teleop_config)
+
+    try:
+        logger.info(f"Connecting to {family} follower arm(s)...")
+        try:
+            robot.connect(calibrate=False)
+        except Exception as e:
+            de_energize_can_device(robot, f"{family} follower arm")
+            raise RuntimeError(
+                f"Could not connect to the {family} follower arm on {request.follower_port}. "
+                "Check that the CAN adapter is plugged in, the arm is powered, and the "
+                "motors are in MIT mode, then try again."
+            ) from e
+
+        logger.info("Connecting to Star Arm 102 leader arm(s)...")
+        try:
+            teleop_device.connect(calibrate=False)
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not connect to the Star Arm 102 leader on {request.leader_port}. "
+                "Make sure it's plugged in and powered on, then try again."
+            ) from e
+
+        logger.info(f"Successfully connected to the {family} arm pair")
+        return robot, teleop_device, []
+    except Exception as e:
+        # Same contract as _connect_bimanual: stash the cleanup outcome on the
+        # exception so the caller (which holds no device of its own yet) can
+        # surface it as a warning instead of losing it.
+        e.cleanup_error = _cleanup_after_setup_failure(
+            robot, teleop_device, f"{family} follower arm", "Star 102 leader arm"
+        )
+        raise
+
+
 def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=None) -> dict[str, Any]:
     """Handle start teleoperation request.
 
@@ -857,6 +988,15 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 "message": "Replay is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_REPLAY,
             }
+        # Lazy, because jobs imports this module back the same way.
+        from . import jobs as _jobs
+
+        if (training := _jobs.training_is_active()) is not None:
+            return {
+                "success": False,
+                "message": f"Training run '{training}' is using this machine. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_TRAINING,
+            }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later grace/return short until the server
@@ -879,7 +1019,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
 
-        if request.mode == "bimanual":
+        if not uses_feetech_bus(request.arm_type):
+            robot, teleop_device, identity_warnings = _connect_can(request)
+        elif request.mode == "bimanual":
             robot, teleop_device, identity_warnings = _connect_bimanual(request)
         else:
             # Create robot and teleop configs (stages calibration files).
@@ -954,10 +1096,22 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # leader. The gripper is excluded: at stop time it may be holding an
         # object, and returning it to its (likely open) starting width would
         # drop the object mid-return.
-        follower_rest_poses = [
-            (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-            for bus in _device_buses(robot)
-        ]
+        # Both arm types capture a start pose and are driven back to it on a
+        # normal stop — an arm has no brakes, so cutting torque anywhere but
+        # near its resting pose drops it under gravity. Only the MECHANISM
+        # differs: an SO-101 is eased home by a Feetech profile velocity
+        # (rest_pose.py), a Maker arm by interpolating its MIT setpoint
+        # (maker_rest_pose.py), because a RobStride joint has no
+        # Goal_Position/Goal_Velocity register to hand the motion off to.
+        if uses_feetech_bus(request.arm_type):
+            follower_rest_poses = [
+                (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
+                for bus in _device_buses(robot)
+            ]
+            maker_rest_poses = []
+        else:
+            follower_rest_poses = []
+            maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
 
         # Stream the arms in the background; the worker owns disconnect so stop()
         # does not race the serial bus from the request thread.
@@ -968,8 +1122,12 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # Power telemetry: ~1 Hz Present_Current samples per follower bus (see
         # PowerTelemetry). Followers only — the leader's torque is off.
         telemetry = PowerTelemetry()
-        telemetry_targets = list(
-            zip(_device_buses(robot), ["left_", "right_"] if is_bimanual else [""], strict=False)
+        # Present_Current is a Feetech register; an empty target list makes the
+        # sampling loop below a no-op for a Maker arm without branching in it.
+        telemetry_targets = (
+            list(zip(_device_buses(robot), ["left_", "right_"] if is_bimanual else [""], strict=False))
+            if uses_feetech_bus(request.arm_type)
+            else []
         )
 
         def teleoperation_worker():
@@ -998,21 +1156,39 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                                 for bus, prefix in telemetry_targets:
                                     telemetry.sample(bus, prefix)
                                 last_current_sample_time = current_time
-                            if is_bimanual:
-                                joint_positions = get_joint_positions_from_robot(
-                                    robot, prefix="left_", calibration=robot.left_arm.calibration
-                                )
+                            if not uses_feetech_bus(request.arm_type):
+                                # No Maker URDF ships yet, so `joints` stays
+                                # empty (the viewer has nothing to drive) and
+                                # the angles travel under `joints_deg` for the
+                                # numeric readout. See get_maker_joint_degrees.
+                                joint_data = {
+                                    "type": "joint_update",
+                                    "joints": {},
+                                    "joints_deg": get_maker_joint_degrees(
+                                        robot, prefix="left_" if is_bimanual else ""
+                                    ),
+                                    "timestamp": current_time,
+                                }
+                                if is_bimanual:
+                                    joint_data["joints_deg_right"] = get_maker_joint_degrees(
+                                        robot, prefix="right_"
+                                    )
                             else:
-                                joint_positions = get_joint_positions_from_robot(robot)
-                            joint_data = {
-                                "type": "joint_update",
-                                "joints": joint_positions,
-                                "timestamp": current_time,
-                            }
-                            if is_bimanual:
-                                joint_data["joints_right"] = get_joint_positions_from_robot(
-                                    robot, prefix="right_", calibration=robot.right_arm.calibration
-                                )
+                                if is_bimanual:
+                                    joint_positions = get_joint_positions_from_robot(
+                                        robot, prefix="left_", calibration=robot.left_arm.calibration
+                                    )
+                                else:
+                                    joint_positions = get_joint_positions_from_robot(robot)
+                                joint_data = {
+                                    "type": "joint_update",
+                                    "joints": joint_positions,
+                                    "timestamp": current_time,
+                                }
+                                if is_bimanual:
+                                    joint_data["joints_right"] = get_joint_positions_from_robot(
+                                        robot, prefix="right_", calibration=robot.right_arm.calibration
+                                    )
                             if telemetry.latest_ma:
                                 # Instantaneous follower current (mA), ~1 Hz
                                 # fresh; the frontend is free to ignore it.
@@ -1050,12 +1226,16 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     # session, not idle yet (mirrors the status payload).
                     notify_session_changed("teleoperation", True, phase="releasing")
                     _return_followers_to_rest(follower_rest_poses, _release_now)
+                    return_maker_arms_to_rest(maker_rest_poses, _release_now)
                 # Belt and braces: disable torque explicitly before disconnect.
                 # disconnect() disables torque too, but if it fails partway the
                 # error is swallowed here and the arm stays energized (rigid) —
                 # so make the disable explicit, and make any failure loud.
-                problems = force_disable_torque(robot, "follower arm")
-                problems += force_disable_torque(teleop_device, "leader arm")
+                if uses_feetech_bus(request.arm_type):
+                    problems = force_disable_torque(robot, "follower arm")
+                    problems += force_disable_torque(teleop_device, "leader arm")
+                else:
+                    problems = release_maker_torque(robot, f"{_can_family_label(request)} follower arm")
                 for device, label in ((robot, "follower arm"), (teleop_device, "leader arm")):
                     error = _safe_disconnect(device, label)
                     if error:

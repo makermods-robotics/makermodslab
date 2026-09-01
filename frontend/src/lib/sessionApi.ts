@@ -4,7 +4,8 @@ import type { SessionKind } from "@/hooks/useActiveSession";
 
 /**
  * Client for the /api/v1/sessions surface — the named-session start/stop the
- * four robot flows (teleoperation, recording, inference, replay) go through.
+ * robot flows (teleoperation, recording, inference, replay, calibration,
+ * auto-calibration) go through.
  *
  * The frontend sends the robot's NAME plus kind-specific options only; ports,
  * configs, mode, right-arm fields and cameras all resolve server-side from
@@ -14,13 +15,16 @@ import type { SessionKind } from "@/hooks/useActiveSession";
  * safety net that replaced the browser unload beacons and exit guards.
  */
 
-/** The kinds startable through POST /api/v1/sessions this phase (calibration,
- * auto-calibration and wiggle still start through their legacy flows). */
+/** The kinds startable through POST /api/v1/sessions (only wiggle still
+ * starts through its legacy flow endpoint — seconds of open-loop motion,
+ * nothing to lease). */
 export type StartableSessionKind =
   | "teleoperation"
   | "recording"
   | "inference"
-  | "replay";
+  | "replay"
+  | "calibration"
+  | "auto_calibration";
 
 export interface SessionLeaseInfo {
   owner: string;
@@ -93,11 +97,43 @@ export interface ReplaySessionOptions {
   skip_identity_check?: boolean;
 }
 
+export interface CalibrationSessionOptions {
+  /** Which physical arm slot to calibrate: "robot" = follower, "teleop" =
+   * leader; "left" is also the single-arm pair. Backend enum values — data,
+   * never display copy. */
+  device_type: "robot" | "teleop";
+  arm?: "left" | "right";
+  /** Calibration is the setup flow, so the port may ride here (the UI's
+   * unsaved draft pick); omitted, the record's saved slot port is used. */
+  port?: string;
+  /** Save name; omitted, the slot's assigned config (else the robot's
+   * default name for the slot) is used. */
+  config_file?: string;
+  overwrite?: boolean;
+}
+
+export interface AutoCalibrationArmSessionOption {
+  device_type: "robot" | "teleop";
+  arm?: "left" | "right";
+  port?: string;
+  config_file?: string;
+}
+
+export interface AutoCalibrationSessionOptions {
+  /** 1-4 arm slots, all run CONCURRENTLY (a single arm is a batch of one). */
+  arms: AutoCalibrationArmSessionOption[];
+  /** Drive torque percent (10-100); omitted, the record's saved motor_power. */
+  motor_power?: number;
+  overwrite?: boolean;
+}
+
 export type SessionOptions =
   | TeleoperationSessionOptions
   | RecordingSessionOptions
   | InferenceSessionOptions
-  | ReplaySessionOptions;
+  | ReplaySessionOptions
+  | CalibrationSessionOptions
+  | AutoCalibrationSessionOptions;
 
 export interface StartSessionArgs {
   kind: StartableSessionKind;
@@ -110,22 +146,28 @@ export interface StartSessionArgs {
   lease_timeout_s?: number;
 }
 
+export interface StartedSession {
+  session: SessionInfo;
+  /** Warn-but-allow findings from the feature's start (teleoperation/replay
+   * arm-identity checks): the session RUNS, but the caller should surface
+   * them. Backend prose — rendered verbatim, never translated. */
+  warnings: string[] | null;
+}
+
 export async function startSession(
   baseUrl: string,
   fetcher: Fetcher,
   args: StartSessionArgs
-): Promise<SessionInfo> {
-  const { session } = await apiRequest<{ session: SessionInfo }>(
-    baseUrl,
-    fetcher,
-    "/api/v1/sessions",
-    {
-      method: "POST",
-      body: args,
-      action: `Start ${args.kind} session`,
-    }
-  );
-  return session;
+): Promise<StartedSession> {
+  const { session, warnings } = await apiRequest<{
+    session: SessionInfo;
+    warnings?: string[] | null;
+  }>(baseUrl, fetcher, "/api/v1/sessions", {
+    method: "POST",
+    body: args,
+    action: `Start ${args.kind} session`,
+  });
+  return { session, warnings: warnings ?? null };
 }
 
 export async function getCurrentSession(

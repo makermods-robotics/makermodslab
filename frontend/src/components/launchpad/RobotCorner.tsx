@@ -48,7 +48,7 @@ import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { useRobots, RobotRecord, RobotMode } from "@/hooks/useRobots";
+import { useRobots, RobotRecord, RobotMode, ArmType } from "@/hooks/useRobots";
 import { ApiError } from "@/lib/apiClient";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
@@ -155,8 +155,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
 
   // Create → select (useRobots does this on success) → straight into the Robot
   // settings window so ports/calibration/cameras get configured (wireframe J1).
-  const handleCreate = async (name: string, mode: RobotMode) => {
-    const ok = await createRobot(name, mode);
+  const handleCreate = async (
+    name: string,
+    mode: RobotMode,
+    armType: ArmType,
+  ) => {
+    const ok = await createRobot(name, mode, armType);
     if (ok) {
       setCreateOpen(false);
       openSettings(name);
@@ -171,17 +175,28 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   const handleTeleop = async (robot: RobotRecord) => {
     setTeleopStarting(true);
     try {
-      const session = await startSession(baseUrl, fetchWithHeaders, {
+      const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "teleoperation",
         robot: robot.name,
         owner: tabOwnerId(),
         options: {},
       });
       setTeleopSessionId(session.id);
-      toast({
-        title: t("robot.teleop.startedTitle"),
-        description: t("robot.teleop.startedFallback", { name: robot.name }),
-      });
+      if (warnings?.length) {
+        // A success can carry a warn-but-allow arm-identity finding (e.g. the
+        // arm's servos hold a different saved calibration). Make it visible —
+        // the warning text is backend prose, rendered verbatim.
+        toast({
+          title: t("robot.teleop.startedWarningTitle"),
+          description: warnings.join(" "),
+          duration: 10000,
+        });
+      } else {
+        toast({
+          title: t("robot.teleop.startedTitle"),
+          description: t("robot.teleop.startedFallback", { name: robot.name }),
+        });
+      }
       setTeleopOpen(true);
     } catch (e) {
       if (e instanceof ApiError) {
@@ -323,6 +338,8 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                           : "uppercase tracking-wider",
                       )}
                     >
+                      {t(`robot.corner.armType.${rec.arm_type ?? "so101"}`)}
+                      {" · "}
                       {rec.mode === "bimanual"
                         ? t("robot.corner.mode.bimanual")
                         : t("robot.corner.mode.single")}

@@ -360,6 +360,13 @@ const TrainPanel: React.FC = () => {
     () => selectedDataset,
   );
   const [query, setQuery] = useState("");
+  // A prefill's episode subset, paired with the repo id it was seeded for —
+  // dropped (via the repoId guard below) if the user then picks a different
+  // dataset, so a stale subset can never silently apply to it.
+  const [prefillEpisodes, setPrefillEpisodes] = useState<{
+    repoId: string;
+    indices: number[];
+  } | null>(null);
 
   // Apply a studio prefill (fine-tune base / preselected dataset) once, then
   // clear it so reopening the studio fresh doesn't re-apply a stale one.
@@ -370,6 +377,11 @@ const TrainPanel: React.FC = () => {
     if (!trainPrefill) return;
     if (trainPrefill.datasetRepoId) {
       setSelectedId(trainPrefill.datasetRepoId);
+      setPrefillEpisodes(
+        trainPrefill.episodeIndices
+          ? { repoId: trainPrefill.datasetRepoId, indices: trainPrefill.episodeIndices }
+          : null,
+      );
     }
     if (trainPrefill.resume) {
       // Continue / Resume-cloud. Mutually exclusive with a fine-tune base, so
@@ -416,6 +428,32 @@ const TrainPanel: React.FC = () => {
   const trainingDatasetRepoId = resumeSeed
     ? resumeSeed.datasetRepoId
     : (selectedId ?? "");
+
+  // A resume can't carry an episode subset (it inherits the parent run's
+  // dataset wholesale), and the subset only applies to the exact dataset it
+  // was computed against.
+  const trainingEpisodeIndices =
+    !resumeSeed && prefillEpisodes?.repoId === trainingDatasetRepoId
+      ? prefillEpisodes.indices
+      : undefined;
+
+  // Total episode count for the "training on X of Y" note below — only
+  // fetched while a subset is actually active, since that's the only time
+  // the note renders.
+  const [datasetTotalEpisodes, setDatasetTotalEpisodes] = useState<
+    number | null
+  >(null);
+  useEffect(() => {
+    if (!trainingEpisodeIndices || !trainingDatasetRepoId) {
+      setDatasetTotalEpisodes(null);
+      return;
+    }
+    const controller = new AbortController();
+    getDatasetInfo(baseUrl, fetchWithHeaders, trainingDatasetRepoId, controller.signal)
+      .then((info) => setDatasetTotalEpisodes(info.total_episodes))
+      .catch(() => setDatasetTotalEpisodes(null));
+    return () => controller.abort();
+  }, [trainingEpisodeIndices, trainingDatasetRepoId, baseUrl, fetchWithHeaders]);
 
   // Keep the shared selection (Deploy panel, direct /training route) in step
   // with the dataset chosen here.
@@ -539,6 +577,18 @@ const TrainPanel: React.FC = () => {
                     </span>
                   </div>
                 ) : null}
+                {trainingEpisodeIndices && (
+                  <p className="text-xs text-muted-foreground">
+                    {datasetTotalEpisodes != null
+                      ? t("studio.train.dataset.episodeSubsetOfTotal", {
+                          used: trainingEpisodeIndices.length,
+                          total: datasetTotalEpisodes,
+                        })
+                      : t("studio.train.dataset.episodeSubset", {
+                          used: trainingEpisodeIndices.length,
+                        })}
+                  </p>
+                )}
                 <div className="relative">
                   <Input
                     id="train-dataset-search"
@@ -709,6 +759,7 @@ const TrainPanel: React.FC = () => {
               policyType={policyType}
               onPolicyTypeChange={setPolicyType}
               datasetRepoId={trainingDatasetRepoId}
+              episodeIndices={trainingEpisodeIndices}
               finetuneSeed={finetuneSeed}
               resumeSeed={resumeSeed}
               // Launch opens the monitor dialog over this panel (via
@@ -749,7 +800,7 @@ const TrainPanel: React.FC = () => {
         <div ref={setActionsEl} className={formOpen ? undefined : "hidden"} />
       </div>
 
-      {/* Training jobs library — local + online runs as cards, pinned to the
+      {/* Training jobs library — local + remote runs as cards, pinned to the
           panel foot like Collect's datasets and Deploy's models. mt-0 keeps it
           glued to the actions slot above, which carries the panel's mt-auto. */}
       <LibrarySection className="mt-0">

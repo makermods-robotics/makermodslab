@@ -9,7 +9,7 @@ import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
+import { Loader2, Play, Square, Trash2, ArrowLeft, XCircle } from "lucide-react";
 
 import {
   JobRecord,
@@ -306,6 +306,29 @@ const TrainingJobDialog: React.FC<{
   }, [baseUrl, fetchWithHeaders, jobId]);
 
   const isRunning = job?.state === "running";
+  const isQueued = job?.state === "queued";
+
+  // Cancel a QUEUED run: the same stop endpoint, with the expect_state
+  // precondition so a click drawn against a stale record refuses (409
+  // job.state_changed) instead of SIGTERMing a promoted run. Cancelling
+  // removes the record outright — the dialog closes on success.
+  const handleCancelQueued = async () => {
+    if (!job) return;
+    // English deliberately — see handleStop's confirm below.
+    if (!window.confirm("Cancel this queued run? It hasn't started training."))
+      return;
+    try {
+      await stopJob(baseUrl, fetchWithHeaders, job.id, "queued");
+      toast({ title: t("training.jobDialog.toast.cancelledTitle") });
+      onExit();
+    } catch (e) {
+      toast({
+        title: t("training.jobDialog.toast.cancelFailedTitle"),
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
 
   // Before the trainer's first metric tick the stats panel can only say
   // "Training starting…" — which is wrong (and worryingly quiet) for the
@@ -380,6 +403,14 @@ const TrainingJobDialog: React.FC<{
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                         HF · {job.hf_flavor ?? t("training.jobDialog.cloudFallback")}
                       </span>
+                    ) : job.runner === "lan_node" ? (
+                      <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                        {/* The short instance id is the run's routing key — data. */}
+                        {t("training.jobDialog.runnerNode")}
+                        {job.node_instance_id
+                          ? ` · ${job.node_instance_id.slice(0, 8)}`
+                          : ""}
+                      </span>
                     ) : (
                       <span className="rounded border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                         {t("training.jobDialog.runnerLocal")}
@@ -420,7 +451,13 @@ const TrainingJobDialog: React.FC<{
                       state, so a stopped run read "interrupted" here while the
                       card behind the dialog called it something else. */}
                   <p className="text-xs text-muted-foreground">
-                    {jobStateLabel(job.state)}
+                    {/* A queued run's label carries its live position, the
+                        same wording as the card badge. */}
+                    {isQueued && (job.queue_position ?? 0) > 0
+                      ? t("jobs.jobState.queuedAt", {
+                          position: job.queue_position ?? 0,
+                        })
+                      : jobStateLabel(job.state)}
                     {job.error_message ? ` — ${job.error_message}` : ""}
                   </p>
                 </div>
@@ -428,6 +465,16 @@ const TrainingJobDialog: React.FC<{
               {isRunning ? (
                 <Button onClick={handleStop} variant="destructive" size="sm">
                   <Square className="mr-2 h-4 w-4" /> {t("training.jobDialog.stop")}
+                </Button>
+              ) : isQueued ? (
+                <Button
+                  onClick={handleCancelQueued}
+                  variant="outline"
+                  size="sm"
+                  className="border-warn/50 text-warn hover:bg-warn/10"
+                >
+                  <XCircle className="mr-2 h-4 w-4" />{" "}
+                  {t("training.jobDialog.cancelQueued")}
                 </Button>
               ) : (
                 <Button

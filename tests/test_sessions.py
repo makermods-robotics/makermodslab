@@ -329,6 +329,12 @@ def test_follower_only_kinds_ignore_leader_gaps(client, tmp_lerobot_home, monkey
         ("replay", {"repo_id": "u/d"}),  # episode_index is required
         ("teleoperation", {"dataset_repo_id": "u/d"}),  # wrong kind's field: extra forbidden
         ("recording", {"dataset_repo_id": "u/d", "single_task": "t", "num_episodes": "lots"}),
+        ("calibration", {}),  # device_type is required
+        ("calibration", {"device_type": "leader"}),  # not the teleop/robot vocabulary
+        ("calibration", {"device_type": "teleop", "repo_id": "u/d"}),  # extra forbidden
+        ("auto_calibration", {}),  # arms is required
+        ("auto_calibration", {"arms": []}),  # at least one arm
+        ("auto_calibration", {"arms": [{"device_type": "teleop"}], "port": "/dev/x"}),  # extra
     ],
 )
 def test_options_must_fit_the_kind_422(client, tmp_lerobot_home, kind, options) -> None:
@@ -339,8 +345,9 @@ def test_options_must_fit_the_kind_422(client, tmp_lerobot_home, kind, options) 
 
 
 def test_unknown_kind_is_a_422(client, tmp_lerobot_home) -> None:
-    # Not a startable kind this phase (legacy wizard endpoints start it).
-    resp = client.post("/api/v1/sessions", json={"kind": "calibration", "robot": "bench"})
+    # wiggle is the one kind still started only through its legacy endpoint
+    # (open-loop seconds, no stop handler — nothing a session could lease).
+    resp = client.post("/api/v1/sessions", json={"kind": "wiggle", "robot": "bench"})
     assert resp.status_code == 422
 
 
@@ -361,6 +368,24 @@ def test_start_while_held_409_names_the_holder(client, monkeypatch, patch_target
     """The gate outranks robot resolution — even an unknown robot gets the
     held answer while the hardware is claimed (one hardware set per node)."""
     monkeypatch.setattr(patch_target, True)
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "ghost"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "session.held"
+    assert body["details"]["holder"] == {"kind": holder_kind, "session_id": None}
+
+
+@pytest.mark.parametrize(
+    ("patch_target", "holder_kind"),
+    [
+        ("makermodslab.calibrate.calibration_is_active", "calibration"),
+        ("makermodslab.auto_calibrate.auto_calibration_is_active", "auto_calibration"),
+    ],
+)
+def test_start_while_calibrating_409_names_the_holder(client, monkeypatch, patch_target, holder_kind) -> None:
+    """The calibration flows report their hold through functions (singleton
+    state), not module flags — the gate must see them all the same."""
+    monkeypatch.setattr(patch_target, lambda: True)
     resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "ghost"})
     assert resp.status_code == 409
     body = resp.json()
@@ -586,6 +611,240 @@ def test_replay_request_built_from_record_and_options(client, tmp_lerobot_home, 
     assert (req.repo_id, req.episode_index) == ("u/d", 4)
     assert (req.follower_port, req.follower_config) == ("/dev/f", "FC")
     assert req.robot_name == "bench"
+
+
+def test_calibration_request_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The record resolves the slot's port and assigned config name; the
+    caller chooses only the slot (device_type/arm) and the overwrite flag."""
+    from makermodslab import calibrate
+
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        calibrate.calibration_manager, "start_calibration", _fake_start("calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "calibration",
+            "robot": "bench",
+            "options": {"device_type": "teleop", "overwrite": True},
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.device_type, req.arm) == ("teleop", "left")
+    assert req.port == "/dev/l"
+    assert req.config_file == "LC"  # the slot's assigned config
+    assert req.robot_name == "bench"
+    assert req.overwrite is True
+
+
+def test_calibration_explicit_port_and_config_override_the_record(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    """Calibration is the setup flow: a fresh port pick lives only in the UI
+    draft until the success write-back, so options may carry it."""
+    from makermodslab import calibrate
+
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        calibrate.calibration_manager, "start_calibration", _fake_start("calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "calibration",
+            "robot": "bench",
+            "options": {"device_type": "robot", "port": "/dev/fresh", "config_file": "custom"},
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert req.port == "/dev/fresh"
+    assert req.config_file == "custom"
+    assert req.overwrite is False
+
+
+def test_calibration_config_defaults_to_the_robots_slot_name(client, tmp_lerobot_home, monkeypatch) -> None:
+    """A slot with no assigned config falls back to the UI's own default name:
+    '<robot>_<arm>' bimanual, '<robot>' single."""
+    from makermodslab import calibrate
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("fresh", {"leader_port": "/dev/l"})  # port, no config
+    captured: list = []
+    monkeypatch.setattr(
+        calibrate.calibration_manager, "start_calibration", _fake_start("calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "fresh", "options": {"device_type": "teleop"}},
+    )
+    assert resp.status_code == 201
+    assert captured[0].config_file == "fresh"
+
+    cfg.save_robot_record("bi", {"mode": "bimanual", "right_follower_port": "/dev/rf"})
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "calibration",
+            "robot": "bi",
+            "options": {"device_type": "robot", "arm": "right"},
+        },
+    )
+    assert resp.status_code == 201
+    assert captured[1].config_file == "bi_right"
+    assert captured[1].port == "/dev/rf"
+
+
+def test_calibration_without_a_port_anywhere_400(client, tmp_lerobot_home) -> None:
+    """No record-clean gate for the setup kinds — but a slot with no port
+    (record or options) is still unusable."""
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("bare", {})
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "bare", "options": {"device_type": "teleop"}},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "robot.not_ready"
+
+
+def test_auto_calibration_batch_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The one options shape covers single and multi arm: `arms` maps to
+    AutoCalibrationBatchRequest, ports/configs per slot from the record,
+    motor_power defaulting to the record's persisted torque cap."""
+    from makermodslab import auto_calibrate
+
+    _make_robot("bi", mode="bimanual")
+    captured: list = []
+    monkeypatch.setattr(
+        auto_calibrate.auto_calibration_batch_manager, "start", _fake_start("auto_calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "auto_calibration",
+            "robot": "bi",
+            "options": {
+                "arms": [
+                    {"device_type": "teleop"},
+                    {"device_type": "robot", "arm": "right"},
+                ],
+                "overwrite": True,
+            },
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert req.robot_name == "bi"
+    assert req.overwrite is True
+    assert req.motor_power == 38  # the record's DEFAULT_MOTOR_POWER
+    assert [(a.device_type, a.arm, a.port, a.config_file) for a in req.arms] == [
+        ("teleop", "left", "/dev/l", "LC"),
+        ("robot", "right", "/dev/rf", "RFC"),
+    ]
+
+
+def test_auto_calibration_motor_power_option_overrides_the_record(
+    client, tmp_lerobot_home, monkeypatch
+) -> None:
+    from makermodslab import auto_calibrate
+
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        auto_calibrate.auto_calibration_batch_manager, "start", _fake_start("auto_calibration", captured)
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "auto_calibration",
+            "robot": "bench",
+            "options": {"arms": [{"device_type": "robot"}], "motor_power": 55},
+        },
+    )
+    assert resp.status_code == 201
+    assert captured[0].motor_power == 55
+
+
+def test_auto_calibration_arm_without_a_port_400(client, tmp_lerobot_home) -> None:
+    _make_robot()  # single: no right_* ports saved
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "auto_calibration",
+            "robot": "bench",
+            "options": {"arms": [{"device_type": "robot", "arm": "right"}]},
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "robot.not_ready"
+
+
+def test_name_taken_refusal_is_a_409(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The calibration flows' name-collision refusal carries no status_code of
+    its own (legacy callers read it from a 200 body) — the sessions surface
+    maps it to a conflict, never a 500."""
+    from makermodslab import calibrate
+
+    _make_robot()
+    monkeypatch.setattr(
+        calibrate.calibration_manager,
+        "start_calibration",
+        lambda request: {
+            "success": False,
+            "code": "name_taken",
+            "message": "A calibration named 'LC' already exists.",
+        },
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "calibration", "robot": "bench", "options": {"device_type": "teleop"}},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "name_taken"
+
+
+# --- the 201's warnings relay -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "patch_target", "options"),
+    [
+        ("teleoperation", "makermodslab.teleoperate.handle_start_teleoperation", {}),
+        ("replay", "makermodslab.replay.handle_start_replay", _REPLAY_OPTIONS),
+    ],
+)
+def test_start_relays_warn_but_allow_findings(
+    client, tmp_lerobot_home, monkeypatch, kind, patch_target, options
+) -> None:
+    """Teleoperation and replay starts can succeed WITH an arm-identity
+    warning; the legacy start responses carried it and the 201 must too."""
+    _make_robot()
+
+    def fake(request, websocket_manager=None):
+        notify_session_changed(kind, True)
+        return {"success": True, "warning": "EEPROM offsets differ from the saved calibration."}
+
+    monkeypatch.setattr(patch_target, fake)
+    resp = client.post("/api/v1/sessions", json={"kind": kind, "robot": "bench", "options": options})
+    assert resp.status_code == 201
+    assert resp.json()["warnings"] == ["EEPROM offsets differ from the saved calibration."]
+
+
+def test_start_without_findings_relays_no_warnings(client, tmp_lerobot_home, monkeypatch) -> None:
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.teleoperate.handle_start_teleoperation", _fake_start("teleoperation", captured)
+    )
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench"})
+    assert resp.status_code == 201
+    assert resp.json()["warnings"] is None
 
 
 # --- GET /api/v1/sessions/current --------------------------------------------

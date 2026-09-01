@@ -198,6 +198,46 @@ export async function listEpisodes(
   );
 }
 
+/** Episode indices excluded from training for a dataset (curation, not
+ * deletion — the episode stays on disk/Hub, it's just left out of the
+ * subset a training run is launched with). GET
+ * /api/v1/datasets/excluded-episodes. */
+export async function getExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    `/api/v1/datasets/excluded-episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Get excluded episodes" },
+  );
+  return body.episode_indices;
+}
+
+/** Replace the excluded-episode set for a dataset. NEVER touches the
+ * dataset's files or Hub copy. PUT /api/v1/datasets/excluded-episodes. */
+export async function setExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndices: number[],
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/datasets/excluded-episodes",
+    {
+      method: "PUT",
+      body: { repo_id: repoId, episode_indices: episodeIndices },
+      action: "Set excluded episodes",
+    },
+  );
+  return body.episode_indices;
+}
+
 export interface EpisodeJointSeries {
   joint_names: string[];
   timestamps: number[];
@@ -236,7 +276,7 @@ export function episodeVideoUrl(
     episode_index: String(episodeIndex),
     camera,
   });
-  return `${baseUrl}/datasets/episode-video?${params.toString()}`;
+  return `${baseUrl}/api/v1/datasets/episode-video?${params.toString()}`;
 }
 
 /** Where a dataset with this id lives. "local_only" = a local copy exists but
@@ -249,6 +289,12 @@ export interface HubStatus {
   repo_id: string;
   status: HubStatusValue;
   url: string | null;
+  /** Qualifies "on_hub": false when that repo exists but holds no dataset —
+   * an upload that died partway leaves behind the empty repo its first call
+   * created. Such a repo is NOT a backup of the local copy, so the card must
+   * not present it as one. null = no claim (not on_hub, no local copy to
+   * protect, or the check couldn't be made). */
+  hub_has_data: boolean | null;
 }
 
 /** Hub existence check, fetched lazily/separately so it never blocks the
