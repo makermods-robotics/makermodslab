@@ -4,6 +4,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useCanUpload } from "@/hooks/useCanUpload";
+import { useEyebrowClass } from "@/hooks/useEyebrowClass";
 import { useModelPublish } from "@/hooks/useModelPublish";
 import { RunCheckpoints, listRunCheckpoints } from "@/lib/modelsApi";
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,7 @@ const PublishToHubRow: React.FC<{
   onPublished: () => void;
 }> = ({ jobId, onPublished }) => {
   const { t } = useTranslation();
+  const eyebrowClass = useEyebrowClass();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { auth } = useHfAuth();
@@ -92,13 +94,19 @@ const PublishToHubRow: React.FC<{
               i18nKey="training.publish.toast.publishedBody"
               values={{ repoId: s.repo_id ?? "" }}
               components={[
-                <a
-                  key="0"
-                  href={s.url ?? undefined}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline font-medium"
-                />,
+                // A missing url (never happens on the done path today) falls
+                // back to plain text rather than an underlined dead link.
+                s.url ? (
+                  <a
+                    key="0"
+                    href={s.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline font-medium"
+                  />
+                ) : (
+                  <span key="0" />
+                ),
               ]}
             />
           </span>
@@ -190,7 +198,14 @@ const PublishToHubRow: React.FC<{
     if (parts.length > 2 || parts.some((p) => p.length === 0)) {
       return t("training.publish.repoInvalid");
     }
-    if (parts.length === 2 && !writableNamespaces.includes(parts[0])) {
+    // Case-insensitive, like the backend's canonical_writable_namespace and
+    // every other namespace gate — a locally-typed casing that differs from
+    // whoami's must not block a push the backend would accept.
+    const fold = parts[0].toLowerCase();
+    if (
+      parts.length === 2 &&
+      !writableNamespaces.some((n) => n.toLowerCase() === fold)
+    ) {
       return t("training.publish.repoNotWritable", { namespace: parts[0] });
     }
     return null;
@@ -242,7 +257,7 @@ const PublishToHubRow: React.FC<{
     <div className="rounded-md border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <span className="eyebrow">{t("training.publish.title")}</span>
+          <span className={eyebrowClass}>{t("training.publish.title")}</span>
           {pinnedRepo ? (
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
               <a
