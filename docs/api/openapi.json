@@ -8054,7 +8054,7 @@
     },
     "/api/v1/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients. The training\nview's multi-checkpoint picker uses POST /api/v1/models/publish instead.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload",
         "requestBody": {
           "content": {
@@ -12739,7 +12739,7 @@
     },
     "/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients. The training\nview's multi-checkpoint picker uses POST /api/v1/models/publish instead.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload_models_upload_post",
         "requestBody": {
           "content": {

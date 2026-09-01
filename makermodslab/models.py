@@ -930,11 +930,16 @@ def list_all_models() -> list[dict[str, Any]]:
 
     # Local rows key on their run id, EXCEPT when the run's hub_repo_id matches a
     # hub repo already present — then it's the same model on both, collapsed to
-    # "both" under the hub repo_id (so the row isn't duplicated).
+    # "both" under the hub repo_id (so the row isn't duplicated). The match is
+    # CASE-INSENSITIVE, like every jobs-side repo dedup (find_imported, the
+    # frontend's trackedRepoIds): a user-typed repo id differing in case from
+    # the Hub's canonical listing must still collapse to one row.
+    hub_key_by_fold = {key.lower(): key for key in merged}
     for item in local:
         hub_repo = item.get("hf_repo_id")
-        if hub_repo and hub_repo in merged:
-            existing = merged[hub_repo]
+        merged_key = hub_key_by_fold.get(hub_repo.lower()) if hub_repo else None
+        if merged_key is not None:
+            existing = merged[merged_key]
             existing["source"] = "both"
             # The local checkpoint is authoritative for detail: override the
             # hub row's placeholder id/name and fill in the checkpoint fields it
@@ -944,11 +949,16 @@ def list_all_models() -> list[dict[str, Any]]:
             # repo, and the merged row must still say the local side is a run —
             # its unpublished checkpoints exist nowhere else, so "just remove
             # the local copy" would be a lie (see deleteSemantics.ts).
+            # dataset_episodes rides with the other checkpoint-derived fields:
+            # only the local producers read train_config.json, so without it a
+            # publish silently dropped the run's episode subset from the
+            # listing. Redacted (None) values still never overwrite.
             for key in (
                 "id",
                 "name",
                 "policy_type",
                 "dataset",
+                "dataset_episodes",
                 "steps",
                 "target_steps",
                 "state",
@@ -976,7 +986,14 @@ def list_all_models() -> list[dict[str, Any]]:
             # The on-disk checkpoint is authoritative for detail: its
             # config.json-derived values override the hub row's tag/name-derived
             # ones (same local-wins rule as the run collapse above).
-            for key in ("policy_type", "dataset", "steps", "path", "local_kind"):
+            for key in (
+                "policy_type",
+                "dataset",
+                "dataset_episodes",
+                "steps",
+                "path",
+                "local_kind",
+            ):
                 if item.get(key) is None:
                     continue
                 # ...EXCEPT local_kind, where "run" is sticky. A published run
@@ -1359,11 +1376,24 @@ class PublishedRepoState(NamedTuple):
     readable: bool
 
 
-def _published_repo_state(repo_id: str) -> PublishedRepoState:
-    """Read a model repo's published checkpoints off the Hub. Best-effort: a
-    network blip or a permission error comes back `readable=False` with no
-    steps, which every caller handles explicitly rather than mistaking for an
-    empty repo.
+# The picker probes the target repo on every training-dialog open; a short TTL
+# keeps that from costing a Hub roundtrip per open without letting the
+# published-badges view go meaningfully stale. Only READABLE states are cached
+# — a failed probe retries on the next read instead of pinning "couldn't
+# check" for the TTL.
+_PUBLISHED_STATE_TTL_S = 30.0
+_published_state_cache: dict[str, tuple[float, PublishedRepoState]] = {}
+_published_state_lock = threading.Lock()
+
+
+def _published_repo_state(repo_id: str, *, fresh: bool = False) -> PublishedRepoState:
+    """Read a model repo's published checkpoints off the Hub, through a short
+    TTL cache. `fresh=True` bypasses (and refreshes) the cache — the
+    post-upload reader must see the steps it just pushed, not a 30s-old view.
+
+    Best-effort: a network blip or a permission error comes back
+    `readable=False` with no steps, which every caller handles explicitly
+    rather than mistaking for an empty repo.
 
     A repo that does not exist is NOT such a failure. The Hub answered, and the
     answer is "nothing is published here" — the ordinary state of every run
@@ -1373,20 +1403,30 @@ def _published_repo_state(repo_id: str) -> PublishedRepoState:
 
     from .jobs import _HUB_CKPT_REF_RE, _hub_checkpoints_from_files
 
+    if not fresh:
+        with _published_state_lock:
+            hit = _published_state_cache.get(repo_id)
+            if hit is not None and time.monotonic() - hit[0] < _PUBLISHED_STATE_TTL_S:
+                return hit[1]
+
     try:
         files = shared_hf_api().list_repo_files(repo_id, repo_type="model")
     except RepositoryNotFoundError:
         # No repo yet ⇒ genuinely nothing published, and we know it.
-        return PublishedRepoState({}, False, True)
+        state = PublishedRepoState({}, False, True)
     except Exception as exc:
         logger.info("Could not read published checkpoints of %s: %s", repo_id, exc)
         return PublishedRepoState({}, False, False)
-    steps: dict[int, str] = {}
-    for ckpt in _hub_checkpoints_from_files(files, repo_id):
-        # The ref preserves the on-Hub dir name (repo@checkpoints/000050).
-        match = _HUB_CKPT_REF_RE.match(ckpt.ref)
-        steps[ckpt.step] = match.group("step_dir") if match else str(ckpt.step)
-    return PublishedRepoState(steps, "config.json" in files, True)
+    else:
+        steps: dict[int, str] = {}
+        for ckpt in _hub_checkpoints_from_files(files, repo_id):
+            # The ref preserves the on-Hub dir name (repo@checkpoints/000050).
+            match = _HUB_CKPT_REF_RE.match(ckpt.ref)
+            steps[ckpt.step] = match.group("step_dir") if match else str(ckpt.step)
+        state = PublishedRepoState(steps, "config.json" in files, True)
+    with _published_state_lock:
+        _published_state_cache[repo_id] = (time.monotonic(), state)
+    return state
 
 
 _CARD_MARK_START = "<!-- makermodslab:checkpoints:start -->"
@@ -1505,6 +1545,8 @@ def upload_local_model(
     repo_id: str | None = None,
     steps: list[int] | None = None,
     on_progress: Callable[[int, int, int | None], None] | None = None,
+    *,
+    root_layout: bool = False,
 ) -> dict[str, Any]:
     """Push one or more of a local run's checkpoints to the Hub as ONE model repo.
 
@@ -1536,6 +1578,13 @@ def upload_local_model(
     tag work runs AFTER that, so a caller tracking progress never mistakes a
     failure there for a checkpoint that did not upload.
 
+    `root_layout=True` is the FROZEN legacy shape for POST /models/upload's SDK
+    clients: the final checkpoint's files land at the repo ROOT (loadable by a
+    plain `from_pretrained(repo_id)`), no repo pin, no card index, and the
+    return is exactly the pre-multi-checkpoint {repo_id, url, tags}. The
+    step-addressed layout above silently replaced this for the legacy route and
+    broke root loaders — a "frozen" surface must keep its old on-Hub shape.
+
     Refuses offline (can't mutate the Hub) with a clear error. Auth/permission
     failures map like the dataset upload path. Invalidates the model-listing
     cache so the freshly-pushed repo appears immediately. Returns
@@ -1554,6 +1603,8 @@ def upload_local_model(
         )
     available = _checkpoint_dirs(record)
     assert available  # _find_local_record guarantees at least one
+    if root_layout and steps is not None:
+        raise ModelError(400, "The legacy root-layout upload takes no step selection.")
     selected = _resolve_upload_steps(record, available, steps)
 
     target_repo_id = repo_id or record.hf_repo_id or _default_model_repo_id(record)
@@ -1564,7 +1615,11 @@ def upload_local_model(
         """Record the repo this run is being published into. Idempotent
         (set_hf_repo_id no-ops on an unchanged value), so it is safe to call per
         step; best-effort, because losing the pin must not fail an upload that
-        otherwise succeeded."""
+        otherwise succeeded. The legacy root layout never pins — the old route
+        didn't, and pinning would flip its training-dialog view to "published"
+        for a repo whose shape the picker treats as legacy."""
+        if root_layout:
+            return
         try:
             job_registry.set_hf_repo_id(model_id, target_repo_id)
         except Exception as exc:
@@ -1575,15 +1630,24 @@ def upload_local_model(
         for done, (step, pretrained_dir) in enumerate(selected):
             if on_progress is not None:
                 on_progress(done, total, step)
-            api.upload_folder(
-                folder_path=str(pretrained_dir),
-                repo_id=target_repo_id,
-                repo_type="model",
-                # The on-disk dir name, not str(step) — lerobot zero-pads it
-                # (000050) and jobs._hub_checkpoints_from_files round-trips that
-                # padding into the ref it later downloads by.
-                path_in_repo=f"checkpoints/{pretrained_dir.parent.name}/pretrained_model",
-            )
+            if root_layout:
+                # The frozen legacy shape: files at the repo ROOT, loadable by
+                # a plain from_pretrained(repo_id).
+                api.upload_folder(
+                    folder_path=str(pretrained_dir),
+                    repo_id=target_repo_id,
+                    repo_type="model",
+                )
+            else:
+                api.upload_folder(
+                    folder_path=str(pretrained_dir),
+                    repo_id=target_repo_id,
+                    repo_type="model",
+                    # The on-disk dir name, not str(step) — lerobot zero-pads it
+                    # (000050) and jobs._hub_checkpoints_from_files round-trips
+                    # that padding into the ref it later downloads by.
+                    path_in_repo=f"checkpoints/{pretrained_dir.parent.name}/pretrained_model",
+                )
             # Pin as soon as the FIRST step lands, not after the loop: a queue
             # that dies half-way has already put weights in this repo, and an
             # unpinned run sends the retry to a freshly-computed default repo —
@@ -1608,16 +1672,19 @@ def upload_local_model(
     if on_progress is not None:
         on_progress(total, total, None)
 
-    state = _published_repo_state(target_repo_id)
-    published = dict(state.steps)
-    published.update({step: path.parent.name for step, path in selected})
-    if state.readable:
-        _sync_model_card(api, target_repo_id, record, published)
-    else:
-        # An unreadable probe means `published` is only THIS call's steps.
-        # Rewriting the index from that would delete the rows of steps that are
-        # published — a stale card beats a wrong one.
-        logger.info("Skipping the card refresh for %s: couldn't read its checkpoints", target_repo_id)
+    published: dict[int, str] = {}
+    if not root_layout:
+        # Legacy pushes keep no checkpoint index — the repo root IS the model.
+        state = _published_repo_state(target_repo_id, fresh=True)
+        published = dict(state.steps)
+        published.update({step: path.parent.name for step, path in selected})
+        if state.readable:
+            _sync_model_card(api, target_repo_id, record, published)
+        else:
+            # An unreadable probe means `published` is only THIS call's steps.
+            # Rewriting the index from that would delete the rows of steps that
+            # are published — a stale card beats a wrong one.
+            logger.info("Skipping the card refresh for %s: couldn't read its checkpoints", target_repo_id)
 
     # Stamp the policy type as a tag alongside the org tags, so future MakerMods Lab
     # uploads are self-describing on the Hub (the same tag lerobot-native
@@ -1649,13 +1716,18 @@ def upload_local_model(
         target_repo_id,
         final_tags,
     )
-    return {
+    result: dict[str, Any] = {
         "repo_id": target_repo_id,
         "url": f"https://huggingface.co/{target_repo_id}",
         "tags": final_tags,
-        "steps": uploaded,
-        "published_steps": sorted(published),
     }
+    if not root_layout:
+        # The legacy return is frozen at exactly these three keys — the step
+        # fields belong to the step-addressed layout only (and would be
+        # silently filtered by ModelUploadResponse anyway).
+        result["steps"] = uploaded
+        result["published_steps"] = sorted(published)
+    return result
 
 
 def list_run_checkpoints(model_id: str) -> dict[str, Any]:
@@ -1756,13 +1828,26 @@ class ModelUploadManager:
             self.done_steps = []
             self.message = "Publishing to the Hub…"
 
-        self._thread = threading.Thread(
-            target=self._worker,
-            args=(model_id, repo_id, steps),
-            name="model-upload-worker",
-            daemon=True,
-        )
-        self._thread.start()
+        try:
+            self._thread = threading.Thread(
+                target=self._worker,
+                args=(model_id, repo_id, steps),
+                name="model-upload-worker",
+                daemon=True,
+            )
+            self._thread.start()
+        except Exception as exc:
+            # Without this, a spawn failure left the manager wedged at
+            # "running" with no worker — every later publish (and, since the
+            # registry's delete guard reads this state, every delete of this
+            # run) refused until a server restart. Land on "error" so the slot
+            # frees and the failure is visible to the status poller.
+            with self._lock:
+                self.state = "error"
+                self.error = f"Could not start the publish worker: {exc}"
+                self.message = f"Publish failed: {self.error}"
+            logger.error("Could not start the publish worker for %s: %s", model_id, exc)
+            raise ModelError(500, f"Could not start the publish worker: {exc}") from exc
         return {"started": True, "model_id": model_id, "message": "Publish started"}
 
     def get_status(self) -> dict[str, Any]:

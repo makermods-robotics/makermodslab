@@ -4813,7 +4813,14 @@ class JobRegistry:
             if record.hf_repo_id == target:
                 return record
             record.hf_repo_id = target
+            # Zeroed before the write, then restamped after — the same derived-
+            # field protocol `rename`, `start` and `reorder_queue` follow, so a
+            # position a read stamped onto the live record never freezes into
+            # job.json. (Publish targets terminal runs, whose position is 0
+            # anyway — the convention holds so no caller has to prove that.)
+            record.queue_position = 0
             self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
         self._notify_change()
         return record
 

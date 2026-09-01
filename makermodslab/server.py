@@ -1632,10 +1632,13 @@ def models_upload(body: ModelUploadBody):
     the token can't write the namespace; 404 when the local model has no saved
     checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.
 
-    The single-checkpoint synchronous push, frozen for SDK clients. The training
-    view's multi-checkpoint picker uses POST /api/v1/models/publish instead."""
+    The single-checkpoint synchronous push, frozen for SDK clients — including
+    its ON-HUB SHAPE: files land at the repo root, loadable by a plain
+    from_pretrained(repo_id) (root_layout=True). The training view's
+    multi-checkpoint picker uses POST /api/v1/models/publish instead, which
+    step-addresses under checkpoints/<step>/."""
     try:
-        return model_browser.upload_local_model(body.id, body.repo_id)
+        return model_browser.upload_local_model(body.id, body.repo_id, root_layout=True)
     except model_browser.ModelError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
@@ -1672,7 +1675,12 @@ def models_publish(body: ModelPublishBody):
     GET /api/v1/models/publish-status reports progress. 409 when a publish is
     already running; the per-step failures (400 offline, 403 permission, 404
     unknown step, 502 Hub) surface through that status, not this call."""
-    result = model_browser.model_upload_manager.start(body.id, body.repo_id, body.steps)
+    try:
+        result = model_browser.model_upload_manager.start(body.id, body.repo_id, body.steps)
+    except model_browser.ModelError as exc:
+        # A worker that could not even be spawned — the manager has already
+        # released the slot (state "error"), so this is a 500, not a 409.
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
     if not result.get("started"):
         raise HTTPException(status_code=409, detail=result.get("message", "Publish busy"))
     return result
