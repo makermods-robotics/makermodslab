@@ -180,6 +180,55 @@ def _reset_hub_listing_caches() -> Iterator[None]:
     _reset_module_caches()
 
 
+@pytest.fixture(autouse=True)
+def _reap_job_registry_threads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Stop the threads of every JobRegistry a test builds, after the test.
+
+    ~100 tests construct throwaway registries, and each one starts a
+    1s-interval "job-registry-watchdog" daemon thread that nothing stops — a
+    full run used to end with ~160 of them (plus a few runner tail/poll
+    threads) still parked in Event.wait at interpreter exit. Daemon threads
+    are normally frozen harmlessly at shutdown, but a teardown that catches
+    one inside native code aborts the process AFTER a fully green summary
+    (glibc's "FATAL: exception not rethrown", exit 134 — seen on the Linux CI
+    runner), which fails the job with zero failing tests.
+
+    Instances are tracked by wrapping __init__ (registries are created inside
+    test bodies, so no fixture can hand them out), then stopped the way the
+    app's own shutdown hook does: `shutdown()` sets the watchdog's stop event
+    and the thread exits within its 1s wait. Runner threads (job-tail-*,
+    hf-job-*) get their `_stop_event` set directly — deliberately NOT
+    `runner.stop()`, which for a tailing runner SIGTERMs a real process
+    group. The module-level `job_registry` singleton (created at import, one
+    thread, mirrors production's lifetime) is left alone.
+    """
+    import makermodslab.jobs as _jobs
+
+    created: list = []
+    real_init = _jobs.JobRegistry.__init__
+
+    def _tracking_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        real_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(_jobs.JobRegistry, "__init__", _tracking_init)
+    yield
+    for reg in created:
+        try:
+            reg.shutdown()
+            for runner in list(getattr(reg, "_runners", {}).values()):
+                stop_event = getattr(runner, "_stop_event", None)
+                if stop_event is not None:
+                    stop_event.set()
+        except Exception:
+            # Teardown must never fail a test that already passed.
+            pass
+    for reg in created:
+        thread = getattr(reg, "_watchdog_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+
 @pytest.fixture
 def mock_lerobot_record(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch `lerobot.record.record` so no real recording loop runs.
