@@ -53,10 +53,12 @@ __all__ = [
     "DownloadStatusResponse",
     "EpisodeJointSeriesResponse",
     "EpisodeSummary",
+    "ExcludedEpisodesResponse",
     "ImportResponse",
     "MergeLogEntry",
     "MergeStartResponse",
     "MergeStatusResponse",
+    "SetExcludedEpisodesResponse",
     "SuccessRepoIdResponse",
     "UploadStartResponse",
     "UploadStatusResponse",
@@ -126,6 +128,24 @@ class EpisodeJointSeriesResponse(BaseModel):
     joint_names: list[str]
     timestamps: list[float]
     values: list[list[float]]
+
+
+class ExcludedEpisodesResponse(BaseModel):
+    """server.py datasets_excluded_episodes — the episode indices left OUT of
+    the training subset for one dataset. Empty list when nothing is excluded;
+    the dataset itself is untouched (curation, not deletion)."""
+
+    repo_id: str
+    episode_indices: list[int]
+
+
+class SetExcludedEpisodesResponse(BaseModel):
+    """server.py datasets_set_excluded_episodes — echoes the set actually
+    persisted (re-read from disk), not the caller's input."""
+
+    success: bool
+    repo_id: str
+    episode_indices: list[int]
 
 
 class DatasetHubStatusResponse(BaseModel):

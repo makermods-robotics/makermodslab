@@ -63,14 +63,30 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 # `name` defaults to a value derived from the image when the caller omits it
 # ("lerobot-gpu-latest-<hash>"), so a `name` read back off a job is not
 # necessarily one we chose; _RUN_LABEL is unambiguous.
-_RUN_LABEL = "makermodslab.run"
+# NO DOT. The Hub serialises each label into a single "key=value" tag and
+# validates that tag against [alphanumeric - _ =]. A dot used to be accepted
+# and no longer is, so the original "makermodslab.run" started failing
+# submission outright with:
+#   Bad Request: `tags` must be 1-256 characters and contain only
+#   alphanumeric characters, '-', '_', or '='
+_RUN_LABEL = "makermodslab_run"
 
-# The Hub rejects a label whose key or value exceeds 100 characters or strays
-# outside [alphanumeric . - _]. A job id is built from a _SLUG_RE-sanitised
-# dataset name (jobs._generate_job_id), so its charset already conforms — only
-# the length can overrun, via a very long dataset name. NOTE the publish repo
-# id is deliberately NOT labelled: it contains a "/", which the Hub refuses,
-# and _hub_job_run_name can already recover the run name from argv anyway.
+# Read-only: the dotted key every job submitted before that rename carries.
+# Dropping it would un-name the entire existing cloud backlog in the jobs UI.
+_LEGACY_RUN_LABELS = ("makermodslab.run",)
+
+# The charset the Hub accepts in the "key=value" tag a label becomes. Checked
+# BEFORE submission (see _run_job_naming_kwargs) so a non-conforming label is
+# dropped rather than 400-ing the whole job — the same trade the signature
+# probe below already makes: a job listed under its image name beats no job.
+_LABEL_CHARSET_RE = re.compile(r"^[A-Za-z0-9\-_]+$")
+
+# The Hub rejects a label whose key or value exceeds 100 characters. A job id is
+# built from a _SLUG_RE-sanitised dataset name (jobs._generate_job_id), so its
+# charset already conforms — only the length can overrun, via a very long
+# dataset name. NOTE the publish repo id is deliberately NOT labelled: it
+# contains a "/", which the Hub refuses, and _hub_job_run_name can already
+# recover the run name from argv anyway.
 _MAX_LABEL_LEN = 100
 
 # The :latest image ships whatever lerobot was current when it was built —
@@ -79,9 +95,12 @@ _MAX_LABEL_LEN = 100
 # The wrapper therefore pip-installs the exact pin (below) before launching
 # the trainer, so container and host agree on the CLI surface.
 
-# Extras from the pyproject pin that only matter on the host machine (serial
-# motor buses). Dropped from the container install.
-_HOST_ONLY_EXTRAS = frozenset({"feetech"})
+# Extras from the pyproject pin that only matter on the host machine — every
+# motor-bus stack: feetech (SO-101 serial), maker/damiao/robstride/metal
+# (CAN), rebot (FashionStar UART). Dropped from the container install: the
+# training pod has no arms attached, so they are dead weight per job at best
+# and a platform-specific resolve failure at worst.
+_HOST_ONLY_EXTRAS = frozenset({"feetech", "maker", "damiao", "robstride", "metal", "rebot"})
 
 # policy_type -> lerobot extra that carries the policy's model dependencies
 # at the pinned ref (e.g. transformers for smolvla). Policies without an
@@ -622,11 +641,18 @@ def _run_job_naming_kwargs(api, job_id: str) -> dict:
     kwarg would raise TypeError and take down cloud training entirely — far
     worse than a job that merely lists under its image name.
 
-    An over-long id is left unnamed rather than truncated: the Hub caps a
-    label at _MAX_LABEL_LEN and would reject it, while _hub_job_run_name's
-    argv fallback recovers the name in full anyway.
+    An over-long or non-conforming id is left unnamed rather than truncated or
+    sent anyway: the Hub caps a label at _MAX_LABEL_LEN and validates its
+    charset, and a rejected label fails the WHOLE submission with a 400 —
+    while _hub_job_run_name's argv fallback recovers the name in full anyway.
+    Degrading to an unnamed job is strictly better than no job.
     """
-    if len(job_id) > _MAX_LABEL_LEN:
+    if len(job_id) > _MAX_LABEL_LEN or not _LABEL_CHARSET_RE.match(job_id):
+        logger.warning(
+            "Job id %r cannot be used as a Hub label; submitting unnamed "
+            "(the run name is still recoverable from the job's argv)",
+            job_id,
+        )
         return {}
     params: set[str] = set()
     with contextlib.suppress(Exception):

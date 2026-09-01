@@ -43,6 +43,7 @@ DOMAINS = frozenset(
         "checkpoint",
         "session",
         "node",
+        "system",
         "internal",
     ]
 )

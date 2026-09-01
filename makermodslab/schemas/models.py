@@ -71,6 +71,11 @@ class ModelListItem(BaseModel):
       neither of those pairs;
     * ``saved_custom`` exists only on rows the pin fold touched.
 
+    ``dataset_episodes`` (the training-episode subset, privacy-gated by
+    models._gate_dataset_episodes) is set by the two local producers and is
+    absent on a Hub-seeded row, which never reads a checkpoint's
+    train_config.json.
+
     The route serializes with exclude_unset so each producer's exact keys
     survive — see the module docstring.
     """
@@ -89,6 +94,7 @@ class ModelListItem(BaseModel):
     state: str | None = None
     private: bool | None = None
     saved_custom: bool | None = None
+    dataset_episodes: list[int] | None = None
 
 
 class ModelInfoResponse(BaseModel):
@@ -99,7 +105,8 @@ class ModelInfoResponse(BaseModel):
     with exclude_unset): a local run adds target_steps/state, the single-call
     hub branch (_hub_model_info) adds private + last_modified, and its
     file-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and
-    ``saved_custom`` never appear here — no producer sets them."""
+    ``saved_custom`` never appear here — no producer sets them.
+    ``dataset_episodes`` is absent only on that file-tree fallback."""
 
     id: str
     name: str
@@ -116,6 +123,7 @@ class ModelInfoResponse(BaseModel):
     target_steps: int | None = None
     state: str | None = None
     private: bool | None = None
+    dataset_episodes: list[int] | None = None
 
 
 class ModelUploadResponse(BaseModel):

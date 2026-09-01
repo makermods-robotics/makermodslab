@@ -57,6 +57,7 @@ from pydantic import BaseModel
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .api_errors import ErrorCode
+from .arm_capabilities import uses_feetech_bus
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
 from .eval_protocol import (
@@ -93,12 +94,19 @@ from .utils.errors import friendly_hint, is_cleanup_error
 
 logger = logging.getLogger(__name__)
 
-# Flat proprioceptive state width of a single SO-101 follower arm (one dim per
-# joint). A bimanual checkpoint trains on two arms → twice this. The frontend
-# forwards the checkpoint's state_dim (from /policy-config) so the server can
-# reject an arm-count mismatch BEFORE spawning the rollout subprocess, instead
-# of letting the shape mismatch crash deep inside it.
-_SINGLE_ARM_STATE_DIM = 6
+# Flat proprioceptive state width of a SINGLE follower arm, one dim per joint,
+# per arm type. A bimanual checkpoint trains on two arms → twice this. The
+# frontend forwards the checkpoint's state_dim (from /policy-config) so the
+# server can reject an arm-count mismatch BEFORE spawning the rollout
+# subprocess, instead of letting the shape mismatch crash deep inside it.
+#
+# The Maker arm is 7-DOF (6 joints + a permanent gripper) against the SO-101's
+# 6, so this MUST be read per arm type: a 7-dim Maker checkpoint measured
+# against the SO-101's 6 is neither <= 6 nor a clean multiple of it, and the
+# guard would silently disable itself on exactly the mismatch it exists to
+# catch.
+_ARM_STATE_DIMS = {"so101": 6, "maker": 7, "metal": 7}
+_SINGLE_ARM_STATE_DIM = _ARM_STATE_DIMS["so101"]
 
 
 class PolicyCameraDims(BaseModel):
@@ -152,6 +160,11 @@ class InferenceRequest(BaseModel):
     #      staging dir, not which calibration drives which arm. Blank/invalid
     #      falls back to DEFAULT_BIMANUAL_BASE.
     robot_name: str = ""
+    # Hardware family: "so101" (Feetech serial) or "maker" (RobStride CAN
+    # follower + Star Arm 102 leader). Decides which lerobot robot type the
+    # rollout CLI args name, which calibration library the follower config
+    # resolves in, and the per-arm joint count the checkpoint guard expects.
+    arm_type: str = "so101"
     # Flat state width of the selected checkpoint (6 = single SO-101 arm, 12 =
     # bimanual), forwarded from /policy-config so the server can reject an
     # arm-count mismatch pre-spawn. None when the checkpoint omits the feature —
@@ -864,28 +877,35 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
     return download_hub_checkpoint_ref(policy_ref, tqdm_class=tqdm_class)
 
 
-def _arm_count_mismatch(mode: str, checkpoint_state_dim: int | None) -> str | None:
+def _arm_count_mismatch(mode: str, checkpoint_state_dim: int | None, arm_type: str = "so101") -> str | None:
     """Explain a checkpoint/robot arm-count mismatch, or None when they agree.
 
-    An SO-101 follower has 6 state dims; a bimanual robot drives two arms (12
-    dims). A checkpoint trained on one arm-count crashes on the other deep in
-    the rollout subprocess (a raw shape mismatch, no explanation). Reject it
-    up front with a legible message when the checkpoint exposes enough to tell.
+    An SO-101 follower has 6 state dims and a Maker follower 7 (6 joints plus
+    its permanent gripper); a bimanual robot drives two arms, so twice that. A
+    checkpoint trained on one arm-count crashes on the other deep in the
+    rollout subprocess (a raw shape mismatch, no explanation). Reject it up
+    front with a legible message when the checkpoint exposes enough to tell.
+
+    The per-arm width is read from `arm_type` rather than assumed, so the guard
+    stays live for Maker robots — measured against the SO-101's 6, a 7-dim
+    Maker checkpoint is neither <= 6 nor a multiple of it and would fall through
+    the "odd width" escape below on every single run.
 
     `checkpoint_state_dim` is None when the checkpoint omits observation.state
     (e.g. a vision-only policy) — then we can't tell cheaply, so return None and
     let the subprocess's own shape check speak (reported in the modal via the
-    existing post-mortem path). A dim that's neither 6 nor a clean multiple is
-    also left to the subprocess rather than guessed at here.
+    existing post-mortem path). A dim that's neither one arm wide nor a clean
+    multiple is also left to the subprocess rather than guessed at here.
     """
     if checkpoint_state_dim is None:
         return None
+    arm_dim = _ARM_STATE_DIMS.get(arm_type, _SINGLE_ARM_STATE_DIM)
     robot_is_bimanual = mode == "bimanual"
     # The checkpoint is bimanual iff its state is (a multiple of) two arms wide.
-    if checkpoint_state_dim <= _SINGLE_ARM_STATE_DIM:
+    if checkpoint_state_dim <= arm_dim:
         checkpoint_is_bimanual = False
-    elif checkpoint_state_dim % _SINGLE_ARM_STATE_DIM == 0:
-        checkpoint_is_bimanual = checkpoint_state_dim // _SINGLE_ARM_STATE_DIM >= 2
+    elif checkpoint_state_dim % arm_dim == 0:
+        checkpoint_is_bimanual = checkpoint_state_dim // arm_dim >= 2
     else:
         # An odd width we don't recognise — don't block on a guess.
         return None
@@ -1192,10 +1212,36 @@ def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
     )
 
 
+# lerobot `--robot.type` per arm type, single and bimanual. These are draccus
+# choice-registry keys (RobotConfig.register_subclass), not free text: a typo
+# fails inside the subprocess at CLI-parse time with a choices list, long after
+# the session has been claimed.
+_ROBOT_CLI_TYPES = {
+    ("so101", False): "so101_follower",
+    ("so101", True): "bi_so_follower",
+    ("maker", False): "maker_follower",
+    ("maker", True): "bi_maker_follower",
+    ("metal", False): "metal_follower",
+    ("metal", True): "bi_metal_follower",
+}
+
+
+def _robot_cli_type(request: InferenceRequest) -> str:
+    """The `--robot.type=` value for this request's arm type and layout."""
+    from .utils.config import normalize_arm_type
+
+    return _ROBOT_CLI_TYPES[(normalize_arm_type(request.arm_type), request.mode == "bimanual")]
+
+
 def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]:
-    """`--robot.*` args for a single SO-101 follower."""
+    """`--robot.*` args for a single follower (SO-101 or Maker).
+
+    Both follower types take the same three flags: `port` is the Feetech
+    USB-serial device for an SO-101 and the CAN adapter's serial port for a
+    Maker arm (slcan, the only transport that works on macOS), so the shape is
+    identical and only the type key differs."""
     args = [
-        "--robot.type=so101_follower",
+        f"--robot.type={_robot_cli_type(request)}",
         f"--robot.port={request.follower_port}",
         f"--robot.id={follower_id}",
     ]
@@ -1206,7 +1252,11 @@ def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]
 
 
 def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging: str) -> list[str]:
-    """`--robot.*` args for a bimanual BiSO follower.
+    """`--robot.*` args for a bimanual follower (BiSO or BiMaker).
+
+    Both bimanual follower configs have the same shape — two sub-arms sharing
+    one calibration_dir + base id, cameras on the left arm — so only the type
+    key differs between arm types.
 
     lerobot's BiSOFollowerConfig wraps two SOFollowerConfig sub-arms
     (left_arm_config / right_arm_config) sharing ONE calibration_dir + base id,
@@ -1217,7 +1267,7 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
     go on the LEFT arm (BiSO re-exposes them prefixed "left_*"); the right arm is
     camera-free, matching the record/teleop bimanual shape."""
     args = [
-        "--robot.type=bi_so_follower",
+        f"--robot.type={_robot_cli_type(request)}",
         f"--robot.id={base}",
         f"--robot.calibration_dir={follower_staging}",
         f"--robot.left_arm_config.port={request.follower_port}",
@@ -1255,13 +1305,18 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
             base,
             request.follower_config,
             request.right_follower_config,
+            request.arm_type,
         )
         # Sub-arm ids are the BiSO staging aliases ("<base>_left/right"), so
         # the identity guard compares against the real library stems.
         left_id, right_id = f"{base}_left", f"{base}_right"
 
         identity_warnings: list[str] = []
-        if request.skip_identity_check:
+        # Both preflights read/write Feetech registers by name and are skipped
+        # wholesale on a Maker arm's CAN bus — see arm_capabilities.
+        if not uses_feetech_bus(request.arm_type):
+            logger.info("CAN arm: skipping the Feetech identity + register preflights")
+        elif request.skip_identity_check:
             logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
         else:
             # Each bus opens/verifies/releases sequentially — never both at
@@ -1272,9 +1327,10 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
             identity_warnings += _preflight_arm_identity(
                 request.right_follower_port, right_id, config_name=request.right_follower_config
             )
-        # Register reset on both buses, sequentially (each opens its own port).
-        identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
-        identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
+        if uses_feetech_bus(request.arm_type):
+            # Register reset on both buses, sequentially (each opens its own port).
+            identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
+            identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
 
         return _bimanual_robot_args(request, base, follower_staging), identity_warnings
 
@@ -1282,11 +1338,18 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
     # .json extension. We need that stripped form for `--robot.id`,
     # because lerobot appends `.json` itself when constructing
     # `calibration_dir / f"{id}.json"`.
-    follower_id = setup_follower_calibration_file(request.follower_config)
+    follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
 
     # Arm-identity guard: refuse before the subprocess can move (or stamp
     # the wrong calibration into) an arm that doesn't match its file.
     identity_warnings = []
+    if not uses_feetech_bus(request.arm_type):
+        # A Maker follower stores its zero inside the RobStride motors and
+        # writes homing_offset=0 for every joint, so the EEPROM fingerprint has
+        # nothing to compare and the torque-limit register does not exist.
+        logger.info("CAN arm: skipping the Feetech identity + register preflights")
+        return _single_robot_args(request, follower_id), identity_warnings
+
     if request.skip_identity_check:
         logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
     else:
@@ -1788,7 +1851,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     # vice versa) BEFORE spawning the worker, where the shape mismatch would
     # otherwise crash unexplained. Cheap (no I/O) — defers to the subprocess when
     # the checkpoint doesn't expose observation.state.
-    mismatch = _arm_count_mismatch(request.mode, request.checkpoint_state_dim)
+    mismatch = _arm_count_mismatch(request.mode, request.checkpoint_state_dim, request.arm_type)
     if mismatch is not None:
         _release_slot()
         return {"success": False, "status_code": 409, "message": mismatch}

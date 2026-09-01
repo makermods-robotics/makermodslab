@@ -24,6 +24,13 @@ export default {
     play: "播放",
     pause: "暂停",
     trainSkill: "用它训练一项技能",
+    curateEpisodes: "挑选回合",
+    curateDone: "完成",
+    includedCount: "已选 {{included}} / {{total}} 个回合",
+    includeEpisodeAria: "将第 {{index}} 回合纳入训练",
+    curateSaveFailedTitle: "无法保存回合选择",
+    curateSaveFailedBody: "改动未保存 — 请重试。",
+    finishCuratingFirst: "请先完成回合挑选",
   },
 
   jointChart: {
@@ -65,6 +72,8 @@ export default {
     steps: "{{steps}} 步",
     private: "私有",
     trainedOn: "<0>训练所用数据集：</0><1>{{dataset}}</1>",
+    episodeSubset: "{{used}} 个回合",
+    episodeSubsetOfTotal: "{{total}} 个回合中的 {{used}} 个",
     notTrained: "尚未训练 — 该技能仍在开发中。",
     run: "在 {{robot}} 上运行",
     robotFallback: "机械臂",

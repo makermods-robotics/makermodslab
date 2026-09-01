@@ -63,6 +63,21 @@ export default {
     nameLabel: "名称",
     duplicate: "已存在同名机器人。",
     armLayout: "机械臂配置",
+    armTypeLabel: "机械臂类型",
+    armTypes: {
+      so101: {
+        label: "SO-101",
+        description: "6 自由度串口主从臂",
+      },
+      maker: {
+        label: "Maker 机械臂",
+        description: "7 自由度 CAN 机械臂，Star 102 主臂",
+      },
+      metal: {
+        label: "Metal 机械臂",
+        description: "7 自由度 Damiao CAN 机械臂，Star 102 主臂",
+      },
+    },
     modes: {
       single: {
         label: "单臂",
