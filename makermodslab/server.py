@@ -86,6 +86,7 @@ from .jobs import (
     _list_local_checkpoints,
     hub_ref_repo_id,
     job_registry,
+    training_is_active,
 )
 from .maker_ports import identify_maker_arm_by_motion, probe_maker_ports
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
@@ -98,10 +99,14 @@ from .nodes import (
     handle_get_node_job,
     handle_get_node_job_logs,
     handle_get_node_jobs,
+    handle_get_node_policy_extra,
+    handle_get_node_policy_extra_status,
     handle_get_node_queue,
+    handle_install_node_policy_extra,
     handle_list_node_sources,
     handle_list_nodes,
     handle_remove_node,
+    handle_restart_node,
     handle_stop_node_job,
 )
 
@@ -207,6 +212,7 @@ from .schemas.system import (
     PolicyExtraStatus,
     PolicyOptimizerDefaultsResponse,
     ReleaseCanTorqueResponse,
+    RestartResponse,
     RobotPortResponse,
     SupplyVoltageResponse,
     UpdateResult,
@@ -217,6 +223,7 @@ from .sessions import (
     handle_heartbeat_session,
     handle_start_session,
     handle_stop_session,
+    held_by,
 )
 
 # Import our custom teleoperation functionality
@@ -278,8 +285,11 @@ from .utils.system import (
     handle_install_training_extra_status,
     handle_install_wandb_extra,
     handle_install_wandb_extra_status,
+    install_in_progress,
     open_folder_in_file_browser,
     probe_gpu,
+    restart_supported,
+    schedule_restart,
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
@@ -1028,6 +1038,57 @@ def delete_node_job(instance_id: str, job_id: str):
     job.not_found, …) keep THEIR status and body; only transport-level failure
     is 502 node.unreachable, and 404 node.not_found names an unknown node."""
     handle_delete_node_job(instance_id, job_id)
+
+
+@v1_router.get(
+    "/nodes/{instance_id}/policy-extra/{policy_type}", response_model=PolicyExtraStatus, tags=["nodes"]
+)
+def get_node_policy_extra(instance_id: str, policy_type: str):
+    """Environment proxy: the peer's own GET /api/v1/system/policy-extra/
+    {policy_type}, passed through — whether the extra the policy needs is
+    importable in THE PEER's environment, the one an offloaded run imports
+    from (the local answer is irrelevant to it). Same error mapping as the
+    other GET proxies: 404 node.not_found for an unknown instance_id, 502
+    node.unreachable for ANY failure to read the peer."""
+    return handle_get_node_policy_extra(instance_id, policy_type)
+
+
+@v1_router.get(
+    "/nodes/{instance_id}/policy-extra/{policy_type}/install-status",
+    response_model=InstallStatusResponse,
+    tags=["nodes"],
+)
+def get_node_policy_extra_status(instance_id: str, policy_type: str):
+    """The peer's own install-status, passed through. The peer drains pending
+    pip log lines per call, so this proxy is inherently incremental — like
+    the job-log proxy. Same error mapping as the GET proxies."""
+    return handle_get_node_policy_extra_status(instance_id, policy_type)
+
+
+@v1_router.post(
+    "/nodes/{instance_id}/policy-extra/{policy_type}/install",
+    response_model=InstallStartResponse,
+    tags=["nodes"],
+)
+def install_node_policy_extra(instance_id: str, policy_type: str):
+    """Forward the install to the peer: `pip install lerobot[<extra>]` runs
+    THERE, in the environment its training subprocesses import from. Mutation
+    stance, like the stop/delete proxies: the peer's own refusals keep THEIR
+    status and body; only transport-level failure is 502 node.unreachable,
+    and 404 node.not_found names an unknown node."""
+    return handle_install_node_policy_extra(instance_id, policy_type)
+
+
+@v1_router.post("/nodes/{instance_id}/restart", response_model=RestartResponse, tags=["nodes"])
+def restart_node(instance_id: str):
+    """Forward a restart to the peer (its own POST /api/v1/system/restart).
+    200 means the peer ANSWERED and scheduled its re-exec — expect it to flap
+    unreachable for a few seconds; the registry's probes pick it back up. The
+    peer's coded refusals (409 session.held / robot.busy.training /
+    system.restart_unsupported — or a plain 404 from a peer too old to have
+    the endpoint) pass through with THEIR status and body; only transport
+    failure is 502 node.unreachable."""
+    return handle_restart_node(instance_id)
 
 
 @v1_router.delete("/nodes/{instance_id}", response_model=NodeRemoveResponse, tags=["nodes"])
@@ -2856,6 +2917,70 @@ def install_policy_extra(policy_type: str):
 def install_policy_extra_status(policy_type: str):
     """Return the policy extra's install state plus any pending log lines (drained on read)."""
     return handle_install_policy_extra_status(policy_type)
+
+
+# The busy matrix's discriminants, for the restart refusal: the same
+# robot.busy.<feature> code the holder's own start-refusals use, so a client
+# learns WHAT holds the machine from the code alone.
+_HOLDER_BUSY_CODES: dict[str, ErrorCode] = {
+    "recording": ErrorCode.ROBOT_BUSY_RECORDING,
+    "teleoperation": ErrorCode.ROBOT_BUSY_TELEOPERATION,
+    "inference": ErrorCode.ROBOT_BUSY_INFERENCE,
+    "replay": ErrorCode.ROBOT_BUSY_REPLAY,
+    "calibration": ErrorCode.ROBOT_BUSY_CALIBRATION,
+    "auto_calibration": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
+    "wiggle": ErrorCode.ROBOT_BUSY_WIGGLE,
+}
+
+
+@v1_router.post("/system/restart", response_model=RestartResponse, tags=["system"])
+def restart_server():
+    """Re-exec this server process in place (same argv/env/PID), so a remote
+    operator — the node-proxy POST /api/v1/nodes/{id}/restart — can bounce a
+    headless station without a shell on it. Answers FIRST, re-execs after a
+    short grace delay so this response reaches the client.
+
+    Refusals, all 409: a live robot flow (robot.busy.<feature> — killing the
+    server mid-flow drops the hardware threads with it), a running or queued
+    training run (robot.busy.training — the loader retires both on startup),
+    and a process that cannot safely re-exec (system.restart_unsupported: a
+    dev reload worker, a non-entry-point launch, or Windows)."""
+    holder = held_by()
+    if holder is not None:
+        raise ApiError(
+            status_code=409,
+            detail=f"Cannot restart while {holder} is active — stop it first.",
+            code=_HOLDER_BUSY_CODES.get(holder, ErrorCode.SESSION_HELD),
+        )
+    running = training_is_active()
+    if running is not None:
+        raise ApiError(
+            status_code=409,
+            detail=f"Cannot restart while a local training run ({running}) is active — stop it first.",
+            code=ErrorCode.ROBOT_BUSY_TRAINING,
+        )
+    queued = job_registry.list_queue()
+    if queued:
+        raise ApiError(
+            status_code=409,
+            detail=(
+                f"Cannot restart with {len(queued)} queued training run(s) — "
+                "the restart would retire the queue. Cancel them first."
+            ),
+            code=ErrorCode.ROBOT_BUSY_TRAINING,
+        )
+    installing = install_in_progress()
+    if installing is not None:
+        raise ApiError(
+            status_code=409,
+            detail=f"Cannot restart while '{installing}' is installing — wait for it to finish.",
+            code=ErrorCode.SYSTEM_INSTALL_IN_PROGRESS,
+        )
+    supported, why = restart_supported()
+    if not supported:
+        raise ApiError(status_code=409, detail=why, code=ErrorCode.SYSTEM_RESTART_UNSUPPORTED)
+    schedule_restart()
+    return {"restarting": True, "message": "Restarting — the server will be back in a few seconds."}
 
 
 @router.get("/system/update-check", response_model=UpdateStatus, tags=["system"])

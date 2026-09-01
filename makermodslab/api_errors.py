@@ -129,6 +129,14 @@ class ErrorCode(StrEnum):
     SESSION_LEASE_EXPIRED = "session.lease_expired"
     SESSION_NOT_FOUND = "session.not_found"
 
+    # system.* — the server process itself. `restart_unsupported`: this
+    # process cannot safely re-exec (a dev reload worker, or a launch whose
+    # argv isn't one of our entry points) — the remedy is restarting it the
+    # way it was started, not retrying. `install_in_progress`: a restart
+    # would orphan a live pip subprocess mid-write — retry once it finishes.
+    SYSTEM_RESTART_UNSUPPORTED = "system.restart_unsupported"
+    SYSTEM_INSTALL_IN_PROGRESS = "system.install_in_progress"
+
     # The residual 500.
     INTERNAL_UNEXPECTED = "internal.unexpected"
 

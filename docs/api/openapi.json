@@ -3414,6 +3414,24 @@
         "title": "ReplayRequest",
         "type": "object"
       },
+      "RestartResponse": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "restarting": {
+            "title": "Restarting",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "restarting",
+          "message"
+        ],
+        "title": "RestartResponse",
+        "type": "object"
+      },
       "RobotPortResponse": {
         "description": "server.py get_robot_port — saved_port is null (not absent) when no\nport file exists, so None must NOT be excluded on this route.",
         "properties": {
@@ -7925,6 +7943,205 @@
         ]
       }
     },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}": {
+      "get": {
+        "description": "Environment proxy: the peer's own GET /api/v1/system/policy-extra/\n{policy_type}, passed through — whether the extra the policy needs is\nimportable in THE PEER's environment, the one an offloaded run imports\nfrom (the local answer is irrelevant to it). Same error mapping as the\nother GET proxies: 404 node.not_found for an unknown instance_id, 502\nnode.unreachable for ANY failure to read the peer.",
+        "operationId": "get_node_policy_extra",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyExtraStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Policy Extra",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install": {
+      "post": {
+        "description": "Forward the install to the peer: `pip install lerobot[<extra>]` runs\nTHERE, in the environment its training subprocesses import from. Mutation\nstance, like the stop/delete proxies: the peer's own refusals keep THEIR\nstatus and body; only transport-level failure is 502 node.unreachable,\nand 404 node.not_found names an unknown node.",
+        "operationId": "install_node_policy_extra",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Node Policy Extra",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install-status": {
+      "get": {
+        "description": "The peer's own install-status, passed through. The peer drains pending\npip log lines per call, so this proxy is inherently incremental — like\nthe job-log proxy. Same error mapping as the GET proxies.",
+        "operationId": "get_node_policy_extra_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "policy_type",
+            "required": true,
+            "schema": {
+              "title": "Policy Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Node Policy Extra Status",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
+    "/api/v1/nodes/{instance_id}/restart": {
+      "post": {
+        "description": "Forward a restart to the peer (its own POST /api/v1/system/restart).\n200 means the peer ANSWERED and scheduled its re-exec — expect it to flap\nunreachable for a few seconds; the registry's probes pick it back up. The\npeer's coded refusals (409 session.held / robot.busy.training /\nsystem.restart_unsupported — or a plain 404 from a peer too old to have\nthe endpoint) pass through with THEIR status and body; only transport\nfailure is 502 node.unreachable.",
+        "operationId": "restart_node",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Node",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
     "/api/v1/open-calibration-folder": {
       "post": {
         "description": "Open a side's calibration folder in the OS file browser (Finder/Explorer/\nxdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.\nThe dir is created if missing so a fresh install opens an empty folder rather\nthan failing. An unknown device_type is rejected with 400.",
@@ -9036,6 +9253,28 @@
           }
         },
         "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/restart": {
+      "post": {
+        "description": "Re-exec this server process in place (same argv/env/PID), so a remote\noperator — the node-proxy POST /api/v1/nodes/{id}/restart — can bounce a\nheadless station without a shell on it. Answers FIRST, re-execs after a\nshort grace delay so this response reaches the client.\n\nRefusals, all 409: a live robot flow (robot.busy.<feature> — killing the\nserver mid-flow drops the hardware threads with it), a running or queued\ntraining run (robot.busy.training — the loader retires both on startup),\nand a process that cannot safely re-exec (system.restart_unsupported: a\ndev reload worker, a non-entry-point launch, or Windows).",
+        "operationId": "restart_server",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Restart Server",
         "tags": [
           "system"
         ]

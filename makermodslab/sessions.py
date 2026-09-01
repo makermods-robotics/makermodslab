@@ -446,6 +446,12 @@ def _held_by() -> str | None:
     return None
 
 
+def held_by() -> str | None:
+    """Public read of the busy matrix, for callers OUTSIDE the session surface
+    (the restart guard): which feature's flag holds the hardware, or None."""
+    return _held_by()
+
+
 def _raise_held(holder_kind: str | None, message: str) -> None:
     """409 session.held, with details naming the holder as precisely as the
     tracker can: its session id when the tracker saw the claim, else null
