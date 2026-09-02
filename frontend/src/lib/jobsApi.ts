@@ -675,10 +675,7 @@ export async function updatePresenceSettings(
 ): Promise<{ enabled: boolean; label: string }> {
   return apiRequest(baseUrl, fetcher, "/api/v1/jobs/devices/settings", {
     method: "POST",
-    // `changes`, NOT JSON.stringify(changes): apiRequest serializes the body
-    // itself, so pre-stringifying sent a JSON *string* where the endpoint
-    // wants an object — a 422 on every toggle and rename.
-    body: changes,
+    body: JSON.stringify(changes),
     action: "Update sharing settings",
   });
 }
