@@ -24,6 +24,9 @@ import time
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .api_errors import ErrorCode
+from .session_events import notify_session_changed
+
 logger = logging.getLogger(__name__)
 
 # ~200 encoder steps (of 4096) is a small but clearly visible movement.
@@ -126,39 +129,64 @@ async def wiggle_gripper(port: str) -> dict:
     )
 
     if wiggle_active:
-        return {"success": False, "message": "A gripper wiggle is already in progress."}
+        return {
+            "success": False,
+            "message": "A gripper wiggle is already in progress.",
+            "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+        }
     if _teleoperate.teleoperation_active:
         return {
             "success": False,
             "message": "Teleoperation is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_TELEOPERATION,
         }
     if _record.recording_active:
         return {
             "success": False,
             "message": "Recording is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_RECORDING,
         }
     if _rollout.inference_active:
         return {
             "success": False,
             "message": "Inference is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_INFERENCE,
         }
     if _calibrate.calibration_is_active():
         return {
             "success": False,
             "message": "Calibration is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_CALIBRATION,
         }
     if _auto_calibrate.auto_calibration_is_active():
         return {
             "success": False,
             "message": "Auto-calibration is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_AUTO_CALIBRATION,
         }
     if _replay.replay_active:
         return {
             "success": False,
             "message": "Replay is currently active — wait for it to stop before wiggling.",
+            "code": ErrorCode.ROBOT_BUSY_REPLAY,
+        }
+    # Lazy, because jobs imports this module back the same way.
+    from . import jobs as _jobs
+
+    if (training := _jobs.training_is_active()) is not None:
+        return {
+            "success": False,
+            "message": (
+                f"Training run '{training}' is using this machine — wait for it to stop before wiggling."
+            ),
+            "code": ErrorCode.ROBOT_BUSY_TRAINING,
         }
 
     wiggle_active = True
+    # The claim above is the real state transition — broadcast the hint so
+    # every WS client learns the robot is busy (wiggle has no status
+    # endpoint of its own; consumers see the busy state via start refusals).
+    notify_session_changed("wiggle", True)
     try:
         await asyncio.wait_for(
             asyncio.to_thread(_run_wiggle_and_clear_flag, port.strip()),
@@ -192,3 +220,6 @@ def _run_wiggle_and_clear_flag(port: str) -> None:
         _wiggle_gripper_sync(port)
     finally:
         wiggle_active = False
+        # Final release, tied to the thread's REAL exit (like the flag) so
+        # the hint can never claim idle while the port is still held.
+        notify_session_changed("wiggle", False)

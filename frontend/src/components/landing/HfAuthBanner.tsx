@@ -41,7 +41,7 @@ const HfAuthBanner: React.FC = () => {
     setSubmitting(true);
     setError(null);
     try {
-      const r = await fetchWithHeaders(`${baseUrl}/hf-auth/login`, {
+      const r = await fetchWithHeaders(`${baseUrl}/api/v1/hf-auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: trimmed }),

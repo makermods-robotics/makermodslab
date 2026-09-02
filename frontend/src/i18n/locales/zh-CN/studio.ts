@@ -63,8 +63,6 @@ export default {
     toast: {
       noRobotTitle: "未选择机器人",
       noRobotBody: "请先选择或创建机器人 — 使用右上角的机器人菜单。",
-      notReadyTitle: "机器人未就绪",
-      notReadyBody: "{{name}}{{gap}}。请先打开机器人设置，然后再开始录制。",
       missingDetailsTitle: "数据集信息不完整",
       missingDetailsBody: "请填写数据集名称和任务描述。",
       invalidNameTitle: "数据集名称无效",
@@ -119,6 +117,10 @@ export default {
       resumeHint: "继承自被继续的那次训练。",
       remove: "移除 {{repoId}}",
       searchPlaceholder: "搜索数据集，或输入公开的 org/name Hub id",
+      episodeSubset:
+        "将使用 {{used}} 个回合进行训练 — 可在「我的库」中该数据集的查看器里调整。",
+      episodeSubsetOfTotal:
+        "将使用 {{total}} 个回合中的 {{used}} 个进行训练 — 可在「我的库」中该数据集的查看器里调整。",
       choose: "选择数据集",
       useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
       useHubHint: "公开数据集 — 训练时按需拉取。",

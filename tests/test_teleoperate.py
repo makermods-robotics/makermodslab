@@ -71,7 +71,7 @@ def test_start_teleoperation_reports_connection_failure(
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     class _Bus:
@@ -117,7 +117,7 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     class _OkBus:
@@ -181,7 +181,7 @@ def test_start_teleoperation_force_disables_torque_and_warns_when_setup_fails_af
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     monkeypatch.setattr(teleop, "verify_devices", lambda *a, **k: [])
     monkeypatch.setattr(teleop, "reset_torque_limit", lambda *a, **k: [])
@@ -387,6 +387,7 @@ def test_start_teleoperation_blocked_when_calibration_active(monkeypatch: pytest
     assert result == {
         "success": False,
         "message": "Calibration is currently active. Stop it first.",
+        "code": "robot.busy.calibration",
     }
 
 
@@ -400,6 +401,7 @@ def test_start_teleoperation_blocked_when_auto_calibration_active(monkeypatch: p
     assert result == {
         "success": False,
         "message": "Auto-calibration is currently active. Stop it first.",
+        "code": "robot.busy.auto_calibration",
     }
 
 
@@ -413,6 +415,7 @@ def test_start_teleoperation_blocked_when_wiggle_active(monkeypatch: pytest.Monk
     assert result == {
         "success": False,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+        "code": "robot.busy.wiggle",
     }
 
 
@@ -429,6 +432,7 @@ def test_start_teleoperation_blocked_when_replay_active(monkeypatch: pytest.Monk
     assert result == {
         "success": False,
         "message": "Replay is currently active. Stop it first.",
+        "code": "robot.busy.replay",
     }
 
 
@@ -447,7 +451,7 @@ def test_teleop_single_config_carries_no_cameras(
     opens none, so any camera display is handled by the browser."""
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
     from makermodslab.teleoperate import TeleoperateRequest
     from makermodslab.utils.robot_factory import build_single_configs
@@ -1889,7 +1893,7 @@ def test_start_clears_stale_release_state_from_previous_double_stop(
     monkeypatch.setattr(teleop, "releasing", True)
     monkeypatch.setattr(
         "makermodslab.utils.robot_factory.setup_calibration_files",
-        lambda leader, follower: ("leader", "follower"),
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
     )
 
     class _Bus:

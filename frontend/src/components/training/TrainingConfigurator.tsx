@@ -32,6 +32,11 @@ import {
 } from "@/lib/jobsApi";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
+import {
+  getNodePolicyExtra,
+  listNodes,
+  nodeDisplayName,
+} from "@/lib/nodesApi";
 import { getDatasetInfo } from "@/lib/replayApi";
 
 // Passed by the "Continue" button on a completed local job, or the "Resume"
@@ -115,6 +120,10 @@ interface TrainingConfiguratorProps {
   onPolicyTypeChange: (policyType: string) => void;
   /** Controlled training dataset. Empty string ⇒ Start stays disabled. */
   datasetRepoId: string;
+  /** Controlled episode subset for datasetRepoId (e.g. seeded from the
+   * dataset viewer's exclude-from-training checkboxes). undefined ⇒ every
+   * episode trains, same as the field being absent from the request. */
+  episodeIndices?: number[];
   /** A "Continue"/"Resume" seed — inherits the source run's target + cadence. */
   resumeSeed?: ResumeSeed | null;
   /** A "Fine-tune" seed — fresh run initialized from a source checkpoint. */
@@ -148,6 +157,7 @@ function configToRequest(
   return {
     target: c.target,
     dataset_repo_id: c.dataset_repo_id,
+    dataset_episodes: c.dataset_episodes,
     policy_type: c.policy_type,
     job_name: c.job_name,
     steps: c.steps,
@@ -213,6 +223,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   policyType,
   onPolicyTypeChange,
   datasetRepoId: controlledDatasetRepoId,
+  episodeIndices: controlledEpisodeIndices,
   resumeSeed = null,
   finetuneSeed = null,
   onStarted,
@@ -310,8 +321,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       ...trainingConfig,
       policy_type: policyType,
       dataset_repo_id: controlledDatasetRepoId,
+      dataset_episodes: controlledEpisodeIndices,
     }),
-    [trainingConfig, policyType, controlledDatasetRepoId],
+    [trainingConfig, policyType, controlledDatasetRepoId, controlledEpisodeIndices],
   );
 
   const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<
@@ -326,6 +338,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     packageName: string;
     installTarget: string;
     installHint: string;
+    // Set when the missing extra is on a LAN NODE's environment (the chosen
+    // compute target), not the local one — the dialog then installs there.
+    node?: { instanceId: string; name: string };
   } | null>(null);
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
@@ -357,7 +372,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   }, [policyType, resumeSeed]);
 
   useEffect(() => {
-    fetchWithHeaders(`${baseUrl}/system/training-extra`)
+    fetchWithHeaders(`${baseUrl}/api/v1/system/training-extra`)
       .then((r) => r.json())
       .then((data: { available: boolean; install_hint: string }) => {
         setTrainingExtraAvailable(data.available);
@@ -481,10 +496,25 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         configToRequest(config, checkpointUploadKind),
       );
       // The job's name is data — shown exactly as the backend returned it.
-      toast({
-        title: t("training.configurator.toast.startedTitle"),
-        description: job.name,
-      });
+      // A busy local slot QUEUES the run rather than refusing (PR #83): say
+      // so, with its 1-based position when the record carries one.
+      if (job.state === "queued") {
+        toast({
+          title: t("training.configurator.toast.queuedTitle"),
+          description:
+            (job.queue_position ?? 0) > 0
+              ? t("training.configurator.toast.queuedBody", {
+                  name: job.name,
+                  position: job.queue_position ?? 0,
+                })
+              : job.name,
+        });
+      } else {
+        toast({
+          title: t("training.configurator.toast.startedTitle"),
+          description: job.name,
+        });
+      }
       onStarted?.(job.id);
       // The monitor is a dialog over the studio's Train panel, not a route.
       // openJobMonitor opens the studio; off-Launchpad callers (the
@@ -558,13 +588,15 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     }
 
     // Pre-flight: smolvla/pi0/pi0_fast/pi05/diffusion need an optional package
-    // installed locally. Catch it here with a one-click installer instead of a buried
-    // ImportError after the job has already started. Cloud jobs run in their
-    // own environment, so the local package is irrelevant — skip the check.
+    // installed WHERE THE RUN EXECUTES — locally for a local run, on the peer
+    // for a LAN-node run (read through the server-to-server proxy). Catch it
+    // here with a one-click installer instead of a buried ImportError after
+    // the job has already started. Cloud jobs run in their own container
+    // environment, so neither answer applies — skip the check.
     if (config.target.runner === "local") {
       try {
         const r = await fetchWithHeaders(
-          `${baseUrl}/system/policy-extra/${config.policy_type}`,
+          `${baseUrl}/api/v1/system/policy-extra/${config.policy_type}`,
         );
         if (r.ok) {
           const extra = await r.json();
@@ -581,6 +613,45 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       } catch {
         // Check failed (offline / older backend) — fall through and let the
         // job report any problem itself.
+      }
+    } else if (
+      config.target.runner === "lan_node" &&
+      config.target.node_instance_id
+    ) {
+      const instanceId = config.target.node_instance_id;
+      try {
+        const extra = await getNodePolicyExtra(
+          baseUrl,
+          fetchWithHeaders,
+          instanceId,
+          config.policy_type,
+        );
+        if (extra.needs_extra && !extra.available) {
+          // The dialog names the node so the user knows WHERE the install
+          // lands; resolve its display name from the registry, falling back
+          // to a short instance id when the listing can't be read.
+          let name = instanceId.slice(0, 8);
+          try {
+            const listing = await listNodes(baseUrl, fetchWithHeaders);
+            const entry = listing.nodes.find(
+              (n) => n.instance_id === instanceId,
+            );
+            if (entry) name = nodeDisplayName(entry);
+          } catch {
+            // Name lookup is cosmetic — the short id is enough.
+          }
+          setPolicyExtra({
+            policyType: config.policy_type,
+            packageName: extra.package,
+            installTarget: extra.install_target,
+            installHint: extra.install_hint,
+            node: { instanceId, name },
+          });
+          return;
+        }
+      } catch {
+        // Node unreachable or an older peer without the endpoint — fall
+        // through and let the peer's own job validation report the problem.
       }
     }
 
@@ -625,7 +696,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const targetRequiresAuth = config.target.runner === "hf_cloud";
   const targetMissingFlavor =
     config.target.runner === "hf_cloud" && !config.target.flavor;
-  const localBlocked = config.target.runner === "local" && localJobRunning;
+  // A running local job no longer blocks Start: the backend QUEUES the
+  // submission (PR #83). `localJobRunning` survives only to make the button
+  // say what the click will actually do.
+  const willQueue = config.target.runner === "local" && localJobRunning;
   // When resuming, total steps must be strictly above the checkpoint's step:
   // equal trains nothing and lerobot requires --steps above the resumed step.
   const resumeStepError =
@@ -649,15 +723,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     isStarting ||
     uploading ||
     !datasetRepoId ||
-    localBlocked ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
     uploadBlockedOffline ||
     checkpointUploadBlockedOffline ||
     resumeStepError != null;
-  const startTooltip = localBlocked
-    ? t("training.configurator.tooltip.localBusy")
-    : targetRequiresAuth && !authenticated
+  const startTooltip =
+    targetRequiresAuth && !authenticated
       ? t("training.configurator.tooltip.needAuth")
       : targetMissingFlavor
         ? t("training.configurator.tooltip.needFlavor")
@@ -665,7 +737,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           ? t("training.configurator.tooltip.offlineDataset")
           : checkpointUploadBlockedOffline
             ? t("training.configurator.tooltip.offlineCheckpoint")
-            : undefined;
+            : willQueue
+              ? t("training.configurator.tooltip.willQueue")
+              : undefined;
 
   return (
     <div className="w-full">
@@ -841,7 +915,11 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
                         : t("training.configurator.button.startFinetuning")
                       : needsUpload
                         ? t("training.configurator.button.uploadAndStart")
-                        : t("training.configurator.button.startTraining")}
+                        : willQueue
+                          ? // The local slot is busy — the click ENQUEUES, and
+                            // the button says so instead of promising a start.
+                            t("training.configurator.button.queueTraining")
+                          : t("training.configurator.button.startTraining")}
                 </>
               )}
             </Button>
@@ -880,6 +958,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           installTarget={policyExtra.installTarget}
           installHint={policyExtra.installHint}
           purpose="training"
+          node={policyExtra.node}
         />
       )}
     </div>
