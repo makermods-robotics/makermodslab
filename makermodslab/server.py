@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
-from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
+from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -52,7 +52,6 @@ from lerobot.policies.factory import make_policy_config
 from . import (
     datasets as dataset_browser,
     models as model_browser,
-    presence,
     record as record_state,
     rollout as rollout_state,
     session_events,
@@ -70,6 +69,7 @@ from .auto_calibrate import (
 from .calibrate import CalibrationRequest, calibration_manager
 from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
+from .can_recovery import ReleaseCanTorqueRequest, handle_release_can_torque
 from .dagger_protocol import (
     CMD_CANCEL,
     CMD_DROP_LAST,
@@ -84,6 +84,7 @@ from .identify import identify_arm_by_motion
 from .jobs import (
     _KNOWN_FOUNDATION_BASE_REPO_IDS,
     CHECKPOINTS_STAGING_SUFFIX,
+    DatasetHubCopyEmptyError,
     DatasetNotOnHubError,
     JobAlreadyContinuedError,
     JobHasChildrenError,
@@ -101,6 +102,7 @@ from .jobs import (
     job_registry,
     training_is_active,
 )
+from .maker_ports import identify_maker_arm_by_motion, probe_maker_ports
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 from .motor_power import read_supply_voltage
 from .nodes import (
@@ -172,17 +174,17 @@ from .schemas.datasets import (
     DownloadStatusResponse,
     EpisodeJointSeriesResponse,
     EpisodeSummary,
+    ExcludedEpisodesResponse,
     ImportResponse,
     MergeStartResponse,
     MergeStatusResponse,
+    SetExcludedEpisodesResponse,
     SuccessRepoIdResponse,
     UploadStartResponse,
     UploadStatusResponse,
 )
 from .schemas.jobs import (
     CheckpointPolicyConfigResponse,
-    DeviceRunsResponse,
-    ForgetDeviceResponse,
     HubJobDismissResponse,
     HubJobsResponse,
     HubModelDeleteResponse,
@@ -192,7 +194,6 @@ from .schemas.jobs import (
     JobMetricsHistoryResponse,
     JobQueueResponse,
     JobRecord,
-    PresenceSettingsResponse,
     RunnersHardwareResponse,
 )
 from .schemas.models import (
@@ -227,8 +228,11 @@ from .schemas.system import (
     HfLoginResponse,
     InstallStartResponse,
     InstallStatusResponse,
+    MakerIdentifyArmResponse,
+    MakerProbePortsResponse,
     PolicyExtraStatus,
     PolicyOptimizerDefaultsResponse,
+    ReleaseCanTorqueResponse,
     RestartResponse,
     RobotPortResponse,
     SupplyVoltageResponse,
@@ -257,8 +261,6 @@ from .teleoperate import (
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
-    FOLLOWER_CONFIG_PATH,
-    LEADER_CONFIG_PATH,
     add_dismissed_hub_job,
     add_hidden_dataset,
     add_hidden_model,
@@ -271,6 +273,7 @@ from .utils.config import (
     find_available_ports,
     get_default_robot_port,
     get_dismissed_hub_jobs,
+    get_excluded_episodes,
     get_instance_id,
     get_robot_record,
     get_saved_robot_port,
@@ -287,6 +290,7 @@ from .utils.config import (
     rename_robot_record,
     save_imported_calibration,
     save_robot_record,
+    set_excluded_episodes,
 )
 from .utils.hf_auth import (
     cached_whoami,
@@ -313,6 +317,7 @@ from .utils.system import (
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
+from .zero_calibrate import zero_calibration_is_active, zero_calibration_manager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -660,15 +665,7 @@ def _on_jobs_changed() -> None:
     """
     model_browser.invalidate_model_listing_cache()
     manager.notify_jobs_changed()
-    # Cross-device presence: a run starting or ending is exactly the event
-    # another machine wants promptly, rather than up to a keepalive later. Flag
-    # only — this runs on registry mutation paths, so it must never touch the
-    # network (and the ~1Hz progress tick deliberately does NOT come through
-    # here; see set_on_progress below).
-    presence_publisher.mark_dirty()
 
-
-presence_publisher = presence.PresencePublisher(job_registry)
 
 job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
@@ -1403,6 +1400,40 @@ def datasets_episodes(repo_id: str):
     if episodes is None:
         raise HTTPException(status_code=404, detail=f"No viewable episode list for '{repo_id}'")
     return episodes
+
+
+@v1_router.get(
+    "/datasets/excluded-episodes",
+    response_model=ExcludedEpisodesResponse,
+    tags=["datasets"],
+)
+def datasets_excluded_episodes(repo_id: str):
+    """Episode indices the user excluded from training for this dataset
+    (curation, not deletion — see set_excluded_episodes). Empty list for a
+    dataset with no exclusions."""
+    return {"repo_id": repo_id, "episode_indices": get_excluded_episodes(repo_id)}
+
+
+class ExcludedEpisodesRequest(BaseModel):
+    repo_id: str
+    episode_indices: list[int]
+
+
+@v1_router.put(
+    "/datasets/excluded-episodes",
+    response_model=SetExcludedEpisodesResponse,
+    tags=["datasets"],
+)
+def datasets_set_excluded_episodes(request: ExcludedEpisodesRequest):
+    """Replace the excluded-episode set for one dataset. NEVER deletes or
+    mutates the dataset — the viewer computes the training subset from this
+    and sends it as dataset_episodes when launching a run."""
+    set_excluded_episodes(request.repo_id, request.episode_indices)
+    return {
+        "success": True,
+        "repo_id": request.repo_id,
+        "episode_indices": get_excluded_episodes(request.repo_id),
+    }
 
 
 @router.get("/datasets/episode-joints", response_model=EpisodeJointSeriesResponse, tags=["datasets"])
@@ -2164,11 +2195,19 @@ async def create_training_job(req: Request):
                 ),
             )
     try:
-        record = job_registry.start(body.config, body.target)
-    except DatasetNotOnHubError as exc:
-        # Cloud run on a local-only dataset. 409: the caller must upload the
-        # dataset first (the browser flow does this automatically before
-        # submitting, so this fires for non-UI callers).
+        # Off the event loop: start()'s remote preflight makes real network
+        # calls (hub status, the emptiness probe, lan_node peer verification),
+        # each worth a full round-trip timeout on the slow/flaky connections
+        # this app is designed for — run inline they'd stall every other
+        # request for the duration.
+        record = await asyncio.to_thread(job_registry.start, body.config, body.target)
+    except (DatasetNotOnHubError, DatasetHubCopyEmptyError) as exc:
+        # Remote run on a dataset the remote side can't fetch: local-only
+        # (upload it first — the browser flow does so automatically, so this
+        # fires for non-UI callers), or a Hub repo that exists but is empty
+        # (an interrupted upload) with no local copy the runner could refill
+        # it from. 409 both ways: a conflict with Hub state the caller has to
+        # resolve before the run can proceed, not a malformed request.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except JobAlreadyContinuedError as exc:
         # Sticks only: the source already has a continuation, so a second one
@@ -2279,11 +2318,11 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
-# Mirrors _RUN_LABEL in runners/hf_cloud.py — the label a submitted job carries.
-# The dotted form is what jobs submitted before the tag-charset fix carry; the
-# Hub rejects a '.' in a label key, so new jobs use the underscore.
-_HUB_RUN_LABEL = "makermodslab_run"
-_HUB_RUN_LABEL_LEGACY = "makermodslab.run"
+# The label keys a submitted job may carry, newest first. `makermodslab_run` is
+# what hf_cloud._RUN_LABEL writes now; the dotted key is read but never written
+# — the Hub now rejects a "key=value" tag containing a dot, so it was renamed,
+# and every job submitted before that still carries the old one.
+_HUB_RUN_LABELS = ("makermodslab_run", "makermodslab.run")
 
 
 def _hub_job_argv(ji) -> list:
@@ -2342,15 +2381,16 @@ def _hub_job_run_name(ji) -> str | None:
     record, and the name has to come off the Hub instead.
 
     Two sources, preferred first:
-    1. The `makermodslab.run` label hf_cloud stamps at submission.
+    1. The run label hf_cloud stamps at submission (either spelling).
     2. `--policy.repo_id` in the job's own argv. Every cloud run publishes to
        "<user>/<run slug>", so this recovers a name for jobs submitted before
        labelling existed — the whole existing backlog.
     """
     labels = getattr(ji, "labels", None) or {}
-    labelled = labels.get(_HUB_RUN_LABEL) or labels.get(_HUB_RUN_LABEL_LEGACY)
-    if isinstance(labelled, str) and labelled.strip():
-        return labelled.strip()
+    for key in _HUB_RUN_LABELS:
+        labelled = labels.get(key)
+        if isinstance(labelled, str) and labelled.strip():
+            return labelled.strip()
 
     repo_id = _argv_value(_hub_job_argv(ji), "--policy.repo_id")
     # The slug after the namespace is the run id the library titles by.
@@ -2441,6 +2481,80 @@ def _hub_job_provenance(ji) -> dict:
             out["base_job_id"] = slug[: -len(CHECKPOINTS_STAGING_SUFFIX)]
 
     return out
+
+
+# The trainer flags worth reading back off a Hub job, and the JSON key each one
+# becomes on the listing row. Deliberately a small allowlist rather than "parse
+# everything": these four are what an untracked row renders (title, policy chip,
+# dataset/steps on the card), and every one of them is a field a tracked
+# JobRecord already carries, so a foreign run reads like a local one.
+_HUB_JOB_TRAINER_FLAGS = ("policy.type", "dataset.repo_id", "steps", "policy.repo_id")
+
+
+def _hub_job_trainer_args(ji) -> dict[str, str]:
+    """The allowlisted `--flag value` pairs out of a Hub job's own argv.
+
+    A cloud run's whole trainer invocation is stored on the job, so what a
+    foreign run trains — its policy, dataset, and step target — is already in
+    the listing response we fetch, with no extra Hub call. This reads it back.
+
+    The command we submit is
+    ``python -c <wrapper source> <spec> [directives] -- <trainer argv>``, so
+    parsing starts after the first BARE ``--`` sentinel where there is one: the
+    wrapper source is a single argv token, but the wrapper-side directives
+    before the sentinel (e.g. ``--resume-from=...``) are not ours to read as
+    trainer flags. `arguments` is where the Hub splits argv for some submission
+    paths; ours rides entirely in `command`, so both are scanned.
+
+    Both spellings are accepted (``--flag value`` and ``--flag=value``) because
+    build_training_command emits each in different places. A flag repeated wins
+    on its first occurrence; an unparsable or valueless flag is simply absent
+    rather than raising — this decorates a listing and must never be able to
+    500 it.
+    """
+    argv = [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
+    argv = [tok for tok in argv if isinstance(tok, str)]
+    if "--" in argv:
+        argv = argv[argv.index("--") + 1 :]
+
+    out: dict[str, str] = {}
+    for i, tok in enumerate(argv):
+        for flag in _HUB_JOB_TRAINER_FLAGS:
+            if flag in out:
+                continue
+            value = None
+            if tok == f"--{flag}" and i + 1 < len(argv):
+                value = argv[i + 1]
+            elif tok.startswith(f"--{flag}="):
+                value = tok.split("=", 1)[1]
+            # A following token that is itself a flag means this one was passed
+            # without a value; leave it absent rather than recording "--next".
+            if value and not value.startswith("--"):
+                out[flag] = value.strip()
+    return out
+
+
+def _hub_job_identity(ji) -> dict[str, Any]:
+    """The run-identity half of a `/jobs/hub` row: what this job trains.
+
+    Every value is best-effort and independently nullable — a RESUMED cloud run
+    passes `--config_path` instead of `--policy.type`/`--dataset.repo_id`
+    (build_training_command reconstructs those from the checkpoint), so a
+    continuation legitimately reports a repo and steps with no policy or
+    dataset. The frontend reserves the columns and renders a blank, which is the
+    honest answer; inventing one from the run name would be a guess.
+    """
+    args = _hub_job_trainer_args(ji)
+    try:
+        total_steps: int | None = int(args["steps"])
+    except (KeyError, ValueError):
+        total_steps = None
+    return {
+        "policy_type": args.get("policy.type"),
+        "dataset": args.get("dataset.repo_id"),
+        "total_steps": total_steps,
+        "hf_repo_id": args.get("policy.repo_id"),
+    }
 
 
 # Errors a per-author Hub model listing may raise that must degrade to "empty for
@@ -2543,159 +2657,6 @@ def _fan_out_model_authors(authors: list[str], call) -> list:
         pool.shutdown(wait=False, cancel_futures=True)
 
     return [r for r in results if r is not None]
-
-
-_devices_cache_lock = threading.Lock()
-_devices_cache: dict[str, Any] | None = None  # {"at": monotonic, "value": {...}}
-
-
-class PresenceSettingsRequest(BaseModel):
-    """Per-device presence settings. Both fields optional — a request carries
-    only what it changes."""
-
-    enabled: bool | None = None
-    label: str | None = None
-    #: Set by the UI once it has actually shown the first-publish notice.
-    announced: bool | None = None
-
-
-def _invalidate_devices_cache() -> None:
-    global _devices_cache
-    with _devices_cache_lock:
-        _devices_cache = None
-
-
-@v1_router.get("/jobs/devices", response_model=DeviceRunsResponse, tags=["jobs"])
-def list_device_runs():
-    """Local training runs on the user's OTHER devices.
-
-    The cross-device gap this closes: a cloud run is listed from any machine by
-    HF Jobs, but a LOCAL run is visible only where it runs. Devices signed into
-    the same account publish a small presence file each (see presence.py), and
-    this reads the board.
-
-    Read-only by nature. There is no channel to another machine, so nothing
-    here can stop, resume, or download a remote run, and the response carries no
-    field that would suggest otherwise.
-
-    Never 500s: an absent board (nobody has published yet) and an unreachable
-    Hub are both simply an empty list, exactly like /jobs/hub's degradation.
-    Declared before `/jobs/{job_id}` so FastAPI's first-match routing doesn't
-    treat "devices" as a job id.
-    """
-    global _devices_cache
-
-    now = time.monotonic()
-    with _devices_cache_lock:
-        if _devices_cache is not None and (now - _devices_cache["at"]) < _HUB_JOBS_CACHE_TTL_S:
-            return _devices_cache["value"]
-
-    settings = presence.load_settings()
-    status = presence_publisher.status()
-    # Under a DEADLINE, on its own thread. read_board makes one tree call plus a
-    # download per device against a client whose timeout is None, and this runs
-    # in FastAPI's worker pool — a blackholed Hub would otherwise pin a worker
-    # indefinitely, and enough cold requests would exhaust the pool.
-    devices = []
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        devices = pool.submit(presence.read_board).result(timeout=presence.READ_BOARD_TIMEOUT_S)
-    except concurrent.futures.TimeoutError:
-        logger.warning(
-            "Presence board read exceeded %ss; serving an empty board.", presence.READ_BOARD_TIMEOUT_S
-        )
-    except Exception as exc:  # noqa: BLE001 - presence must never break the library
-        logger.warning("Reading the presence board failed: %s", exc)
-    finally:
-        # Never joins: a hung read is left to die with its socket rather than
-        # holding the request open at the executor's exit.
-        pool.shutdown(wait=False)
-
-    response = {
-        "enabled": settings["enabled"],
-        "label": settings["label"],
-        "device_id": status["device_id"],
-        # The repo this device publishes to, so the UI can NAME it in the
-        # first-publish notice. None when signed out.
-        "repo_id": presence.presence_repo_id(username)
-        if (username := (cached_whoami() or {}).get("name"))
-        else None,
-        # Non-null when publishing has given up for this session: "offline", or
-        # "forbidden" when the token cannot write. The UI says so rather than
-        # leaving the toggle claiming this device is sharing when it is not.
-        "disabled_reason": status["disabled_reason"],
-        # `published` is the FACT (this device has written at least once);
-        # `announced` is whether the UI has already told the user about it. The
-        # UI announces when published and not yet announced, then acknowledges.
-        # The writer deliberately does not set `announced` itself — doing so
-        # marked the notice delivered when nothing had been shown, so it could
-        # never fire.
-        "published": status["last_write"] > 0,
-        "announced": settings.get("announced", False),
-        "devices": devices,
-    }
-    with _devices_cache_lock:
-        _devices_cache = {"at": time.monotonic(), "value": response}
-    return response
-
-
-@v1_router.post("/jobs/devices/settings", response_model=PresenceSettingsResponse, tags=["jobs"])
-def update_presence_settings(request: PresenceSettingsRequest):
-    """Turn this device's run-sharing on or off, or rename it on the board."""
-    changes: dict[str, Any] = {}
-    if request.enabled is not None:
-        changes["enabled"] = request.enabled
-    if request.label is not None and request.label.strip():
-        changes["label"] = request.label.strip()
-    if request.announced is not None:
-        changes["announced"] = request.announced
-    settings = presence.save_settings(**changes)
-    _invalidate_devices_cache()
-    # Publish the change straight away so the other machines reflect it without
-    # waiting out a keepalive.
-    presence_publisher.mark_dirty()
-    return {"enabled": settings["enabled"], "label": settings["label"]}
-
-
-@v1_router.delete("/jobs/devices/{device_id}", response_model=ForgetDeviceResponse, tags=["jobs"])
-def forget_device(device_id: str):
-    """Remove one device's file from the presence board.
-
-    For a machine that is gone for good (wiped, sold, reinstalled): its last
-    payload would otherwise sit at "presumed stopped" forever. This deletes the
-    presence record only — it touches nothing on the device itself, which by
-    then may not exist.
-
-    Refuses this device's own id: that file is rewritten on the next publish, so
-    deleting it would be a no-op that looks like it worked.
-    """
-    mine = presence.device_id()
-    if device_id == mine:
-        raise HTTPException(
-            status_code=400,
-            detail="That is this device. Turn sharing off instead of forgetting it.",
-        )
-    info = cached_whoami()
-    username = (info or {}).get("name")
-    if not username:
-        raise HTTPException(status_code=400, detail="Sign in to Hugging Face first.")
-    try:
-        shared_hf_api().delete_file(
-            path_in_repo=presence.device_file_path(device_id),
-            repo_id=presence.presence_repo_id(username),
-            repo_type="model",
-            commit_message=f"presence: forget {device_id}",
-        )
-    except EntryNotFoundError:
-        pass  # Already gone: the caller's intent is satisfied.
-    except Exception as exc:  # noqa: BLE001 - mapped to an honest refusal below
-        # Do NOT report success here. The UI toasts "Device removed" on a 2xx,
-        # and a 403 from a read-only token or a dropped connection would make
-        # that a lie about a row the user can still see.
-        logger.warning("Forgetting device %s failed: %s", device_id, exc)
-        raise HTTPException(status_code=502, detail=f"Could not remove that device: {exc}") from exc
-    _invalidate_devices_cache()
-    return {"status": "ok"}
 
 
 @router.get(
@@ -2807,10 +2768,15 @@ def list_hub_jobs():
                 "status": ({"stage": ji.status.stage, "message": ji.status.message} if ji.status else None),
                 "owner": ji.owner.name if ji.owner else None,
                 "url": ji.url,
-                # What the run started from, parsed off its own argv. Every
-                # cloud run ships the same image and flavor, so without this a
-                # card launched from another machine has almost nothing on it
-                # that distinguishes one run from the next.
+                # What the run trains (policy/dataset/steps/repo), read back off
+                # the job's own argv so a foreign run's card reads like a local
+                # one.
+                **_hub_job_identity(ji),
+                # What the run started FROM (kind + base checkpoint), parsed off
+                # the same argv. Every cloud run ships the same image and flavor,
+                # so without this a card launched from another machine has almost
+                # nothing on it that distinguishes one run from the next. Spread
+                # last: its `policy_type` is computed identically to identity's.
                 **_hub_job_provenance(ji),
             }
             for ji in jobs
@@ -3557,28 +3523,53 @@ def run_update():
 # Calibration endpoints
 @router.post("/start-calibration")
 def start_calibration(request: CalibrationRequest):
-    """Start calibration process"""
+    """Start calibration process.
+
+    Legacy/external entry point: it takes a device + port directly rather than
+    a robot name, so there is no record to read an arm type from and it always
+    runs the SO-101 range sweep. The Maker arm's zero-pose flow is reached
+    through the sessions surface (POST /api/v1/sessions, kind "calibration"),
+    which resolves the arm type from the robot record.
+    """
     return calibration_manager.start_calibration(request)
 
 
 @router.post("/stop-calibration")
 def stop_calibration():
-    """Stop calibration process"""
+    """Stop calibration process.
+
+    Stops whichever calibration flow is live. Stopping is never owner-gated
+    and the two managers are mutually exclusive, so trying the zero-pose flow
+    first and falling through is unambiguous.
+    """
+    if zero_calibration_is_active():
+        return zero_calibration_manager.stop()
     return calibration_manager.stop_calibration_process()
 
 
 @router.get("/calibration-status")
 def calibration_status():
-    """Get current calibration status"""
+    """Get current calibration status, from whichever flow is live.
+
+    The two status dataclasses are field-compatible where they overlap, so one
+    client shape reads both. `awaiting_pose` is present only on the zero-pose
+    flow and defaults to False for the SO-101 sweep, which is what lets the
+    frontend switch panels on it.
+    """
     from dataclasses import asdict
 
-    status = calibration_manager.get_status()
-    return asdict(status)
+    if zero_calibration_is_active():
+        return asdict(zero_calibration_manager.get_status())
+    payload = asdict(calibration_manager.get_status())
+    payload.setdefault("awaiting_pose", False)
+    return payload
 
 
 @router.post("/complete-calibration-step")
 def complete_calibration_step():
-    """Complete the current calibration step"""
+    """Complete the current calibration step (either flow)."""
+    if zero_calibration_is_active():
+        return zero_calibration_manager.complete_step()
     return calibration_manager.complete_step()
 
 
@@ -3626,14 +3617,11 @@ def auto_calibration_batch_status():
 
 
 @router.get("/calibration-configs/{device_type}")
-def get_calibration_configs(device_type: str):
+def get_calibration_configs(device_type: str, arm_type: str = "so101"):
     """Get all calibration config files for a specific device type"""
     try:
-        if device_type == "robot":
-            config_path = FOLLOWER_CONFIG_PATH
-        elif device_type == "teleop":
-            config_path = LEADER_CONFIG_PATH
-        else:
+        config_path = calibration_dir_for_device(device_type, arm_type)
+        if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
         # Get all JSON files in the config directory
@@ -3663,14 +3651,11 @@ def get_calibration_configs(device_type: str):
 
 
 @router.delete("/calibration-configs/{device_type}/{config_name}")
-def delete_calibration_config(device_type: str, config_name: str):
+def delete_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
     """Delete a calibration config file"""
     try:
-        if device_type == "robot":
-            config_path = FOLLOWER_CONFIG_PATH
-        elif device_type == "teleop":
-            config_path = LEADER_CONFIG_PATH
-        else:
+        config_path = calibration_dir_for_device(device_type, arm_type)
+        if config_path is None:
             return {"success": False, "message": "Invalid device type"}
 
         # config_name is interpolated into a filename, so reject path-traversal
@@ -3698,7 +3683,7 @@ def delete_calibration_config(device_type: str, config_name: str):
         # those arms return to the "needs calibration" state instead of
         # dangling on a missing file. The response lists them so the UI can
         # refresh the affected robots.
-        unassigned = clear_config_references(device_type, config_name)
+        unassigned = clear_config_references(device_type, config_name, arm_type)
         if unassigned:
             robots = ", ".join(u["robot"] for u in unassigned)
             message = (
@@ -3719,7 +3704,7 @@ def delete_calibration_config(device_type: str, config_name: str):
 
 
 @router.get("/calibration-configs/{device_type}/{config_name}/download")
-def download_calibration_config(device_type: str, config_name: str):
+def download_calibration_config(device_type: str, config_name: str, arm_type: str = "so101"):
     """
     Download one arm's calibration as a raw lerobot calibration JSON file.
 
@@ -3727,11 +3712,8 @@ def download_calibration_config(device_type: str, config_name: str):
     drop-in: shareable, hand-copyable, and re-importable anywhere. The arm's
     side/name are supplied by the caller on re-import, not stored in the file.
     """
-    if device_type == "robot":
-        config_path = FOLLOWER_CONFIG_PATH
-    elif device_type == "teleop":
-        config_path = LEADER_CONFIG_PATH
-    else:
+    config_path = calibration_dir_for_device(device_type, arm_type)
+    if config_path is None:
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
 
     # config_name is interpolated into a filename, so reject path-traversal
@@ -3768,7 +3750,7 @@ def download_calibration_config(device_type: str, config_name: str):
 
 
 @router.post("/calibration-configs/{device_type}/upload")
-def upload_calibration_config(device_type: str, body: dict):
+def upload_calibration_config(device_type: str, body: dict, arm_type: str = "so101"):
     """
     Import a calibration into a side's config dir. Body: {"name": "...",
     "data": {<raw lerobot calibration>}}. The data is shape-validated; an
@@ -3779,7 +3761,7 @@ def upload_calibration_config(device_type: str, body: dict):
     if not isinstance(name, str):
         return JSONResponse(status_code=400, content={"success": False, "message": "name must be a string"})
 
-    ok, reason, saved = save_imported_calibration(device_type, name, data)
+    ok, reason, saved = save_imported_calibration(device_type, name, data, arm_type)
     if ok:
         return {"success": True, "name": saved}
 
@@ -3803,7 +3785,9 @@ def upload_calibration_config(device_type: str, body: dict):
 
 
 @router.post("/calibration-configs/{device_type}/{config_name}/rename")
-def rename_calibration_config_endpoint(device_type: str, config_name: str, body: dict):
+def rename_calibration_config_endpoint(
+    device_type: str, config_name: str, body: dict, arm_type: str = "so101"
+):
     """
     Rename a calibration config file. Body: {"new_name": "..."}. Never
     overwrites; robot records referencing the old name are repointed.
@@ -3814,7 +3798,7 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
             status_code=400, content={"success": False, "message": "new_name must be a string"}
         )
 
-    ok, reason = rename_calibration_config(device_type, config_name, new_name)
+    ok, reason = rename_calibration_config(device_type, config_name, new_name, arm_type)
     if ok:
         return {"success": True, "name": new_name.strip().removesuffix(".json")}
 
@@ -3829,6 +3813,10 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
 
 class OpenCalibrationFolderRequest(BaseModel):
     device_type: str  # "teleop" (leader) or "robot" (follower)
+    # Which arm type's library to open — "so101" or "maker". The two live in
+    # separate directories (so_leader/so_follower vs
+    # rebot_102_leader/maker_follower).
+    arm_type: str = "so101"
 
 
 @router.post("/open-calibration-folder")
@@ -3838,7 +3826,7 @@ def open_calibration_folder(request: OpenCalibrationFolderRequest):
     The dir is created if missing so a fresh install opens an empty folder rather
     than failing. An unknown device_type is rejected with 400.
     """
-    path = calibration_dir_for_device(request.device_type)
+    path = calibration_dir_for_device(request.device_type, request.arm_type)
     if path is None:
         return JSONResponse(
             status_code=400,
@@ -3891,6 +3879,76 @@ async def wiggle(request: WiggleRequest):
 class IdentifyArmRequest(BaseModel):
     # Candidate ports to watch; empty/omitted = all detected arm ports.
     ports: list[str] | None = None
+
+
+class MakerProbePortsRequest(BaseModel):
+    # Candidate ports to probe; empty/omitted = every detected serial port.
+    ports: list[str] | None = None
+    # Which CAN family the follower probe should speak: "maker" (RobStride) or
+    # "metal" (Damiao). The leader probe is identical either way (both
+    # families use the Star Arm 102). Defaults to maker so a client that
+    # predates the Metal arm is unchanged.
+    arm_type: Literal["maker", "metal"] = "maker"
+
+
+class MakerIdentifyArmRequest(BaseModel):
+    # "robot" (the CAN follower) or "teleop" (the UART leader). Unlike the
+    # SO-101, the two halves of a Maker rig need different bus drivers, so the
+    # caller must say which side it is asking about.
+    device_type: str
+    ports: list[str] | None = None
+    # See MakerProbePortsRequest. For "metal" the follower side is refused
+    # (opening a Damiao bus energizes it mid-gesture); the leader side works.
+    arm_type: Literal["maker", "metal"] = "maker"
+
+
+@v1_router.post("/maker/probe-ports", response_model=MakerProbePortsResponse, tags=["system"])
+async def probe_maker_arm_ports(request: MakerProbePortsRequest):
+    """Find which ports carry a Maker follower and which carry its Star 102 leader.
+
+    A CAN rig's two halves speak different protocols on different adapters
+    (RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101
+    this needs NO gesture from the user — asking each port which protocol
+    answers is enough. The maker probe is strictly read-only; the METAL
+    follower probe briefly enables the gravity-neutral base joint and disables
+    it again (the Damiao handshake is the enable command — see
+    maker_ports._open_metal_follower_bus).
+    """
+    return await probe_maker_ports(request.ports, request.arm_type)
+
+
+# exclude_none: success carries `port`, failure omits it entirely (never null),
+# so None-exclusion reproduces each branch exactly — same contract as
+# /identify-arm above.
+@v1_router.post(
+    "/maker/identify-arm",
+    response_model=MakerIdentifyArmResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+async def identify_maker_arm(request: MakerIdentifyArmRequest):
+    """Tell one Maker arm from its twin by watching for a hand gesture.
+
+    Only needed for a BIMANUAL Maker robot: both arms ship with identical CAN
+    and servo ids, so probing alone cannot say which is left and which is
+    right. The user swings one arm's base and we report the port that saw it.
+    Read-only — no motor writes.
+    """
+    return await identify_maker_arm_by_motion(request.device_type, request.ports, request.arm_type)
+
+
+@v1_router.post("/arms/release-torque", response_model=ReleaseCanTorqueResponse, tags=["system"])
+async def release_can_torque(request: ReleaseCanTorqueRequest):
+    """De-energize a CAN follower after a crash left it holding torque.
+
+    A SIGKILL or power loss leaves Damiao motors rigid at their last command
+    with no session and no device object to clean up through. This reopens
+    the named bus WITHOUT the energizing handshake, broadcasts the disable,
+    and closes. Refused (409 session.held) while any live session holds the
+    hardware; not a session itself — no lease, no session events (see
+    can_recovery.py).
+    """
+    return await asyncio.to_thread(handle_release_can_torque, request)
 
 
 @router.post("/identify-arm")
@@ -4381,9 +4439,6 @@ def delete_robot(name: str):
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
-    # Cross-device presence. Self-disables when offline or when the token
-    # cannot write, so this is safe to call unconditionally.
-    presence_publisher.start()
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.
@@ -4413,17 +4468,13 @@ async def shutdown_event():
     # job watchdog, so the local training queue cannot promote a run while we
     # are shutting down.
     #
-    # `_drain_queue` runs every second from a thread uvicorn does not manage,
-    # and `LocalJobRunner` spawns a DETACHED wrapper — that detachment is
-    # deliberate (it is what `process_pid` + `exit_status` reattachment exists
-    # for), so a trainer started here outlives the server. The user would close
-    # MakerMods Lab and be left with a GPU training they never saw start and no
-    # UI able to stop it until they relaunch. Before the queue this was
-    # impossible: starting a run required an HTTP request, and uvicorn stops
-    # accepting those before this handler runs.
-    #
-    # Only the watchdog stops. A run already training is left alone on purpose,
-    # exactly as it is across a restart today.
+    # `_drain_queue` runs every second from a thread uvicorn does not manage, so
+    # without this a queued run could still be promoted after uvicorn has
+    # stopped accepting the HTTP requests that are the only other way to start
+    # one. The run already training is then ended deliberately further down (see
+    # `stop_local_for_shutdown`), because its stdout pipe dies with this process
+    # regardless — the exit-status file + TailingJobRunner still cover a worker
+    # reload that this same process survives.
     job_registry.shutdown()
 
     # Stop the AVFoundation pump first so its next tick can't interleave with
@@ -4488,14 +4539,6 @@ async def shutdown_event():
             )
     except Exception:
         logger.exception("Failed to stop local training jobs during shutdown")
-
-    # Deliberately AFTER the local runs are stopped, so the final presence write
-    # carries their terminal state. Other devices then see "finished" at once,
-    # instead of watching this one age out through `unknown` over 25 minutes.
-    try:
-        await asyncio.to_thread(presence_publisher.stop)
-    except Exception:
-        logger.exception("Failed to publish the final presence state during shutdown")
 
     if manager:
         manager.stop_broadcast_thread()

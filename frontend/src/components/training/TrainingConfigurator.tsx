@@ -47,9 +47,11 @@ import { getDatasetInfo } from "@/lib/replayApi";
 // Policies whose lerobot preset returns NO LR scheduler — a constant learning
 // rate, so changing the step total cannot produce a schedule seam and the
 // warning below would be a plain falsehood. Taken from
-// `get_scheduler_preset() -> None` across the pinned lerobot v0.6.0's
-// `policies/*/configuration_*.py`. If lerobot adds another such policy this
-// list goes stale in the safe-ish direction: a warning that does not apply.
+// `get_scheduler_preset() -> None` across the pinned fork lerobot's
+// `policies/*/configuration_*.py` (act, tdmpc, fastwam, gaussian_actor as of
+// the makermods-robotics/lerobot 0.6.2 pin). If lerobot adds another such
+// policy this list goes stale in the safe-ish direction: a warning that does
+// not apply.
 const POLICIES_WITHOUT_LR_SCHEDULE = new Set([
   "act",
   "tdmpc",
@@ -136,6 +138,10 @@ interface TrainingConfiguratorProps {
   onPolicyTypeChange: (policyType: string) => void;
   /** Controlled training dataset. Empty string ⇒ Start stays disabled. */
   datasetRepoId: string;
+  /** Controlled episode subset for datasetRepoId (e.g. seeded from the
+   * dataset viewer's exclude-from-training checkboxes). undefined ⇒ every
+   * episode trains, same as the field being absent from the request. */
+  episodeIndices?: number[];
   /** A "Continue"/"Resume" seed — inherits the source run's target + cadence. */
   resumeSeed?: ResumeSeed | null;
   /** A "Fine-tune" seed — fresh run initialized from a source checkpoint. */
@@ -176,6 +182,7 @@ function configToRequest(
   return {
     target: c.target,
     dataset_repo_id: c.dataset_repo_id,
+    dataset_episodes: c.dataset_episodes,
     policy_type: c.policy_type,
     job_name: c.job_name,
     steps: c.steps,
@@ -241,6 +248,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   policyType,
   onPolicyTypeChange,
   datasetRepoId: controlledDatasetRepoId,
+  episodeIndices: controlledEpisodeIndices,
   resumeSeed = null,
   finetuneSeed = null,
   onFinetuneCheckpointChange,
@@ -339,6 +347,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       ...trainingConfig,
       policy_type: policyType,
       dataset_repo_id: controlledDatasetRepoId,
+      dataset_episodes: controlledEpisodeIndices,
       // Read the fine-tune step from the SEED, not from the state seeded at
       // mount. This is what makes the picker authoritative: `trainingConfig`
       // froze the step this form opened with, so a launch after a pick (or
@@ -347,7 +356,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         ? { finetune_from_step: finetuneSeed.step ?? undefined }
         : {}),
     }),
-    [trainingConfig, policyType, controlledDatasetRepoId, finetuneSeed],
+    [
+      trainingConfig,
+      policyType,
+      controlledDatasetRepoId,
+      controlledEpisodeIndices,
+      finetuneSeed,
+    ],
   );
 
   const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<

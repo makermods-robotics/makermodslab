@@ -29,6 +29,13 @@ export interface ModelItem {
   /** Whether the Hub repo is private (hub-derived rows only). Mirrors
    * DatasetItem.private; drives the picker's amber "private" badge. */
   private?: boolean;
+  /** Episode subset this model was trained on, from its checkpoint's
+   * train_config.json. null/absent means every episode (no curation), OR the
+   * training dataset didn't resolve as a public Hub dataset — the backend
+   * redacts this field rather than expose it for a private/unresolvable
+   * source (see models._gate_dataset_episodes); the frontend has no way to
+   * tell those two cases apart, by design. */
+  dataset_episodes?: number[] | null;
 }
 
 /** GET /models — merged local + Hub listing, each with a `source`. Mirrors

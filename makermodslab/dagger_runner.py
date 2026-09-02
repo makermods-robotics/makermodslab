@@ -28,7 +28,8 @@ Hu et al. 2025.)
 
 Why this module exists
 ----------------------
-lerobot v0.6.0 already implements all of that in `DAggerStrategy`. What it does
+lerobot (the makermods-robotics fork, v0.6.2 base) already implements all of
+that in `DAggerStrategy`. What it does
 NOT have is a way to drive it from anything but a keyboard or a USB foot pedal
 plugged into the machine running the arm. `DAggerStrategy.setup` installs a
 `create_key_listener`, which on a headless host falls back to reading the
@@ -795,15 +796,13 @@ class WebDAggerStrategy(DAggerStrategy):
         it. Nothing is verified and nothing can refuse, because there is no
         outcome this code needs the leader to achieve.
 
-        Only for an ACTUATED leader. A non-actuated one (bimanual, on this pin)
-        cannot be driven at all, and there the offset does the entire job — no
-        glide, offset only. That is a property of the PIN, not of the hardware:
-        upstream lerobot PR #4028 gives `BiSOLeader` feedback support, but it
-        landed after the v0.6.0 release tag this repo pins (see CLAUDE.md — we
-        track releases, not `main`), so `teleop_supports_feedback` answers False
-        for the bimanual leader here and this function returns immediately.
-        A pin bump past that PR turns the bimanual path into the actuated one
-        below, glide and leader release included.
+        Only for an ACTUATED leader, guarded by `teleop_supports_feedback`. In
+        practice every coaching session that reaches here is single-arm SO-101:
+        bimanual coaching is refused up front in `rollout.handle_start_inference`
+        (the policy's camera names don't line up on a two-arm rig on this pin),
+        and the CAN arms are refused too (their Star Arm 102 leader has no
+        motors — see `arm_capabilities.supports_dagger`). So the non-actuated
+        early return below is defensive rather than a path a real session takes.
 
         THE LEADER IS RELEASED ON THE WAY OUT, unconditionally, and that is not
         housekeeping. Upstream's `_apply_transition` ends its PAUSED->CORRECTING

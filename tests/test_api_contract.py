@@ -243,6 +243,16 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # Workload proxy: the peer's own typed jobs listing, passed through.
         "GET /api/v1/nodes/{instance_id}/jobs",
         "POST /api/v1/nodes",
+        # Maker arm port detection (maker_ports.py). No flat mirror: the flat
+        # surface only ever shrinks, and the SO-101's /identify-arm cannot
+        # serve these — a Maker rig answers RobStride over CAN and FashionStar
+        # over UART, neither of which a Feetech bus can open.
+        "POST /api/v1/maker/identify-arm",
+        "POST /api/v1/maker/probe-ports",
+        # CAN crash recovery (can_recovery.py): de-energize a follower whose
+        # process died holding torque. Not a session (see the module
+        # docstring), and no flat mirror for the same only-shrinks reason.
+        "POST /api/v1/arms/release-torque",
         # Peer-job drill-in proxies: record + incremental log tail (GET, any
         # HTTP failure = node.unreachable) and forwarded stop/delete (the
         # peer's own coded refusals pass through with THEIR status and body).
@@ -267,16 +277,15 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/jobs/queue/reorder",
         # Skills: the deployable projection of the /models build (PR #94).
         "GET /api/v1/skills",
-        # Cross-device presence board: other machines' local runs, read-only,
-        # plus this device's own sharing settings (presence.py, PR #94).
-        "GET /api/v1/jobs/devices",
-        "POST /api/v1/jobs/devices/settings",
-        "DELETE /api/v1/jobs/devices/{device_id}",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
         "POST /api/v1/sessions/{session_id}/heartbeat",
         "POST /api/v1/sessions/{session_id}/stop",
+        # Episode curation (PR #84): which episodes of a dataset a training
+        # run is launched with. Read/replace only — never deletes an episode.
+        "GET /api/v1/datasets/excluded-episodes",
+        "PUT /api/v1/datasets/excluded-episodes",
     ]
 )
 

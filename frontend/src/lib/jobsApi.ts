@@ -37,6 +37,9 @@ export type MetricsHistoryPoint = {
 // these; defaults on the server fill in the rest.
 export interface TrainingRequest {
   dataset_repo_id: string;
+  // Episode indices to train on; omitted ⇒ every episode (see
+  // TrainingConfig.dataset_episodes).
+  dataset_episodes?: number[];
   policy_type: string;
   // Optional user-supplied display name; blank ⇒ backend auto-names the run.
   job_name?: string;
@@ -496,6 +499,14 @@ export interface HubJob {
   status: { stage: string; message: string | null } | null;
   owner: string | null;
   url: string;
+  // What the run trains, recovered Hub-side from the job's own argv
+  // (_hub_job_identity). Each is independently null: a RESUMED cloud run passes
+  // --config_path instead of --policy.type/--dataset.repo_id, so it reports a
+  // repo and a step target with no policy or dataset.
+  policy_type: string | null;
+  dataset: string | null;
+  total_steps: number | null;
+  hf_repo_id: string | null;
   // What the run started from, parsed backend-side off the job's own argv (see
   // _hub_job_provenance). All optional: a job submitted by something other than
   // MakerMods Lab carries argv we can't read, and the card simply omits the rows.
@@ -507,7 +518,6 @@ export interface HubJob {
   // originating local run's job id, which is what a person recognizes.
   base_job_id?: string | null;
   dataset_repo_id?: string | null;
-  policy_type?: string | null;
   steps?: string | null;
 }
 
@@ -578,124 +588,6 @@ export function formatBaseModel(source: {
   const name = source.base_job_id || source.base_repo;
   if (!name) return null;
   return source.base_step ? `${name} @ step ${Number(source.base_step)}` : name;
-}
-
-/** One local training run happening on ANOTHER of the user's devices.
- *
- * A strict subset of JobRecord, and deliberately so: this machine cannot stop,
- * resume, or download it, so the type carries nothing that would let a
- * component offer to. */
-export interface RemoteRun {
-  job_id: string;
-  job_number: number;
-  name: string | null;
-  display_name: string | null;
-  // "unknown" is not a backend JobState — it is what a run's state becomes when
-  // the device reporting it has gone quiet. See RemoteDevice.liveness.
-  state: JobState | "unknown";
-  current_step: number;
-  total_steps: number;
-  policy_type: string | null;
-  dataset_repo_id: string | null;
-  started_at: number | null;
-  ended_at: number | null;
-}
-
-/** How much of a device's last report we still believe.
- *
- * `live`             — heard from within the staleness window.
- * `unknown`          — silent long enough that its runs are no longer reported
- *                      as running. A machine unplugged mid-run never wrote a
- *                      goodbye, so its last payload claims "running" forever.
- * `presumed_stopped` — silent long enough to stop saying "unknown".
- *
- * Never "failed": a silence is not an observed failure. */
-export type DeviceLiveness = "live" | "unknown" | "presumed_stopped";
-
-export interface RemoteDevice {
-  device_id: string;
-  device_label: string;
-  last_seen: number | null;
-  liveness: DeviceLiveness;
-  runs: RemoteRun[];
-}
-
-export interface DeviceRunsResponse {
-  /** Whether THIS device publishes its own runs. */
-  enabled: boolean;
-  label: string;
-  device_id: string;
-  /** Non-null when publishing gave up for this session: "offline", or
-   * "forbidden" when the token cannot write to the Hub. */
-  disabled_reason: string | null;
-  /** Whether this device has actually written to the board at least once. */
-  published: boolean;
-  /** Whether the UI has already shown the first-publish notice. */
-  announced: boolean;
-  /** The repo this device publishes to; null when signed out. */
-  repo_id: string | null;
-  devices: RemoteDevice[];
-}
-
-const EMPTY_DEVICES: DeviceRunsResponse = {
-  enabled: false,
-  label: "",
-  device_id: "",
-  disabled_reason: null,
-  published: false,
-  announced: false,
-  repo_id: null,
-  devices: [],
-};
-
-/** Local runs on the user's other devices.
- *
- * Resolves to an empty board rather than throwing: this shares a library with
- * the user's own jobs, and a presence outage must never cost them sight of
- * those. */
-export async function listDeviceRuns(
-  baseUrl: string,
-  fetcher: Fetcher,
-  signal?: AbortSignal,
-): Promise<DeviceRunsResponse> {
-  try {
-    return await apiRequest<DeviceRunsResponse>(baseUrl, fetcher, "/api/v1/jobs/devices", {
-      signal,
-      action: "List device runs",
-    });
-  } catch {
-    return EMPTY_DEVICES;
-  }
-}
-
-export async function updatePresenceSettings(
-  baseUrl: string,
-  fetcher: Fetcher,
-  changes: { enabled?: boolean; label?: string; announced?: boolean },
-): Promise<{ enabled: boolean; label: string }> {
-  return apiRequest(baseUrl, fetcher, "/api/v1/jobs/devices/settings", {
-    method: "POST",
-    // `changes`, NOT JSON.stringify(changes): apiRequest serializes the body
-    // itself, so pre-stringifying sent a JSON *string* where the endpoint
-    // wants an object — a 422 on every toggle and rename.
-    body: changes,
-    action: "Update sharing settings",
-  });
-}
-
-/** Drop a device from the presence board. Touches the board only — the device
- * itself is unaffected, and by now may not exist. */
-export async function forgetDevice(
-  baseUrl: string,
-  fetcher: Fetcher,
-  deviceId: string,
-): Promise<void> {
-  await apiRequest<void>(
-    baseUrl,
-    fetcher,
-    `/api/v1/jobs/devices/${encodeURIComponent(deviceId)}`,
-    { method: "DELETE", action: "Forget device" },
-  );
 }
 
 // Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,

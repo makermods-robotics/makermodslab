@@ -59,11 +59,6 @@ __all__ = [
     "JobRecord",
     "LogLine",
     "MetricsHistoryPoint",
-    "DeviceRunsResponse",
-    "ForgetDeviceResponse",
-    "PresenceSettingsResponse",
-    "RemoteDevice",
-    "RemoteRun",
     "RunnerFlavor",
     "RunnersHardwareResponse",
 ]
@@ -146,7 +141,21 @@ class HubJobItem(BaseModel):
     """One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is
     always present; the nullables mirror huggingface_hub's JobInfo (docker_image
     and space_id are mutually exclusive on the Hub side, status/owner can be
-    absent objects → null, name is _hub_job_run_name's best effort)."""
+    absent objects → null, name is _hub_job_run_name's best effort).
+
+    `policy_type` / `dataset` / `total_steps` / `hf_repo_id` are the run's
+    identity, recovered from the job's own argv by _hub_job_identity so a run
+    launched on another machine reads like a tracked one. Each is independently
+    nullable and for a real reason: a RESUMED cloud run carries `--config_path`
+    instead of `--policy.type` / `--dataset.repo_id`, so it reports a repo and a
+    step target with no policy or dataset.
+
+    `kind` and the `base_*` / `dataset_repo_id` / `steps` fields are what the run
+    started FROM, parsed by _hub_job_provenance off the same argv (kind chip +
+    base-checkpoint row on the card). `kind` is always one of
+    scratch/foundation/finetune/resume; the rest are null when the argv doesn't
+    answer them. All of it is decoration on a listing — never identity — so a
+    row that answers none of them still renders."""
 
     id: str
     name: str | None
@@ -157,6 +166,17 @@ class HubJobItem(BaseModel):
     status: HubJobStatus | None
     owner: str | None
     url: str
+    policy_type: str | None
+    dataset: str | None
+    total_steps: int | None
+    hf_repo_id: str | None
+    kind: Literal["scratch", "foundation", "finetune", "resume"] | None = None
+    base_ref: str | None = None
+    base_repo: str | None = None
+    base_step: str | None = None
+    base_job_id: str | None = None
+    dataset_repo_id: str | None = None
+    steps: str | None = None
 
 
 class HubModelItem(BaseModel):
@@ -222,79 +242,3 @@ class RunnersHardwareResponse(BaseModel):
     username: str | None
     flavors: list[RunnerFlavor]
     offline: bool
-
-
-class RemoteRun(BaseModel):
-    """One training run reported by ANOTHER device (presence.py project_run).
-
-    Every field is optional because this crossed the network from a machine
-    running its own version of MakerMods Lab: a payload written by an older
-    (or newer) build must degrade to a thinner card, never to a 500 from our
-    own response validation. `state` widens JobState with "unknown", which is
-    not a backend state — it is what a run becomes when the device reporting
-    it has gone quiet (see RemoteDevice.liveness).
-    """
-
-    job_id: str | None = None
-    job_number: int | None = None
-    name: str | None = None
-    display_name: str | None = None
-    state: str | None = None
-    current_step: int | None = None
-    total_steps: int | None = None
-    policy_type: str | None = None
-    dataset_repo_id: str | None = None
-    started_at: float | None = None
-    ended_at: float | None = None
-
-
-class RemoteDevice(BaseModel):
-    """One entry of the presence board (presence.py project_device).
-
-    `last_seen` is the COMMIT time of the device's presence file, not the
-    payload's own clock — liveness is the one thing that must not be
-    self-reported. `liveness` says how much of the report we still believe;
-    it is never "failed", because a silence is not an observed failure.
-    """
-
-    device_id: str | None
-    device_label: str | None
-    last_seen: float | None
-    liveness: Literal["live", "unknown", "presumed_stopped"]
-    runs: list[RemoteRun]
-
-
-class DeviceRunsResponse(BaseModel):
-    """server.py list_device_runs — this device's sharing state plus every
-    OTHER device's board entry (never its own: those runs are already listed
-    as local records).
-
-    `published` is the FACT that this device has written at least once;
-    `announced` is whether the UI has already shown the first-publish notice.
-    `disabled_reason` is non-null when publishing gave up for this session
-    ("offline", or "forbidden" when the token cannot write); `repo_id` is null
-    when signed out.
-    """
-
-    enabled: bool
-    label: str
-    device_id: str
-    disabled_reason: str | None
-    published: bool
-    announced: bool
-    repo_id: str | None
-    devices: list[RemoteDevice]
-
-
-class PresenceSettingsResponse(BaseModel):
-    """server.py update_presence_settings — the settings as they now stand."""
-
-    enabled: bool
-    label: str
-
-
-class ForgetDeviceResponse(BaseModel):
-    """server.py forget_device — the board entry is gone. Says nothing about
-    the device itself, which by now may not exist."""
-
-    status: Literal["ok"]

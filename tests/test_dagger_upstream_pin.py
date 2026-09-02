@@ -58,11 +58,22 @@ from lerobot.rollout.strategies.core import RolloutStrategy
 from lerobot.rollout.strategies.dagger import DAggerEvents, DAggerPhase, DAggerStrategy
 from makermodslab.dagger_runner import WebDAggerStrategy
 
-# Truncated sha256 of each object's source, as of the pinned lerobot (v0.6.0).
+# Truncated sha256 of each object's source, as of the pinned lerobot (the
+# makermods-robotics/lerobot fork, v0.6.2 base — see CLAUDE.md).
 # Update ONLY after re-reading the upstream diff — see the module docstring.
+#
+# 2026-09: bumped from the huggingface/lerobot v0.6.0 tag to the fork pin as
+# part of PR #94's staging merge. Only `_apply_transition` moved: the fork adds
+# a `--strategy.smooth_handover` config flag that gates BOTH smooth-handover
+# branches. It is IMMATERIAL here — `_run_corrections` already suppresses those
+# two branches by passing `handover_action=None` on exactly the edges they fire
+# on (see the comment at its `_apply_transition` call site), so the extra
+# `self.config.smooth_handover and ...` guard short-circuits the same way the
+# old `prev_action is not None` guard did. `_run_corrections_only`,
+# `_return_to_initial_position` and `DAggerEvents` are byte-identical to v0.6.0.
 _PINNED = {
     "DAggerStrategy._run_corrections_only": "036ca02102fc3277",
-    "DAggerStrategy._apply_transition": "7102f74d661b5dd4",
+    "DAggerStrategy._apply_transition": "ce1233879928cad4",
     "RolloutStrategy._return_to_initial_position": "90abcaf4804bbf3b",
     "DAggerEvents": "0a13fbe73fb79909",
 }

@@ -260,6 +260,21 @@ def test_episode_weights_from_dataset_without_metadata_is_unknown() -> None:
     assert episode_weights_from_dataset(SimpleNamespace()) is None
 
 
+def test_episode_weights_from_dataset_clamps_a_hand_edited_garbage_cell() -> None:
+    """Agrees with datasets._sampling_weight: a negative / infinite / NaN cell
+    reads as 1.0 rather than passing through to raise in the sampler. Only
+    reachable with a hand-edited parquet, but the reader that gates
+    dataset_is_weighted and the one that feeds the sampler must not disagree."""
+    from makermodslab.sampling import episode_weights_from_dataset
+
+    dataset = SimpleNamespace(
+        meta=SimpleNamespace(
+            episodes=_FakeEpisodes({"sampling_weight": [3.0, -1.0, float("inf"), float("nan"), "oops"]})
+        )
+    )
+    assert list(episode_weights_from_dataset(dataset)) == [3.0, 1.0, 1.0, 1.0, 1.0]
+
+
 class _FakeEpisodes:
     """The slice of `datasets.Dataset` that episode_weights_from_dataset uses."""
 

@@ -14,6 +14,14 @@ export default {
       single: "single",
       bimanual: "bimanual",
     },
+    // Short family tags for the picker rows; the long-form names live in
+    // landing.createRobot.armTypes. The VALUES "so101"/"maker"/"metal" are
+    // data (robot records on disk) — only these display labels localize.
+    armType: {
+      so101: "SO-101",
+      maker: "Maker",
+      metal: "Metal",
+    },
     status: {
       ready: "ready",
       needsSetup: "needs setup",

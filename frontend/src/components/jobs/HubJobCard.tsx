@@ -103,31 +103,28 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
     job.space_id ??
     t("jobs.hubJob.fallbackTitle", { id: job.id.slice(0, 12) });
 
-  // Unified metadata rows (same format as the dataset/job/model cards).
-  const metaRows: Array<[string, string]> = [
-    [t("jobs.meta.flavor"), job.flavor ?? "—"],
-    [t("jobs.meta.created"), relativeTime(job.created_at)],
-  ];
-  // What the run started from, ahead of the Hub-side bookkeeping below: on an
-  // account where every run ships the same image and flavor, this is the row
-  // that tells two cards apart. Values are data (repo ids, policy types, step
-  // counts) and are never translated; only the labels are.
+  // Unified metadata rows (same format as the dataset/job/model cards). The
+  // run-identity rows lead, in JobCard's order, so a foreign run's card reads
+  // like a tracked one; each is omitted when the job's argv didn't answer it
+  // (a resumed run names a config_path, not a policy or dataset). Only the
+  // LABELS are translated — the values are data (policy type, repo id) or a
+  // pre-formatted number.
+  const metaRows: Array<[string, string]> = [];
+  // What the run started from, ahead of the identity rows: on an account where
+  // every run ships the same image and flavor, this is often the row that tells
+  // two cards apart. A fine-tune whose source we could not name still says so.
   const baseModel = formatBaseModel(job);
   if (baseModel || job.kind === "finetune")
     metaRows.push([
       t("jobs.meta.base"),
-      // A fine-tune whose source we could not name still says so. Dropping the
-      // row would hide the one fact the card exists to carry.
       baseModel ?? t("jobs.kind.unknownBase"),
     ]);
-  // Absent on a continuation by design — lerobot rebuilds both from the
-  // checkpoint config, so build_training_command never puts them on the argv.
-  if (job.dataset_repo_id)
-    metaRows.push([t("jobs.meta.dataset"), job.dataset_repo_id]);
-  if (job.policy_type)
-    metaRows.push([t("jobs.meta.policy"), job.policy_type]);
-  if (job.steps)
-    metaRows.push([t("jobs.meta.steps"), Number(job.steps).toLocaleString()]);
+  if (job.policy_type) metaRows.push([t("jobs.meta.policy"), job.policy_type]);
+  if (job.dataset) metaRows.push([t("jobs.meta.dataset"), job.dataset]);
+  if (job.total_steps)
+    metaRows.push([t("jobs.meta.steps"), job.total_steps.toLocaleString()]);
+  metaRows.push([t("jobs.meta.flavor"), job.flavor ?? "—"]);
+  metaRows.push([t("jobs.meta.created"), relativeTime(job.created_at)]);
   if (job.owner) metaRows.push([t("jobs.meta.owner"), job.owner]);
   // Only worth a row once it isn't the title; keeps the image visible for the
   // "which image did this run on" question without spending a row twice.

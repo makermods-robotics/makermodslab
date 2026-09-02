@@ -181,9 +181,9 @@ export interface EpisodeSummary {
   duration: number;
   tasks: string[];
   /** How often this episode is sampled during training, relative to a weight of
-   * 1. Written at merge time; absent from an older backend's response, and
-   * absent means 1 (see R3 in docs/weighted-sampling-plan.md) — so read it as
-   * `sampling_weight ?? 1`, never as a bare number. */
+   * 1. Written at merge time (see makermodslab/merge.py); absent from an older
+   * backend's response, and absent means 1 — so read it as `sampling_weight ??
+   * 1`, never as a bare number. */
   sampling_weight?: number;
   /** Per-camera {from, to} seconds locating this episode's slice WITHIN its
    * (possibly shared) video file — v3.0 packs consecutive episodes into the
@@ -208,6 +208,46 @@ export async function listEpisodes(
     `/api/v1/datasets/episodes?repo_id=${encodeURIComponent(repoId)}`,
     { signal, action: "List episodes" },
   );
+}
+
+/** Episode indices excluded from training for a dataset (curation, not
+ * deletion — the episode stays on disk/Hub, it's just left out of the
+ * subset a training run is launched with). GET
+ * /api/v1/datasets/excluded-episodes. */
+export async function getExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    `/api/v1/datasets/excluded-episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Get excluded episodes" },
+  );
+  return body.episode_indices;
+}
+
+/** Replace the excluded-episode set for a dataset. NEVER touches the
+ * dataset's files or Hub copy. PUT /api/v1/datasets/excluded-episodes. */
+export async function setExcludedEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndices: number[],
+): Promise<number[]> {
+  const body = await apiRequest<{ repo_id: string; episode_indices: number[] }>(
+    baseUrl,
+    fetcher,
+    "/api/v1/datasets/excluded-episodes",
+    {
+      method: "PUT",
+      body: { repo_id: repoId, episode_indices: episodeIndices },
+      action: "Set excluded episodes",
+    },
+  );
+  return body.episode_indices;
 }
 
 export interface EpisodeJointSeries {
@@ -261,6 +301,12 @@ export interface HubStatus {
   repo_id: string;
   status: HubStatusValue;
   url: string | null;
+  /** Qualifies "on_hub": false when that repo exists but holds no dataset —
+   * an upload that died partway leaves behind the empty repo its first call
+   * created. Such a repo is NOT a backup of the local copy, so the card must
+   * not present it as one. null = no claim (not on_hub, no local copy to
+   * protect, or the check couldn't be made). */
+  hub_has_data: boolean | null;
 }
 
 /** Hub existence check, fetched lazily/separately so it never blocks the

@@ -53,6 +53,7 @@ from .datasets import (
     _dir_mtime_iso,
     _fan_out_hub_authors,
     _lerobot_cache_root,
+    is_dataset_private,
 )
 from .jobs import (
     JobHasChildrenError,
@@ -250,6 +251,16 @@ def _read_train_config(pretrained_dir: Path) -> dict[str, Any]:
         return {}
 
 
+def _clean_episode_indices(raw: Any) -> list[int] | None:
+    """Validate a train_config.json `dataset.episodes` value into a sorted
+    list[int], or None for a missing/empty/malformed one — the caller then
+    knows the run trained on every episode, same as the field being absent."""
+    if not isinstance(raw, list):
+        return None
+    cleaned = sorted({i for i in raw if isinstance(i, int)})
+    return cleaned or None
+
+
 def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, Any]:
     """Build the listing row for one completed local run's final checkpoint.
 
@@ -273,6 +284,7 @@ def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, A
 
     dataset = train_config.get("dataset") or {}
     dataset_repo_id = dataset.get("repo_id") or record.config.dataset_repo_id or None
+    dataset_episodes = _clean_episode_indices(dataset.get("episodes"))
 
     raw_target_steps = train_config.get("steps")
     target_steps = raw_target_steps if isinstance(raw_target_steps, int) else record.config.steps
@@ -288,6 +300,7 @@ def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, A
         "name": record.display_name or record.name,
         "policy_type": policy_type,
         "dataset": dataset_repo_id,
+        "dataset_episodes": dataset_episodes,
         "steps": steps,
         "target_steps": target_steps,
         "state": record.state,
@@ -350,7 +363,7 @@ def list_local_models() -> list[dict[str, Any]]:
         pretrained_dir = _final_checkpoint_dir(record)
         if pretrained_dir is None:
             continue
-        out.append(_local_model_summary(record, pretrained_dir))
+        out.append(_gate_dataset_episodes(_local_model_summary(record, pretrained_dir)))
 
     out.sort(key=lambda m: m["last_modified"] or "", reverse=True)
     return out
@@ -611,7 +624,9 @@ def _downloaded_model_summary(repo_id: str, model_dir: Path) -> dict[str, Any]:
         logger.info("Could not read %s: %s", pretrained / "config.json", exc)
 
     train_config = _read_train_config(pretrained)
-    dataset = (train_config.get("dataset") or {}).get("repo_id")
+    train_dataset = train_config.get("dataset") or {}
+    dataset = train_dataset.get("repo_id")
+    dataset_episodes = _clean_episode_indices(train_dataset.get("episodes"))
 
     steps: int | None = None
     if pretrained != model_dir:
@@ -630,6 +645,7 @@ def _downloaded_model_summary(repo_id: str, model_dir: Path) -> dict[str, Any]:
         "name": repo_id,
         "policy_type": policy_type,
         "dataset": dataset,
+        "dataset_episodes": dataset_episodes,
         "steps": steps,
         "path": str(pretrained),
         "last_modified": _dir_mtime_iso(model_dir),
@@ -669,7 +685,7 @@ def list_downloaded_models() -> list[dict[str, Any]]:
             continue
 
         if _resolve_pretrained_dir(top) is not None:
-            out.append(_downloaded_model_summary(top.name, top))
+            out.append(_gate_dataset_episodes(_downloaded_model_summary(top.name, top)))
             continue
 
         # Not a checkpoint itself — treat as a namespace dir, descend one level.
@@ -684,7 +700,7 @@ def list_downloaded_models() -> list[dict[str, Any]]:
             except OSError:
                 continue
             if _resolve_pretrained_dir(sub) is not None:
-                out.append(_downloaded_model_summary(f"{top.name}/{sub.name}", sub))
+                out.append(_gate_dataset_episodes(_downloaded_model_summary(f"{top.name}/{sub.name}", sub)))
 
     out.sort(key=lambda m: m["last_modified"] or "", reverse=True)
     return out
@@ -1899,6 +1915,27 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
+def _gate_dataset_episodes(summary: dict[str, Any]) -> dict[str, Any]:
+    """Redact `dataset_episodes` in place unless the training dataset resolves
+    as a NOT-private Hub dataset. Applied once here — every source
+    (_local_model_summary, _downloaded_model_summary, _hub_model_info) builds
+    it unconditionally; this is the single place the marketplace-visibility
+    rule actually gets enforced, so it can't be forgotten in a fourth source
+    later.
+
+    Fail closed: a dataset that can't be resolved (never pushed to the Hub,
+    deleted, offline) is treated the same as an explicit private=True — see
+    datasets.is_dataset_private. Skips the Hub privacy check entirely when
+    there's no episode subset to protect in the first place (the common case:
+    most runs train on every episode)."""
+    episodes = summary.get("dataset_episodes")
+    dataset = summary.get("dataset")
+    if episodes and dataset and is_dataset_private(dataset) is False:
+        return summary
+    summary["dataset_episodes"] = None
+    return summary
+
+
 def get_model_info(id_or_repo: str) -> dict[str, Any] | None:
     """Detail view of one model: policy type, dataset, steps, size, path/repo.
 
@@ -1909,14 +1946,16 @@ def get_model_info(id_or_repo: str) -> dict[str, Any] | None:
     Local: reads train_config.json + config.json from the final checkpoint and
     walks the dir for its on-disk size. Hub: reads the root config.json via the
     Hub (the network call is the caller's — the info card fetches it lazily) and
-    reports no size (the repo isn't on disk)."""
+    reports no size (the repo isn't on disk). `dataset_episodes` is
+    privacy-gated the same way regardless of source — see
+    _gate_dataset_episodes."""
     record = _find_local_record(id_or_repo)
     if record is not None:
         pretrained_dir = _final_checkpoint_dir(record)
         assert pretrained_dir is not None  # _find_local_record guarantees it
         summary = _local_model_summary(record, pretrained_dir)
         summary["size_bytes"] = _dir_size_bytes(pretrained_dir)
-        return summary
+        return _gate_dataset_episodes(summary)
 
     # A downloaded/imported checkpoint in the local models dir — filesystem
     # only, so it works offline (that's the point of downloading a model).
@@ -1924,12 +1963,13 @@ def get_model_info(id_or_repo: str) -> dict[str, Any] | None:
     if model_dir is not None:
         summary = _downloaded_model_summary(id_or_repo, model_dir)
         summary["size_bytes"] = _dir_size_bytes(model_dir)
-        return summary
+        return _gate_dataset_episodes(summary)
 
     # Not local at all — try the Hub. Offline ⇒ can't read a hub-only model.
     if hf_hub_offline():
         return None
-    return _hub_model_info(id_or_repo)
+    summary = _hub_model_info(id_or_repo)
+    return _gate_dataset_episodes(summary) if summary is not None else None
 
 
 # In-process cache of per-repo Hub model metadata (the /models/info hub
@@ -1982,6 +2022,26 @@ def _hub_model_probe(repo_id: str) -> dict[str, Any] | None:
         "size_bytes": None,
         "source": "hub",
     }
+
+
+def _hub_dataset_episodes(repo_id: str) -> list[int] | None:
+    """The episode subset this model repo's final checkpoint was trained on,
+    read from its train_config.json on the Hub. None if the repo has no usable
+    checkpoint, that checkpoint carries no train_config.json (e.g. a flat
+    imported repo — see read_checkpoint_train_config), or it trained on every
+    episode. Best-effort: never raises. Not privacy-gated here — see
+    _gate_dataset_episodes, applied once in get_model_info for every source."""
+    from .jobs import _list_imported_hub, read_checkpoint_train_config
+
+    try:
+        checkpoints = _list_imported_hub(shared_hf_api(), repo_id)
+    except Exception as exc:
+        logger.info("Could not list hub checkpoints for %s: %s", repo_id, exc)
+        return None
+    if not checkpoints:
+        return None
+    train_config = read_checkpoint_train_config(checkpoints[-1])
+    return _clean_episode_indices((train_config.get("dataset") or {}).get("episodes"))
 
 
 def _hub_model_info(repo_id: str) -> dict[str, Any] | None:
@@ -2037,6 +2097,7 @@ def _hub_model_info(repo_id: str) -> dict[str, Any] | None:
         "name": name,
         "policy_type": policy_type,
         "dataset": dataset,
+        "dataset_episodes": _hub_dataset_episodes(repo_id) if dataset else None,
         "steps": None,
         "path": None,
         "last_modified": last_modified.isoformat() if last_modified else None,

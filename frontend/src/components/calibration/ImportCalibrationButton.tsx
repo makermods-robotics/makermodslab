@@ -13,10 +13,15 @@ import {
 } from "@/components/ui/dialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
+import type { ArmType } from "@/hooks/useRobots";
 
 interface ImportCalibrationButtonProps {
   /** API device vocabulary: "teleop" (leader) or "robot" (follower). */
   device: "teleop" | "robot";
+  /** Which calibration library to upload into — the SO-101 and Maker pairs
+   * keep separate directories, so a file imported for one arm type is
+   * invisible to the other. */
+  armType: ArmType;
   /** Called with the saved config name after a successful import. */
   onImported?: (name: string) => void;
 }
@@ -28,6 +33,7 @@ interface ImportCalibrationButtonProps {
  */
 const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
   device,
+  armType,
   onImported,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -75,7 +81,7 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
     setError(null);
     try {
       const res = await fetchWithHeaders(
-        `${baseUrl}/api/v1/calibration-configs/${device}/upload`,
+        `${baseUrl}/api/v1/calibration-configs/${device}/upload?arm_type=${armType}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

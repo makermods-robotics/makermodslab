@@ -502,6 +502,17 @@
       "DatasetHubStatusResponse": {
         "description": "datasets.py get_hub_status — url is null (not absent) for every status\nexcept on_hub, so None must NOT be excluded on this route.",
         "properties": {
+          "hub_has_data": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Has Data"
+          },
           "repo_id": {
             "title": "Repo Id",
             "type": "string"
@@ -531,7 +542,8 @@
         "required": [
           "repo_id",
           "status",
-          "url"
+          "url",
+          "hub_has_data"
         ],
         "title": "DatasetHubStatusResponse",
         "type": "object"
@@ -878,72 +890,6 @@
         "title": "DeleteDatasetResponse",
         "type": "object"
       },
-      "DeviceRunsResponse": {
-        "description": "server.py list_device_runs — this device's sharing state plus every\nOTHER device's board entry (never its own: those runs are already listed\nas local records).\n\n`published` is the FACT that this device has written at least once;\n`announced` is whether the UI has already shown the first-publish notice.\n`disabled_reason` is non-null when publishing gave up for this session\n(\"offline\", or \"forbidden\" when the token cannot write); `repo_id` is null\nwhen signed out.",
-        "properties": {
-          "announced": {
-            "title": "Announced",
-            "type": "boolean"
-          },
-          "device_id": {
-            "title": "Device Id",
-            "type": "string"
-          },
-          "devices": {
-            "items": {
-              "$ref": "#/components/schemas/RemoteDevice"
-            },
-            "title": "Devices",
-            "type": "array"
-          },
-          "disabled_reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Disabled Reason"
-          },
-          "enabled": {
-            "title": "Enabled",
-            "type": "boolean"
-          },
-          "label": {
-            "title": "Label",
-            "type": "string"
-          },
-          "published": {
-            "title": "Published",
-            "type": "boolean"
-          },
-          "repo_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Repo Id"
-          }
-        },
-        "required": [
-          "enabled",
-          "label",
-          "device_id",
-          "disabled_reason",
-          "published",
-          "announced",
-          "repo_id",
-          "devices"
-        ],
-        "title": "DeviceRunsResponse",
-        "type": "object"
-      },
       "DownloadStartResponse": {
         "description": "datasets.py DownloadManager.start success branch, shared by the dataset\nand model download routes (both raise on the started=False branch, so only\nthis shape reaches the wire).",
         "properties": {
@@ -1151,6 +1097,49 @@
         "title": "EpisodeSummary",
         "type": "object"
       },
+      "ExcludedEpisodesRequest": {
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesRequest",
+        "type": "object"
+      },
+      "ExcludedEpisodesResponse": {
+        "description": "server.py datasets_excluded_episodes — the episode indices left OUT of\nthe training subset for one dataset. Empty list when nothing is excluded;\nthe dataset itself is untouched (curation, not deletion).",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "ExcludedEpisodesResponse",
+        "type": "object"
+      },
       "ExtraStatus": {
         "properties": {
           "available": {
@@ -1167,21 +1156,6 @@
           "install_hint"
         ],
         "title": "ExtraStatus",
-        "type": "object"
-      },
-      "ForgetDeviceResponse": {
-        "description": "server.py forget_device — the board entry is gone. Says nothing about\nthe device itself, which by now may not exist.",
-        "properties": {
-          "status": {
-            "const": "ok",
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "status"
-        ],
-        "title": "ForgetDeviceResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1363,8 +1337,52 @@
         "type": "object"
       },
       "HubJobItem": {
-        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).",
+        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).\n\n`policy_type` / `dataset` / `total_steps` / `hf_repo_id` are the run's\nidentity, recovered from the job's own argv by _hub_job_identity so a run\nlaunched on another machine reads like a tracked one. Each is independently\nnullable and for a real reason: a RESUMED cloud run carries `--config_path`\ninstead of `--policy.type` / `--dataset.repo_id`, so it reports a repo and a\nstep target with no policy or dataset.\n\n`kind` and the `base_*` / `dataset_repo_id` / `steps` fields are what the run\nstarted FROM, parsed by _hub_job_provenance off the same argv (kind chip +\nbase-checkpoint row on the card). `kind` is always one of\nscratch/foundation/finetune/resume; the rest are null when the argv doesn't\nanswer them. All of it is decoration on a listing — never identity — so a\nrow that answers none of them still renders.",
         "properties": {
+          "base_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Job Id"
+          },
+          "base_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Ref"
+          },
+          "base_repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Repo"
+          },
+          "base_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Step"
+          },
           "created_at": {
             "anyOf": [
               {
@@ -1375,6 +1393,28 @@
               }
             ],
             "title": "Created At"
+          },
+          "dataset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset"
+          },
+          "dataset_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Repo Id"
           },
           "docker_image": {
             "anyOf": [
@@ -1398,9 +1438,37 @@
             ],
             "title": "Flavor"
           },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "scratch",
+                  "foundation",
+                  "finetune",
+                  "resume"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
           },
           "name": {
             "anyOf": [
@@ -1424,6 +1492,17 @@
             ],
             "title": "Owner"
           },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
           "space_id": {
             "anyOf": [
               {
@@ -1445,6 +1524,28 @@
               }
             ]
           },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          },
+          "total_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Steps"
+          },
           "url": {
             "title": "Url",
             "type": "string"
@@ -1459,7 +1560,11 @@
           "flavor",
           "status",
           "owner",
-          "url"
+          "url",
+          "policy_type",
+          "dataset",
+          "total_steps",
+          "hf_repo_id"
         ],
         "title": "HubJobItem",
         "type": "object"
@@ -1642,6 +1747,11 @@
       },
       "InferenceRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "camera_bindings": {
             "additionalProperties": {
               "type": "string"
@@ -2282,6 +2392,152 @@
         "title": "LogLine",
         "type": "object"
       },
+      "MakerIdentifyArmRequest": {
+        "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "device_type": {
+            "title": "Device Type",
+            "type": "string"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "required": [
+          "device_type"
+        ],
+        "title": "MakerIdentifyArmRequest",
+        "type": "object"
+      },
+      "MakerIdentifyArmResponse": {
+        "description": "maker_ports.identify_maker_arm_by_motion — which port saw the gesture.\n\n`port` is absent on failure rather than null, so the route excludes None.\n`skipped` lists ports that could not be opened (usually the other half of\nthe rig, which speaks a different protocol).",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "skipped": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "MakerIdentifyArmResponse",
+        "type": "object"
+      },
+      "MakerProbePortsRequest": {
+        "properties": {
+          "arm_type": {
+            "default": "maker",
+            "enum": [
+              "maker",
+              "metal"
+            ],
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "title": "MakerProbePortsRequest",
+        "type": "object"
+      },
+      "MakerProbePortsResponse": {
+        "description": "maker_ports.probe_maker_ports — which ports answered which protocol.\n\nEvery list is always present (empty rather than absent) so a client can\nread them unconditionally; `message` is always a human-readable summary,\nincluding on the nothing-found path.",
+        "properties": {
+          "follower_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Follower Ports",
+            "type": "array"
+          },
+          "leader_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Leader Ports",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          },
+          "unknown_ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Ports",
+            "type": "array"
+          }
+        },
+        "required": [
+          "success",
+          "follower_ports",
+          "leader_ports",
+          "unknown_ports",
+          "message"
+        ],
+        "title": "MakerProbePortsResponse",
+        "type": "object"
+      },
       "MergeLogEntry": {
         "description": "One drained line of the merge subprocess log (merge.py _enqueue).",
         "properties": {
@@ -2544,7 +2800,7 @@
         "type": "object"
       },
       "ModelInfoResponse": {
-        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.",
+        "description": "GET /models/info (models.py get_model_info): a listing row plus\n``size_bytes`` (null for a hub repo probed without usedStorage).\n\nSame absent-key heterogeneity as the listing (the route also serializes\nwith exclude_unset): a local run adds target_steps/state, the single-call\nhub branch (_hub_model_info) adds private + last_modified, and its\nfile-tree fallback (_hub_model_probe) carries neither. ``repo_id`` and\n``saved_custom`` never appear here — no producer sets them.\n``dataset_episodes`` is absent only on that file-tree fallback.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2556,6 +2812,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -2688,7 +2958,7 @@
         "type": "object"
       },
       "ModelListItem": {
-        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
+        "description": "One row of GET /models (models.py list_all_models).\n\nFour producers, four key sets — every one carries id/name/policy_type/\ndataset/steps/path/last_modified/hf_repo_id/source, and the rest are\ngenuinely absent (never null) outside their producer:\n\n* Hub-seeded rows (and the pin fold) add ``repo_id`` + ``private``;\n* local training-run rows (_local_model_summary) add ``target_steps`` +\n  ``state`` (\"done\"/\"interrupted\"), which the hub seed also carries as\n  nulls;\n* downloaded/imported checkpoint rows (_downloaded_model_summary) carry\n  neither of those pairs;\n* ``saved_custom`` exists only on rows the pin fold touched.\n\n``dataset_episodes`` (the training-episode subset, privacy-gated by\nmodels._gate_dataset_episodes) is set by the two local producers and is\nabsent on a Hub-seeded row, which never reads a checkpoint's\ntrain_config.json.\n\nThe route serializes with exclude_unset so each producer's exact keys\nsurvive — see the module docstring.",
         "properties": {
           "dataset": {
             "anyOf": [
@@ -2700,6 +2970,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "hf_repo_id": {
             "anyOf": [
@@ -3059,6 +3343,11 @@
       },
       "OpenCalibrationFolderRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "device_type": {
             "title": "Device Type",
             "type": "string"
@@ -3189,67 +3478,13 @@
         "title": "PolicyOptimizerPreset",
         "type": "object"
       },
-      "PresenceSettingsRequest": {
-        "description": "Per-device presence settings. Both fields optional — a request carries\nonly what it changes.",
-        "properties": {
-          "announced": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Announced"
-          },
-          "enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enabled"
-          },
-          "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Label"
-          }
-        },
-        "title": "PresenceSettingsRequest",
-        "type": "object"
-      },
-      "PresenceSettingsResponse": {
-        "description": "server.py update_presence_settings — the settings as they now stand.",
-        "properties": {
-          "enabled": {
-            "title": "Enabled",
-            "type": "boolean"
-          },
-          "label": {
-            "title": "Label",
-            "type": "string"
-          }
-        },
-        "required": [
-          "enabled",
-          "label"
-        ],
-        "title": "PresenceSettingsResponse",
-        "type": "object"
-      },
       "RecordingRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "dataset_repo_id": {
             "title": "Dataset Repo Id",
             "type": "string"
@@ -3379,195 +3614,53 @@
         "title": "RecordingRequest",
         "type": "object"
       },
-      "RemoteDevice": {
-        "description": "One entry of the presence board (presence.py project_device).\n\n`last_seen` is the COMMIT time of the device's presence file, not the\npayload's own clock — liveness is the one thing that must not be\nself-reported. `liveness` says how much of the report we still believe;\nit is never \"failed\", because a silence is not an observed failure.",
+      "ReleaseCanTorqueRequest": {
         "properties": {
-          "device_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Device Id"
-          },
-          "device_label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Device Label"
-          },
-          "last_seen": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Last Seen"
-          },
-          "liveness": {
+          "arm_type": {
             "enum": [
-              "live",
-              "unknown",
-              "presumed_stopped"
+              "maker",
+              "metal"
             ],
-            "title": "Liveness",
+            "title": "Arm Type",
             "type": "string"
           },
-          "runs": {
-            "items": {
-              "$ref": "#/components/schemas/RemoteRun"
-            },
-            "title": "Runs",
-            "type": "array"
+          "port": {
+            "title": "Port",
+            "type": "string"
           }
         },
         "required": [
-          "device_id",
-          "device_label",
-          "last_seen",
-          "liveness",
-          "runs"
+          "arm_type",
+          "port"
         ],
-        "title": "RemoteDevice",
+        "title": "ReleaseCanTorqueRequest",
         "type": "object"
       },
-      "RemoteRun": {
-        "description": "One training run reported by ANOTHER device (presence.py project_run).\n\nEvery field is optional because this crossed the network from a machine\nrunning its own version of MakerMods Lab: a payload written by an older\n(or newer) build must degrade to a thinner card, never to a 500 from our\nown response validation. `state` widens JobState with \"unknown\", which is\nnot a backend state — it is what a run becomes when the device reporting\nit has gone quiet (see RemoteDevice.liveness).",
+      "ReleaseCanTorqueResponse": {
+        "description": "can_recovery.handle_release_can_torque — the crash-recovery release.\n\n`problems` is always present (empty on success) so a client can render\nthe loud per-bus alarms unconditionally.",
         "properties": {
-          "current_step": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Current Step"
+          "message": {
+            "title": "Message",
+            "type": "string"
           },
-          "dataset_repo_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Dataset Repo Id"
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
           },
-          "display_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Display Name"
-          },
-          "ended_at": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ended At"
-          },
-          "job_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Job Id"
-          },
-          "job_number": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Job Number"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "policy_type": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Policy Type"
-          },
-          "started_at": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Started At"
-          },
-          "state": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "State"
-          },
-          "total_steps": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Total Steps"
+          "success": {
+            "title": "Success",
+            "type": "boolean"
           }
         },
-        "title": "RemoteRun",
+        "required": [
+          "success",
+          "message",
+          "problems"
+        ],
+        "title": "ReleaseCanTorqueResponse",
         "type": "object"
       },
       "RenameJobBody": {
@@ -3603,6 +3696,11 @@
       },
       "ReplayRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "episode_index": {
             "title": "Episode Index",
             "type": "integer"
@@ -4065,6 +4163,33 @@
         "title": "SessionStopResponse",
         "type": "object"
       },
+      "SetExcludedEpisodesResponse": {
+        "description": "server.py datasets_set_excluded_episodes — echoes the set actually\npersisted (re-read from disk), not the caller's input.",
+        "properties": {
+          "episode_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Episode Indices",
+            "type": "array"
+          },
+          "repo_id": {
+            "title": "Repo Id",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "repo_id",
+          "episode_indices"
+        ],
+        "title": "SetExcludedEpisodesResponse",
+        "type": "object"
+      },
       "SkillListItem": {
         "description": "One row of GET /skills (models.py list_skills).\n\nThe deployable projection of a listing row: the same producers, the same\nabsent-key heterogeneity (the route serializes with exclude_unset for the\nreason ModelListItem documents — a scanned checkpoint dir carries no\n``state``, for instance), plus the annotations list_skills stamps on every\nrow it emits.\n\n``origin`` is where the weights CAME FROM, as opposed to ``source``, which\nis where they live now. ``deployable`` is derived on read, never stored:\na checkpoint dir can be deleted and a resume can land at any moment, so a\npersisted flag would rot with no writer nearby.",
         "properties": {
@@ -4078,6 +4203,20 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
           },
           "deployable": {
             "title": "Deployable",
@@ -4390,6 +4529,11 @@
       },
       "TeleoperateRequest": {
         "properties": {
+          "arm_type": {
+            "default": "so101",
+            "title": "Arm Type",
+            "type": "string"
+          },
           "follower_config": {
             "title": "Follower Config",
             "type": "string"
@@ -5227,6 +5371,48 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/arms/release-torque": {
+      "post": {
+        "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
+        "operationId": "release_can_torque",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseCanTorqueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseCanTorqueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Can Torque",
+        "tags": [
+          "system"
+        ]
+      }
+    },
     "/api/v1/auto-calibration-batch-status": {
       "get": {
         "description": "Per-arm status + logs and overall counts for a batch auto-calibration.",
@@ -5318,6 +5504,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5354,6 +5550,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -5415,6 +5621,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5460,6 +5676,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -5509,6 +5735,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -5548,7 +5784,7 @@
     },
     "/api/v1/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status",
         "responses": {
           "200": {
@@ -5795,7 +6031,7 @@
     },
     "/api/v1/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step",
         "responses": {
           "200": {
@@ -6132,6 +6368,89 @@
           }
         },
         "summary": "Datasets Episodes",
+        "tags": [
+          "datasets"
+        ]
+      }
+    },
+    "/api/v1/datasets/excluded-episodes": {
+      "get": {
+        "description": "Episode indices the user excluded from training for this dataset\n(curation, not deletion — see set_excluded_episodes). Empty list for a\ndataset with no exclusions.",
+        "operationId": "datasets_excluded_episodes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo_id",
+            "required": true,
+            "schema": {
+              "title": "Repo Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Excluded Episodes",
+        "tags": [
+          "datasets"
+        ]
+      },
+      "put": {
+        "description": "Replace the excluded-episode set for one dataset. NEVER deletes or\nmutates the dataset — the viewer computes the training subset from this\nand sends it as dataset_episodes when launching a run.",
+        "operationId": "datasets_set_excluded_episodes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExcludedEpisodesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetExcludedEpisodesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Datasets Set Excluded Episodes",
         "tags": [
           "datasets"
         ]
@@ -6850,113 +7169,6 @@
           }
         },
         "summary": "List Jobs",
-        "tags": [
-          "jobs"
-        ]
-      }
-    },
-    "/api/v1/jobs/devices": {
-      "get": {
-        "description": "Local training runs on the user's OTHER devices.\n\nThe cross-device gap this closes: a cloud run is listed from any machine by\nHF Jobs, but a LOCAL run is visible only where it runs. Devices signed into\nthe same account publish a small presence file each (see presence.py), and\nthis reads the board.\n\nRead-only by nature. There is no channel to another machine, so nothing\nhere can stop, resume, or download a remote run, and the response carries no\nfield that would suggest otherwise.\n\nNever 500s: an absent board (nobody has published yet) and an unreachable\nHub are both simply an empty list, exactly like /jobs/hub's degradation.\nDeclared before `/jobs/{job_id}` so FastAPI's first-match routing doesn't\ntreat \"devices\" as a job id.",
-        "operationId": "list_device_runs",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeviceRunsResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Device Runs",
-        "tags": [
-          "jobs"
-        ]
-      }
-    },
-    "/api/v1/jobs/devices/settings": {
-      "post": {
-        "description": "Turn this device's run-sharing on or off, or rename it on the board.",
-        "operationId": "update_presence_settings",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PresenceSettingsRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PresenceSettingsResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Presence Settings",
-        "tags": [
-          "jobs"
-        ]
-      }
-    },
-    "/api/v1/jobs/devices/{device_id}": {
-      "delete": {
-        "description": "Remove one device's file from the presence board.\n\nFor a machine that is gone for good (wiped, sold, reinstalled): its last\npayload would otherwise sit at \"presumed stopped\" forever. This deletes the\npresence record only — it touches nothing on the device itself, which by\nthen may not exist.\n\nRefuses this device's own id: that file is rewritten on the next publish, so\ndeleting it would be a no-op that looks like it worked.",
-        "operationId": "forget_device",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "device_id",
-            "required": true,
-            "schema": {
-              "title": "Device Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForgetDeviceResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Forget Device",
         "tags": [
           "jobs"
         ]
@@ -7690,6 +7902,90 @@
         "summary": "Stop Job",
         "tags": [
           "jobs"
+        ]
+      }
+    },
+    "/api/v1/maker/identify-arm": {
+      "post": {
+        "description": "Tell one Maker arm from its twin by watching for a hand gesture.\n\nOnly needed for a BIMANUAL Maker robot: both arms ship with identical CAN\nand servo ids, so probing alone cannot say which is left and which is\nright. The user swings one arm's base and we report the port that saw it.\nRead-only — no motor writes.",
+        "operationId": "identify_maker_arm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerIdentifyArmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerIdentifyArmResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Identify Maker Arm",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/maker/probe-ports": {
+      "post": {
+        "description": "Find which ports carry a Maker follower and which carry its Star 102 leader.\n\nA CAN rig's two halves speak different protocols on different adapters\n(RobStride/Damiao over CAN vs FashionStar over UART), so unlike the SO-101\nthis needs NO gesture from the user — asking each port which protocol\nanswers is enough. The maker probe is strictly read-only; the METAL\nfollower probe briefly enables the gravity-neutral base joint and disables\nit again (the Damiao handshake is the enable command — see\nmaker_ports._open_metal_follower_bus).",
+        "operationId": "probe_maker_arm_ports",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MakerProbePortsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MakerProbePortsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Probe Maker Arm Ports",
+        "tags": [
+          "system"
         ]
       }
     },
@@ -9521,7 +9817,7 @@
     },
     "/api/v1/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration",
         "requestBody": {
           "content": {
@@ -9701,7 +9997,7 @@
     },
     "/api/v1/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration",
         "responses": {
           "200": {
@@ -10385,6 +10681,16 @@
               "title": "Device Type",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -10421,6 +10727,16 @@
             "required": true,
             "schema": {
               "title": "Device Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -10482,6 +10798,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -10527,6 +10853,16 @@
             "required": true,
             "schema": {
               "title": "Config Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
               "type": "string"
             }
           }
@@ -10576,6 +10912,16 @@
               "title": "Config Name",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "arm_type",
+            "required": false,
+            "schema": {
+              "default": "so101",
+              "title": "Arm Type",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -10615,7 +10961,7 @@
     },
     "/calibration-status": {
       "get": {
-        "description": "Get current calibration status",
+        "description": "Get current calibration status, from whichever flow is live.\n\nThe two status dataclasses are field-compatible where they overlap, so one\nclient shape reads both. `awaiting_pose` is present only on the zero-pose\nflow and defaults to False for the SO-101 sweep, which is what lets the\nfrontend switch panels on it.",
         "operationId": "calibration_status_calibration_status_get",
         "responses": {
           "200": {
@@ -10686,7 +11032,7 @@
     },
     "/complete-calibration-step": {
       "post": {
-        "description": "Complete the current calibration step",
+        "description": "Complete the current calibration step (either flow).",
         "operationId": "complete_calibration_step_complete_calibration_step_post",
         "responses": {
           "200": {
@@ -13372,7 +13718,7 @@
     },
     "/start-calibration": {
       "post": {
-        "description": "Start calibration process",
+        "description": "Start calibration process.\n\nLegacy/external entry point: it takes a device + port directly rather than\na robot name, so there is no record to read an arm type from and it always\nruns the SO-101 range sweep. The Maker arm's zero-pose flow is reached\nthrough the sessions surface (POST /api/v1/sessions, kind \"calibration\"),\nwhich resolves the arm type from the robot record.",
         "operationId": "start_calibration_start_calibration_post",
         "requestBody": {
           "content": {
@@ -13552,7 +13898,7 @@
     },
     "/stop-calibration": {
       "post": {
-        "description": "Stop calibration process",
+        "description": "Stop calibration process.\n\nStops whichever calibration flow is live. Stopping is never owner-gated\nand the two managers are mutually exclusive, so trying the zero-pose flow\nfirst and falling through is unambiguous.",
         "operationId": "stop_calibration_stop_calibration_post",
         "responses": {
           "200": {

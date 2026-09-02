@@ -20,7 +20,6 @@ import type { NoResumeReason } from "./resumeSeed";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import JobsDropdown, { JobsEntry } from "./JobsDropdown";
-import RemoteDevicesSection from "./RemoteDevicesSection";
 import { useJobsData } from "./JobsDataContext";
 import { HubJob, JobRecord, isHubJobActive } from "@/lib/jobsApi";
 
@@ -529,13 +528,6 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               </>
             )}
           </div>
-
-          {/* Runs on the user's OTHER machines, plus this device's sharing
-              switch. OUTSIDE the empty-state branch on purpose: a fresh laptop
-              with no runs of its own is exactly the machine that exists to
-              watch the desktop, and gating this on having local runs hid the
-              feature in its own headline scenario. */}
-          <RemoteDevicesSection />
         </div>
       </CollapsibleContent>
     </Collapsible>

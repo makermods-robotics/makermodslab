@@ -460,7 +460,9 @@ def test_pacing_always_sends_the_final_frame() -> None:
 
 
 def _connect_stubs(monkeypatch):
-    monkeypatch.setattr("makermodslab.replay.setup_follower_calibration_file", lambda cfg: "fid")
+    monkeypatch.setattr(
+        "makermodslab.replay.setup_follower_calibration_file", lambda cfg, arm_type="so101": "fid"
+    )
     monkeypatch.setattr("makermodslab.replay.verify_devices", lambda *a, **k: [])
     monkeypatch.setattr("makermodslab.replay.reset_torque_limit", lambda *a, **k: [])
     monkeypatch.setattr("makermodslab.replay.clear_goal_velocity", lambda *a, **k: [])

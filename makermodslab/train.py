@@ -386,9 +386,11 @@ def build_training_command(
     resolves it from the dataset's own `meta/episodes` (see
     `datasets.dataset_is_weighted`), because a client must not be able to claim a
     dataset is or isn't weighted. Defaults to False so every existing call site
-    keeps producing byte-identical argv (R2); the cloud runner leaves it at the
-    default because a weighted dataset is refused before it ever gets there
-    (R6/R7 — `makermodslab` is not installed in the HF Jobs container).
+    keeps producing byte-identical argv (R2). Both runners set it: the local one
+    from `dataset_is_weighted` directly, the cloud one likewise — the HF Jobs
+    container has no `makermodslab`, so the cloud wrapper materializes
+    `sampling.py` / `train_weighted.py` pod-side onto `PYTHONPATH` before
+    launching the trainer (see `runners/hf_cloud._WRAPPER_TEMPLATE`).
 
     `video_backend` overrides lerobot's dataset video decoder when set — the
     LOCAL runner passes "pyav" when torchcodec's native libraries don't load

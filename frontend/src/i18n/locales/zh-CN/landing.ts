@@ -63,6 +63,21 @@ export default {
     nameLabel: "名称",
     duplicate: "已存在同名机器人。",
     armLayout: "机械臂配置",
+    armTypeLabel: "机械臂类型",
+    armTypes: {
+      so101: {
+        label: "SO-101",
+        description: "6 自由度串口主从臂",
+      },
+      maker: {
+        label: "Maker 机械臂",
+        description: "7 自由度 CAN 机械臂，Star 102 主臂",
+      },
+      metal: {
+        label: "Metal 机械臂",
+        description: "7 自由度 Damiao CAN 机械臂，Star 102 主臂",
+      },
+    },
     modes: {
       single: {
         label: "单臂",
@@ -143,6 +158,8 @@ export default {
     clearing: "正在清理…",
     clearAll: "全部清理（{{n}}）",
     clearFailed: "无法清理 {{repoId}} 的缓存。",
+    notBackedUp:
+      "上传未完成——Hub 仓库是空的，本地副本是唯一副本。请先重新上传再清理。",
   },
   mergeDatasets: {
     title: "合并数据集",
@@ -174,9 +191,9 @@ export default {
     episodesUnknown: "无法获取",
     sharePercent: "{{percent}}%",
     diskEstimate: "占用约 {{size}}",
-    weightHint:
-      "提高某个数据集的权重，可以让它的回合被重复收录，训练时也就会更频繁地采样到它。",
-    weightedHint: "带权重的来源会在磁盘上复制多份，合并后的数据集会更大。",
+    weightHint: "提高某个数据集的权重，训练时就会更频繁地采样到它的回合。",
+    weightedHint:
+      "权重以每回合的元数据形式记录，不会复制回合，因此无论权重如何，合并后的数据集在磁盘上大小相同。",
   },
   usageInstructions: {
     title: "开始使用 MakerMods Lab",
@@ -224,6 +241,7 @@ export default {
       localOnly: "仅本地",
       unknown: "Hub 状态未知",
       upload: "上传到 Hub",
+      uploadIncomplete: "上传未完成——Hub 上还没有数据",
       uploadedTitle: "已上传到 Hub",
       uploadedBody: "{{repoId}} 现已在 Hub 上。<0>查看数据集</0>",
       uploadFailedTitle: "上传失败",
