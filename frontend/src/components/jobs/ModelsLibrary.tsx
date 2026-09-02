@@ -18,10 +18,17 @@ import JobCard from "./JobCard";
 import HubModelCard from "./HubModelCard";
 import ImportModelModal from "./ImportModelModal";
 import { useJobsData } from "./JobsDataContext";
+import { useSkills } from "@/hooks/useSkills";
 
-/** How a model got here: everything, imported (local folder or Hub pull), or
- * uploaded Hub repos no job tracks. */
-type ModelsFilter = "all" | "imported" | "uploaded";
+/** How a model got here: everything, trained on this machine or in the cloud,
+ * imported (local folder or Hub pull), or uploaded Hub repos no job tracks.
+ *
+ * These map onto the `origin` the SERVER stamps on every skill row. The library
+ * used to decide membership itself, by filtering the job registry to
+ * `runner === "imported"` — a different question from the one the deploy picker
+ * asked of /models, which is why the two lists disagreed about what a skill is.
+ * Both now read /skills and differ only in which origins they show. */
+type ModelsFilter = "all" | "trained" | "imported" | "uploaded";
 
 /** `key` is LOGIC — it is what the grid filters on and never changes. `label`
  * is a translation KEY, not a word: this array is built at import time, so a
@@ -29,6 +36,7 @@ type ModelsFilter = "all" | "imported" | "uploaded";
  * where the toolbar is rendered. */
 const FILTERS = [
   { key: "all", label: "jobs.modelsLibrary.filters.all" },
+  { key: "trained", label: "jobs.modelsLibrary.filters.trained" },
   { key: "imported", label: "jobs.modelsLibrary.filters.imported" },
   { key: "uploaded", label: "jobs.modelsLibrary.filters.uploaded" },
 ] as const satisfies ReadonlyArray<{ key: ModelsFilter; label: string }>;
@@ -50,13 +58,12 @@ interface ModelsLibraryProps {
 const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   const { t } = useTranslation();
   const { openStudio } = useStudio();
-  const {
-    importedJobs,
-    untrackedHubModels,
-    refresh,
-    stop,
-    remove,
-  } = useJobsData();
+  const { jobs, untrackedHubModels, refresh, stop, remove } = useJobsData();
+  // The DEFINITION of what belongs here. The job registry still supplies the
+  // record each card renders from (progress, lineage, stop/delete), but it no
+  // longer decides membership — a run is in this library because /skills says
+  // it is a skill, which is the same sentence the deploy picker reads.
+  const { skills } = useSkills();
   // Shared lazy-import (idempotent registration + husk-repo messaging) so an
   // untracked Hub repo resolves to a pseudo-job exactly as everywhere else.
   const { importSource } = useInferenceLaunch();
@@ -66,24 +73,56 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ModelsFilter>("all");
 
+  // Skill rows that a registry record backs, keyed by that record's id.
+  const skillByJobId = useMemo(() => {
+    const out = new Map<string, (typeof skills)[number]>();
+    for (const skill of skills) if (skill.job_id) out.set(skill.job_id, skill);
+    return out;
+  }, [skills]);
+
   const query = search.trim().toLowerCase();
   const matchesQuery = (text: string | null | undefined) =>
     !query || (text ?? "").toLowerCase().includes(query);
 
+  // Every loaded run that /skills calls a skill, narrowed by the chosen origin.
+  // NOTE this is still bounded by the jobs page JobsDataContext loads — a skill
+  // whose run has scrolled off that page has no record to render a card from.
+  // That bound is unchanged by this rewiring; it is the pagination limit the
+  // library always had, not a new one.
+  const skillJobs = useMemo(
+    () =>
+      jobs.filter((j) => {
+        const skill = skillByJobId.get(j.id);
+        if (!skill) return false;
+        // A superseded run is a LINK in a chain, not a skill of its own — the
+        // tip stands for the whole chain. /skills returns it so a caller can
+        // explain where a run went; a library of skills is not that caller, and
+        // listing it here would show one trained model as several.
+        if (skill.superseded_by) return false;
+        if (filter === "uploaded") return false;
+        if (filter === "trained")
+          return (
+            skill.origin === "trained-local" || skill.origin === "trained-cloud"
+          );
+        if (filter === "imported")
+          return skill.origin === "imported" || skill.origin === "downloaded";
+        return true;
+      }),
+    [jobs, skillByJobId, filter],
+  );
+
   // A renamed import is findable by alias, original name, repo id, or path.
   const visibleImported = useMemo(
     () =>
-      filter === "uploaded"
-        ? []
-        : importedJobs.filter(
-            (j) =>
-              matchesQuery(j.name) ||
-              matchesQuery(j.display_name) ||
-              matchesQuery(j.hf_repo_id) ||
-              matchesQuery(j.output_dir),
-          ),
+      skillJobs.filter(
+        (j) =>
+          matchesQuery(j.name) ||
+          matchesQuery(j.display_name) ||
+          matchesQuery(j.hf_repo_id) ||
+          matchesQuery(j.output_dir),
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [importedJobs, filter, query],
+    [skillJobs, query],
   );
   const visibleUploaded = useMemo(
     () =>
@@ -94,7 +133,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
     [untrackedHubModels, filter, query],
   );
 
-  const count = importedJobs.length + untrackedHubModels.length;
+  const count = skillJobs.length + untrackedHubModels.length;
   const visibleCount = visibleImported.length + visibleUploaded.length;
 
   // Untracked hub model actions: register the repo as an imported pseudo-job

@@ -260,6 +260,8 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # the whole-list reorder that goes with it.
         "GET /api/v1/jobs/queue",
         "POST /api/v1/jobs/queue/reorder",
+        # Skills: the deployable projection of the /models build (PR #94).
+        "GET /api/v1/skills",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",

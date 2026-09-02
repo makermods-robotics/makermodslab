@@ -8,6 +8,7 @@ silently re-enable a guard (or a feature) on hardware that cannot support it.
 import pytest
 
 from makermodslab.arm_capabilities import (
+    arm_type_from_robot_type,
     arm_type_of_robot_config,
     joints_per_arm,
     supports_auto_calibration,
@@ -118,3 +119,45 @@ def test_a_config_without_a_type_reads_as_so101() -> None:
     """Defensive: the getattr fallback must not raise on an unexpected object."""
     assert arm_type_of_robot_config(object()) == "so101"
     assert arm_type_of_robot_config(None) == "so101"
+
+
+@pytest.mark.parametrize(
+    ("robot_type", "expected"),
+    [
+        # What this app writes into a recorded dataset's meta/info.json
+        # (lerobot stores the robot object's .name there).
+        ("so101_follower", "so101"),
+        ("bi_so_follower", "so101"),
+        ("maker_follower", "maker"),
+        ("bi_maker_follower", "maker"),
+        ("metal_follower", "metal"),
+        ("bi_metal_follower", "metal"),
+        # Legacy / community datasets recorded elsewhere.
+        ("so100_follower", "so101"),
+        ("so-101", "so101"),
+        ("SO101", "so101"),
+        ("  Maker_Follower  ", "maker"),
+    ],
+)
+def test_arm_type_from_robot_type_maps_known_strings(robot_type: str, expected: str) -> None:
+    """The dataset-side counterpart to arm_type_of_robot_config: it takes the
+    free-form robot_type STRING from meta/info.json rather than a built config."""
+    assert arm_type_from_robot_type(robot_type) == expected
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "aloha", "widowx", "unknown", 7, object()])
+def test_arm_type_from_robot_type_returns_none_when_unrecognized(value: object) -> None:
+    """Unlike arm_type_of_robot_config, this must NOT default to so101: the
+    compatibility warnings that call it have to stay silent on "don't know"
+    rather than cry wolf about a dataset whose arm can't be established."""
+    assert arm_type_from_robot_type(value) is None
+
+
+def test_arm_type_from_robot_type_marker_match_is_deliberately_greedy() -> None:
+    """A family marker anywhere in the string wins. That's the point — a
+    dataset whose robot_type merely *contains* "metal"/"maker" is almost
+    certainly that arm — but pin it so the behaviour is a choice, not an
+    accident."""
+    assert arm_type_from_robot_type("experimental_metal_rig") == "metal"
+    assert arm_type_from_robot_type("bi_so100_follower") == "so101"
+    assert arm_type_from_robot_type("so_leader") == "so101"

@@ -35,6 +35,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
+from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
     get_hidden_datasets,
     get_saved_custom_datasets,
@@ -47,6 +48,27 @@ from .utils.hf_auth import cached_whoami, canonical_writable_namespace, hf_hub_o
 logger = logging.getLogger(__name__)
 
 CAMERA_FEATURE_PREFIX = "observation.images."
+
+
+def _sampling_weight(value: Any) -> float:
+    """One episode's sampling weight, defaulting to 1.0.
+
+    Absent column, null cell, or an unreadable value all mean 1.0 (R3) — never an
+    error, and never 0.0, which would drop the episode from training entirely.
+
+    Kept in step with `sampling.episode_weights_from_dataset`'s clamp: this reader
+    gates `dataset_is_weighted` (so whether the weighted sampler runs), that one
+    feeds the sampler, and a cell one accepts but the other rejects would crash a
+    run mid-training.
+    """
+    if value is None:
+        return 1.0
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    # Rejects negatives, infinities, and NaN (which satisfies no comparison).
+    return weight if 0 <= weight < float("inf") else 1.0
 
 
 def _safe_int(value: Any) -> int | None:
@@ -857,6 +879,29 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+def _has_sampling_weight_column(path: Path) -> bool:
+    """Whether ``path``'s episode metadata carries a ``sampling_weight`` column.
+
+    Reads only the parquet FOOTER (``read_schema``), never the rows, so it is
+    cheap enough to run per dataset while building a listing.
+
+    This is an exact proxy for "is weighted", not an approximation: a merge with
+    every weight at 1 writes no column at all, so a present column always means
+    at least one episode is weighted. The authoritative check that gates which
+    trainer launches is still ``dataset_is_weighted`` — this one only decides
+    whether to draw a badge.
+    """
+    episodes_dir = path / "meta" / "episodes"
+    if not episodes_dir.is_dir():
+        return False
+    for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+        try:
+            return SAMPLING_WEIGHT_COLUMN in pq.read_schema(parquet_path).names
+        except Exception:
+            return False
+    return False
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -891,6 +936,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": top.name,
                         "last_modified": _dir_mtime_iso(top),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(top),
                     }
                 )
             continue
@@ -912,6 +958,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": f"{top.name}/{sub.name}",
                         "last_modified": _dir_mtime_iso(sub),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(sub),
                     }
                 )
 
@@ -1067,10 +1114,18 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         # Hub dataset — see get_hub_dataset_info). The card gates its local-only
         # affordances (rename, size, task counts) on this.
         "source": "local",
+        # Per-episode sampling weights present. Drives the "weighted" badge and
+        # the training mix panel; both runners honour it (the cloud wrapper
+        # materializes the sampler pod-side).
+        "weighted": _has_sampling_weight_column(path),
     }
 
 
-def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list[dict[str, Any]] | None:
+def _read_episode_rows(
+    meta_dir: Path,
+    columns: list[str] | None = None,
+    optional_columns: list[str] | None = None,
+) -> list[dict[str, Any]] | None:
     """Every row of ``meta/episodes/chunk-*/file-*.parquet``, column-pruned.
 
     v3.0-only: older v2.x datasets keep episodes in ``meta/episodes.jsonl``,
@@ -1078,6 +1133,14 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
     viewer (episode list, video, joint chart) isn't offered for them — callers
     treat a None return as "not viewable", not an error. Returns None if the
     directory is absent or nothing could be read.
+
+    ``optional_columns`` are requested only from the files that actually have
+    them. That distinction is load-bearing: pyarrow raises when ``columns`` names
+    a column a file lacks, and the ``except`` below logs and *continues*, so
+    naming a not-universally-present column in ``columns`` would silently drop
+    every parquet file of every dataset written before that column existed —
+    ending with ``rows == []`` and a None return, i.e. "not viewable". A per-file
+    schema probe (footer only, no row groups read) keeps that from happening.
     """
     episodes_dir = meta_dir / "episodes"
     if not episodes_dir.is_dir():
@@ -1085,7 +1148,11 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
     rows: list[dict[str, Any]] = []
     for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
         try:
-            table = pq.read_table(parquet_path, columns=columns)
+            requested = columns
+            if columns is not None and optional_columns:
+                present = set(pq.read_schema(parquet_path).names)
+                requested = [*columns, *[c for c in optional_columns if c in present]]
+            table = pq.read_table(parquet_path, columns=requested)
         except Exception as e:
             logger.warning(f"Could not read {parquet_path}: {e}")
             continue
@@ -1176,7 +1243,14 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
         col_to_camera[from_col] = (camera, "from")
         col_to_camera[to_col] = (camera, "to")
 
-    rows = _read_episode_rows(path / "meta", columns=["episode_index", "tasks", "length", *video_cols])
+    rows = _read_episode_rows(
+        path / "meta",
+        columns=["episode_index", "tasks", "length", *video_cols],
+        # Only merged-with-weights datasets carry this. It MUST stay optional:
+        # see _read_episode_rows for what requiring it would do to every dataset
+        # recorded before the column existed (R3).
+        optional_columns=[SAMPLING_WEIGHT_COLUMN],
+    )
     if rows is None:
         return None
     out = []
@@ -1202,10 +1276,42 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
                 "duration": round(length / fps, 3),
                 "tasks": [str(t) for t in (row.get("tasks") or [])],
                 "video_offsets": video_offsets,
+                "sampling_weight": _sampling_weight(row.get(SAMPLING_WEIGHT_COLUMN)),
             }
         )
     out.sort(key=lambda e: e["episode_index"])
     return out
+
+
+def dataset_is_weighted(repo_id: str) -> bool:
+    """Whether any episode of ``repo_id`` carries a ``sampling_weight`` != 1.
+
+    Resolved from the dataset's own ``meta/episodes``, never from a request body:
+    weightedness decides which trainer module a run launches, and a client must
+    not be able to claim a dataset is (or isn't) weighted.
+
+    Local copy first, then the same Hub episode-metadata fetch the viewer uses,
+    so a dataset that only exists on the Hub is still classified correctly.
+    False when nothing resolves — a v2.x dataset, or one that predates the
+    column, has no weights to honour (R3).
+    """
+    try:
+        path = _resolve_local_dataset_path(repo_id)
+        if path is None:
+            path = _ensure_hub_episodes_root(repo_id)
+        if path is None:
+            return False
+        rows = _read_episode_rows(
+            path / "meta",
+            columns=["episode_index"],
+            optional_columns=[SAMPLING_WEIGHT_COLUMN],
+        )
+    except Exception as exc:
+        logger.warning("Could not read sampling weights for %s: %s", repo_id, exc)
+        return False
+    if rows is None:
+        return False
+    return any(_sampling_weight(row.get(SAMPLING_WEIGHT_COLUMN)) != 1.0 for row in rows)
 
 
 def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Path | None:
@@ -1520,22 +1626,15 @@ def is_dataset_private(repo_id: str) -> bool | None:
     return bool(getattr(info, "private", False))
 
 
-def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
-    """The RAW ``features`` map from a dataset's ``meta/info.json``.
-
-    The other readers above summarise info.json for a UI card (camera names,
-    episode counts); this one hands back the feature specs untouched —
-    ``dtype``/``shape``/``names`` per key — because the fine-tune preflight in
-    jobs.py compares them dimension-for-dimension against a checkpoint's own
-    ``input_features``/``output_features``. Local first (a plain file read, no
-    network), falling back to fetching just ``meta/info.json`` from the Hub for
-    a dataset with no local copy — the same tiny file get_hub_dataset_info
+def _read_dataset_info_json(repo_id: str) -> dict[str, Any] | None:
+    """A dataset's whole ``meta/info.json`` as a dict, local first (a plain file
+    read, no network) then falling back to fetching just that one tiny file from
+    the Hub for a dataset with no local copy — the same file get_hub_dataset_info
     uses.
 
     Returns None when it can't be read — not local, offline, absent/private
-    repo, malformed JSON, or no ``features`` map. None means "not established",
-    never "fine": a caller must treat it as a reason to stay silent rather than
-    as a clean bill of health.
+    repo, malformed JSON. None means "not established", never "fine": callers
+    must treat it as a reason to stay silent rather than a clean bill of health.
     """
     path = _resolve_local_dataset_path(repo_id)
     if path is not None:
@@ -1552,11 +1651,52 @@ def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
             )
             info = json.loads(Path(local).read_text())
         except Exception as exc:
-            logger.info("dataset features fetch for %s failed: %s", repo_id, exc)
+            logger.info("dataset info.json fetch for %s failed: %s", repo_id, exc)
             return None
+    return info if isinstance(info, dict) else None
 
-    features = info.get("features") if isinstance(info, dict) else None
+
+def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
+    """The RAW ``features`` map from a dataset's ``meta/info.json``.
+
+    The other readers above summarise info.json for a UI card (camera names,
+    episode counts); this one hands back the feature specs untouched —
+    ``dtype``/``shape``/``names`` per key — because the fine-tune preflight in
+    jobs.py compares them dimension-for-dimension against a checkpoint's own
+    ``input_features``/``output_features``.
+
+    Returns None when it can't be read (see _read_dataset_info_json) or carries
+    no ``features`` map. None means "not established", never "fine".
+    """
+    info = _read_dataset_info_json(repo_id)
+    features = info.get("features") if info is not None else None
     return features if isinstance(features, dict) else None
+
+
+def read_dataset_robot_type(repo_id: str) -> str | None:
+    """The raw ``robot_type`` string from a locally-cached dataset's
+    ``meta/info.json``, or None.
+
+    lerobot writes the recording robot's ``.name`` here (``so101_follower``,
+    ``bi_maker_follower``, …); a dataset recorded elsewhere can carry anything.
+    Callers normalise it with ``arm_capabilities.arm_type_from_robot_type`` to
+    decide whether a cross-arm fine-tune warning applies.
+
+    LOCAL ONLY — deliberately no Hub fallback. The one caller
+    (``get_policy_config_summary``) runs inside a synchronous GET handler and
+    this is a display nicety; a Hub round-trip there (for an imported model or
+    an uncached training dataset) would be a latency regression for no real
+    gain. None means "not established" — stay silent, don't warn.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    robot_type = info.get("robot_type") if isinstance(info, dict) else None
+    return robot_type if isinstance(robot_type, str) and robot_type.strip() else None
 
 
 class DatasetRenameError(Exception):
@@ -1950,6 +2090,12 @@ def list_all_datasets() -> list[dict[str, Any]]:
             a = existing.get("last_modified") or ""
             b = item.get("last_modified") or ""
             existing["last_modified"] = max(a, b) or None
+            # Carry the local-only facts the Hub row cannot know. Without this a
+            # dataset that exists in BOTH places lost its `weighted` flag, and
+            # the badge silently disappeared for exactly the datasets most
+            # likely to have been merged and pushed.
+            if "weighted" in item:
+                existing["weighted"] = item["weighted"]
         else:
             merged[rid] = {**item, "source": "local"}
 

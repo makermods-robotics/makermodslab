@@ -30,6 +30,14 @@ export default {
     episodesHeadingWithCount: "episodes ({{total}})",
     // One row in that list. {{index}} is the dataset's own episode index.
     episodeRow: "Episode {{index}}",
+    // Multiplication sign + the number; no translatable words.
+    weightTimes: "\u00d7{{weight}}",
+    weightTitle: "Sampled {{weight}}\u00d7 as often during training",
+    mixTitle: "Training mix",
+    // {{weight}} is the sampling weight, {{count}} the episode count in that tier.
+    mixTier_one: "\u00d7{{weight}} \u00b7 {{count}} episode",
+    mixTier_other: "\u00d7{{weight}} \u00b7 {{count}} episodes",
+    mixShare: "{{percent}}% of frames",
     episodesEmpty:
       "Episodes appear here once this dataset is downloaded to your machine.",
     noCameras:

@@ -214,6 +214,41 @@ export default {
     created: "Created <0>{{repoId}}</0>",
     failed: "Merge failed",
     done: "Done",
+    // --- Per-source weights ---------------------------------------------
+    // Incompatibility reasons. Camera lists are DATA — the names come from the
+    // dataset and are never translated.
+    incompatibleFps: "Can't merge: {{theirs}} fps, but the first dataset you picked is {{anchor}} fps.",
+    incompatibleCameras: "Can't merge: cameras are [{{theirs}}], but the first dataset you picked has [{{anchor}}].",
+    // {{groups}} is a list of dataset ids grouped by arm name — data.
+    armMismatchWarning:
+      "These datasets were recorded on different arms: {{groups}}. Merging them mixes robots, so a policy trained on the result learns an average of both.",
+    confirmTitle: "Merge datasets recorded on different arms?",
+    confirmPrompt: "Merge anyway only if you know the arms are equivalent.",
+    confirmProceed: "Merge anyway",
+    weightColumn: "Weight",
+    // repoId is a dataset id — data, never translated.
+    weightAria: "Weight for {{repoId}}",
+    decreaseWeight: "Decrease weight",
+    increaseWeight: "Increase weight",
+    resetWeights: "Reset",
+    // Multiplication sign + the number; no translatable words.
+    weightTimes: "\u00d7{{weight}}",
+    mixTitle: "Resulting mix",
+    mixEpisodesPlain_one: "{{count}} episode",
+    mixEpisodesPlain_other: "{{count}} episodes",
+    // {{base}} is the source's own episode count, {{count}} the weighted total.
+    mixEpisodesWeighted_one: "{{base}} \u2192 {{count}} episode",
+    mixEpisodesWeighted_other: "{{base}} \u2192 {{count}} episodes",
+    mixTotal_one: "{{count}} episode total",
+    mixTotal_other: "{{count}} episodes total",
+    episodesUnknown: "Unavailable",
+    sharePercent: "{{percent}}%",
+    // {{size}} is a pre-formatted byte size ("1.4 GB") — not a `count`.
+    diskEstimate: "~{{size}} on disk",
+    weightHint:
+      "Raise a dataset's weight so training samples its episodes more often.",
+    weightedHint:
+      "Weights are stored as per-episode metadata, not by duplicating episodes, so the merged dataset is the same size on disk whatever the weights.",
   },
   usageInstructions: {
     title: "Get Started with MakerMods Lab",

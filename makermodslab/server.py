@@ -72,6 +72,8 @@ from .camera_preview import CameraOpenError, camera_preview_manager
 from .can_recovery import ReleaseCanTorqueRequest, handle_release_can_torque
 from .identify import identify_arm_by_motion
 from .jobs import (
+    _KNOWN_FOUNDATION_BASE_REPO_IDS,
+    CHECKPOINTS_STAGING_SUFFIX,
     DatasetHubCopyEmptyError,
     DatasetNotOnHubError,
     JobAlreadyContinuedError,
@@ -86,6 +88,7 @@ from .jobs import (
     QueueChangedError,
     _list_local_checkpoints,
     hub_ref_repo_id,
+    hub_ref_step_label,
     job_registry,
     training_is_active,
 )
@@ -187,6 +190,7 @@ from .schemas.models import (
     ModelInfoResponse,
     ModelListItem,
     ModelUploadResponse,
+    SkillsResponse,
 )
 from .schemas.nodes import (
     NodeEntry,
@@ -604,7 +608,33 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-job_registry.set_on_change(manager.notify_jobs_changed)
+
+
+def _on_jobs_changed() -> None:
+    """Registry-change fan-out: drop the models listing cache, THEN announce.
+
+    A run reaching a terminal state changes what `/models` lists — that is the
+    moment it becomes a deployable skill — but no MODEL mutation ran, so until
+    now nothing invalidated the listing cache. The picker stayed up to
+    `_LISTING_CACHE_TTL_S` (45s) stale while the jobs-driven library, which
+    reads the registry directly over a WS push, was already current. That gap
+    is the transient half of "the two skill lists disagree". Registry renames
+    had the same shape: `rename` fires this hook, but no route invalidated the
+    listing, so the picker showed a run's old name for up to a TTL.
+
+    Two placement details, both load-bearing:
+
+      * Invalidation runs BEFORE the broadcast. Clients refetch on the event,
+        so announcing first races a cache this call exists to drop.
+      * Invalidation runs OUTSIDE `notify_jobs_changed`'s "are any clients
+        connected?" guard. The broadcast is pointless with nobody listening;
+        the cache drop is not — the next plain HTTP GET still wants the truth.
+    """
+    model_browser.invalidate_model_listing_cache()
+    manager.notify_jobs_changed()
+
+
+job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
 session_events.set_notifier(manager.notify_session_changed)
 
@@ -1598,6 +1628,30 @@ def models_list():
     return model_browser.list_all_models()
 
 
+# exclude_unset for the same reason as GET /models: the rows come from the same
+# four producers, whose key sets differ (see SkillListItem).
+@v1_router.get(
+    "/skills",
+    response_model=SkillsResponse,
+    response_model_exclude_unset=True,
+    tags=["models"],
+)
+def skills_list():
+    """Every trained policy, each saying whether it can actually run.
+
+    The deployable projection of the same merged build `/models` serves, so the
+    deploy picker and the models library can no longer disagree about what a
+    skill is — they were reading two different endpoints (`/models` and the
+    `/jobs` registry) and filtering them on two different rules.
+
+    Envelope, not a bare array: `{skills, hub}`. `hub` reports whether the Hub
+    half was reachable, because "the Hub is down" and "you own no skills" used
+    to render identically as an empty list. Each row carries `weights`
+    (ready/unverified/none), `superseded_by`, `deployable`, `origin` and the
+    `job_id` that deploys it."""
+    return model_browser.list_skills()
+
+
 # exclude_unset for the same reason as GET /models: the local/hub/probe
 # branches carry different key sets (see ModelInfoResponse).
 @router.get(
@@ -2060,11 +2114,57 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
-# Mirrors _RUN_LABEL + _LEGACY_RUN_LABELS in runners/hf_cloud.py — the label a
-# submitted job carries, newest first. The dotted key is read but never
-# written: the Hub now rejects a "key=value" tag containing a dot, so it was
-# renamed, and every job submitted before that still carries the old one.
+# The label keys a submitted job may carry, newest first. `makermodslab_run` is
+# what hf_cloud._RUN_LABEL writes now; the dotted key is read but never written
+# — the Hub now rejects a "key=value" tag containing a dot, so it was renamed,
+# and every job submitted before that still carries the old one.
 _HUB_RUN_LABELS = ("makermodslab_run", "makermodslab.run")
+
+
+def _hub_job_argv(ji) -> list:
+    """A Hub job's argv as one flat list, POSITIONS PRESERVED.
+
+    `arguments` is where the Hub splits argv for some submission paths; ours
+    rides entirely in `command`. Both are scanned so neither shape is missed.
+
+    Non-string tokens are deliberately NOT dropped. Removing them would close
+    the gap they leave and make two tokens adjacent that never were, so
+    `--policy.type` followed by a non-string would read the token after it as
+    its value. They are left in place and rejected by `_argv_value` instead.
+    """
+    return [*(getattr(ji, "command", None) or []), *(getattr(ji, "arguments", None) or [])]
+
+
+def _argv_value(argv: list, flag: str) -> str | None:
+    """The value of `--flag value` or `--flag=value` in argv; None if absent.
+
+    Both spellings occur in the same command line: build_training_command
+    (train.py) emits the space form for most flags but the '=' form for
+    `--config_path` / `--policy.pretrained_path`, where lerobot's own
+    pre-parser only accepts '='. Empty and whitespace-only values read as
+    absent — an empty flag value carries no more information than no flag.
+
+    A space-form value that is itself option-shaped is rejected. A dangling
+    `--policy.pretrained_path` immediately before `--resume true` would
+    otherwise yield the base model "--resume", and with it a confident
+    "Fine-tune" chip on a run that is nothing of the kind. No value we look for
+    can legitimately begin with "--": they are repo ids, policy names and step
+    counts.
+    """
+    prefix = flag + "="
+    for i, tok in enumerate(argv):
+        if not isinstance(tok, str):
+            continue
+        value = None
+        if tok == flag and i + 1 < len(argv):
+            nxt = argv[i + 1]
+            if isinstance(nxt, str) and not nxt.startswith("--"):
+                value = nxt
+        elif tok.startswith(prefix):
+            value = tok[len(prefix) :]
+        if value is not None and value.strip():
+            return value.strip()
+    return None
 
 
 def _hub_job_run_name(ji) -> str | None:
@@ -2088,11 +2188,95 @@ def _hub_job_run_name(ji) -> str | None:
         if isinstance(labelled, str) and labelled.strip():
             return labelled.strip()
 
-    repo_id = _hub_job_trainer_args(ji).get("policy.repo_id")
-    if repo_id:
-        # The slug after the namespace is the run id the library titles by.
-        return repo_id.rsplit("/", 1)[-1]
-    return None
+    repo_id = _argv_value(_hub_job_argv(ji), "--policy.repo_id")
+    # The slug after the namespace is the run id the library titles by.
+    return repo_id.rsplit("/", 1)[-1] if repo_id else None
+
+
+def _hub_job_provenance(ji) -> dict:
+    """What a Hub job started FROM, read off its own argv.
+
+    Four kinds, so a card can say what a run IS at a glance:
+
+      * `finetune`   — fresh optimizer from a base checkpoint the user chose.
+      * `foundation` — fresh optimizer from the public foundation checkpoint a
+                       VLA policy defaults to. NOT a fine-tune in the sense the
+                       user means: JobRegistry.start pins
+                       `policy_pretrained_path` to lerobot/smolvla_base (and the
+                       pi0 family's equivalents) for ANY such run that names no
+                       starting point, so treating a bare `--policy.pretrained_path`
+                       as a fine-tune would mislabel every from-scratch VLA run.
+      * `resume`     — a continuation of an earlier run.
+      * `scratch`    — random weights.
+
+    Read from argv rather than from Hub labels because a label cannot carry a
+    repo id at all: the Hub validates label keys and values under its `tags`
+    rules (alphanumeric, '-', '_', '=' — see _RUN_LABEL in runners/hf_cloud.py),
+    and every repo id contains a '/'. argv also covers the whole existing
+    backlog, and is what actually ran.
+
+    `--config_path` is deliberately NOT consulted. On a cloud continuation it
+    holds a CONTAINER path ("/tmp/makermodslab/train/checkpoints/.../train_config.json",
+    set in runners/hf_cloud.py) that names nothing the user could recognize. The
+    real source rides in the wrapper's own `--resume-from=<repo>@checkpoints/<step>`
+    directive, which is part of the submitted command and so visible here.
+
+    Absent facts are omitted rather than guessed: build_training_command's
+    resume branch emits neither `--dataset.repo_id` nor `--policy.type` (lerobot
+    reconstructs both from the checkpoint config), so a continuation simply has
+    no value for them.
+    """
+    argv = _hub_job_argv(ji)
+    out: dict[str, object] = {
+        "kind": "scratch",
+        "base_ref": None,
+        "base_repo": None,
+        "base_step": None,
+        "base_job_id": None,
+        "dataset_repo_id": _argv_value(argv, "--dataset.repo_id"),
+        "policy_type": _argv_value(argv, "--policy.type"),
+        "steps": _argv_value(argv, "--steps"),
+    }
+
+    pretrained = _argv_value(argv, "--policy.pretrained_path")
+    resume_from = _argv_value(argv, "--resume-from")
+
+    if resume_from:
+        out["kind"] = "resume"
+        out["base_ref"] = resume_from
+    elif pretrained:
+        # A run whose base is one of the public foundation checkpoints was
+        # defaulted there, not pointed there by the user.
+        out["kind"] = "foundation" if pretrained in _KNOWN_FOUNDATION_BASE_REPO_IDS else "finetune"
+        out["base_ref"] = pretrained
+    elif (_argv_value(argv, "--resume") or "").lower() == "true":
+        # Submitted before the wrapper carried --resume-from; we know it
+        # continued something but not what.
+        out["kind"] = "resume"
+
+    base_ref = out["base_ref"]
+    if isinstance(base_ref, str):
+        # hub_ref_* fall back to the whole ref when it isn't step-suffixed, so a
+        # plain repo id passes through as its own repo with no step.
+        repo = hub_ref_repo_id(base_ref)
+        step = hub_ref_step_label(base_ref)
+        if step == base_ref and "@checkpoints/" in base_ref:
+            # hub_ref_* only split a DIGIT step dir, but hf_cloud can emit
+            # "<repo>@checkpoints/last". Without this the whole raw ref would
+            # land in base_repo and be rendered at the user (R2).
+            repo, _, step = base_ref.partition("@checkpoints/")
+        out["base_repo"] = repo
+        out["base_step"] = step if step != base_ref else None
+        # A "<user>/<job id>_checkpoints" base is a STAGING repo holding a local
+        # run's uploaded checkpoint (checkpoints_staging_repo_id in jobs.py).
+        # The job id inside it is the thing a person recognizes; the repo id is
+        # plumbing. Recovered here, next to the rule that mints it, rather than
+        # sniffed for in the frontend.
+        slug = repo.rsplit("/", 1)[-1]
+        if slug.endswith(CHECKPOINTS_STAGING_SUFFIX):
+            out["base_job_id"] = slug[: -len(CHECKPOINTS_STAGING_SUFFIX)]
+
+    return out
 
 
 # The trainer flags worth reading back off a Hub job, and the JSON key each one
@@ -2380,7 +2564,16 @@ def list_hub_jobs():
                 "status": ({"stage": ji.status.stage, "message": ji.status.message} if ji.status else None),
                 "owner": ji.owner.name if ji.owner else None,
                 "url": ji.url,
+                # What the run trains (policy/dataset/steps/repo), read back off
+                # the job's own argv so a foreign run's card reads like a local
+                # one.
                 **_hub_job_identity(ji),
+                # What the run started FROM (kind + base checkpoint), parsed off
+                # the same argv. Every cloud run ships the same image and flavor,
+                # so without this a card launched from another machine has almost
+                # nothing on it that distinguishes one run from the next. Spread
+                # last: its `policy_type` is computed identically to identity's.
+                **_hub_job_provenance(ji),
             }
             for ji in jobs
         ],
@@ -2475,7 +2668,11 @@ def delete_hub_model(repo_id: str):
         raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
 
     # The listing changed — drop the cached /jobs/hub response so the removed
-    # repo doesn't linger until the TTL expires.
+    # repo doesn't linger until the TTL expires. The models/skills listing has
+    # its own Hub cache and its own last-good fallback, so it needs telling
+    # separately: without this the deleted repo survives the TTL AND, worse,
+    # persists as a retained "stale" row every time a later fan-out degrades.
+    model_browser.forget_hub_repo(repo_id)
     invalidate_hub_jobs_cache()
     return {"status": "success", "repo_id": repo_id}
 
@@ -2571,9 +2768,17 @@ def get_job_metrics_history(job_id: str):
 
 
 @router.get("/jobs/{job_id}/checkpoints", response_model=JobCheckpointsResponse, tags=["jobs"])
-def get_job_checkpoints(job_id: str):
-    """List the checkpoints saved for this job, ascending by step."""
+def get_job_checkpoints(job_id: str, lineage: bool = False):
+    """List the checkpoints saved for this job, ascending by step.
+
+    ``lineage=true`` widens that to the whole resume chain — this run plus the
+    runs it resumed. Opt-in rather than the default so existing callers keep
+    their exact semantics; the skill picker asks for it because a chain is one
+    model and splitting its steps across rows is what this fixes.
+    """
     try:
+        if lineage:
+            return {"checkpoints": job_registry.list_chain_checkpoints(job_id)}
         return {"checkpoints": job_registry.list_checkpoints(job_id)}
     except JobNotFoundError as exc:
         raise ApiError(
@@ -2588,9 +2793,11 @@ def get_job_checkpoints(job_id: str):
 )
 def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
-    policy_type, image_features (per-camera height/width), requires_task, and
-    the flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
-    modal uses to flag a single-arm/bimanual mismatch."""
+    policy_type, image_features (per-camera height/width), requires_task, the
+    flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
+    modal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type
+    (the arm the checkpoint was trained on, for the fine-tune panel's cross-arm
+    warning; null when it can't be established)."""
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:
@@ -4059,17 +4266,13 @@ async def shutdown_event():
     # job watchdog, so the local training queue cannot promote a run while we
     # are shutting down.
     #
-    # `_drain_queue` runs every second from a thread uvicorn does not manage,
-    # and `LocalJobRunner` spawns a DETACHED wrapper — that detachment is
-    # deliberate (it is what `process_pid` + `exit_status` reattachment exists
-    # for), so a trainer started here outlives the server. The user would close
-    # MakerMods Lab and be left with a GPU training they never saw start and no
-    # UI able to stop it until they relaunch. Before the queue this was
-    # impossible: starting a run required an HTTP request, and uvicorn stops
-    # accepting those before this handler runs.
-    #
-    # Only the watchdog stops. A run already training is left alone on purpose,
-    # exactly as it is across a restart today.
+    # `_drain_queue` runs every second from a thread uvicorn does not manage, so
+    # without this a queued run could still be promoted after uvicorn has
+    # stopped accepting the HTTP requests that are the only other way to start
+    # one. The run already training is then ended deliberately further down (see
+    # `stop_local_for_shutdown`), because its stdout pipe dies with this process
+    # regardless — the exit-status file + TailingJobRunner still cover a worker
+    # reload that this same process survives.
     job_registry.shutdown()
 
     # Stop the AVFoundation pump first so its next tick can't interleave with
@@ -4114,6 +4317,26 @@ async def shutdown_event():
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):
             logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)
+
+    # Local training is not on the list above because it drives no hardware —
+    # but it does die with this process regardless of what we do here. The
+    # trainer's stdout is a pipe this process owns, so the moment we exit its
+    # next write raises BrokenPipeError and it exits 1, with the traceback
+    # going into the closed pipe: no log line, and a history entry reading
+    # "Subprocess exited with code 1" that looks exactly like a broken model.
+    # (`start_new_session=True` escapes the process group, not the pipe.) So we
+    # end it deliberately instead, and file it as `interrupted` with a reason.
+    # Cloud runs are untouched — they keep going on HF's GPUs.
+    try:
+        stopped = await asyncio.to_thread(job_registry.stop_local_for_shutdown)
+        if stopped:
+            logger.info(
+                "Stopped %d local training job(s) on shutdown: %s",
+                len(stopped),
+                ", ".join(stopped),
+            )
+    except Exception:
+        logger.exception("Failed to stop local training jobs during shutdown")
 
     if manager:
         manager.stop_broadcast_thread()

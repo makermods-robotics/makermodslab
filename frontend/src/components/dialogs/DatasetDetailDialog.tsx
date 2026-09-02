@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -586,6 +587,31 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
   const [episodes, setEpisodes] = useState<EpisodeSummary[] | null>(null);
   const [episodesLoading, setEpisodesLoading] = useState(true);
+
+  // Per-weight training-mix tiers, newest-lever-first. Share is measured in
+  // FRAMES (length x weight), not episodes: episodes differ in length, so an
+  // episode count would misstate how much of training each tier actually is.
+  // Returns a single tier for an unweighted dataset, which the panel uses as
+  // its "nothing to show" signal.
+  const weightTiers = useMemo(() => {
+    if (!episodes || episodes.length === 0) return [];
+    const byWeight = new Map<number, { episodes: number; frames: number }>();
+    for (const ep of episodes) {
+      const weight = ep.sampling_weight ?? 1;
+      const tier = byWeight.get(weight) ?? { episodes: 0, frames: 0 };
+      tier.episodes += 1;
+      tier.frames += ep.length * weight;
+      byWeight.set(weight, tier);
+    }
+    const total = [...byWeight.values()].reduce((sum, t) => sum + t.frames, 0);
+    return [...byWeight.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([weight, t]) => ({
+        weight,
+        episodes: t.episodes,
+        share: total > 0 ? Math.round((t.frames / total) * 100) : 0,
+      }));
+  }, [episodes]);
   const [cameras, setCameras] = useState<string[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -764,6 +790,41 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                   </p>
                 )}
               </div>
+              {/* Training mix. Rendered only for a weighted dataset, and only
+                  here — the share is computed from the episode list this panel
+                  already holds, so it needs no extra request and no prop
+                  threading through DatasetInfoCard (which only receives totals).
+
+                  The SHARE is the number worth showing: "×3" is the lever, but
+                  "60% of sampled frames" is the thing being tuned. Frames, not
+                  episodes, because episodes differ in length. */}
+              {weightTiers.length > 1 ? (
+                <div className="mb-2 rounded-md border border-border bg-muted/40 p-2">
+                  <div className="mb-1 text-[11px] font-medium text-foreground">
+                    {t("dialogs.datasetDetail.mixTitle")}
+                  </div>
+                  <div className="space-y-0.5">
+                    {weightTiers.map((tier) => (
+                      <div
+                        key={tier.weight}
+                        className="flex items-baseline justify-between gap-2 font-mono text-[10.5px] tabular-nums"
+                      >
+                        <span className={tier.weight !== 1 ? "text-info" : "text-muted-foreground"}>
+                          {t("dialogs.datasetDetail.mixTier", {
+                            weight: String(tier.weight),
+                            count: tier.episodes,
+                          })}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {t("dialogs.datasetDetail.mixShare", {
+                            percent: tier.share,
+                          })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {episodes && episodes.length > 0 ? (
                   <div className="space-y-0.5">
@@ -799,6 +860,22 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                               index: ep.episode_index,
                             })}
                           </span>
+                          {/* Oversampled episodes only. A weight of 1 is the
+                              default for every episode ever recorded, so showing
+                              "×1" on every row would be noise on the common case.
+                              `?? 1` because an older backend omits the field. */}
+                          {(ep.sampling_weight ?? 1) !== 1 ? (
+                            <span
+                              className="shrink-0 font-mono text-[10.5px] tabular-nums text-info"
+                              title={t("dialogs.datasetDetail.weightTitle", {
+                                weight: String(ep.sampling_weight ?? 1),
+                              })}
+                            >
+                              {t("dialogs.datasetDetail.weightTimes", {
+                                weight: String(ep.sampling_weight ?? 1),
+                              })}
+                            </span>
+                          ) : null}
                           <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
                             {ep.duration.toFixed(1)}s
                           </span>

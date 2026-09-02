@@ -1,4 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { Trans, useTranslation } from "react-i18next";
 import {
   AlertTriangle,
@@ -41,9 +46,10 @@ import {
 } from "@/lib/inferenceApi";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
-import { JobRecord, getJob, jobDisplayName, listJobs } from "@/lib/jobsApi";
-import { ModelItem, getModels } from "@/lib/modelsApi";
-import { findJobForModel, importSourceForModel } from "@/lib/inferenceLaunch";
+import { JobRecord, getJob, jobDisplayName } from "@/lib/jobsApi";
+import { SkillItem } from "@/lib/modelsApi";
+import { useSkills } from "@/hooks/useSkills";
+import { importSourceForModel } from "@/lib/inferenceLaunch";
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
@@ -84,7 +90,6 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
  * the husk-repo messaging is identical, not re-implemented.
  */
 
-const JOB_SCAN_LIMIT = 200;
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
 // just stops the stepper from offering a number that would be silently reduced.
 const MAX_EVAL_EPISODES = 200;
@@ -194,8 +199,25 @@ const DeployPanel: React.FC = () => {
   const { importSource } = useInferenceLaunch();
 
   // --- Skill picker state ------------------------------------------------
-  const [models, setModels] = useState<ModelItem[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
+  // The listing is NOT owned here. It is one app-wide fetch behind the
+  // `jobs_changed` push (see ModelsDataContext), so a run that finishes while
+  // this panel is open appears in the picker without waiting for a reopen —
+  // and the launchpad's slider, the Train panel's Starting point and this
+  // picker can no longer be looking at three different snapshots.
+  const {
+    skills,
+    hub: hubStatus,
+    loading: modelsLoading,
+    error: modelsError,
+    refresh: refreshModels,
+  } = useSkills();
+  // The picker offers what can actually run. A row that is not deployable is
+  // still in the listing — carrying WHY, so the library can explain it — but it
+  // has no business being selectable here.
+  const models: SkillItem[] = useMemo(
+    () => skills.filter((s) => s.deployable),
+    [skills],
+  );
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<JobRecord | null>(null);
   const [resolving, setResolving] = useState(false);
@@ -206,7 +228,50 @@ const DeployPanel: React.FC = () => {
 
   // --- Inference config state (ported from InferenceModal) ---------------
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
-  const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  // Keyed on `ref`, NOT step. The picker lists a whole resume lineage, and a
+  // rewind (resuming from an ancestor's checkpoint) legitimately produces two
+  // DIFFERENT checkpoints at the same step. Keying on step made the second one
+  // unselectable — `find(c => c.step === selectedStep)` always returns the
+  // first — so picking it silently deployed the other one's weights.
+  const [selectedRef, setSelectedRef] = useState<string | null>(null);
+  // Callers outside this panel (a deploy deep link, a ModelsLibrary card) can
+  // only name a STEP — they have no ref. Park it until the checkpoint list
+  // arrives, then resolve it to a ref. A step-only request is inherently
+  // ambiguous on a rewound lineage; it resolves to the first match, which is
+  // what these callers got before. Selection made INSIDE the panel is always
+  // ref-exact.
+  // Resolved by the effect below, which keys on the checkpoint LIST rather than
+  // on the job — resolving it inside the fetch coupled it to `jobId` changing,
+  // so picking a step on the ALREADY-selected model stranded it and dropped the
+  // dropdown to its placeholder.
+  const [pendingStep, setPendingStep] = useState<number | null>(null);
+
+  // Attribution for the dropdown, built from the server's own owner fields. The
+  // dropdown renders it only when the list actually spans more than one run, so
+  // a plain (unresumed) skill shows nothing extra.
+  const checkpointOwnerMap = useMemo(() => {
+    const out: Record<
+      string,
+      { name: string; number: number; detail: string }
+    > = {};
+    for (const c of checkpoints) {
+      if (!c.owner_job_id) continue;
+      out[c.ref] = {
+        name: c.owner_name ?? c.owner_job_id,
+        number: c.owner_job_number ?? 0,
+        detail: c.owner_job_id,
+      };
+    }
+    return out;
+  }, [checkpoints]);
+
+  const selectedCheckpoint =
+    selectedRef != null
+      ? checkpoints.find((c) => c.ref === selectedRef) ?? null
+      : null;
+  // The step is now DERIVED from the selected checkpoint, never the other way
+  // round — it is a label, not an identity.
+  const selectedStep = selectedCheckpoint?.step ?? null;
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
   // Multi-episode evaluation. 1 (the default) is the plain single rollout; >1
@@ -280,6 +345,11 @@ const DeployPanel: React.FC = () => {
   // as one so a configured deploy can be folded down to picker + actions.
 
   const jobId = selectedJob?.id ?? null;
+  // Address the policy-config endpoint by the checkpoint's OWNER. `(owner, step)`
+  // is unique even on a rewound lineage, where `(tip, step)` is not. Falls back
+  // to the tip when there is no owner — a single-run listing, where the step is
+  // unique anyway.
+  const policyConfigJobId = selectedCheckpoint?.owner_job_id ?? jobId;
   const isBimanual = robot?.mode === "bimanual";
 
   const cameraMap = useMemo(
@@ -314,35 +384,21 @@ const DeployPanel: React.FC = () => {
     [recordCameraByName, availableCameras],
   );
 
-  // Load the skill listing (local runs + Hub models) when the studio opens.
+  // Opening the studio is a freshness gesture, so it still re-pulls — but it is
+  // no longer the ONLY thing that does, which is what made a run completing
+  // behind an open panel invisible until it was closed and reopened.
   useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    setModelsLoading(true);
-    getModels(baseUrl, fetchWithHeaders)
-      .then((m) => {
-        if (!cancelled) setModels(m);
-      })
-      .catch(() => {
-        if (!cancelled) setModels([]);
-      })
-      .finally(() => {
-        if (!cancelled) setModelsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, baseUrl, fetchWithHeaders]);
+    if (open) refreshModels();
+  }, [open, refreshModels]);
 
-  // Re-fetch the skill listing after a successful import so the new skill
-  // shows up in the picker right away — mirrors ModelsLibrary's onImported.
+  // Re-pull after a successful import so the new skill shows up right away —
+  // mirrors ModelsLibrary's onImported. Still explicit: the import posts to
+  // /jobs, so `jobs_changed` covers it, but a fire-and-forget broadcast the
+  // server drops when no socket is registered is not something the panel that
+  // just did the import should be relying on.
   const handleImported = useCallback(() => {
-    setModelsLoading(true);
-    getModels(baseUrl, fetchWithHeaders)
-      .then((m) => setModels(m))
-      .catch(() => setModels([]))
-      .finally(() => setModelsLoading(false));
-  }, [baseUrl, fetchWithHeaders]);
+    refreshModels();
+  }, [refreshModels]);
 
   // Apply a "Run on robot" prefill: source "job" selects that job (+ optional
   // step); source "hub" lazy-imports the repo, then selects the pseudo-job.
@@ -361,13 +417,13 @@ const DeployPanel: React.FC = () => {
         if (deployPrefill.source === "job") {
           const job = await getJob(baseUrl, fetchWithHeaders, deployPrefill.id);
           if (cancelled) return;
-          setSelectedStep(deployPrefill.step ?? null);
+          setPendingStep(deployPrefill.step ?? null);
           setSelectedJob(job);
           setSelectedModelId(job.id);
         } else {
           const imported = await importSource(deployPrefill.id);
           if (cancelled || !imported) return;
-          setSelectedStep(deployPrefill.step ?? null);
+          setPendingStep(deployPrefill.step ?? null);
           setSelectedJob(imported);
           setSelectedModelId(imported.id);
         }
@@ -407,21 +463,31 @@ const DeployPanel: React.FC = () => {
       setSelectedModelId(modelId);
       const model = models.find((m) => m.id === modelId);
       if (!model) return;
-      // New skill → drop the prior step so the load effect picks the new job's
-      // latest checkpoint.
-      setSelectedStep(null);
+      // New skill → drop the prior selection so the load effect picks the new
+      // job's latest checkpoint.
+      setSelectedRef(null);
+      setPendingStep(null);
       setResolving(true);
       try {
-        const jobs = await listJobs(
-          baseUrl,
-          fetchWithHeaders,
-          JOB_SCAN_LIMIT,
-        );
-        const hit = findJobForModel(model, jobs);
-        if (hit) {
-          setSelectedJob(hit);
-          return;
+        // `job_id` is stamped by the server, which already ranks the runs
+        // sharing an output repo (`_job_outranks`). This used to re-list up to
+        // 200 jobs and re-implement that ranking in TypeScript — a second copy
+        // of the definition, kept in sync by hand, and blind to any run past
+        // the scan limit.
+        if (model.job_id) {
+          try {
+            const job = await getJob(baseUrl, fetchWithHeaders, model.job_id);
+            setSelectedJob(job);
+            return;
+          } catch {
+            // The record went away between the listing and this click (deleted
+            // in another tab, or from the Train panel). The weights may still be
+            // on the Hub, so fall through to the import rather than dead-end —
+            // the path the old lookup took whenever it found no job at all.
+          }
         }
+        // No run tracks it (a bare Hub repo, a scanned directory), or the one
+        // that did is gone — the lazy import registers one, as before.
         const imported = await importSource(importSourceForModel(model));
         if (imported) setSelectedJob(imported);
       } catch {
@@ -441,27 +507,56 @@ const DeployPanel: React.FC = () => {
       return;
     }
     let cancelled = false;
-    listJobCheckpoints(baseUrl, fetchWithHeaders, jobId)
+    // Lineage-wide: a resumed run and the run it resumed are ONE skill, and
+    // the picker must offer every step the chain trained through — not just
+    // the ones this link happened to save.
+    listJobCheckpoints(baseUrl, fetchWithHeaders, jobId, undefined, true)
       .then((cks) => {
         if (cancelled) return;
         setCheckpoints(cks);
         if (cks.length > 0) {
-          const latest = cks[cks.length - 1].step;
-          setSelectedStep((prev) => (prev != null ? prev : latest));
+          // Ascending by step, so the last entry is the newest. A ref that is
+          // no longer in the list (the run was deleted, or a rewind rewrote
+          // the chain) falls back to the latest rather than leaving a
+          // selection that resolves to nothing.
+          const latest = cks[cks.length - 1].ref;
+          setSelectedRef((prev) =>
+            prev != null && cks.some((c) => c.ref === prev) ? prev : latest,
+          );
         }
       })
       .catch(() => {
         if (cancelled) return;
         setCheckpoints([]);
+        // Never leave a parked step behind: it would resolve against whichever
+        // list arrives next.
+        setPendingStep(null);
       });
     return () => {
       cancelled = true;
     };
   }, [open, baseUrl, fetchWithHeaders, jobId]);
 
+  // Resolve a step parked by a caller that had no ref (a deploy deep link, a
+  // ModelsLibrary row). Keyed on the checkpoint LIST, not on the job, so it
+  // fires both when the list has just arrived AND when it was already loaded —
+  // the latter is picking a step on the model that is already selected, which
+  // resolving inside the fetch could never handle.
+  //
+  // A step-only request is ambiguous on a rewound lineage; `find` takes the
+  // first match, which is the tip's checkpoint (list_chain_checkpoints appends
+  // the tip first and the sort is stable). That is the same one the backend's
+  // own-first policy-config lookup returns, so the two agree.
+  useEffect(() => {
+    if (pendingStep == null || checkpoints.length === 0) return;
+    const match = checkpoints.find((c) => c.step === pendingStep);
+    setPendingStep(null);
+    if (match) setSelectedRef(match.ref);
+  }, [pendingStep, checkpoints]);
+
   // Load policy config when step changes.
   useEffect(() => {
-    if (!open || !jobId || selectedStep == null) {
+    if (!open || !policyConfigJobId || selectedStep == null) {
       setPolicyConfig(null);
       setPolicyConfigError(null);
       return;
@@ -469,7 +564,16 @@ const DeployPanel: React.FC = () => {
     let cancelled = false;
     setPolicyConfigLoading(true);
     setPolicyConfigError(null);
-    getCheckpointPolicyConfig(baseUrl, fetchWithHeaders, jobId, selectedStep)
+    getCheckpointPolicyConfig(
+      baseUrl,
+      fetchWithHeaders,
+      // The OWNER's job id, not the chain tip's: `(owner_job_id, step)` is
+      // unique, so a rewind's two same-step checkpoints resolve to the right
+      // one. Falls back to the tip for a single-run listing, which carries no
+      // owner and where the step is unique anyway.
+      policyConfigJobId,
+      selectedStep,
+    )
       .then((cfg) => {
         if (cancelled) return;
         setPolicyConfig(cfg);
@@ -496,7 +600,7 @@ const DeployPanel: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [open, baseUrl, fetchWithHeaders, jobId, selectedStep, isBimanual]);
+  }, [open, baseUrl, fetchWithHeaders, policyConfigJobId, selectedStep, isBimanual]);
 
   // Auto-bind robot cameras whose names match a policy-expected camera, by
   // name against the DISPLAY name (the bare name the user chose at record
@@ -560,11 +664,6 @@ const DeployPanel: React.FC = () => {
       clearInterval(id);
     };
   }, [open, baseUrl, fetchWithHeaders]);
-
-  const selectedRef =
-    selectedStep != null
-      ? checkpoints.find((c) => c.step === selectedStep)?.ref ?? null
-      : null;
 
   // Arm-count mismatch between CHECKPOINT and ROBOT — client mirror of the
   // server's `_arm_count_mismatch` 409 guard. (Ported verbatim.)
@@ -814,8 +913,21 @@ const DeployPanel: React.FC = () => {
                   {t("studio.deploy.picker.loading")}
                 </div>
               ) : models.length === 0 ? (
-                <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                  {t("studio.deploy.picker.empty")}
+                // "We could not ask" and "you own nothing" are different
+                // sentences, and the picker used to render the second for the
+                // first: a `/models` failure was caught into an empty array, so
+                // a backend hiccup or a dropped Hub listing read on screen as
+                // the user's skills having been deleted. The listing is only
+                // empty when the fetch actually succeeded and returned nothing.
+                <div
+                  className={cn(
+                    "px-2 py-1.5 text-xs",
+                    modelsError ? "text-destructive" : "text-muted-foreground",
+                  )}
+                >
+                  {modelsError
+                    ? t("studio.deploy.picker.error")
+                    : t("studio.deploy.picker.empty")}
                 </div>
               ) : (
                 models.map((m) => (
@@ -835,11 +947,34 @@ const DeployPanel: React.FC = () => {
                           ? t("studio.deploy.source.both")
                           : t("studio.deploy.source.local")}
                     </span>
+                    {/* A failed run that saved weights IS runnable, and the
+                        Train panel's card has always run one. It is offered
+                        here rather than silently withheld — but it says so,
+                        because a non-zero exit is a fact about the run the
+                        user should weigh before deploying it. */}
+                    {m.state === "failed" && (
+                      <span
+                        className={cn(
+                          "ml-2 text-[10px] text-amber-600 dark:text-amber-500",
+                          isCJK ? "" : "uppercase tracking-wide",
+                        )}
+                      >
+                        {t("studio.deploy.picker.failedBadge")}
+                      </span>
+                    )}
                   </SelectItem>
                 ))
               )}
             </SelectContent>
           </Select>
+          {/* An unreachable Hub used to look exactly like an empty shelf: the
+              rows simply were not there. Now the listing says which it is, and
+              keeps serving the last complete Hub result underneath. */}
+          {hubStatus && !hubStatus.ok && (
+            <p className="mt-1 px-1 text-[11px] text-amber-600 dark:text-amber-500">
+              {t("studio.deploy.picker.hubDegraded")}
+            </p>
+          )}
           {/* Duplicate of ModelsLibrary's "Import skill" button, docked
               inside the picker's own box (right edge) so it's visible
               without opening the dropdown. A sibling overlay, not a child of
@@ -923,13 +1058,11 @@ const DeployPanel: React.FC = () => {
                 <CheckpointDropdown
                   id="deploy-checkpoint"
                   checkpoints={checkpoints}
-                  // Single-job list: steps are unique here, so the step maps
-                  // 1:1 onto the checkpoint's identifying ref.
-                  selectedRef={
-                    checkpoints.find((c) => c.step === selectedStep)?.ref ??
-                    null
-                  }
-                  onChange={(c) => setSelectedStep(c.step)}
+                  // Lineage-wide list: two entries can share a step, so the ref
+                  // is the only safe identity to select by.
+                  selectedRef={selectedRef}
+                  onChange={(c) => setSelectedRef(c.ref)}
+                  owners={checkpointOwnerMap}
                 />
               )}
               {robotCheckpointArmMismatch ? (
@@ -1273,7 +1406,7 @@ const DeployPanel: React.FC = () => {
       <LibrarySection className="mt-0">
         <ModelsLibrary
           onPick={(job, step) => {
-            setSelectedStep(step);
+            setPendingStep(step);
             setSelectedJob(job);
             setSelectedModelId(job.id);
           }}

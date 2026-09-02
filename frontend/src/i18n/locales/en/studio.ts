@@ -181,6 +181,10 @@ export default {
         // Source marker for a Hub-only row. Product name — same in every
         // language, keyed so the two markers have one uniform shape.
         hub: "Hub",
+        // Compact badge: this dataset carries per-episode sampling weights.
+        weighted: "weighted",
+        weightedTitle:
+          "Carries per-episode sampling weights — some episodes are sampled more often during training",
       },
     },
     startingPoint: {
@@ -219,6 +223,12 @@ export default {
       placeholder: "Pick a skill",
       loading: "Loading skills…",
       empty: "No trained or imported skills yet",
+      // Shown INSTEAD of `empty` when the listing could not be fetched —
+      // an outage must not read as "you have no skills".
+      error: "Couldn’t load skills. Check the server and try again.",
+      // Badge on a run that exited non-zero but left usable weights.
+      failedBadge: "failed run",
+      hubDegraded: "Hub unreachable — showing your local skills and the last Hub listing.",
       // aria-label and title on the same button.
       import: "Import skill",
       hint: "Pick a trained checkpoint or an imported Hub skill to run on your robot.",
