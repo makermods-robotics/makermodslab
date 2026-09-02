@@ -18,7 +18,9 @@ import logging
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from pydantic import BaseModel
@@ -44,6 +46,7 @@ from .datasets import (
 from .maker_rest_pose import (
     capture_maker_pose,
     maker_follower_arms,
+    maker_targets_from_action,
     return_maker_arms_to_rest,
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
@@ -1598,6 +1601,97 @@ def handle_upload_status() -> dict[str, Any]:
     return upload_manager.get_status()
 
 
+class _ResetPhaseAbort:
+    """A ``threading.Event``-shaped view of the reset phase's stop signals.
+
+    ``maker_rest_pose``'s returns poll ``abort_event.is_set()`` between
+    setpoints so a stop can cut a multi-second move short. The reset phase's
+    own signals are plain dict flags on ``web_events`` (Stop sets both
+    ``exit_early`` and ``stop_recording``; Pause sets ``paused``), so wrap them
+    in the shape the return already understands rather than spawning a thread
+    to mirror them into a real Event.
+
+    ``paused`` counts as an abort on purpose: pressing Pause during a
+    re-alignment means the operator wants the follower to stop tracking the
+    leader right now. The move is abandoned and the reset loop re-runs it on
+    the next resume, from wherever the arm got to.
+    """
+
+    __slots__ = ("_events",)
+
+    def __init__(self, events: dict) -> None:
+        self._events = events
+
+    def is_set(self) -> bool:
+        return bool(
+            self._events.get("exit_early", False)
+            or self._events.get("stop_recording", False)
+            or self._events.get("paused", False)
+            or _release_now.is_set()
+        )
+
+
+def _realign_follower_to_leader(
+    robot,
+    teleop,
+    arm_type: str,
+    teleop_action_processor,
+    robot_action_processor,
+    abort_event=None,
+) -> None:
+    """Walk a CAN follower to the leader's CURRENT pose at a bounded rate.
+
+    Recording has two mid-session gaps where the follower stops tracking the
+    leader while the operator is free to move it: a pause (the reset loop
+    deliberately freezes passthrough) and the episode boundary itself
+    (``dataset.save_episode()`` is seconds of file I/O, and a re-record
+    decision sits in the same place). When passthrough resumes, the very next
+    send points the follower straight at wherever the leader has ended up.
+
+    On a Feetech arm that is merely abrupt. On a CAN arm it is a SNAP: the
+    fork's followers ramp their first commands (``startup_sync_speed_deg``,
+    1 deg per step until within tolerance) but re-arm that ramp only in
+    ``connect()``, so once the follower has caught up at session start every
+    later send goes through at full MIT gain. This shapes the catch-up the
+    same way the stop path shapes the return home — see maker_rest_pose.py.
+
+    The target is computed through the SAME processors the reset loop's
+    passthrough uses, so the arm is walked to exactly the pose the next raw
+    send would have jumped to; the gripper is excluded, matching what teleop
+    and record already exclude from a captured pose.
+
+    Never raises and never aborts the session: the return reports ``(ok,
+    reason)``, a failure is logged, and the caller drops back into ordinary
+    passthrough (today's behaviour).
+    """
+    if teleop is None or uses_feetech_bus(arm_type):
+        # SO-101: rest_pose.py's bounded-velocity move is only exposed as
+        # "return to the captured session-start pose", not to an arbitrary
+        # target, so the Feetech path stays plain passthrough exactly as
+        # before. Extending it is a refactor of rest_pose.py, not of this.
+        return
+
+    try:
+        observation = robot.get_observation()
+        action = teleop.get_action()
+        processed = teleop_action_processor((action, observation))
+        robot_action = robot_action_processor((processed, observation))
+    except Exception as e:
+        logger.warning(f"Could not read the leader to re-align the follower: {e}")
+        return
+
+    targets = [(device, pose) for device, pose in maker_targets_from_action(robot, robot_action) if pose]
+    if not targets:
+        return
+
+    logger.info("Re-aligning the follower to the leader before passthrough resumes")
+    verdicts = return_maker_arms_to_rest(targets, abort_event=abort_event, target_label="the leader's pose")
+    for ok, reason in verdicts:
+        if ok or reason == "cut-short":
+            continue
+        logger.warning(f"The follower did not fully re-align to the leader ({reason}); continuing")
+
+
 def _reset_loop_with_pause(
     robot,
     teleop,
@@ -1606,6 +1700,7 @@ def _reset_loop_with_pause(
     teleop_action_processor,
     robot_action_processor,
     control_time_s: float,
+    realign: Callable[[], None] | None = None,
 ) -> None:
     """Reset-phase tick loop: same per-tick shape as lerobot's record_loop
     (lerobot.scripts.lerobot_record.record_loop) called with dataset=None —
@@ -1628,12 +1723,25 @@ def _reset_loop_with_pause(
     together, so the stop_recording check is redundant in practice today —
     it's here so this loop's own contract (matching the design spec: check
     both every tick) doesn't depend on caller discipline.
+
+    `realign` (optional) is run ONCE before the first passthrough send of the
+    phase, and again on the first tick after each resume — the two moments the
+    follower has stopped tracking the leader for long enough that the operator
+    can have moved it (the episode-save gap, and the pause itself). It is
+    ``record._realign_follower_to_leader`` in the real session and a no-op for
+    an SO-101; None here keeps the loop's old shape exactly, which is what the
+    pause/passthrough tests exercise. Nothing runs it on an ordinary tick, so
+    the steady state is unchanged.
     """
     from lerobot.utils.robot_utils import precise_sleep
 
     control_interval = 1 / fps
     timestamp = 0.0
     start_episode_t = time.perf_counter()
+    # Armed at entry: the phase is REACHED across a discontinuity — the episode
+    # save (seconds of file I/O) or a re-record decision — during which the
+    # follower held its last commanded pose while the leader was free to move.
+    realign_pending = True
 
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
@@ -1646,9 +1754,25 @@ def _reset_loop_with_pause(
             break
 
         if events.get("paused", False):
+            # Resuming reopens the same gap that entering the phase did: frozen
+            # passthrough is exactly the operator repositioning the leader while
+            # the follower holds still.
+            realign_pending = True
             precise_sleep(control_interval)
             # Paused time isn't spent from control_time_s: push the reference
             # point forward by the tick we just spent paused.
+            start_episode_t += time.perf_counter() - start_loop_t
+            timestamp = time.perf_counter() - start_episode_t
+            continue
+
+        if realign_pending and realign is not None:
+            realign_pending = False
+            realign()
+            # Machine time, not the operator's gap time: don't spend the move
+            # from control_time_s, same as a pause isn't spent. Then go round
+            # again rather than falling through — a stop or a fresh pause that
+            # cut the move short is honoured at the loop head, before any raw
+            # passthrough send can undo what the move just did.
             start_episode_t += time.perf_counter() - start_loop_t
             timestamp = time.perf_counter() - start_episode_t
             continue
@@ -1702,7 +1826,8 @@ def record_with_web_events(
     # Read the arm type back off the assembled config rather than taking it as
     # a parameter, so it can never disagree with the devices actually built.
     # Everything below that touches a Feetech register by name is gated on it.
-    feetech = uses_feetech_bus(arm_type_of_robot_config(cfg.robot))
+    arm_type = arm_type_of_robot_config(cfg.robot)
+    feetech = uses_feetech_bus(arm_type)
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
@@ -1967,6 +2092,20 @@ def record_with_web_events(
         follower_rest_poses = []
         maker_rest_poses = [(arm, capture_maker_pose(arm)) for arm, _label in maker_follower_arms(robot)]
 
+    # Rate-bounded catch-up for the reset phase's two discontinuities (entering
+    # it across the episode-save gap, and resuming from a pause). Built once and
+    # handed to both reset-loop call sites; a no-op on the SO-101, and it only
+    # ever runs on the tick after a gap — see _realign_follower_to_leader.
+    realign = partial(
+        _realign_follower_to_leader,
+        robot,
+        teleop,
+        arm_type,
+        teleop_action_processor,
+        robot_action_processor,
+        _ResetPhaseAbort(web_events),
+    )
+
     # Start with episode 1 - but track it properly
     current_episode = 1
     saved_episodes = 0  # Track how many episodes we've actually saved
@@ -2095,6 +2234,7 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    realign=realign,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while
@@ -2175,6 +2315,7 @@ def record_with_web_events(
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
+                    realign=realign,
                 )
 
                 # The loop may have exited (e.g. via exit_early/stop) while

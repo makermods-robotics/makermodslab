@@ -126,6 +126,48 @@ def capture_maker_pose(device, include_gripper: bool = False) -> dict[str, float
     return pose
 
 
+def maker_targets_from_action(
+    robot, action: dict, include_gripper: bool = False
+) -> list[tuple[object, dict[str, float]]]:
+    """Split a ROBOT-level action dict into per-sub-arm target poses.
+
+    ``return_maker_to_pose`` drives the individually drivable arms of
+    ``maker_follower_arms`` and speaks their BARE motor names; a bimanual
+    robot's action dict is keyed ``left_<motor>.pos`` / ``right_<motor>.pos``
+    (see ``BiMakerFollower.send_action``, which splits on exactly those
+    prefixes). This converts one into the other, so a target computed from the
+    leader through the ordinary processors can be handed to the rate-bounded
+    return unchanged.
+
+    The result pairs with ``maker_follower_arms`` device for device. Poses may
+    be empty (an action carrying no ``.pos`` key for that side); callers drop
+    those rather than asking for a return with nothing to return to.
+
+    The gripper is excluded by default, matching ``capture_maker_pose``: a
+    rate-bounded walk of the jaws would squeeze or drop whatever they hold,
+    and the gripper is the one joint a snap does not endanger.
+    """
+    left = getattr(robot, "left_arm", None)
+    right = getattr(robot, "right_arm", None)
+    bimanual = left is not None and right is not None
+    sides = [(left, "left_"), (right, "right_")] if bimanual else [(robot, "")]
+
+    targets: list[tuple[object, dict[str, float]]] = []
+    for device, prefix in sides:
+        pose: dict[str, float] = {}
+        for key, value in action.items():
+            if prefix and not key.startswith(prefix):
+                continue
+            if not key.endswith(".pos") or not isinstance(value, (int, float)):
+                continue
+            motor = key[len(prefix) : -len(".pos")]
+            if motor == "gripper" and not include_gripper:
+                continue
+            pose[motor] = float(value)
+        targets.append((device, pose))
+    return targets
+
+
 def _read_pose(device) -> dict[str, float]:
     """Bare-name degrees, including the gripper — used to measure progress."""
     return capture_maker_pose(device, include_gripper=True)
@@ -138,12 +180,18 @@ def return_maker_to_pose(
     label: str = "follower arm",
     speed_deg_s: float = MAKER_RETURN_SPEED_DEG_S,
     ceiling_s: float = MAKER_RETURN_CEILING_S,
+    target_label: str = "its start pose",
 ) -> tuple[bool, str]:
     """Walk a Maker arm back to ``pose`` at a bounded rate, then confirm it landed.
 
     ``pose`` is bare-name degrees, as ``capture_maker_pose`` returns. Joints
     absent from it are left alone — that is how the gripper keeps its grip
     through a stop.
+
+    ``target_label`` only names the destination in the log lines. It defaults to
+    the teardown wording because that is this function's original caller; the
+    mid-session re-alignment (``record._realign_follower_to_leader``) walks the
+    arm to the LEADER's current pose, which is not a start pose at all.
 
     Never raises: this runs on teardown paths where the caller's next move is
     to release torque regardless, and an exception here would skip that. A
@@ -184,7 +232,11 @@ def return_maker_to_pose(
     deadline = time.monotonic() + ceiling_s
 
     logger.info(
-        "Returning the %s to its start pose: %.1f deg worst-case over %.1fs", label, max_delta, duration_s
+        "Returning the %s to %s: %.1f deg worst-case over %.1fs",
+        label,
+        target_label,
+        max_delta,
+        duration_s,
     )
 
     try:
@@ -228,42 +280,58 @@ def return_maker_to_pose(
                 continue
             # Converged as far as its gains allow.
             if delta <= MAKER_RETURN_SETTLE_DEG:
-                logger.info("The %s settled at its start pose (%s)", label, described)
+                logger.info("The %s settled at %s (%s)", label, target_label, described)
                 return True, "settled"
-            logger.warning("The %s stopped short of its start pose: %s", label, described)
+            logger.warning("The %s stopped short of %s: %s", label, target_label, described)
             return False, described
 
         return False, described or "timed out"
     except Exception as e:
         # Documented never-raises: the caller is about to cut torque and must
         # not be skipped by an exception from the courtesy return.
-        logger.error(f"Error returning the {label} to its start pose: {e}")
+        logger.error(f"Error returning the {label} to {target_label}: {e}")
         return False, str(e)
 
 
 def return_maker_arms_to_rest(
     rest_poses: list[tuple[object, dict[str, float]]],
     abort_event: threading.Event | None = None,
-) -> None:
+    target_label: str = "its start pose",
+) -> list[tuple[bool, str]]:
     """Return every captured Maker arm concurrently, then wait for all of them.
 
     Mirrors ``teleoperate._return_followers_to_rest``: the two arms of a
     bimanual rig sit on separate CAN buses, so returning them in series would
     take twice as long for no reason and leave the second arm hanging under
     gravity while the first moves.
+
+    Returns each arm's ``(ok, reason)`` verdict, in the order given. The stop
+    paths ignore it — they release torque either way, and a failure has already
+    been logged by then — but the mid-session re-alignment reports its own
+    outcome, and a thread whose join timed out must not be mistaken for a
+    success, so the verdicts are collected rather than discarded.
     """
     if not rest_poses:
-        return
+        return []
     if len(rest_poses) == 1:
         device, pose = rest_poses[0]
-        return_maker_to_pose(device, pose, abort_event=abort_event)
-        return
+        return [return_maker_to_pose(device, pose, abort_event=abort_event, target_label=target_label)]
+
+    results: list[tuple[bool, str]] = [(False, "did not finish")] * len(rest_poses)
+
+    def _run(index: int, device: object, pose: dict[str, float]) -> None:
+        results[index] = return_maker_to_pose(
+            device,
+            pose,
+            abort_event=abort_event,
+            label=f"Maker follower arm {index + 1}",
+            target_label=target_label,
+        )
 
     threads = [
         threading.Thread(
-            target=return_maker_to_pose,
-            args=(device, pose),
-            kwargs={"abort_event": abort_event, "label": f"Maker follower arm {i + 1}"},
+            target=_run,
+            args=(i, device, pose),
             name=f"maker-return-{i}",
             daemon=True,
         )
@@ -275,3 +343,4 @@ def return_maker_arms_to_rest(
     # so a wedged CAN read can't hold the stop path open indefinitely.
     for t in threads:
         t.join(timeout=MAKER_RETURN_CEILING_S + 2.0)
+    return results
