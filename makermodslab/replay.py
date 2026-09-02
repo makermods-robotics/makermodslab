@@ -39,12 +39,17 @@ from pydantic import BaseModel
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .api_errors import ErrorCode
-from .arm_capabilities import uses_feetech_bus
+from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type, uses_feetech_bus
 from .arm_identity import verify_devices
-from .datasets import get_episode_action_series
+from .datasets import get_episode_action_series, read_dataset_robot_type
 from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
 from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
-from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
+from .rest_pose import (
+    RETURN_CEILING_S,
+    _clamp_to_representable_range,
+    capture_rest_pose,
+    return_to_rest_pose,
+)
 from .session_events import notify_session_changed
 from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
 from .torque import release_maker_torque
@@ -77,6 +82,27 @@ EASE_ARRIVE_TOLERANCE = 2.0
 # docstring). Keeps the same 0.5x-of-arrival-tolerance ratio as the raw-ticks
 # defaults (RETURN_STALL_MIN_PROGRESS=10 is half of RETURN_ARRIVE_TOLERANCE=20).
 EASE_STALL_MIN_PROGRESS = 1.0
+
+# How far a *settled* ease-in may still be from frame 0 and still be good
+# enough to start playback, in the same normalized units as
+# EASE_ARRIVE_TOLERANCE (~9-10 deg on the arm joints).
+#
+# EASE_ARRIVE_TOLERANCE's 2.0 units is ~22-39 ticks (~2-3 deg), which sits
+# INSIDE the standing error an STS3215 holds in position mode at lerobot's
+# P=16 — and frame 0 of a recorded episode routinely parks joints against
+# their calibrated endpoints (shoulder_lift recorded at -103 and clamped to
+# the -100 hard stop, elbow near +96, a gripper under a torque cap), which is
+# exactly where that error is largest. Teleop and record run the same return
+# loop and merely LOG a "settled" verdict; replay's ease-in was the one place
+# it was fatal, and exactness doesn't matter here: the ease-in exists only so
+# frame 0 doesn't snap the arm from wherever it happened to be, so a joint a
+# few units short just means the first send_action moves it a few more
+# degrees. A `settled` whose largest per-joint |present - target| is at or
+# under this bound is therefore accepted (loudly) and playback starts; a
+# `settled` with a LARGER residual — and every `stalled` / `ceiling` /
+# `comm-error` / `no-pose` verdict — stays fatal, because those mean a stuck
+# or latched joint, or an arm posed genuinely far from frame 0.
+EASE_SETTLED_MAX_RESIDUAL = 10.0
 
 # How far behind real time a frame may be before it is dropped rather than
 # fired late. Below this, ordinary jitter is absorbed by the pacing wait; above
@@ -240,6 +266,29 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "success": False,
                 "status_code": 400,
                 "message": "Could not read this episode's recorded actions — it may not be downloaded locally yet.",
+            }
+
+        # Joint NAMES can match while the arm family doesn't: Maker and Metal
+        # share all seven, and only their units differ, so neither the
+        # action_features comparison below nor the frame-0 bus keying can tell
+        # them apart. lerobot tags the recording robot in the dataset's
+        # meta/info.json, so check that FIRST — before _connect_follower, so a
+        # refused replay never energizes the arm.
+        #
+        # An untagged, imported or community dataset resolves to None, and that
+        # stays SILENT (same rule the merge / cross-arm fine-tune warnings
+        # follow): "not established" is not "mismatched", and the joint-name
+        # checks below remain the guard for those, exactly as before.
+        dataset_arm = arm_type_from_robot_type(read_dataset_robot_type(request.repo_id))
+        if dataset_arm is not None and dataset_arm != request.arm_type:
+            robot_label = ARM_TYPE_LABEL.get(request.arm_type, f"a {request.arm_type} arm")
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": (
+                    f"This dataset was recorded on {ARM_TYPE_LABEL[dataset_arm]}, but the "
+                    f"connected robot is {robot_label} — replay it on a matching robot."
+                ),
             }
 
         try:
@@ -415,6 +464,35 @@ def _bus_keyed(action: dict[str, float], bus) -> dict[str, float]:
     return keyed
 
 
+def _ease_in_residual(bus, targets: dict[str, float]) -> dict[str, float] | None:
+    """Per-joint |present - target| after a `settled` ease-in, normalized units.
+
+    Read fresh rather than parsed out of return_to_rest_pose's reason string:
+    the reason is prose meant for humans, and (bool, str) is the contract every
+    teleop/record caller of return_to_rest_pose depends on, so the verdict is
+    not the place to smuggle numbers through. Compares against the SAME clamped
+    targets the return itself drove to (_clamp_to_representable_range) — a
+    recorded action beyond a motor's calibrated span is clamped on both the
+    write and the read path, so an unclamped comparison would measure a joint
+    resting perfectly on its hard stop as several units off.
+
+    Returns None when the read fails or reports no motor we have a target for;
+    the caller must treat that as "unknown", i.e. keep the fatal path.
+    """
+    clamped = _clamp_to_representable_range(getattr(bus, "motors", None) or {}, targets)
+    try:
+        positions = bus.sync_read("Present_Position", normalize=True)
+    except Exception as e:
+        logger.warning(f"Could not measure how far the ease-in settled from the first frame: {e}")
+        return None
+    residual = {
+        motor: abs(float(positions[motor]) - float(target))
+        for motor, target in clamped.items()
+        if motor in positions
+    }
+    return residual or None
+
+
 def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
     """Clear the RAM Goal_Velocity profile cap and verify it actually took.
 
@@ -513,6 +591,31 @@ def _replay_worker(
                     abort_event=_stop_event,
                     label="follower arm",
                 )
+            # A `settled` verdict says every motor STOPPED short of target, which
+            # on this arm is the ordinary outcome of easing into a frame 0 that
+            # parks joints on their endpoints — not a fault. Measure how short it
+            # actually stopped and start playback anyway when that is within
+            # EASE_SETTLED_MAX_RESIDUAL (Feetech only: the CAN return already
+            # judges by convergence and has no equivalent verdict).
+            settled_too_far: tuple[str, float] | None = None
+            if not arrived and feetech and reason.startswith("settled"):
+                residual = _ease_in_residual(robot.bus, _bus_keyed(frame0, robot.bus))
+                if residual is not None:
+                    worst_joint, worst = max(residual.items(), key=lambda item: item[1])
+                    if worst <= EASE_SETTLED_MAX_RESIDUAL:
+                        logger.warning(
+                            "Ease-in settled %.1f normalized units short of the episode's first "
+                            "frame on %s (%s), within the %.1f-unit bound — starting playback; the "
+                            "first frames will carry those joints the rest of the way",
+                            worst,
+                            worst_joint,
+                            ", ".join(f"{m}={d:.1f}" for m, d in sorted(residual.items())),
+                            EASE_SETTLED_MAX_RESIDUAL,
+                        )
+                        arrived = True
+                    else:
+                        settled_too_far = (worst_joint, worst)
+
             if not arrived and reason != "cut-short":
                 with _state_lock:
                     _replay_meta["phase"] = "error"
@@ -522,10 +625,19 @@ def _replay_worker(
                     # generic guess — the frontend shows hint in preference to
                     # error, so a static "may be posed too far" message was
                     # hiding the real diagnosis from the user.
-                    _replay_meta["hint"] = (
-                        f"The arm didn't settle at this episode's starting position ({reason}). "
-                        "Try again, or reposition it closer first."
-                    )
+                    if settled_too_far is not None:
+                        worst_joint, worst = settled_too_far
+                        _replay_meta["hint"] = (
+                            "The arm didn't settle at this episode's starting position: "
+                            f"{worst_joint} stopped {worst:.1f} normalized units away, past the "
+                            f"{EASE_SETTLED_MAX_RESIDUAL:.0f}-unit bound for starting playback "
+                            f"({reason}). Try again, or reposition it closer first."
+                        )
+                    else:
+                        _replay_meta["hint"] = (
+                            f"The arm didn't settle at this episode's starting position ({reason}). "
+                            "Try again, or reposition it closer first."
+                        )
                 # Fall through to the graceful return below instead of
                 # returning here — an ease-in that didn't arrive still left
                 # the arm mid-air under torque, and the drop straight to
