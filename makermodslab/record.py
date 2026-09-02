@@ -251,12 +251,33 @@ connect_retry_attempt = 0
 # current_phase == "resetting" — the two resets alone aren't sufficient,
 # since this is a stateless global any thread's status read can observe
 # between the reset-phase end and the next reset-phase start.
+#
+# Since the reset loop publishes its own countdown (reset_phase_elapsed_s,
+# below), this pair is the FALLBACK the status uses only in the sub-tick
+# before that loop's first publish — the loop's figure is authoritative
+# whenever it exists, because paused time is no longer the only thing the
+# countdown declines to spend.
 paused_accum_seconds: float = 0.0
 # Wall-clock time.time() the current pause began; None while not paused. Kept
 # separate from the reset loop's own internal perf_counter()-based pacing —
 # this pair exists purely so handle_recording_status can freeze the
 # frontend-facing countdown, independent of how the tick loop paces itself.
 pause_started_at: float | None = None
+# The reset loop's OWN countdown position: seconds of ACTIVE reset time spent
+# so far in the current reset phase, republished by _reset_loop_with_pause
+# every tick, None whenever no reset loop is running.
+#
+# This exists because the loop spends its control_time_s budget on strictly
+# less than wall time, and on more than one axis: a pause isn't spent (the
+# operator's gap time is what reset_time_s buys them), and neither is a
+# follower re-alignment (machine time — see _realign_follower_to_leader,
+# whose chase runs for seconds). handle_recording_status used to reconstruct
+# the same figure from wall clock minus paused time, which silently went
+# wrong the moment a second credited-back branch existed: the countdown ran
+# past its limit by however long the re-alignments took. Publishing the
+# loop's own timestamp keeps ONE clock for the countdown, so any future
+# credited-back branch is reported correctly without touching the status.
+reset_phase_elapsed_s: float | None = None
 # True when the most recent session saved zero episodes and its (freshly
 # created) dataset directory was discarded. Surfaced in the session-end status
 # so the frontend can tell the user nothing was kept (see Upload.tsx).
@@ -841,12 +862,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 last_session_outcome, \
                 last_session_error, \
                 paused_accum_seconds, \
-                pause_started_at
+                pause_started_at, \
+                reset_phase_elapsed_s
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
             paused_accum_seconds = 0.0
             pause_started_at = None
+            reset_phase_elapsed_s = None
 
             try:
                 logger.info(
@@ -1265,15 +1288,28 @@ def handle_recording_status() -> dict[str, Any]:
         if phase_start_time:
             status["phase_start_time"] = phase_start_time
             elapsed = time.time() - phase_start_time
-            # Only the reset phase ever accumulates paused time; gate the
-            # adjustment on phase so a leftover paused_accum_seconds/
-            # pause_started_at from a finished reset phase (this is a
-            # stateless read of module globals, so it can race a phase
-            # transition) never corrupts the recording phase's countdown.
+            # Only the reset phase ever spends less than wall time; gate the
+            # adjustment on phase so a leftover reset countdown from a
+            # finished reset phase (this is a stateless read of module
+            # globals, so it can race a phase transition) never corrupts the
+            # recording phase's countdown.
             if current_phase == "resetting":
-                elapsed -= paused_accum_seconds
-                if pause_started_at is not None:
-                    elapsed -= time.time() - pause_started_at
+                if reset_phase_elapsed_s is not None:
+                    # THE reset countdown: the loop's own budget position,
+                    # republished every tick. It already excludes paused time
+                    # AND re-alignment time, and stays correct for any credit
+                    # the loop grows later. Reconstructing it here from wall
+                    # clock is what made the displayed timer run past
+                    # reset_time_s by the length of every re-alignment.
+                    elapsed = reset_phase_elapsed_s
+                else:
+                    # No loop publishing yet (the sub-tick between the phase
+                    # flipping and the loop's first tick, or a phase entered
+                    # by a path that runs no loop): wall clock minus the
+                    # pause bookkeeping is the best available answer.
+                    elapsed -= paused_accum_seconds
+                    if pause_started_at is not None:
+                        elapsed -= time.time() - pause_started_at
             status["phase_elapsed_seconds"] = int(elapsed)
 
             # Add phase time limits
@@ -1836,6 +1872,12 @@ def _reset_loop_with_pause(
     time regardless of how long they stayed paused. Pausing is indefinite —
     this loop enforces no timeout of its own.
 
+    Publishes its budget position to ``record.reset_phase_elapsed_s`` every
+    tick, and that is the ONLY correct source for the frontend's reset
+    countdown: wall clock disagrees with it by however long the phase spent
+    paused AND re-aligning, so a status endpoint that reconstructs the figure
+    itself drifts every time this loop grows another credited-back branch.
+
     Never blocks on an unbounded wait while paused: sleeps one control tick
     at a time and rechecks events["exit_early"]/events["stop_recording"] every
     iteration BEFORE the pause check, so Stop remains responsive within about
@@ -1857,75 +1899,101 @@ def _reset_loop_with_pause(
     """
     from lerobot.utils.robot_utils import precise_sleep
 
+    global reset_phase_elapsed_s
+
     control_interval = 1 / fps
-    timestamp = 0.0
     start_episode_t = time.perf_counter()
     # Armed at entry: the phase is REACHED across a discontinuity — the episode
     # save (seconds of file I/O) or a re-record decision — during which the
     # follower held its last commanded pose while the leader was free to move.
     realign_pending = True
 
-    while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
+    def _spent() -> float:
+        """Active reset time spent so far, published for the status endpoint.
 
-        if events.get("exit_early", False):
-            events["exit_early"] = False
-            break
+        Every branch that credits time back does it by pushing
+        ``start_episode_t`` forward, so this one expression is the whole
+        countdown — and the ONLY thing the frontend's `elapsed / limit`
+        timer should be derived from. Reconstructing it from wall clock
+        elsewhere is what let the displayed countdown run past reset_time_s
+        by the duration of each re-alignment; see reset_phase_elapsed_s.
+        """
+        global reset_phase_elapsed_s
 
-        if events.get("stop_recording", False):
-            break
+        spent = time.perf_counter() - start_episode_t
+        reset_phase_elapsed_s = spent
+        return spent
 
-        if events.get("paused", False):
-            # Resuming reopens the same gap that entering the phase did: frozen
-            # passthrough is exactly the operator repositioning the leader while
-            # the follower holds still.
-            realign_pending = True
-            precise_sleep(control_interval)
-            # Paused time isn't spent from control_time_s: push the reference
-            # point forward by the tick we just spent paused.
-            start_episode_t += time.perf_counter() - start_loop_t
-            timestamp = time.perf_counter() - start_episode_t
-            continue
+    timestamp = _spent()
 
-        if realign_pending and realign is not None:
-            # A move the abort event cut short (a pause pressed during it, a
-            # forced release) leaves the arm part-way, so it stays pending and
-            # the next resume runs it again. The pause branch above re-arms it
-            # too, but only while `paused` is still set when control reaches
-            # the loop head — a pause and resume that both land inside the move
-            # would otherwise slip through into a raw send.
-            #
-            # Not covered here: an `exit_early` set right after a resume breaks
-            # the loop at the head before the re-run happens, leaving the arm
-            # part-way with the pending flag lost. Closing that means teaching
-            # the phase exit to finish the move, which is a separate change.
-            realign_pending = realign() is False
-            if realign_pending:
-                # It cannot be re-run immediately: the abort that cut it short
-                # may still be hot, and a hot abort makes the next attempt
-                # return at its first check. One tick of sleep keeps a pending
-                # re-run from becoming a busy spin — the loop head is where the
-                # stop or the pause is actually acted on.
+    try:
+        while timestamp < control_time_s:
+            start_loop_t = time.perf_counter()
+
+            if events.get("exit_early", False):
+                events["exit_early"] = False
+                break
+
+            if events.get("stop_recording", False):
+                break
+
+            if events.get("paused", False):
+                # Resuming reopens the same gap that entering the phase did: frozen
+                # passthrough is exactly the operator repositioning the leader while
+                # the follower holds still.
+                realign_pending = True
                 precise_sleep(control_interval)
-            # Machine time, not the operator's gap time: don't spend the move
-            # from control_time_s, same as a pause isn't spent. Then go round
-            # again rather than falling through — a stop or a fresh pause that
-            # cut the move short is honoured at the loop head, before any raw
-            # passthrough send can undo what the move just did.
-            start_episode_t += time.perf_counter() - start_loop_t
-            timestamp = time.perf_counter() - start_episode_t
-            continue
+                # Paused time isn't spent from control_time_s: push the reference
+                # point forward by the tick we just spent paused.
+                start_episode_t += time.perf_counter() - start_loop_t
+                timestamp = _spent()
+                continue
 
-        if teleop is not None:
-            obs = robot.get_observation()
-            act = teleop.get_action()
-            act_processed_teleop = teleop_action_processor((act, obs))
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
-            robot.send_action(robot_action_to_send)
+            if realign_pending and realign is not None:
+                # A move the abort event cut short (a pause pressed during it, a
+                # forced release) leaves the arm part-way, so it stays pending and
+                # the next resume runs it again. The pause branch above re-arms it
+                # too, but only while `paused` is still set when control reaches
+                # the loop head — a pause and resume that both land inside the move
+                # would otherwise slip through into a raw send.
+                #
+                # Not covered here: an `exit_early` set right after a resume breaks
+                # the loop at the head before the re-run happens, leaving the arm
+                # part-way with the pending flag lost. Closing that means teaching
+                # the phase exit to finish the move, which is a separate change.
+                realign_pending = realign() is False
+                if realign_pending:
+                    # It cannot be re-run immediately: the abort that cut it short
+                    # may still be hot, and a hot abort makes the next attempt
+                    # return at its first check. One tick of sleep keeps a pending
+                    # re-run from becoming a busy spin — the loop head is where the
+                    # stop or the pause is actually acted on.
+                    precise_sleep(control_interval)
+                # Machine time, not the operator's gap time: don't spend the move
+                # from control_time_s, same as a pause isn't spent. Then go round
+                # again rather than falling through — a stop or a fresh pause that
+                # cut the move short is honoured at the loop head, before any raw
+                # passthrough send can undo what the move just did.
+                start_episode_t += time.perf_counter() - start_loop_t
+                timestamp = _spent()
+                continue
 
-        dt_s = time.perf_counter() - start_loop_t
-        precise_sleep(max(control_interval - dt_s, 0.0))
-        timestamp = time.perf_counter() - start_episode_t
+            if teleop is not None:
+                obs = robot.get_observation()
+                act = teleop.get_action()
+                act_processed_teleop = teleop_action_processor((act, obs))
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+                robot.send_action(robot_action_to_send)
+
+            dt_s = time.perf_counter() - start_loop_t
+            precise_sleep(max(control_interval - dt_s, 0.0))
+            timestamp = _spent()
+    finally:
+        # Nothing is publishing a countdown once this returns — on any exit
+        # path, including the exception that ends the session. A stale float
+        # here would let handle_recording_status report a frozen elapsed for
+        # a phase that is over (its phase gate is the other half of that).
+        reset_phase_elapsed_s = None
 
 
 def record_with_web_events(
@@ -1957,7 +2025,7 @@ def record_with_web_events(
 
     global current_phase, phase_start_time, current_episode, saved_episodes, releasing
     global identity_warnings, connect_retry_attempt
-    global paused_accum_seconds, pause_started_at
+    global paused_accum_seconds, pause_started_at, reset_phase_elapsed_s
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -2266,6 +2334,7 @@ def record_with_web_events(
             # recording phase of the session or the one after a reset gap.
             paused_accum_seconds = 0.0
             pause_started_at = None
+            reset_phase_elapsed_s = None
             logger.info(f"Starting recording phase for episode {current_episode}")
             logger.info(f"Events state at start of recording phase: {web_events}")
             print(
@@ -2349,6 +2418,9 @@ def record_with_web_events(
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
+                # No loop is publishing a countdown yet; the status falls back
+                # to wall clock for the sub-tick until the loop's first tick.
+                reset_phase_elapsed_s = None
                 logger.info(f"Starting reset phase for re-record of episode {current_episode}")
                 logger.info(f"Events state at start of reset phase: {web_events}")
                 print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
@@ -2430,6 +2502,9 @@ def record_with_web_events(
                 phase_start_time = time.time()
                 paused_accum_seconds = 0.0
                 pause_started_at = None
+                # No loop is publishing a countdown yet; the status falls back
+                # to wall clock for the sub-tick until the loop's first tick.
+                reset_phase_elapsed_s = None
                 logger.info(f"Starting reset phase for next episode {current_episode}")
                 logger.info(f"Events state at start of reset phase: {web_events}")
                 print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")

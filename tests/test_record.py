@@ -19,6 +19,7 @@ import itertools
 import logging
 import threading
 import time
+import types
 
 import pytest
 
@@ -1354,6 +1355,291 @@ def test_reset_loop_re_runs_a_realign_that_a_fresh_pause_cut_short(
     # No send between the cut-short move and the one that replaces it.
     assert log[:2] == ["realign", "realign"]
     assert log[2:] == ["send", "send"]
+
+
+# ---------------------------------------------------------------------------
+# Reset phase: the countdown the operator is watching
+#
+# reset_time_s buys the operator that much ACTIVE gap time: the loop refuses to
+# spend its budget while paused, and refuses to spend it on a re-alignment
+# (machine time). Wall clock therefore runs ahead of the countdown by
+# paused + re-aligning, and handle_recording_status must report the loop's own
+# position rather than reconstructing it — see reset_phase_elapsed_s.
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """A perf_counter that only moves when the loop says time passed.
+
+    Patched in as record.time (the loop reads time.perf_counter through the
+    module global), so nothing in the test sleeps and the arithmetic is exact
+    rather than approximately-a-tick.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+        self.start = start
+
+    def perf_counter(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    @property
+    def wall_elapsed(self) -> float:
+        return self.now - self.start
+
+
+def _install_fake_clock(monkeypatch: pytest.MonkeyPatch, record, clock: _FakeClock) -> None:
+    monkeypatch.setattr(
+        record,
+        "time",
+        types.SimpleNamespace(
+            perf_counter=clock.perf_counter,
+            time=time.time,
+            monotonic=time.monotonic,
+            sleep=lambda seconds: None,
+        ),
+    )
+
+
+def test_reset_loop_spends_its_budget_on_active_time_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """15 s of reset_time_s means 15 s of ACTIVE gap, not 15 s of wall clock.
+
+    The rig case: 5 s of resetting, a 4 s pause, then a resume whose
+    re-alignment chases the leader for 3 s. Wall time must come to 22 s and
+    the loop must have driven passthrough for exactly 15 s of it — neither
+    cutting the operator's gap short by the 7 s they never got, nor (the
+    inverse bug) counting the credited time twice and running long.
+    """
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "reset_phase_elapsed_s", None)
+    clock = _FakeClock()
+    _install_fake_clock(monkeypatch, record, clock)
+
+    robot = _FakePauseRobot()
+    teleop = _FakePauseTeleop()
+    events = {"exit_early": False, "stop_recording": False, "paused": False}
+    # 8 fps = 0.125 s per tick: an exact binary fraction, so the accumulated
+    # clock below is exact and the loop's exit lands on the tick it should
+    # rather than a float-noise tick either side of it.
+    fps = 8
+    ticks: list[float] = []
+
+    def _fake_sleep(seconds: float) -> None:
+        clock.advance(seconds)
+        ticks.append(seconds)
+        if len(ticks) == 40:  # 5.0 s of active reset time spent
+            events["paused"] = True
+        elif len(ticks) == 72:  # ...then 4.0 s paused
+            events["paused"] = False
+
+    realigns: list[float] = []
+
+    def _realign() -> bool:
+        # Entry re-alignment: the arm is still where the episode left it, so
+        # the chase converges immediately. The one after the resume is the
+        # expensive one — the operator repositioned the leader.
+        cost = 0.0 if not realigns else 3.0
+        realigns.append(cost)
+        clock.advance(cost)
+        return True
+
+    monkeypatch.setattr("lerobot.utils.robot_utils.precise_sleep", _fake_sleep, raising=False)
+
+    record._reset_loop_with_pause(
+        robot=robot,
+        teleop=teleop,
+        events=events,
+        fps=fps,
+        teleop_action_processor=_identity,
+        robot_action_processor=_identity,
+        control_time_s=15.0,
+        realign=_realign,
+    )
+
+    # Exactly two re-alignments: the entry one and the one after the resume.
+    assert realigns == [0.0, 3.0]
+    # 120 passthrough ticks = 15.0 s of active reset, and the 32 paused ticks
+    # sent nothing.
+    assert robot.send_action_calls == 120
+    assert teleop.get_action_calls == 120
+    assert len(ticks) == 152  # 120 active + 32 paused; the realign adds none
+    # Wall clock = the 15 s of gap the operator was promised, PLUS the 4 s
+    # they chose to pause and the 3 s the arm spent catching up.
+    assert clock.wall_elapsed == pytest.approx(22.0)
+
+
+def test_reset_loop_publishes_a_countdown_that_freezes_while_paused_and_realigning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The status endpoint's countdown is a read of this global, so it has to
+    hold still for exactly the time the loop refuses to spend."""
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "reset_phase_elapsed_s", None)
+    clock = _FakeClock()
+    _install_fake_clock(monkeypatch, record, clock)
+
+    events = {"exit_early": False, "stop_recording": False, "paused": False}
+    ticks: list[float] = []
+    published: list[tuple[float, float | None]] = []
+
+    def _fake_sleep(seconds: float) -> None:
+        clock.advance(seconds)
+        ticks.append(seconds)
+        # Sampled the way the status endpoint samples it: mid-tick, so what
+        # it sees is the value the PREVIOUS tick published, against wall
+        # clock at the same instant.
+        published.append((clock.wall_elapsed, record.reset_phase_elapsed_s))
+        if len(ticks) == 16:  # 2.0 s of active reset time spent
+            events["paused"] = True
+        elif len(ticks) == 32:  # ...then 2.0 s paused
+            events["paused"] = False
+        elif len(ticks) >= 48:
+            events["exit_early"] = True
+
+    def _realign() -> bool:
+        clock.advance(2.0)
+        return True
+
+    monkeypatch.setattr("lerobot.utils.robot_utils.precise_sleep", _fake_sleep, raising=False)
+
+    record._reset_loop_with_pause(
+        robot=_FakePauseRobot(),
+        teleop=_FakePauseTeleop(),
+        events=events,
+        fps=8,
+        teleop_action_processor=_identity,
+        robot_action_processor=_identity,
+        control_time_s=30.0,
+        realign=_realign,
+    )
+
+    # Sample 16 is the first one taken while paused, 31 the last: the
+    # countdown reads 2.0 s of active reset at both, and at sample 32 — the
+    # first one taken after the resume's re-alignment — it STILL reads 2.0.
+    # Wall clock moved 4.0 s across that span (the pause plus the move).
+    assert published[16][1] == pytest.approx(2.0)
+    assert published[31][1] == pytest.approx(2.0)
+    assert published[32][1] == pytest.approx(2.0)
+    assert published[32][0] - published[16][0] == pytest.approx(4.0)
+    # ...and then it advances again, one tick at a time.
+    assert published[33][1] == pytest.approx(2.125)
+    # Nothing is publishing once the loop returns.
+    assert record.reset_phase_elapsed_s is None
+
+
+def test_recording_status_countdown_excludes_pause_and_realign_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontend renders `phase_elapsed_seconds / phase_time_limit_s` as a
+    count-up against reset_time_s, so a figure reconstructed from wall clock
+    sails past the limit by however long the re-alignments took (the rig
+    report: "goes past 15 s"). It must be the loop's own position."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+    # 12 s of wall clock: 5 s active + 4 s paused + 3 s re-aligning.
+    monkeypatch.setattr(record, "phase_start_time", 988.0)
+    monkeypatch.setattr(record, "recording_start_time", 900.0)
+    monkeypatch.setattr(record, "current_episode", 2)
+    monkeypatch.setattr(record, "saved_episodes", 1)
+    monkeypatch.setattr(
+        record,
+        "recording_config",
+        type("Cfg", (), {"dataset_repo_id": "tester/ds", "num_episodes": 2, "reset_time_s": 15})(),
+    )
+    monkeypatch.setattr(record, "paused_accum_seconds", 4.0)
+    monkeypatch.setattr(record, "pause_started_at", None)
+    monkeypatch.setattr(record, "reset_phase_elapsed_s", 5.0)
+    monkeypatch.setattr(
+        record, "recording_events", {"paused": False, "exit_early": False, "stop_recording": False}
+    )
+
+    status = record.handle_recording_status()
+
+    # Wall-minus-pause would say 8; the loop has spent 5 of its 15.
+    assert status["phase_elapsed_seconds"] == 5
+    assert status["phase_time_limit_s"] == 15
+
+
+def test_recording_status_countdown_falls_back_to_wall_clock_before_the_loop_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Between the phase flipping to resetting and the loop's first tick there
+    is nothing published; the old wall-clock-minus-pause arithmetic still has
+    to answer, so the timer never blanks or jumps to zero."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+    monkeypatch.setattr(record, "phase_start_time", 994.0)
+    monkeypatch.setattr(record, "recording_start_time", 900.0)
+    monkeypatch.setattr(record, "current_episode", 1)
+    monkeypatch.setattr(record, "saved_episodes", 0)
+    monkeypatch.setattr(
+        record,
+        "recording_config",
+        type("Cfg", (), {"dataset_repo_id": "tester/ds", "num_episodes": 2, "reset_time_s": 15})(),
+    )
+    monkeypatch.setattr(record, "paused_accum_seconds", 2.0)
+    monkeypatch.setattr(record, "pause_started_at", None)
+    monkeypatch.setattr(record, "reset_phase_elapsed_s", None)
+    monkeypatch.setattr(
+        record, "recording_events", {"paused": False, "exit_early": False, "stop_recording": False}
+    )
+
+    status = record.handle_recording_status()
+
+    assert status["phase_elapsed_seconds"] == 4  # 6 s of wall clock, 2 s paused
+
+
+def test_recording_status_ignores_a_reset_countdown_during_the_recording_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The published countdown is a stateless global a status read can observe
+    across a phase transition; the recording phase's own timer is plain wall
+    clock and must never borrow it."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "recording")
+    monkeypatch.setattr(record, "phase_start_time", 993.0)
+    monkeypatch.setattr(record, "recording_start_time", 900.0)
+    monkeypatch.setattr(record, "current_episode", 2)
+    monkeypatch.setattr(record, "saved_episodes", 1)
+    monkeypatch.setattr(
+        record,
+        "recording_config",
+        type(
+            "Cfg",
+            (),
+            {
+                "dataset_repo_id": "tester/ds",
+                "num_episodes": 2,
+                "reset_time_s": 15,
+                "episode_time_s": 30,
+            },
+        )(),
+    )
+    monkeypatch.setattr(record, "paused_accum_seconds", 4.0)
+    monkeypatch.setattr(record, "pause_started_at", None)
+    monkeypatch.setattr(record, "reset_phase_elapsed_s", 5.0)  # left over from the last reset gap
+    monkeypatch.setattr(
+        record, "recording_events", {"paused": False, "exit_early": False, "stop_recording": False}
+    )
+
+    status = record.handle_recording_status()
+
+    assert status["phase_elapsed_seconds"] == 7  # plain wall clock
+    assert status["phase_time_limit_s"] == 30
 
 
 def test_reset_phase_abort_goes_hot_on_stop_pause_and_release_now() -> None:
