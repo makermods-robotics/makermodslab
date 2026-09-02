@@ -175,8 +175,12 @@ def test_cloud_lerobot_spec_falls_back_to_pyproject_when_metadata_missing(
     """Running from a source tree without installed MakerMods Lab metadata must still
     derive the pin — from pyproject.toml directly."""
     from makermodslab.runners import hf_cloud
+    from makermodslab.utils import system
 
-    monkeypatch.setattr(hf_cloud, "requires", lambda name: None)
+    # _pinned_lerobot_requirement lives in utils.system (utils.system is a leaf
+    # module; hf_cloud imports it, never the reverse), so the metadata lookup
+    # it resolves is system's, not hf_cloud's.
+    monkeypatch.setattr(system, "requires", lambda name: None)
     pin = _pyproject_lerobot_pin()
     ref = pin.rsplit("@", 1)[1]
     assert ref in hf_cloud.cloud_lerobot_spec("act")

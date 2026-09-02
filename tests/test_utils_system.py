@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 
 
@@ -133,7 +134,10 @@ def test_policy_extra_maps_policies_to_install_targets() -> None:
     assert smol["needs_extra"] is True
     assert smol["package"] == "transformers"
     assert smol["install_target"] == "lerobot[smolvla]"
-    assert "lerobot[smolvla]" in smol["install_hint"]
+    assert smol["install_hint"] == (
+        "Use the in-app Install button — lerobot[smolvla] must be installed at "
+        "MakerMods Lab's pinned lerobot fork, not from PyPI."
+    )
 
     # pi0, pi0_fast, and pi05 share the lerobot[pi] extra; diffusion uses diffusers.
     assert handle_get_policy_extra("pi0")["install_target"] == "lerobot[pi]"
@@ -254,6 +258,67 @@ def test_install_failure_does_not_invalidate_caches(monkeypatch) -> None:
 
     assert calls == []
     assert mgr.get_status()["state"] == "error"
+
+
+def test_policy_install_spec_carries_the_pinned_ref_and_the_requested_extra() -> None:
+    """A policy-extra install must go to the pinned fork, never to PyPI.
+
+    Bare ``lerobot[smolvla]`` resolves against PyPI and would REPLACE the
+    SHA-pinned makermods fork the arm stacks run on. The composed spec keeps
+    the pin's URL/ref and unions the requested extra with the pinned extras.
+    Pin is hand-built here — never read from the real installed metadata.
+    """
+    from packaging.requirements import Requirement
+
+    from makermodslab.utils.system import _compose_lerobot_spec
+
+    pin = Requirement(
+        "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ "
+        "git+https://github.com/makermods-robotics/lerobot@b968c0c01"
+    )
+    spec = _compose_lerobot_spec(pin, "lerobot[smolvla]")
+
+    assert "git+https://github.com/makermods-robotics/lerobot@b968c0c01" in spec
+    extras = set(re.match(r"lerobot\[(?P<extras>[^\]]*)\]", spec).group("extras").split(","))
+    assert "smolvla" in extras  # the requested policy extra
+    # the pinned arm stacks survive the reinstall
+    assert {"core_scripts", "feetech", "training", "maker", "damiao", "rebot"} <= extras
+
+
+def test_policy_install_manager_installs_the_pin_not_bare_pypi_lerobot(monkeypatch) -> None:
+    """The install manager for a policy extra is built from the pinned spec,
+    not from the bare ``lerobot[extra]`` target in POLICY_EXTRAS."""
+    from packaging.requirements import Requirement
+
+    from makermodslab.utils import system
+
+    pin = Requirement("lerobot[feetech,training] @ git+https://github.com/makermods-robotics/lerobot@dead123")
+    monkeypatch.setattr(system, "_pinned_lerobot_requirement", lambda: pin)
+    monkeypatch.setattr(system, "_policy_install_managers", {})  # fresh cache
+
+    mgr = system._policy_install_manager("smolvla")
+    assert mgr is not None
+    assert (
+        mgr.package
+        == "lerobot[feetech,smolvla,training] @ git+https://github.com/makermods-robotics/lerobot@dead123"
+    )
+    assert system._build_install_cmd(mgr.package)[-1] == mgr.package
+
+
+def test_policy_extra_hint_offers_no_runnable_install_command() -> None:
+    """The hint is copy-pasted into a shell by users (the UI renders it in a
+    code box with a copy button), so it must not contain a command that
+    resolves lerobot from PyPI — that is the very clobber the in-app installer
+    now avoids. It names the extra, and points at the button, and stops there.
+    """
+    from makermodslab.utils.system import POLICY_EXTRAS, handle_get_policy_extra
+
+    for policy_type, (_probe, target) in POLICY_EXTRAS.items():
+        hint = handle_get_policy_extra(policy_type)["install_hint"]
+        assert "pip install" not in hint, policy_type
+        assert "uv pip" not in hint, policy_type
+        assert target in hint, policy_type  # still says WHICH extra is missing
+        assert "Install button" in hint, policy_type
 
 
 def test_policy_extra_install_is_noop_for_core_policy() -> None:

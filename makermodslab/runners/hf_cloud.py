@@ -34,19 +34,17 @@ import re
 import shlex
 import threading
 import time
-import tomllib
-from importlib.metadata import requires
 from pathlib import Path
 from queue import Empty, Queue
 
 from huggingface_hub import get_token
-from packaging.requirements import Requirement
 
 from .. import sampling as _sampling, train_weighted as _train_weighted
 from ..datasets import resolve_hub_repo_id
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.hf_auth import cached_whoami, shared_hf_api
+from ..utils.system import _pinned_lerobot_requirement
 from ._dataset import ensure_dataset_on_hub
 
 logger = logging.getLogger(__name__)
@@ -116,30 +114,6 @@ _POLICY_CLOUD_EXTRAS = {
 
 # "git+https://github.com/<org>/<repo>(.git)@<ref>" — the shape of our pin.
 _GIT_PIN_RE = re.compile(r"^git\+(?P<repo>https://github\.com/[^@#]+?)(?:\.git)?@(?P<ref>[^#]+)$")
-
-
-def _pinned_lerobot_requirement() -> Requirement:
-    """The exact lerobot requirement MakerMods Lab was installed with (the pyproject pin).
-
-    Primary source is the installed distribution's metadata — generated from
-    pyproject.toml at install time, so there is no second hardcoded copy of the
-    sha and, crucially, it matches the lerobot actually importable on this host
-    (the one build_training_command's argv is shaped for). Falls back to parsing
-    pyproject.toml directly when running from a source tree without installed
-    metadata.
-    """
-    candidates: list[str] = []
-    with contextlib.suppress(Exception):
-        candidates = requires("makermodslab") or []
-    if not any("lerobot" in c for c in candidates):
-        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-        candidates = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
-    for line in candidates:
-        with contextlib.suppress(Exception):
-            parsed = Requirement(line)
-            if parsed.name.lower() == "lerobot":
-                return parsed
-    raise RuntimeError("Could not resolve the lerobot pin from MakerMods Lab metadata or pyproject.toml")
 
 
 def cloud_lerobot_spec(policy_type: str) -> str:
