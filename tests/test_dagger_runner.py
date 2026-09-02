@@ -1171,6 +1171,11 @@ def _glide_ctx(strategy, monkeypatch, leader, follower_pose):
     from makermodslab import dagger_runner
 
     def fake_move(tl, target, duration_s=2.0, fps=30):
+        # Faithful to `teleop_smooth_move_to`, whose FIRST statement is
+        # `teleop.enable_torque()` and which never disables it again. The stub
+        # used to skip that, which is why a test could not have caught the
+        # bench bug where a release was immediately undone by a second glide.
+        tl.enable_torque()
         tl.glides.append(duration_s)
         if tl.fail_feedback:
             raise RuntimeError("bus gone")
@@ -1680,3 +1685,47 @@ def test_the_write_patch_is_idempotent() -> None:
     first = MotorsBus.write._bus_retry_original
     importlib.reload(br)
     assert MotorsBus.write._bus_retry_original is first
+
+
+# --- the second press must leave the leader FREE -----------------------------
+#
+# Reported from the bench: the arms lined up and held correctly, but after the
+# second press the leader was still energised and could barely be moved. The
+# release was there — and then `close_the_gap` ran immediately after it, whose
+# first statement is `enable_torque()`. The leader was released and re-powered
+# in consecutive lines, and the operator drove the whole correction against it.
+
+
+def test_the_second_press_does_not_glide_again(strategy, monkeypatch) -> None:
+    """The poise already glided. Doing it again re-powers the leader — and would
+    be wrong even if it did not, because by now the operator has hold of the arm
+    and driving it under torque means fighting their hand."""
+    leader = _GlideLeader(_pose(shoulder_pan=0))
+    _glide_ctx(strategy, monkeypatch, leader, _pose(shoulder_pan=0))
+    # Whatever the second press does, it must not call the glide.
+    strategy.begin_correction(_pose(shoulder_pan=0), _pose(shoulder_pan=0))
+    assert leader.glides == []
+
+
+def test_the_leader_is_free_once_a_correction_begins(strategy) -> None:
+    """The property the operator actually feels. `_release_leader` is the last
+    word on the takeover edge; nothing after it may re-energise."""
+    leader = _HomeLeader(_pose(shoulder_pan=0))
+    leader.torque = True  # held through the poise
+    strategy._release_leader(_home_ctx(_HomeRobot({}), leader))
+    assert leader.torque is False
+    assert leader.released is True
+
+
+def test_close_the_gap_powers_the_leader_and_never_releases_it(strategy, monkeypatch) -> None:
+    """Pinning the trap rather than the symptom. `close_the_gap` deliberately
+    leaves the leader HELD — that is what the poise needs — so any future caller
+    placed after a release re-creates the bench bug. If this ever stops being
+    true, the ordering comments on the takeover edge need revisiting."""
+    leader = _GlideLeader(_pose(shoulder_pan=-30))
+    ctx = _glide_ctx(strategy, monkeypatch, leader, _pose(shoulder_pan=40))
+    leader.torque = False
+    strategy.close_the_gap(ctx, _pose(shoulder_pan=40))
+    assert leader.glides, "expected a glide for a 70 deg gap"
+    assert leader.torque is True
+    assert leader.released is False

@@ -1667,21 +1667,24 @@ class WebDAggerStrategy(DAggerStrategy):
                             # earlier would have let it sag out of position while
                             # they were still reaching for it.
                             self._poised = False
-                            self._release_leader(ctx)
-                            # Read both arms fresh: the transition block runs
-                            # before the tick takes its observation, and an
+                            # NO GLIDE HERE. The poise already did it, and
+                            # `teleop_smooth_move_to`'s first statement is
+                            # `enable_torque()` — so calling it again re-powered
+                            # the leader immediately after the release below,
+                            # and the operator drove the whole correction
+                            # against an energised arm they could barely move.
+                            #
+                            # Gliding again would be wrong even if it did not
+                            # re-power: by this point the operator has hold of
+                            # the leader, and driving it under torque means
+                            # fighting their hand. Whatever gap opened while
+                            # they took hold is exactly what the offset is for.
+                            #
+                            # Read both arms fresh first: the transition block
+                            # runs before the tick takes its observation, and an
                             # offset measured against a stale pose is an offset
                             # that does not cancel.
                             try:
-                                obs_edge = ctx.hardware.robot_wrapper.get_observation()
-                                # Close what the leader can, THEN measure. The
-                                # order is the design: the glide shrinks the gap
-                                # the follower would otherwise travel during the
-                                # decay, and the offset is taken afterwards
-                                # against whatever is actually left — so the
-                                # glide never has to succeed at anything.
-                                _emit(EVENT_PHASE, f"phase={PHASE_HANDING_OVER}")
-                                self.close_the_gap(ctx, obs_edge)
                                 obs_edge = ctx.hardware.robot_wrapper.get_observation()
                                 leader_edge = ctx.processors.teleop_action_processor(
                                     (ctx.hardware.teleop.get_action(), obs_edge)
@@ -1723,6 +1726,16 @@ class WebDAggerStrategy(DAggerStrategy):
                                         if k.endswith(".pos") and isinstance(v, (int, float))
                                     }
                                 self._last_target_at = time.perf_counter()
+                            finally:
+                                # The release is a `finally` because the operator
+                                # is ALREADY HOLDING the leader by this point.
+                                # Every route out of here — a clean measurement or
+                                # a failed one — must end with it back-drivable,
+                                # or they spend the correction fighting a powered
+                                # arm. That was the bug this block was rewritten
+                                # for; it must not come back through the error
+                                # path.
+                                self._release_leader(ctx)
                             # Fresh window per takeover: a budget carried across
                             # the handover glide would open every correction with
                             # a 2s "tick" and bury the thing being measured.
