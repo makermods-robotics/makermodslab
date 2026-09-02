@@ -10,7 +10,7 @@
 
 <p align="center">
   <b>A web UI interface for policy development.</b><br />
-  Built for the Maker Arm, the Metal Arm, and the SO-101. Every robot in LeRobot, single or bimanual.
+  Built for the Maker Arm, the Metal Arm, and the SO-101. Every robot in LeRobot. Single or Bimanual.
 </p>
 
 <div align="center">
@@ -23,7 +23,7 @@
 
 MakerMods Lab puts the full workflow for robotic policy development into one browser tab. Plug in an
 arm, open the app, and go. Calibrate, teleoperate, record, curate, train, deploy, evaluate, then go
-around again. That last part is the one that matters.
+around again.
 
 ![MakerMods Lab demo](https://raw.githubusercontent.com/makermods-robotics/makermodslab/assets/readme-demo/demo.gif)
 
@@ -37,48 +37,28 @@ Most tools make the first pass easy and the tenth pass miserable. One CLI invoca
 dataset directory you edit by hand, a checkpoint path you paste between five terminals. We built for
 the tenth pass.
 
-**The whole loop lives in one tab.** Record into a LeRobotDataset, curate it, launch training, watch
+**The whole loop lives in one tab.** Record into a dataset, curate it, launch training, watch
 the loss chart, deploy the checkpoint to the arm, evaluate it, and fine-tune from the result. No
 terminal, no re-deriving a path.
 
 **Correct the policy while it is running.** DAgger hands control back to the leader arm mid-rollout,
 so you drive the robot through the exact motion it just failed. Those corrections land in the
 training set, and the evaluation summary offers to merge them and fine-tune from the same screen.
-For a policy that is 90% there, this beats collecting another hundred demos and hoping.
 
-**Curate before you spend a GPU on it.** Open any dataset, watch the episodes back in a synced
-camera grid, and untick the bad ones. Exclusions are per dataset, they persist, and the training
-request only sees what you kept. Nothing is ever deleted. Merge datasets from the UI when you want
-the combined set instead.
+**Curate before you spend a GPU on it.** Open any dataset, watch the episodes and deselect the bad ones for training. Nothing is ever deleted. Merge datasets from the UI when you want the combined set instead.
 
-**Fine-tune from where you stopped.** Continue any run from a checkpoint, with the lineage's loss
-chart stitched into one view and the source checkpoints folded into the successor.
+**Fine-tune from where you stopped.** Continue any run from a checkpoint, and also fine tune any public policies
 
-**LeRobot and Hugging Face all the way down.** Real LeRobotDatasets, real LeRobot policies, real Hub
-repos. Nothing is trapped in our format, and you can drop back to the CLI whenever you want.
+**Powered by LeRobot and Huggingface.**
 
 ## Remote everything
 
-The machine wired to the robot is rarely the machine you want to train on, and the room with the
-robot in it is rarely the room you want to sit in. So none of it has to be local.
-
 **Training jobs on any node in your tailnet.** Point a run at this machine, at a peer node, or at a
-Hugging Face Jobs GPU, from the same picker. MakerMods Lab drives the peer's own jobs API, relays its
-progress, survives network blips, and reports the peer's terminal verdict instead of guessing.
-Datasets travel through the Hub, because a LAN peer can no more read your local LeRobot cache than an
-HF pod can.
+Hugging Face Jobs GPU, from the same picker.
 
-**Remote teleoperation over [LiveKit](https://livekit.io/).** Split the lab across two machines. The
-station owns the follower arm and the cameras, your laptop owns the leader. Leader joints go out over
-a LiveKit Portal session and camera frames come back. The dataset is written on the station from the
-raw observation, so video compression never touches what lands on disk.
+**Remote teleoperation over [LiveKit](https://livekit.io/).** Teleop any follower arm and view cameras over internet with livekit
 
-**Remote inference on [Modal](https://modal.com/) GPUs.** Run your own policies against a cloud GPU
-when the machine next to the robot cannot keep up with the model you actually want to deploy.
-
-> [!NOTE]
-> Tailnet training jobs are on `staging` today. LiveKit teleoperation, Modal inference, DAgger
-> coaching and episode trimming live on feature branches and land on `staging` first.
+**Remote inference on [Modal](https://modal.com/) GPUs.** Run bigger models with cloud GPUs
 
 ## Quick start
 
@@ -125,23 +105,22 @@ Once a station is up, any client on the same tailnet can drive it from a browser
 hand a training job to any other.
 
 **Peer nodes are verified, not trusted.** A node is only added once its `/api/v1/health` identity
-document checks out, and a discovered peer gets re-verified every time. Nothing is taken from disk on
-faith.
+document checks out, and a discovered peer gets re-verified every time.
 
-**One live session, leased.** The server hands out a lease with a heartbeat. If a browser wanders
-off, a watchdog stops the session and releases the arm. No tab elections, no stop beacons, and no way
-to leave a robot energized because someone shut a laptop.
+**One browser drives the robot at a time.** The tab that started a session checks in every twenty
+seconds. Go quiet for a minute, because the tab closed or the laptop shut, and the server stops the
+session and releases the arm by itself.
 
 ## Every arm, single or bimanual
 
 Three families, and the app knows the difference. Bus protocol, calibration flow, port detection,
 joint count and safe-stop behaviour all branch on the arm type, so you never hand-configure it.
 
-| Arm | Follower | Leader | Joints |
-|---|---|---|---|
-| **SO-101** | Feetech STS3215 over USB serial | SO-101 leader | 6 per arm |
-| **Maker Arm v1** | RobStride over CAN | Star Arm 102 | 7 per arm |
-| **Metal Arm** | Damiao over CAN | Star Arm 102 | 7 per arm |
+| Arm              | Follower                        | Leader        | Joints    |
+| ---------------- | ------------------------------- | ------------- | --------- |
+| **SO-101**       | Feetech STS3215 over USB serial | SO-101 leader | 6 per arm |
+| **Maker Arm v1** | RobStride over CAN              | Star Arm 102  | 7 per arm |
+| **Metal Arm**    | Damiao over CAN                 | Star Arm 102  | 7 per arm |
 
 Every family runs single or bimanual: two leader/follower pairs, four-arm calibration, dual-arm
 teleoperation and bimanual recording.
