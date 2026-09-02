@@ -123,11 +123,18 @@ class CheckpointPolicyConfigResponse(BaseModel):
     null when the checkpoint omits the feature. trained_on_robot_type is the
     raw lerobot robot_type of the checkpoint's training dataset (recovered via
     train_config.json), null when it can't be established — the fine-tune
-    panel compares it against the selected dataset's arm."""
+    panel compares it against the selected dataset's arm.
+
+    supports_rtc says whether this architecture can run the Real-Time Chunking
+    inference engine; null means the policy type isn't one the server knows
+    (a fork newer than jobs.policy_type_supports_rtc's table), which the client
+    must read as "offer it and let the server decide", not as "no". The route
+    declares no exclude_none/exclude_unset, so the key is always present."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
     requires_task: bool
+    supports_rtc: bool | None
     state_dim: int | None
     action_dim: int | None
     trained_on_robot_type: str | None
