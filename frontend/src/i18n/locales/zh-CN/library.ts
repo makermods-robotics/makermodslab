@@ -54,14 +54,14 @@ export default {
     title: "我的库",
     close: "关闭库",
     tabs: {
-      skills: "我的技能",
+      policies: "我的策略",
       datasets: "我的数据集",
     },
     steps: "{{steps}} 步",
     private: "私有",
-    skills: {
-      loading: "正在加载技能…",
-      empty: "你还没有自己的技能 —— 可在下方创建一个。",
+    policies: {
+      loading: "正在加载策略…",
+      empty: "你还没有自己的策略 —— 可在下方创建一个。",
       manage: "管理 {{name}}",
       run: "运行 {{name}}",
     },
@@ -78,7 +78,7 @@ export default {
       addFromHub: "从 Hub 添加",
       importFromDisk: "从磁盘导入",
       manageCaches: "管理缓存",
-      newSkill: "新建技能",
+      newPolicy: "新建策略",
       mergeDatasets: "合并数据集",
     },
     toast: {

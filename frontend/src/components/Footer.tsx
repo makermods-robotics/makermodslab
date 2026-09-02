@@ -1,6 +1,7 @@
 import React from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Github, BookOpen } from "lucide-react";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 import hfLogo from "@/assets/hf-logo.svg";
 import lerobotLogo from "@/assets/lerobot-logo.png";
 
@@ -88,6 +89,11 @@ const Footer: React.FC = () => {
               <span>{t(labelKey)}</span>
             </a>
           ))}
+          {/* The app's ONLY language control. This footer renders on the
+              Launchpad alone, which is deliberate: the studio and the session
+              dialogs are places you are mid-task, and swapping the UI language
+              underneath a running robot flow is not something to offer there. */}
+          <LanguageSwitcher className="text-muted-foreground hover:text-foreground" />
         </nav>
       </div>
     </footer>

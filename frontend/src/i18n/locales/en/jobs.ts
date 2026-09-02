@@ -196,9 +196,9 @@ export default {
     },
   },
   importModal: {
-    title: "Import a skill",
+    title: "Import a policy",
     description:
-      "Point at a local directory or a Hugging Face repo. It appears in your skills, ready to run inference on.",
+      "Point at a local directory or a Hugging Face repo. It appears in your policies, ready to run inference on.",
     sourceLabel: "Local path or Hugging Face repo id",
     // The example path and repo id are illustrative data — keep them verbatim
     // in every language; only the joining word is translated.
@@ -339,12 +339,12 @@ export default {
     },
   },
   modelsLibrary: {
-    title: "Your skills",
-    importSkill: "Import skill",
-    searchPlaceholder: "Search skills",
-    // Names the "Import skill" button above it — keep the two in step.
+    title: "Your policies",
+    importPolicy: "Import policy",
+    searchPlaceholder: "Search policies",
+    // Names the "Import policy" button above it — keep the two in step.
     empty:
-      "No skills yet. Train one, or use Import skill to add one from the Hub or a local folder.",
+      "No policies yet. Train one, or use Import policy to add one from the Hub or a local folder.",
     noMatch: "No models match.",
     filters: {
       all: "All",

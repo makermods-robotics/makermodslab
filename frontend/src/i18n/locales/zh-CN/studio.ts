@@ -1,5 +1,5 @@
 /**
- * "studio" namespace — 技能工作室及其三个面板。
+ * "studio" namespace — 策略工作室及其三个面板。
  *
  * Key tree must match the other language exactly (see i18n/catalogs.test.ts).
  *
@@ -9,7 +9,7 @@
  */
 export default {
   overlay: {
-    title: "技能工作室",
+    title: "策略工作室",
     backToMenu: "返回主菜单",
     close: "关闭工作室",
     sections: {
@@ -97,7 +97,7 @@ export default {
       hubUpload: {
         title: "已上传到 Hub！",
         description:
-          "你的数据集现已公开且可分享 — 在 MakerLab 的任何位置引用它的 repo id，或在「训练」面板中基于它微调技能。",
+          "你的数据集现已公开且可分享 — 在 MakerLab 的任何位置引用它的 repo id，或在「训练」面板中基于它微调策略。",
       },
     },
   },
@@ -139,12 +139,12 @@ export default {
       scratch: "从零开始训练",
       fromBase: "基于基础模型训练",
       loading: "正在加载检查点…",
-      finetuneHint: "基于该技能的最新检查点进行微调。",
-      hint: "微调已有技能，或从零开始。",
-      foundationHint: "微调已有技能，或基于其公开的基础模型训练。",
+      finetuneHint: "基于该策略的最新检查点进行微调。",
+      hint: "微调已有策略，或从零开始。",
+      foundationHint: "微调已有策略，或基于其公开的基础模型训练。",
     },
     toast: {
-      noCheckpointsTitle: "该技能没有检查点",
+      noCheckpointsTitle: "该策略没有检查点",
       noCheckpointsBody: "它没有可用于微调的已保存检查点。",
       baseFailedTitle: "无法加载起点",
     },
@@ -168,21 +168,21 @@ export default {
   deploy: {
     title: "运行",
     picker: {
-      placeholder: "选择技能",
-      loading: "正在加载技能…",
-      empty: "还没有已训练或已导入的技能",
-      error: "无法加载技能。请检查服务器后重试。",
+      placeholder: "选择策略",
+      loading: "正在加载策略…",
+      empty: "还没有已训练或已导入的策略",
+      error: "无法加载策略。请检查服务器后重试。",
       failedBadge: "运行失败",
-      hubDegraded: "无法连接 Hub — 正在显示本地技能和上次的 Hub 列表。",
-      import: "导入技能",
-      hint: "选择一个已训练的检查点，或已从 Hub 导入的技能，在机器人上运行。",
+      hubDegraded: "无法连接 Hub — 正在显示本地策略和上次的 Hub 列表。",
+      import: "导入策略",
+      hint: "选择一个已训练的检查点，或已从 Hub 导入的策略，在机器人上运行。",
     },
     source: {
       hub: "hub",
       local: "本地",
       both: "本地 · hub",
     },
-    intro: "在机器人上运行该技能，然后开始推理。",
+    intro: "在机器人上运行该策略，然后开始推理。",
     noRobot: "选择要运行的机器人 — 使用本窗口右上角的机器人菜单。",
     robotNotReady_other:
       "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（推理只使用从臂 — 无需配置主臂。）",
@@ -236,7 +236,7 @@ export default {
     },
     checkpoint: {
       label: "检查点",
-      none: "该技能暂无可用的检查点。",
+      none: "该策略暂无可用的检查点。",
     },
     armMismatch: {
       bimanualCheckpoint:
@@ -345,16 +345,16 @@ export default {
       stopping: "正在停止…",
     },
     toast: {
-      loadSkillFailed: "无法加载该技能",
+      loadPolicyFailed: "无法加载该策略",
       startFailed: "无法启动推理",
       stoppingTitle: "正在停止推理",
       stoppingBody: "该次运行正在收尾。",
       stopFailed: "停止失败",
     },
     milestone: {
-      title: "首个技能已部署！",
+      title: "首个策略已部署！",
       description:
-        "你的机器人刚刚运行了一个训练好的策略。随时回到这里重新部署、切换检查点，或运行其他技能。",
+        "你的机器人刚刚运行了一个训练好的策略。随时回到这里重新部署、切换检查点，或运行其他策略。",
     },
   },
 } as const;

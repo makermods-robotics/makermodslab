@@ -10,22 +10,22 @@ export default {
   // Tour step copy, keyed by tour id + step. tours.ts holds only these keys.
   launchpad: {
     search: {
-      title: "Find a skill",
-      description: "Search for a skill by name, or browse the ones below.",
+      title: "Find a policy",
+      description: "Search for a policy by name, or browse the ones below.",
     },
-    skills: {
-      title: "Browse skills",
+    policies: {
+      title: "Browse policies",
       description:
-        "Skills others have trained and shared — run one, or use it as a starting point for your own.",
+        "Policies others have trained and shared — run one, or use it as a starting point for your own.",
     },
-    newSkill: {
+    newPolicy: {
       title: "Build your own",
       description:
         "Collect a dataset, train a policy, and deploy it to your robot — all without leaving this page.",
     },
     robot: {
       title: "Set up your robot",
-      description: "Add and configure the arm you'll record and run skills on.",
+      description: "Add and configure the arm you'll record and run policies on.",
     },
     library: {
       title: "Your library",
@@ -43,7 +43,7 @@ export default {
     },
     deploy: {
       title: "3 · Deploy",
-      description: "Run a trained skill on your robot.",
+      description: "Run a trained policy on your robot.",
     },
   },
 } as const;

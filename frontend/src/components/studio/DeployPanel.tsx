@@ -699,7 +699,7 @@ const DeployPanel: React.FC = () => {
       } catch (e) {
         if (!cancelled) {
           toast({
-            title: t("studio.deploy.toast.loadSkillFailed"),
+            title: t("studio.deploy.toast.loadPolicyFailed"),
             // The thrown error's own text — shown exactly as raised.
             description: e instanceof Error ? e.message : String(e),
             variant: "destructive",

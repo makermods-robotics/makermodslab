@@ -1890,7 +1890,7 @@ def test_excluded_episodes_endpoints_round_trip(client: TestClient, excluded_epi
 
 
 # ---------------------------------------------------------------------------
-# is_dataset_private — the marketplace-visibility gate for a skill's
+# is_dataset_private — the marketplace-visibility gate for a policy's
 # dataset_episodes (see models._gate_dataset_episodes).
 # ---------------------------------------------------------------------------
 

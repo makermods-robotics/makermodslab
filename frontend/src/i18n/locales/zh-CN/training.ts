@@ -345,7 +345,7 @@ export default {
 
   jobDialog: {
     srTitle: "训练任务状态",
-    back: "技能工作室",
+    back: "策略工作室",
     loadFailed: "无法加载任务 {{jobId}}：{{errorText}}",
     loading: "正在加载任务…",
     runnerLocal: "本地",

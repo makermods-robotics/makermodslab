@@ -240,7 +240,7 @@ const TrainPanel: React.FC = () => {
   };
 
   // ── Policy ────────────────────────────────────────────────────────────────
-  // Chosen inside Run configuration (EssentialsCard's select); a base-skill or
+  // Chosen inside Run configuration (EssentialsCard's select); a base-policy or
   // prefill choice re-targets it so the fine-tune trains the matching policy.
   const [policyType, setPolicyType] = useState<string>("act");
 
@@ -250,7 +250,7 @@ const TrainPanel: React.FC = () => {
   // proven lazy-import path), then its latest checkpoint step seeds the run.
   // Sequence guard: only the LATEST resolution may write state — a slower,
   // older import/checkpoint lookup finishing last must not overwrite a newer
-  // base-skill choice.
+  // base-policy choice.
   const resolveSeqRef = useRef(0);
   const resolveFinetune = useCallback(
     async (opts: {
@@ -278,7 +278,7 @@ const TrainPanel: React.FC = () => {
           // prefill, a local model row) carries no policy type, so read it off
           // the registry record — the same value the import branch above gets.
           // Without this the policy stays on the "act" default while the form
-          // LOCKS the picker ("set by the base skill"), and the run silently
+          // LOCKS the picker ("set by the base policy"), and the run silently
           // trains ACT from e.g. smolvla weights: lerobot loads a checkpoint
           // non-strictly, so the mismatch never surfaces at runtime.
           const rec = await getJob(baseUrl, fetchWithHeaders, jobId).catch(
@@ -374,7 +374,7 @@ const TrainPanel: React.FC = () => {
 
   // Apply a studio prefill (fine-tune base / preselected dataset) once, then
   // clear it so reopening the studio fresh doesn't re-apply a stale one.
-  // Local skills arrive as baseJobId (a job registry id), Hub skills as
+  // Local policies arrive as baseJobId (a job registry id), Hub policies as
   // baseModelRepoId — a job id must never be sent through the Hub import path.
   // A prefill is an intent to configure a run, so it slides the form open too.
   useEffect(() => {
@@ -699,7 +699,7 @@ const TrainPanel: React.FC = () => {
                     {/* A prefilled base (job card's Fine-tune) may not exist as
                       an item in the models listing — render the resolved
                       seed's name so the trigger is never blank (same pattern
-                      as the Run panel's skill picker). */}
+                      as the Run panel's policy picker). */}
                     {baseModelId !== NONE && finetuneSeed ? (
                       <span className="truncate">{finetuneSeed.name}</span>
                     ) : (

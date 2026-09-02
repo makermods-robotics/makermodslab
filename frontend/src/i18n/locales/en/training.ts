@@ -443,7 +443,7 @@ export default {
 
   jobDialog: {
     srTitle: "Training job status",
-    back: "Skill studio",
+    back: "Policy studio",
     // {{jobId}} is data; {{errorText}} is the backend's own message, left as it
     // arrived.
     loadFailed: "Couldn't load job {{jobId}}: {{errorText}}",

@@ -1653,7 +1653,7 @@ def test_classify_outcome_ok_warns_and_fails() -> None:
     assert _classify_outcome(0, True, "overload") == "ok"
     assert _classify_outcome(None, True, None) == "ok"
     # Non-zero AFTER the rollout started, with a torque-disable/overload on
-    # shutdown => the skill ran; only cleanup tripped.
+    # shutdown => the policy ran; only cleanup tripped.
     assert _classify_outcome(1, True, "Motor 6 overload, torque_enable failed") == "ran_with_warning"
     # Never started, or an unrelated error => a real failure.
     assert _classify_outcome(1, False, "overload") == "failed"
