@@ -17,7 +17,7 @@ checkpoint (:func:`policy_wire_schema`). The robot side derives the same
 numbers from its real hardware features (:func:`robot_wire_schema`). When the
 robot is the one the policy was trained on, the two agree automatically and
 inference just works. When they don't, Portal drops the packets and you see
-"0 chunks / 0 observations" at runtime — see the README troubleshooting note.
+"0 chunks / 0 observations" at runtime — see docs/drtc/README.md "Install".
 
 The *ordering* of state and action is the load-bearing assumption: the robot
 serializes its joints in ``observation_features`` / ``action_features`` order,

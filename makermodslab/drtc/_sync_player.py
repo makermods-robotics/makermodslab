@@ -230,8 +230,9 @@ class AdaptiveBlockPlayer:
 
 
 # ===========================================================================
-# Headless simulation:  `python3 _sync_player.py`  (numpy only; no torch, no
-# hardware, no network).  Deterministic (seeded) so results are reproducible.
+# Headless simulation:  `python -m makermodslab.drtc._sync_player`  (numpy only;
+# no torch, no hardware, no network).  Deterministic (seeded) so results are
+# reproducible.
 # ===========================================================================
 if __name__ == "__main__":
     import numpy as np

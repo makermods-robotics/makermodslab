@@ -135,10 +135,23 @@ ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 # holding LIVEKIT_URL / LIVEKIT_ROOM / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
 # It lives beside the rest of our persistent state rather than in the package
 # so a wheel install and a source checkout read the same credentials, and so
-# `.env` never lands inside site-packages. A `.env` in the CURRENT DIRECTORY
-# still wins over this one (see makermodslab.drtc._common.load_env), which is
-# what makes a local-SFU run's generated `.env.local` override the saved creds.
+# `.env` never lands inside site-packages. It is the LOWEST-precedence source:
+# a `.env` in the current directory, and then the local-SFU override below,
+# layer on top (see makermodslab.drtc._env.load_env for the full order).
 DRTC_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.env")
+
+# Written by tools/drtc/local_sfu*.sh while a LOCAL LiveKit SFU is running: the
+# URL/key/secret that point the ROBOT side at ws://127.0.0.1:7880 instead of the
+# saved credentials above. Loaded with override=True (it is the "current
+# transport", not the default), so deleting it is how the robot goes back to
+# LiveKit Cloud. Lives here rather than as a cwd `.env.local` so the robot can
+# be started from any directory — the source repo's cwd-relative override was
+# the cause of two "connection refused" false starts on 2026-09-02.
+DRTC_LOCAL_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.local.env")
+# The local SFU's own config (random API key/secret, ports). Delete to rotate.
+DRTC_SFU_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.local.yaml")
+# livekit-server / cloudflared logs from those scripts.
+DRTC_LOG_DIR = os.path.expanduser("~/.cache/huggingface/lerobot/logs/drtc")
 
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /

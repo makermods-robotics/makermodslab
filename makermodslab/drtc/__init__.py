@@ -1,9 +1,9 @@
 """Remote lerobot inference over LiveKit Portal (DRTC), ported from `livekit-drtc`.
 
 The robot half of a split inference loop: this machine owns the arm and the
-cameras, a GPU elsewhere (today: Modal, see the `livekit-drtc` repo's
-`modal_policy*.py`) owns the policy, and LiveKit Portal carries observations
-one way and action chunks the other.
+cameras, a GPU elsewhere (today: Modal — see `modal_policy.py` /
+`modal_policy_rtc.py` in this package) owns the policy, and LiveKit Portal
+carries observations one way and action chunks the other.
 
 Two regimes, picked by policy type — see `robot_sync` / `robot_rtc`:
 
@@ -20,5 +20,7 @@ subprocess the way `rollout.py` spawns `lerobot-rollout`:
     python -m makermodslab.drtc.robot_sync --robot.type=so101_follower ...
 
 This package is only importable with the optional `drtc` extra installed
-(`livekit-portal`, `livekit-api`); nothing in the Lab imports it at startup.
+(`livekit-portal`, `livekit-api`, `python-dotenv`); nothing in the Lab imports
+it at startup. The one exception is `_env`, which needs python-dotenv alone so
+the credential-precedence rules stay unit-testable without LiveKit.
 """

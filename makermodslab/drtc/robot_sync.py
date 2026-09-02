@@ -64,9 +64,11 @@ Run it with the same ``--robot.*`` CLI you already use for `lerobot-record`::
 ``--horizon`` MUST match policy.py's ``--horizon`` and should equal the
 checkpoint's ``n_action_steps`` (and be ``<=`` its ``chunk_size``) so one
 transmitted chunk is exactly one open-loop block. LiveKit creds + room come from
-`~/.cache/huggingface/lerobot/livekit.env` (overridable by a `.env` /
-`.env.local` in the working directory — see `_common.load_env`). The remote
-policy runs in the `livekit-drtc` repo's unchanged `policy.py` on Modal.
+`~/.cache/huggingface/lerobot/livekit.env` (a local SFU's override comes from
+`~/.cache/huggingface/lerobot/livekit.local.env`, written by
+`tools/drtc/local_sfu*.sh`; see `_env.load_env` for the full precedence). The
+remote policy runs in this package's `policy.py`, launched on Modal by
+`modal run makermodslab/drtc/modal_policy.py` (see docs/drtc/README.md).
 
 NOTE: no `from __future__ import annotations` here — it would stringize the
 `main(cfg: RobotSideConfig)` signature and break draccus's config-type lookup.
