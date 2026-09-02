@@ -34,6 +34,12 @@ def _reset_replay_globals(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(replay, "replay_thread", None)
     monkeypatch.setattr(replay, "_replay_meta", {})
     monkeypatch.setattr(replay, "_replay_started_at", None)
+    # _stop_event is a real Event, not reassignable state monkeypatch can undo:
+    # a test that drives handle_stop_replay leaves it SET, which would make the
+    # next worker test skip playback before it began. Clear it on both edges.
+    replay._stop_event.clear()
+    yield
+    replay._stop_event.clear()
 
 
 def _stub_request():
@@ -171,6 +177,92 @@ def test_handle_start_replay_rejects_action_name_mismatch(monkeypatch) -> None:
     assert result["success"] is False
     assert result["status_code"] == 400
     assert "match" in result["message"].lower() or "joint" in result["message"].lower()
+
+
+# --- cross-arm datasets are refused before the arm is energized --------------
+#
+# The joint-name checks catch SO-101 (6 joints) vs Maker/Metal (7), but Maker
+# and Metal share all seven names and differ only in their action units, so a
+# Metal dataset replayed on a Maker arm passed every existing check. lerobot
+# tags the recording robot in meta/info.json; an untagged or community dataset
+# resolves to None and must stay allowed (silence, not a false alarm).
+
+
+def _arm_type_case(monkeypatch, robot_type, arm_type, motors=("shoulder_pan", "gripper")):
+    """Start a replay whose dataset carries `robot_type` against a robot of
+    `arm_type`; the dataset's joint names deliberately don't map, so a start
+    that gets PAST the arm-type check still fails — on the joint-name message,
+    with _connect_follower recorded as called."""
+    from makermodslab.replay import ReplayRequest, handle_start_replay
+
+    monkeypatch.setattr("makermodslab.replay.read_dataset_robot_type", lambda repo_id: robot_type)
+    monkeypatch.setattr(
+        "makermodslab.replay.get_episode_action_series",
+        lambda repo_id, episode_index: {
+            "action_names": [f"{m}.pos" for m in motors],
+            "timestamps": [0.0],
+            "values": [[1.0, 2.0]],
+        },
+    )
+
+    class _FakeRobot:
+        action_features = {"a_joint_this_dataset_never_names.pos": float}
+
+    connects: list[str] = []
+
+    def _connect(request):
+        connects.append(request.arm_type)
+        return _FakeRobot(), []
+
+    monkeypatch.setattr("makermodslab.replay._connect_follower", _connect)
+    monkeypatch.setattr("makermodslab.replay._cleanup_after_setup_failure", lambda *a, **k: None)
+
+    request = ReplayRequest(
+        repo_id="alice/pick",
+        episode_index=0,
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        arm_type=arm_type,
+    )
+    return handle_start_replay(request), connects
+
+
+def test_handle_start_replay_rejects_a_maker_dataset_on_an_so101(monkeypatch) -> None:
+    result, connects = _arm_type_case(monkeypatch, "maker_follower", "so101")
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "Maker arm" in result["message"] and "SO-101 arm" in result["message"]
+    assert connects == []  # refused BEFORE the arm was energized
+
+
+def test_handle_start_replay_rejects_a_metal_dataset_on_a_maker_arm(monkeypatch) -> None:
+    """The case the joint-name checks structurally cannot catch: same seven
+    names on both sides, different action units."""
+    result, connects = _arm_type_case(monkeypatch, "metal_follower", "maker")
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "Metal arm" in result["message"] and "Maker arm" in result["message"]
+    assert connects == []
+
+
+@pytest.mark.parametrize("robot_type", [None, "aloha", "so100", "", "koch_follower"])
+def test_handle_start_replay_allows_a_dataset_whose_arm_cant_be_established(monkeypatch, robot_type) -> None:
+    """None / unrecognized stays silent, and so100 normalises to so101 — all of
+    these must fall through to the existing joint-name check instead."""
+    result, connects = _arm_type_case(monkeypatch, robot_type, "so101")
+
+    assert result["success"] is False  # the joint-name check, not the arm check
+    assert "recorded on" not in result["message"]
+    assert connects == ["so101"]  # got past the arm-type check
+
+
+def test_handle_start_replay_allows_a_matching_arm_type(monkeypatch) -> None:
+    result, connects = _arm_type_case(monkeypatch, "bi_maker_follower", "maker")
+
+    assert "recorded on" not in result["message"]
+    assert connects == ["maker"]
 
 
 def test_handle_start_replay_returns_400_when_episode_has_no_action_data(monkeypatch) -> None:
@@ -606,6 +698,174 @@ def test_stop_and_wait_timeout_budgets_two_returns_not_one() -> None:
     from makermodslab.rest_pose import RETURN_CEILING_S
 
     assert _STOP_AND_WAIT_TIMEOUT_S >= 2 * RETURN_CEILING_S + 5.0
+
+
+# --- a settled-but-close ease-in must not abort the replay -------------------
+#
+# EASE_ARRIVE_TOLERANCE (2.0 normalized units, ~22-39 ticks) is inside the
+# standing error an STS3215 holds in position mode at lerobot's P=16, and frame
+# 0 routinely parks joints on their calibrated endpoints where that error is
+# largest — so the return loop reported "settled short of target" and replay
+# treated it as fatal ("The arm didn't settle at this episode's starting
+# position"). Observed on the so101-finc arm. The ease-in only exists so frame 0
+# doesn't snap the arm from wherever it was, so a few units short is fine;
+# a stuck joint, or an arm posed genuinely far away, is not.
+
+
+class _EaseBus:
+    """A bus that reports a fixed Present_Position for the residual read."""
+
+    def __init__(self, present, motors=None, read_raises=False):
+        self.motors = dict.fromkeys(present) if motors is None else motors
+        self.present = dict(present)
+        self.read_raises = read_raises
+        self.reads = 0
+
+    def sync_read(self, reg, normalize=True):
+        assert reg == "Present_Position"
+        self.reads += 1
+        if self.read_raises:
+            raise RuntimeError("bus gone")
+        return dict(self.present)
+
+    def disconnect(self, disable_torque=False):
+        pass
+
+
+class _EaseRobot:
+    def __init__(self, bus):
+        self.bus = bus
+        self.actions: list[dict] = []
+
+    def send_action(self, action):
+        self.actions.append(dict(action))
+
+    def get_observation(self):
+        return {}
+
+
+_EASE_FRAMES = {
+    "action_names": ["shoulder_pan.pos", "gripper.pos"],
+    "timestamps": [0.0, 0.01],
+    "values": [[10.0, 1.0], [11.0, 1.0]],
+}
+
+
+def _run_ease_in_worker(monkeypatch, verdict, bus):
+    """Drive _replay_worker with a canned ease-in verdict and a fake bus."""
+    from makermodslab import replay
+
+    monkeypatch.setattr(replay, "replay_active", True)
+    monkeypatch.setattr(replay, "capture_rest_pose", lambda bus, normalize=False: {"shoulder_pan": 10})
+    monkeypatch.setattr(replay, "_ensure_uncapped", lambda robot, label: None)
+    monkeypatch.setattr(replay, "force_disable_torque", lambda robot, label: None)
+
+    def fake_return_to_rest_pose(
+        bus, target, abort_event=None, label="arm", normalize=False, tolerance=None, stall_min_progress=None
+    ):
+        # normalize=True is the ease-in; the raw-ticks call is the stopping return.
+        return verdict if normalize else (True, "returned: max delta 0 ticks ()")
+
+    monkeypatch.setattr(replay, "return_to_rest_pose", fake_return_to_rest_pose)
+
+    robot = _EaseRobot(bus)
+    replay._replay_worker(robot, _EASE_FRAMES, None)
+    return replay, robot
+
+
+def test_ease_in_settled_within_the_bound_plays_the_episode(monkeypatch, caplog) -> None:
+    """shoulder_pan stops 4.0 units short of frame 0 — inside the bound, so
+    playback runs and the session ends clean."""
+    bus = _EaseBus({"shoulder_pan": 6.0, "gripper": 1.0})
+    verdict = (False, "settled short of target after 3.0s, remaining 4.0 units (shoulder_pan=4.0)")
+
+    with caplog.at_level("WARNING"):
+        replay, robot = _run_ease_in_worker(monkeypatch, verdict, bus)
+
+    assert len(robot.actions) == len(_EASE_FRAMES["timestamps"])  # every frame sent
+    assert replay._replay_meta["phase"] == "done"
+    assert replay._replay_meta.get("error") is None
+    assert replay._replay_meta.get("hint") is None
+    assert any("starting playback" in r.getMessage() for r in caplog.records)
+
+
+def test_ease_in_settled_too_far_stays_fatal_and_names_the_joint(monkeypatch) -> None:
+    """15 units short is not the servo's standing error — it is an arm posed
+    somewhere else, or a joint that gave up."""
+    bus = _EaseBus({"shoulder_pan": -5.0, "gripper": 1.0})
+    verdict = (False, "settled short of target after 3.0s, remaining 15.0 units (shoulder_pan=15.0)")
+
+    replay, robot = _run_ease_in_worker(monkeypatch, verdict, bus)
+
+    assert robot.actions == []  # playback never started
+    assert replay._replay_meta["phase"] == "error"
+    hint = replay._replay_meta["hint"]
+    assert "starting position" in hint
+    assert "shoulder_pan" in hint
+    assert "15.0" in hint
+
+
+def test_ease_in_stalled_stays_fatal_even_when_the_arm_is_at_target(monkeypatch) -> None:
+    """Only `settled` is forgiven — a stalled joint is still fighting, and the
+    verdict must not be re-litigated by a Present_Position read."""
+    bus = _EaseBus({"shoulder_pan": 10.0, "gripper": 1.0})
+    verdict = (False, "stalled after 3.0s, remaining 0.0 units (shoulder_pan=0.0)")
+
+    replay, robot = _run_ease_in_worker(monkeypatch, verdict, bus)
+
+    assert bus.reads == 0  # no residual read on a non-settled verdict
+    assert robot.actions == []
+    assert replay._replay_meta["phase"] == "error"
+    assert "stalled" in replay._replay_meta["hint"]
+
+
+def test_ease_in_settled_stays_fatal_when_the_residual_read_fails(monkeypatch) -> None:
+    """An unmeasurable residual is unknown, not small — keep the fatal path."""
+    bus = _EaseBus({"shoulder_pan": 10.0, "gripper": 1.0}, read_raises=True)
+    verdict = (False, "settled short of target after 3.0s, remaining 4.0 units (shoulder_pan=4.0)")
+
+    replay, robot = _run_ease_in_worker(monkeypatch, verdict, bus)
+
+    assert bus.reads == 1
+    assert robot.actions == []
+    assert replay._replay_meta["phase"] == "error"
+
+
+def test_ease_in_residual_compares_against_the_clamped_target() -> None:
+    """A recorded -103 is clamped to the -100 the bus can actually write and
+    read back, so a joint resting on its hard stop is 0 units off, not 3."""
+    from lerobot.motors import MotorNormMode
+    from makermodslab.replay import _ease_in_residual
+
+    class _Motor:
+        def __init__(self, norm_mode):
+            self.norm_mode = norm_mode
+
+    class _Bus:
+        motors = {
+            "shoulder_lift": _Motor(MotorNormMode.RANGE_M100_100),
+            "gripper": _Motor(MotorNormMode.RANGE_0_100),
+        }
+
+        def sync_read(self, reg, normalize=True):
+            assert reg == "Present_Position" and normalize is True
+            return {"shoulder_lift": -100.0, "gripper": 2.5}
+
+    residual = _ease_in_residual(_Bus(), {"shoulder_lift": -103.0, "gripper": 0.9})
+
+    assert residual == {"shoulder_lift": 0.0, "gripper": pytest.approx(1.6)}
+
+
+def test_ease_in_residual_is_none_when_no_motor_reads_back() -> None:
+    from makermodslab.replay import _ease_in_residual
+
+    class _Bus:
+        motors = {"shoulder_pan": None}
+
+        def sync_read(self, reg, normalize=True):
+            return {}
+
+    assert _ease_in_residual(_Bus(), {"shoulder_pan": 1.0}) is None
 
 
 def test_replay_status_elapsed_freezes_once_the_session_ends(monkeypatch) -> None:
