@@ -43,11 +43,11 @@ cv2 walks (video + muxed devices, uniqueID-sorted — mirrors OpenCV's
 cap_avfoundation_mac.mm). A device attached after startup is invisible to
 in-process AVFoundation entirely — and, worse, a camera replugged into the
 SAME port comes back with the same uniqueID (it is derived from the port), so
-it stays *present* in the stale list as a dead device object that opens "successfully" and then never produces a frame
-(silently blank previews, reads that can block forever). Resolution returns
-None only for the verifiably-absent case; callers must fail loudly (telling
-the user to restart MakerMods Lab) rather than open whatever now sits at the
-stale index.
+it stays *present* in the stale list as a dead device object that opens
+"successfully" and then never produces a frame (silently blank previews,
+reads that can block forever). Resolution returns None only for the
+verifiably-absent case; callers must fail loudly (telling the user to restart
+MakerMods Lab) rather than open whatever now sits at the stale index.
 
 Both failure modes disappear while :func:`pump_avfoundation_runloop` runs:
 AVFoundation queues its device-cache updates on the main dispatch queue,

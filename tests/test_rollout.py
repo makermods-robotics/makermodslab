@@ -3623,6 +3623,8 @@ def test_next_episode_respawn_refuses_when_a_camera_moved(
     )
     session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=None)
     session.request = _cam_request("solo", {"front": "wrist"})
+    # Two episodes already scored — the thing the rollback is protecting.
+    session.results = ["success", "failure"]
     monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
     monkeypatch.setattr(
         rollout,
@@ -3631,10 +3633,22 @@ def test_next_episode_respawn_refuses_when_a_camera_moved(
     )
     _fake_enumeration(monkeypatch, [{"index": 1, "name": "Other", "unique_id": "uid-X"}])
 
+    results_before = list(session.results)
     result = rollout.handle_next_episode()
 
     assert result["success"] is False
+    assert result["status_code"] == 400
     assert "wrist" in result["message"]
+    # The refusal must ROLL BACK the "we are starting" bookkeeping the lock
+    # section already did, not just decline to spawn. Left as-is the session
+    # sits at PHASE_STARTING with an episode pending: the reset dialog never
+    # comes back, so Continue can never be pressed again even once the camera
+    # is re-selected — and the only way out is a stop, which discards every
+    # episode already scored.
+    assert session.episode_pending is False
+    assert rollout._inference_meta["phase"] == rollout.PHASE_RESETTING
+    assert session.results == results_before
+    assert session.episodes_total == 3
 
 
 def test_next_episode_respawn_proceeds_when_the_cameras_still_match(
@@ -3667,3 +3681,223 @@ def test_next_episode_respawn_proceeds_when_the_cameras_still_match(
 
     assert result["success"] is True
     assert launched["robot_args"][0] == "--robot.type=so101_follower"
+    # The re-verified args must still CARRY the cameras: the rebuild strips the
+    # cached flag before re-appending it, so a rebuild that silently drops it
+    # respawns a camera-less runner that drives the arm on no images.
+    cam_args = [a for a in launched["robot_args"] if a.startswith("--robot.cameras=")]
+    assert len(cam_args) == 1, f"no single --robot.cameras= in {launched['robot_args']}"
+    assert "index_or_path: 1" in cam_args[0]
+
+
+# ---------------------------------------------------------------------------
+# The camera args actually reaching argv
+#
+# Verification and argv-building are the same step (_prepare_robot resolves the
+# cameras to verify them, THEN formats them), so a refactor that keeps the check
+# can still drop the flag. A run with no `--robot.cameras=` is the worst of the
+# failure modes this branch exists for: lerobot builds a camera-less robot, the
+# arm drives on a policy that is being fed no images at all, and nothing in the
+# logs says so. Assert the flag lands, on both robot shapes.
+# ---------------------------------------------------------------------------
+
+
+def _bimanual_cam_request(robot: str, bindings: dict[str, str]):
+    from makermodslab.rollout import InferenceRequest
+
+    return InferenceRequest(
+        follower_port="/dev/left",
+        follower_config="left_cal",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="bimanual",
+        right_follower_port="/dev/right",
+        right_follower_config="right_cal",
+        robot_name=robot,
+        camera_bindings=bindings,
+    )
+
+
+def test_prepare_robot_passes_the_record_cameras_into_the_single_arm_args(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The successful return, not just the refusal: the resolved cameras must
+    reach `--robot.cameras=` under the POLICY name, carrying the record's
+    index."""
+    from makermodslab import rollout
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(
+        monkeypatch,
+        [
+            {"index": 0, "name": "Built-in", "unique_id": "uid-B"},
+            {"index": 1, "name": "Wrist", "unique_id": "uid-W"},
+        ],
+    )
+    _trap_preflights(monkeypatch, rollout)
+
+    robot_args, _ = rollout._prepare_robot(_cam_request("solo", {"front": "wrist"}))
+
+    cam_args = [a for a in robot_args if a.startswith("--robot.cameras=")]
+    assert len(cam_args) == 1, f"no single --robot.cameras= in {robot_args}"
+    assert "front: {" in cam_args[0]
+    assert "index_or_path: 1" in cam_args[0]
+
+
+def test_prepare_robot_passes_the_record_cameras_into_the_bimanual_args(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BiSO takes its cameras on the LEFT sub-arm (it re-exposes them as
+    "left_*"); a bare `--robot.cameras=` is not a flag its config has."""
+    from makermodslab import rollout
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "dual_arm", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(monkeypatch, [{"index": 1, "name": "Wrist", "unique_id": "uid-W"}])
+    _trap_preflights(monkeypatch, rollout)
+    monkeypatch.setattr(
+        rollout, "stage_bimanual_follower_calibrations", lambda *a, **k: ("/staging/follower", None)
+    )
+
+    robot_args, _ = rollout._prepare_robot(_bimanual_cam_request("dual_arm", {"front": "wrist"}))
+
+    cam_args = [a for a in robot_args if a.startswith("--robot.left_arm_config.cameras=")]
+    assert len(cam_args) == 1, f"no single left-arm cameras flag in {robot_args}"
+    assert "front: {" in cam_args[0]
+    assert "index_or_path: 1" in cam_args[0]
+    assert not [a for a in robot_args if a.startswith("--robot.cameras=")]
+
+
+def test_next_episode_respawn_picks_up_a_record_fixed_mid_session(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The headline claim of the rebuild: the refusal tells the user to
+    re-select the camera, which REWRITES the record, and pressing Continue then
+    has to relaunch against the new index. Rebuilding from the same re-read
+    record the check ran against is what makes that work — reusing the cached
+    flag would relaunch on the stale index that just passed the check for a
+    different reason."""
+    from makermodslab import rollout
+
+    # Session start: the record said index 1, and the cached args carry it.
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=None)
+    session.request = _cam_request("solo", {"front": "wrist"})
+    session.robot_args = [
+        "--robot.type=so101_follower",
+        "--robot.cameras={front: {type: opencv, index_or_path: 1, fourcc: MJPG}}",
+    ]
+    # The user re-selected the camera during the reset: it now sits at 2, and
+    # the record was rewritten to say so.
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 2, "uid-W")]
+    )
+    _fake_enumeration(
+        monkeypatch,
+        [
+            {"index": 0, "name": "Built-in", "unique_id": "uid-B"},
+            {"index": 1, "name": "Front", "unique_id": "uid-F"},
+            {"index": 2, "name": "Wrist", "unique_id": "uid-W"},
+        ],
+    )
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    launched = {}
+
+    def _fake_launch(request, policy_path, robot_args):
+        launched["robot_args"] = robot_args
+        proc = _FakeRunner()
+        proc.stdout = _EmptyStdout()
+        return proc, io.StringIO(), Path("/tmp/ep2.log")
+
+    monkeypatch.setattr(rollout, "_launch_eval_runner", _fake_launch)
+    monkeypatch.setattr(rollout, "_handle_runner_exit", lambda proc, rc: None)
+
+    result = rollout.handle_next_episode()
+
+    assert result["success"] is True
+    cam_args = [a for a in launched["robot_args"] if a.startswith("--robot.cameras=")]
+    assert len(cam_args) == 1, f"stale flag not replaced: {launched['robot_args']}"
+    assert "index_or_path: 2" in cam_args[0]
+
+
+def test_next_episode_bimanual_respawn_rebuilds_the_left_arm_camera_flag(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bimanual session's cameras live on `--robot.left_arm_config.cameras=`.
+    Rebuilding under the single-arm name would leave the stale flag in place
+    (nothing matches it to strip) AND append one BiSOFollowerConfig has no field
+    for — draccus rejects unknown args, so the respawn dies at CLI parse; and if
+    it did not, every remaining episode would run on the stale index."""
+    from makermodslab import rollout
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "dual_arm", [_identified_cam("wrist", 2, "uid-W")]
+    )
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=None)
+    session.request = _bimanual_cam_request("dual_arm", {"front": "wrist"})
+    session.robot_args = [
+        "--robot.type=bi_so_follower",
+        "--robot.left_arm_config.cameras={front: {type: opencv, index_or_path: 1, fourcc: MJPG}}",
+    ]
+    _fake_enumeration(
+        monkeypatch,
+        [
+            {"index": 0, "name": "Built-in", "unique_id": "uid-B"},
+            {"index": 1, "name": "Front", "unique_id": "uid-F"},
+            {"index": 2, "name": "Wrist", "unique_id": "uid-W"},
+        ],
+    )
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    launched = {}
+
+    def _fake_launch(request, policy_path, robot_args):
+        launched["robot_args"] = robot_args
+        proc = _FakeRunner()
+        proc.stdout = _EmptyStdout()
+        return proc, io.StringIO(), Path("/tmp/ep2.log")
+
+    monkeypatch.setattr(rollout, "_launch_eval_runner", _fake_launch)
+    monkeypatch.setattr(rollout, "_handle_runner_exit", lambda proc, rc: None)
+
+    result = rollout.handle_next_episode()
+
+    assert result["success"] is True
+    args = launched["robot_args"]
+    cam_args = [a for a in args if a.startswith("--robot.left_arm_config.cameras=")]
+    assert len(cam_args) == 1, f"stale left-arm flag not replaced: {args}"
+    assert "index_or_path: 2" in cam_args[0]
+    assert not [a for a in args if a.startswith("--robot.cameras=")], args
+
+
+def test_next_episode_live_runner_does_not_re_enumerate(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-verification is the RESPAWN's business only. The live runner is
+    already holding the verified devices open — an index it never re-reads
+    cannot renumber underneath it — so enumerating there would buy nothing and
+    cost a subprocess spawn plus, on a bench the user rearranged and will
+    rearrange back, a spurious mid-session 400 against cameras the running child
+    is happily using."""
+    from makermodslab import rollout
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    proc = _FakeRunner()
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=proc)
+    session.request = _cam_request("solo", {"front": "wrist"})
+
+    def _boom():
+        raise AssertionError("the live-runner path enumerated cameras")
+
+    monkeypatch.setattr(rollout, "list_cameras_in_subprocess", _boom)
+
+    result = rollout.handle_next_episode()
+
+    assert result["success"] is True
+    assert rollout.CMD_EPISODE in proc.commands

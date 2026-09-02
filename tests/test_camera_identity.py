@@ -20,6 +20,7 @@ external cameras needs camera permission.
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 
@@ -410,6 +411,33 @@ def test_subprocess_enumeration_invalid_json_is_none(fake_enum_subprocess) -> No
     assert list_cameras_in_subprocess() is None
 
 
+def test_subprocess_enumeration_treats_a_json_null_as_no_answer(
+    fake_enum_subprocess, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The child signals could-not-ask twice — a JSON null AND a non-zero exit
+    — because neither channel is guaranteed to survive. Only the exit code is
+    load-bearing today (check=True raises before stdout is looked at), so this
+    covers the null on its own: the day someone drops the `sys.exit(1)`, the
+    null is all that stands between a failed enumeration and a parent that
+    concludes "no cameras attached" and refuses every start."""
+    from makermodslab.camera_identity import list_cameras_in_subprocess
+
+    fake_enum_subprocess("null")
+    with caplog.at_level(logging.WARNING, logger="makermodslab.camera_identity"):
+        assert list_cameras_in_subprocess() is None
+    assert "reported no answer" in caplog.text
+
+
+def test_subprocess_enumeration_rejects_json_that_is_not_a_list(fake_enum_subprocess) -> None:
+    """Only a real list may be trusted as a device set: `[]` is acted on as a
+    fact about the machine, so anything that is not a list has to be no answer
+    rather than something a caller iterates."""
+    from makermodslab.camera_identity import list_cameras_in_subprocess
+
+    fake_enum_subprocess('{"index": 0, "name": "Cam A", "unique_id": "uid-A"}')
+    assert list_cameras_in_subprocess() is None
+
+
 def test_subprocess_enumeration_is_none_off_macos(monkeypatch: pytest.MonkeyPatch) -> None:
     """The script is PyObjC/AVFoundation-only. Elsewhere there is no answer to
     give — and, again, "no answer" is not "no cameras"."""
@@ -535,6 +563,25 @@ def run_real_enum_script(tmp_path, monkeypatch: pytest.MonkeyPatch):
     return _set
 
 
+def _enum_failure_reason(caplog: pytest.LogCaptureFixture) -> str | None:
+    """The child's could-not-ask reason as it reached the parent's log.
+
+    Only the CalledProcessError branch relays it: `fail()` names the reason on
+    stderr and exits 1, and `check=True` turns that into an exception carrying
+    the stderr. Fall through to the generic subprocess-failed branch instead and
+    the reason is gone — replaced by a "returned non-zero exit status 1" whose
+    text happens to quote the whole argv (the enum script's own source, reason
+    strings and all), which is why this matches the prefix rather than searching
+    caplog for the words.
+    """
+    prefix = "AVFoundation enumeration could not be performed: "
+    for record in caplog.records:
+        message = record.getMessage()
+        if message.startswith(prefix):
+            return message[len(prefix) :]
+    return None
+
+
 def test_real_script_reports_a_genuinely_empty_machine_as_an_empty_list(run_real_enum_script) -> None:
     """The control: an ask that succeeded and saw nothing still returns [], so
     the failure signalling below cannot be blamed for over-triggering."""
@@ -553,33 +600,53 @@ def test_real_script_returns_the_devices_it_saw(run_real_enum_script) -> None:
 
 
 def test_real_script_signals_failure_when_no_device_type_constant_resolves(
-    run_real_enum_script,
+    run_real_enum_script, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A macOS point release renaming the AVCaptureDeviceType constants leaves
     the script with an empty type list, which can only ever match nothing. That
     nothing must not reach the parent as [] — `_verify_camera_identities` would
     then declare every bound camera missing and 400 every start, telling the
     user to re-select cameras that are sitting right there."""
-    assert run_real_enum_script(FAKE_TYPES="") is None
+    with caplog.at_level(logging.WARNING, logger="makermodslab.camera_identity"):
+        assert run_real_enum_script(FAKE_TYPES="") is None
+    # The child's own reason has to survive the process boundary and land in the
+    # log. All three failures return the same None, so the stderr text is the
+    # ONLY thing that separates "renamed by a macOS release" (needs a code
+    # change) from the transient ones — see the reasons asserted below. Matched
+    # WITH the "could not be performed" prefix on purpose: that prefix is what
+    # marks the child's own could-not-ask signal, and the generic
+    # subprocess-failed branch quotes the whole argv, script source included,
+    # so every reason string appears in its message too.
+    assert _enum_failure_reason(caplog) == (
+        "No AVFoundation camera device-type constants resolved (renamed by macOS?)"
+    )
 
 
-def test_real_script_signals_failure_when_the_framework_does_not_load(run_real_enum_script) -> None:
+def test_real_script_signals_failure_when_the_framework_does_not_load(
+    run_real_enum_script, caplog: pytest.LogCaptureFixture
+) -> None:
     """Without AVFoundation loaded no constant resolves and no device can be
     found — a failure to ask, not an empty machine."""
-    assert run_real_enum_script(FAKE_BUNDLE_LOAD="0", FAKE_TYPES="AVCaptureDeviceTypeExternal") is None
+    with caplog.at_level(logging.WARNING, logger="makermodslab.camera_identity"):
+        assert run_real_enum_script(FAKE_BUNDLE_LOAD="0", FAKE_TYPES="AVCaptureDeviceTypeExternal") is None
+    assert _enum_failure_reason(caplog) == "AVFoundation framework did not load"
 
 
-def test_real_script_signals_failure_when_no_discovery_query_answered(run_real_enum_script) -> None:
+def test_real_script_signals_failure_when_no_discovery_query_answered(
+    run_real_enum_script, caplog: pytest.LogCaptureFixture
+) -> None:
     """`devices()` returning nil is a query that did not answer. Flattening it
     with `or []` is exactly what turns a failed query into an empty machine."""
-    assert (
-        run_real_enum_script(
-            FAKE_TYPES="AVCaptureDeviceTypeExternal",
-            FAKE_DEVICES_vide="null",
-            FAKE_DEVICES_muxx="null",
+    with caplog.at_level(logging.WARNING, logger="makermodslab.camera_identity"):
+        assert (
+            run_real_enum_script(
+                FAKE_TYPES="AVCaptureDeviceTypeExternal",
+                FAKE_DEVICES_vide="null",
+                FAKE_DEVICES_muxx="null",
+            )
+            is None
         )
-        is None
-    )
+    assert _enum_failure_reason(caplog) == "AVFoundation discovery answered nothing"
 
 
 def test_real_script_trusts_one_answering_query(run_real_enum_script) -> None:

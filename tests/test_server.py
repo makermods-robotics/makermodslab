@@ -1570,3 +1570,20 @@ def test_format_accelerator_survives_a_renamed_hub_field() -> None:
             return "some-future-accelerator"
 
     assert _format_accelerator(_Unknown()) == "some-future-accelerator"
+
+
+def test_available_cameras_reports_a_failed_darwin_enumeration_as_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`list_cameras_in_subprocess` distinguishes None ("could not ask") from []
+    ("asked, nothing attached") for the callers that REFUSE on an empty set.
+    This endpoint is not one of them — it only populates a picker — so it
+    flattens both to []. Iterating the None instead crashes the handler into its
+    error branch, and the camera picker goes blank on a transient PyObjC
+    hiccup."""
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(server_mod, "list_cameras_in_subprocess", lambda: None)
+
+    assert server_mod.get_available_cameras() == {"status": "success", "cameras": []}

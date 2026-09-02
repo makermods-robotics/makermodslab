@@ -1285,13 +1285,24 @@ def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
 
     Camera identity and transport settings are resolved from the robot record
     every time they're needed rather than carried on the request: the record is
-    the only place they live, and the lookup is one small JSON read. Capture
-    resolution is overlaid from the checkpoint (see PolicyCameraDims /
-    bind_robot_cameras). The bound cameras are then verified to still BE the
-    cameras the record names (see _verify_camera_identities) — a stored index
-    can silently address a different device after any USB change. Raises
-    CameraResolutionError, which handle_start_inference turns into a 400 before
-    the session starts, so a wrong-camera run never energises an arm."""
+    the only place they live, and re-reading it is what lets a record the user
+    fixes mid-session take effect. Capture resolution is overlaid from the
+    checkpoint (see PolicyCameraDims / bind_robot_cameras). The bound cameras
+    are then verified to still BE the cameras the record names (see
+    _verify_camera_identities) — a stored index can silently address a
+    different device after any USB change. Raises CameraResolutionError, which
+    handle_start_inference turns into a 400 before the session starts, so a
+    wrong-camera run never energises an arm.
+
+    NOT cheap, despite reading like a config lookup: whenever there are
+    bindings, verification spawns a fresh Python that imports PyObjC and runs
+    an AVFoundation discovery session (10s timeout) — see
+    list_cameras_in_subprocess for why a child is the only honest answer. That
+    is paid at least twice per start (the request-thread reject, then again in
+    _prepare_robot after the download) plus once per eval respawn. The
+    duplication is deliberate — the whole point is that the device set can
+    change between those calls — so treat this as an I/O call and keep it off
+    any path that must not block, not as something to sprinkle freely."""
     cameras = bind_robot_cameras(
         request.robot_name,
         request.camera_bindings,
@@ -2029,10 +2040,15 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "message": f"Unrecognised policy ref: {request.policy_ref!r}",
         }
 
-    # Resolve the camera bindings against the robot record now (one small JSON
-    # read, no hardware). A binding that names a camera the record doesn't have
-    # must 4xx in the panel; deferring it to the startup worker would surface
-    # the same mistake as a mid-startup failure after the model download.
+    # Resolve the camera bindings against the robot record now. A binding that
+    # names a camera the record doesn't have — or a stored index that no longer
+    # holds it — must 4xx in the panel; deferring it to the startup worker
+    # would surface the same mistake as a mid-startup failure after the model
+    # download. Not free on the request thread: with bindings present this
+    # spawns an enumeration child (see _session_cameras) that can take up to
+    # its 10s timeout. Worth it here — no arm is touched and no bus is opened,
+    # and the alternative is the user watching a multi-minute download only to
+    # be told the camera is wrong.
     try:
         _session_cameras(request)
     except CameraResolutionError as exc:
