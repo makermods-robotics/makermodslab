@@ -1197,6 +1197,50 @@ def _build_eval_runner_cmd(request: InferenceRequest, policy_path: str, robot_ar
     ]
 
 
+def _camera_mismatch_message(
+    absent: list[tuple[str, str, Any]], moved: list[tuple[str, str, Any, Any]]
+) -> str:
+    """The user-facing refusal for cameras that no longer sit where the record says.
+
+    Takes the two classifications `_verify_camera_identities` made — `absent`
+    is (label, uniqueID, saved index), `moved` is that plus the index the
+    camera is at now — and renders one paragraph per non-empty group, in that
+    order, so a bench rearrangement that did both gets both instructions
+    rather than whichever one happened to win.
+
+    Deliberately never says "restart": the index is stale on disk, so a restart
+    changes nothing and sends the user round a loop. Only the record changing
+    fixes this, and it must be the USER doing it — they are the only one who
+    knows which physical camera they meant.
+    """
+    parts = []
+    if absent:
+        named = "; ".join(f"'{label}' (device {uid})" for label, uid, _ in absent)
+        parts.append(
+            f"{'These cameras are' if len(absent) > 1 else 'This camera is'} not connected, so "
+            f"inference cannot open {'them' if len(absent) > 1 else 'it'}: {named}. Reconnect "
+            f"{'them' if len(absent) > 1 else 'it'} and start again, or remove "
+            f"{'them' if len(absent) > 1 else 'it'} from this robot's cameras and rebind the "
+            f"policy {'cameras' if len(absent) > 1 else 'camera'} before starting."
+        )
+    if moved:
+        # Say where the camera actually IS. Without it the user is told their
+        # camera moved and left to guess where to, which is the one fact the
+        # enumeration already handed us.
+        named = "; ".join(
+            f"'{label}' (device {uid}) was saved at position {index} but is now at position {now}"
+            for label, uid, index, now in moved
+        )
+        parts.append(
+            f"{'These cameras have' if len(moved) > 1 else 'This camera has'} moved since this "
+            f"robot's cameras were saved, so inference would open the wrong device: {named}. "
+            "USB camera numbering shifts whenever cameras are plugged in or removed. "
+            "Open this robot's settings and save its camera configuration to update the saved "
+            f"position{'s' if len(moved) > 1 else ''}, then start again."
+        )
+    return " ".join(parts)
+
+
 def _verify_camera_identities(cameras: dict[str, dict[str, Any]], bindings: dict[str, str]) -> None:
     """Refuse the run if a record's stored index no longer holds its camera.
 
@@ -1222,9 +1266,10 @@ def _verify_camera_identities(cameras: dict[str, dict[str, Any]], bindings: dict
     person who made it. The two ways a binding can break need DIFFERENT
     instructions, so the refusal separates them: a camera whose uniqueID is not
     in the enumeration at all is unplugged and cannot be picked in a UI that
-    only lists attached devices (reconnect it, or drop it from the record),
-    while one sitting at another index is present and merely renumbered (the
-    message says where it is now, and to re-save this robot's cameras).
+    only lists attached devices, while one sitting at another index is present
+    and merely renumbered. What each case is told to do is
+    _camera_mismatch_message's job; this function only decides which case a
+    camera is in.
     Verification is skipped — the run proceeds exactly as it did before —
     whenever there is nothing to check against: no `unique_id` in the record
     (records written before identity existed, and every record on a non-macOS
@@ -1287,36 +1332,7 @@ def _verify_camera_identities(cameras: dict[str, dict[str, Any]], bindings: dict
         or "none",
         attached,
     )
-    # Deliberately never says "restart": the index is stale on disk, so a
-    # restart changes nothing and sends the user round a loop. Only the record
-    # changing fixes this, and it must be the USER doing it — they are the
-    # only one who knows which physical camera they meant.
-    parts = []
-    if absent:
-        named = "; ".join(f"'{label}' (device {uid})" for label, uid, _ in absent)
-        parts.append(
-            f"{'These cameras are' if len(absent) > 1 else 'This camera is'} not connected, so "
-            f"inference cannot open {'them' if len(absent) > 1 else 'it'}: {named}. Reconnect "
-            f"{'them' if len(absent) > 1 else 'it'} and start again, or remove "
-            f"{'them' if len(absent) > 1 else 'it'} from this robot's cameras and rebind the "
-            f"policy {'cameras' if len(absent) > 1 else 'camera'} before starting."
-        )
-    if moved:
-        # Say where the camera actually IS. Without it the user is told their
-        # camera moved and left to guess where to, which is the one fact the
-        # enumeration already handed us.
-        named = "; ".join(
-            f"'{label}' (device {uid}) was saved at position {index} but is now at position {now}"
-            for label, uid, index, now in moved
-        )
-        parts.append(
-            f"{'These cameras have' if len(moved) > 1 else 'This camera has'} moved since this "
-            f"robot's cameras were saved, so inference would open the wrong device: {named}. "
-            "USB camera numbering shifts whenever cameras are plugged in or removed. "
-            "Open this robot's settings and save its camera configuration to update the saved "
-            f"position{'s' if len(moved) > 1 else ''}, then start again."
-        )
-    raise CameraResolutionError(" ".join(parts))
+    raise CameraResolutionError(_camera_mismatch_message(absent, moved))
 
 
 def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
