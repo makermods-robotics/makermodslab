@@ -277,7 +277,7 @@ def list_cameras_in_subprocess() -> list[dict] | None:
     reasoning).
 
     - None — the enumeration could not be performed (non-macOS, the subprocess
-      failing to run, unparseable output, or the script reporting a failure to
+      failing to run, unparsable output, or the script reporting a failure to
       ask: AVFoundation not loading, no device-type constant resolving, no
       discovery query answering). Nothing is known about the device set, so
       callers must fall back to trusting the index they were given.

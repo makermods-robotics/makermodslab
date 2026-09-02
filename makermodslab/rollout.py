@@ -1297,8 +1297,9 @@ def _verify_camera_identities(cameras: dict[str, dict[str, Any]], bindings: dict
         parts.append(
             f"{'These cameras are' if len(absent) > 1 else 'This camera is'} not connected, so "
             f"inference cannot open {'them' if len(absent) > 1 else 'it'}: {named}. Reconnect "
-            f"{'them' if len(absent) > 1 else 'it'}, or remove "
-            f"{'them' if len(absent) > 1 else 'it'} from this robot's cameras, then start again."
+            f"{'them' if len(absent) > 1 else 'it'} and start again, or remove "
+            f"{'them' if len(absent) > 1 else 'it'} from this robot's cameras and rebind the "
+            f"policy {'cameras' if len(absent) > 1 else 'camera'} before starting."
         )
     if moved:
         # Say where the camera actually IS. Without it the user is told their
