@@ -296,10 +296,15 @@ export default {
       "Each arm moves on its own to find its joint limits. Keep the area clear.",
     zeroNote:
       "Put the arm in the position shown above, then set zero. Torque stays off, so it moves freely.",
-    // Placeholder labels for media not shot yet.
     videoAuto: "Auto-calibration demo",
     poseMiddle: "Start pose: middle position",
     poseAutoStart: "Start pose for auto-calibration",
+    // Captions under the two start-pose photos. They carry the one thing the
+    // picture cannot: that the arm has to be put there BEFORE Start.
+    restingPoseCaption:
+      "This is the SO-101's resting position — the pose auto-calibration starts from. Put the arm in it before you press Start.",
+    middlePoseCaption:
+      "Put the arm in this middle position — every joint near the centre of its range — before you press Start.",
     videoUnsupported: "Your browser does not support the video tag.",
     videoLink: "Click here to view the calibration video",
     toast: {
