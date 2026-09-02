@@ -349,3 +349,115 @@ class SystemResource(Resource):
         return UpdateResult.model_validate(
             self._transport.request("POST", "/api/v1/system/update", action="Run server update")
         )
+
+    @operation("restart_server")
+    def restart(self) -> RestartResult:
+        """Restart the server process in place (same version). Refused with a
+        409 while a live session is driving hardware. Expect the connection to
+        drop, then poll ``health()`` until it answers again."""
+        return RestartResult.model_validate(
+            self._transport.request("POST", "/api/v1/system/restart", action="Restart server")
+        )
+
+    # --- CAN arms (Maker / Metal) --------------------------------------------
+
+    @operation("release_can_torque")
+    def release_can_torque(self, arm_type: str, port: str) -> ReleaseCanTorqueResult:
+        """SAFETY HAMMER for the CAN arms: de-energize every motor on the bus.
+
+        A Damiao (Metal) handshake IS the enable command, so a failed connect
+        or a killed process can leave motors energized and holding — this
+        reopens the bus without handshaking and broadcasts the disable.
+        Deliberately not a session (it must work when session state is
+        wrecked), but refused with a 409 while a live session is driving.
+
+        Example:
+            >>> client.system.release_can_torque("metal", "/dev/tty.usbmodemCAN1").success
+            True
+        """
+        return ReleaseCanTorqueResult.model_validate(
+            self._transport.request(
+                "POST",
+                "/api/v1/arms/release-torque",
+                json={"arm_type": arm_type, "port": port},
+                action="Release CAN torque",
+            )
+        )
+
+    @operation("identify_maker_arm")
+    def identify_maker_arm(
+        self,
+        device_type: str,
+        *,
+        arm_type: str | None = None,
+        ports: list[str] | None = None,
+    ) -> MakerIdentifyResult:
+        """Find which port holds a CAN-family arm of the given role
+        (``device_type``: "teleop" = leader, "robot" = follower) by probing —
+        the CAN arms have no hand-motion detection. ``ports`` narrows the
+        probe; omitted, every candidate port is tried.
+
+        Example:
+            >>> client.system.identify_maker_arm("robot", arm_type="maker").port
+            '/dev/tty.usbmodemCAN1'
+        """
+        body: dict[str, Any] = {"device_type": device_type}
+        if arm_type is not None:
+            body["arm_type"] = arm_type
+        if ports is not None:
+            body["ports"] = ports
+        return MakerIdentifyResult.model_validate(
+            self._transport.request(
+                "POST", "/api/v1/maker/identify-arm", json=body, action="Identify CAN arm"
+            )
+        )
+
+    @operation("probe_maker_arm_ports")
+    def probe_maker_arm_ports(
+        self, *, arm_type: str | None = None, ports: list[str] | None = None
+    ) -> MakerProbeResult:
+        """Classify serial ports into CAN leader / follower / unknown in one
+        sweep (the batch sibling of ``identify_maker_arm``).
+
+        Example:
+            >>> client.system.probe_maker_arm_ports(arm_type="maker").follower_ports
+            ['/dev/tty.usbmodemCAN1']
+        """
+        body: dict[str, Any] = {}
+        if arm_type is not None:
+            body["arm_type"] = arm_type
+        if ports is not None:
+            body["ports"] = ports
+        return MakerProbeResult.model_validate(
+            self._transport.request(
+                "POST", "/api/v1/maker/probe-ports", json=body, action="Probe CAN arm ports"
+            )
+        )
+
+
+class RestartResult(SdkModel):
+    """POST /api/v1/system/restart and the nodes restart proxy."""
+
+    restarting: bool
+    message: str
+
+
+class ReleaseCanTorqueResult(SdkModel):
+    success: bool
+    message: str
+    problems: list[str] = []
+
+
+class MakerIdentifyResult(SdkModel):
+    success: bool
+    message: str
+    port: str | None = None
+    skipped: list[str] = []
+
+
+class MakerProbeResult(SdkModel):
+    success: bool
+    follower_ports: list[str] = []
+    leader_ports: list[str] = []
+    unknown_ports: list[str] = []
+    message: str = ""

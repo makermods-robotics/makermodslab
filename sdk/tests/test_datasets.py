@@ -407,3 +407,22 @@ def test_status_ops_end_to_end(sdk_client):
     assert sdk_client.datasets.download_status().state in {"idle", "running", "done", "error"}
     assert sdk_client.datasets.upload_status().state in {"idle", "running", "done", "error"}
     assert sdk_client.datasets.merge_status().state in {"idle", "running", "done", "error"}
+
+
+def test_excluded_episodes_roundtrip_shapes():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            seen["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"repo_id": "u/d", "episode_indices": [3, 17]})
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"success": True, "repo_id": "u/d", "episode_indices": [3]})
+
+    with mock_client(handler) as client:
+        current = client.datasets.excluded_episodes("u/d")
+        assert current.episode_indices == [3, 17]
+        assert seen["params"] == {"repo_id": "u/d"}
+        result = client.datasets.set_excluded_episodes("u/d", [3])
+        assert result.success is True
+        assert seen["body"] == {"repo_id": "u/d", "episode_indices": [3]}

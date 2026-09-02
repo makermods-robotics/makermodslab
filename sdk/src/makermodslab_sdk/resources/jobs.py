@@ -23,9 +23,9 @@ from makermodslab_sdk.errors import InvalidRequestError, MakerModsError
 from makermodslab_sdk.resources._base import Resource, SdkModel
 
 # The server's job lifecycle (makermodslab/jobs.py):
-#   JobState = Literal["running", "done", "failed", "interrupted"]
-# "running" is the only non-terminal state, so the terminal set wait() polls
-# for is exactly the other three.
+#   JobState = Literal["queued", "running", "done", "failed", "interrupted"]
+# "queued" (waiting for the machine's one local-training slot) and "running"
+# are the live states; wait() polls through both to the terminal three.
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "interrupted"})
 
 
@@ -213,6 +213,12 @@ class Job(SdkModel):
     checkpoints_hub_steps: list[str] = []
     child_ids: list[str] = []
     ancestor_ids: list[str] = []
+    # Local training queue (state == "queued"): promotion order and FIFO seq;
+    # both 0 outside the queue.
+    queue_position: int = 0
+    queue_seq: int = 0
+    queued_hub_ref: str | None = None
+    queued_resume_ref: str | None = None
 
 
 class JobList(SdkModel):
@@ -387,6 +393,39 @@ class JobsResource(Resource):
         """
         return JobList.model_validate(
             self._transport.request("GET", "/api/v1/jobs", params={"limit": limit}, action="List jobs")
+        )
+
+    @operation("list_job_queue")
+    def queue(self) -> JobList:
+        """The local training queue, in promotion order (a submit made while
+        the machine's one training slot is busy QUEUES instead of refusing —
+        these are those runs, state "queued").
+
+        Example:
+            >>> [(j.queue_position, j.name) for j in client.jobs.queue().jobs]
+            [(1, 'act_run_a'), (2, 'act_run_b')]
+        """
+        return JobList.model_validate(
+            self._transport.request("GET", "/api/v1/jobs/queue", action="List job queue")
+        )
+
+    @operation("reorder_job_queue")
+    def reorder_queue(self, job_ids: list[str]) -> JobList:
+        """Reorder the queue to exactly ``job_ids`` (every queued id, in the
+        new order). A 409 job.queue_stale means the queue changed under you —
+        refetch ``queue()`` and retry with the current ids.
+
+        Example:
+            >>> ids = [j.id for j in client.jobs.queue().jobs]
+            >>> client.jobs.reorder_queue(ids[::-1])  # reverse the order
+        """
+        return JobList.model_validate(
+            self._transport.request(
+                "POST",
+                "/api/v1/jobs/queue/reorder",
+                json={"job_ids": job_ids},
+                action="Reorder job queue",
+            )
         )
 
     @operation("get_job")

@@ -71,3 +71,78 @@ def test_remove_unknown_end_to_end(sdk_client):
     with pytest.raises(NotFoundError) as excinfo:
         sdk_client.nodes.remove("0" * 32)
     assert excinfo.value.code == "node.not_found"
+
+
+def test_workload_proxy_paths_and_expect_state():
+    peer = "cd" * 16
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, dict(request.url.params)))
+        if request.url.path.endswith("/jobs") or request.url.path.endswith("/queue"):
+            return httpx.Response(200, json={"jobs": []})
+        if request.url.path.endswith("/logs"):
+            return httpx.Response(200, json={"logs": []})
+        if request.url.path.endswith("/stop"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "j1",
+                    "name": "run",
+                    "state": "interrupted",
+                    "config": {"dataset_repo_id": "u/d"},
+                    "output_dir": "outputs/train/j1",
+                    "started_at": 1.0,
+                },
+            )
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        if request.url.path.endswith("/restart"):
+            return httpx.Response(200, json={"restarting": True, "message": "bye"})
+        return httpx.Response(200, json={"state": "idle", "logs": []})
+
+    with mock_client(handler) as client:
+        client.nodes.jobs(peer)
+        client.nodes.job_queue(peer)
+        client.nodes.job_logs(peer, "j1")
+        stopped = client.nodes.stop_job(peer, "j1", expect_state="queued")
+        client.nodes.delete_job(peer, "j1")
+        assert client.nodes.restart(peer).restarting is True
+    assert stopped.state == "interrupted"
+    assert calls[0][1] == f"/api/v1/nodes/{peer}/jobs"
+    assert calls[1][1] == f"/api/v1/nodes/{peer}/jobs/queue"
+    assert calls[3][2] == {"expect_state": "queued"}  # cancel precondition rides as query
+    assert calls[4][0] == "DELETE"
+
+
+def test_node_policy_extra_proxy_paths():
+    peer = "cd" * 16
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/install"):
+            return httpx.Response(200, json={"started": True, "message": "installing"})
+        if request.url.path.endswith("/install-status"):
+            return httpx.Response(200, json={"state": "running"})
+        return httpx.Response(
+            200,
+            json={
+                "policy_type": "pi0",
+                "needs_extra": True,
+                "available": False,
+                "package": "lerobot[pi0]",
+                "install_target": "lerobot[pi0]",
+                "install_hint": "install it",
+            },
+        )
+
+    with mock_client(handler) as client:
+        assert client.nodes.policy_extra(peer, "pi0").needs_extra is True
+        assert client.nodes.install_policy_extra(peer, "pi0").started is True
+        assert client.nodes.policy_extra_install_status(peer, "pi0").state == "running"
+    assert paths == [
+        f"/api/v1/nodes/{peer}/policy-extra/pi0",
+        f"/api/v1/nodes/{peer}/policy-extra/pi0/install",
+        f"/api/v1/nodes/{peer}/policy-extra/pi0/install-status",
+    ]

@@ -3,6 +3,8 @@ lines up — SDK → httpx → FastAPI routing → handler → response model �
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from makermodslab_sdk import ApiError, NotFoundError
 from makermodslab_sdk.resources.system import Health
@@ -42,9 +44,9 @@ def test_coded_error_end_to_end(sdk_client):
 
 def test_validation_error_end_to_end(sdk_client):
     """A real FastAPI 422 arrives typed, with the field list flattened into
-    readable prose. (At this snapshot the server doesn't yet stamp
-    request.validation on 422 bodies — classification is by status, and the
-    SDK accepts the code when newer servers add it.)"""
+    readable prose. Since the 2026-09 staging sync the server stamps
+    request.validation on 422 bodies APP-WIDE (a global handler — FastAPI
+    rejects before endpoint code runs), so the code is asserted too."""
     from makermodslab_sdk import InvalidRequestError
 
     with pytest.raises(InvalidRequestError) as excinfo:
@@ -53,6 +55,8 @@ def test_validation_error_end_to_end(sdk_client):
         )
     err = excinfo.value
     assert err.status == 422
+    assert err.code == "request.validation"
+    assert err.suggestion is not None
     assert err.detail  # normalized, human-readable, not a repr of the list
     assert "[{" not in err.detail
 
@@ -161,3 +165,63 @@ def test_robot_port_end_to_end(sdk_client):
     port = sdk_client.system.robot_port("follower")
     assert port.status == "success"
     assert isinstance(port.default_port, str)
+
+
+def test_release_can_torque_sends_arm_and_port():
+    import httpx
+    from helpers import mock_client
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"success": True, "message": "released", "problems": []})
+
+    with mock_client(handler) as client:
+        result = client.system.release_can_torque("metal", "/dev/tty.usbmodemCAN1")
+    assert seen["path"] == "/api/v1/arms/release-torque"
+    assert seen["body"] == {"arm_type": "metal", "port": "/dev/tty.usbmodemCAN1"}
+    assert result.success is True
+
+
+def test_maker_probe_and_identify_omit_unset_fields():
+    import httpx
+    from helpers import mock_client
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.url.path] = json.loads(request.read())
+        if request.url.path.endswith("identify-arm"):
+            return httpx.Response(
+                200, json={"success": True, "message": "found", "port": "/dev/x", "skipped": []}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "follower_ports": ["/dev/x"],
+                "leader_ports": [],
+                "unknown_ports": [],
+                "message": "",
+            },
+        )
+
+    with mock_client(handler) as client:
+        assert client.system.identify_maker_arm("robot").port == "/dev/x"
+        assert seen["/api/v1/maker/identify-arm"] == {"device_type": "robot"}
+        client.system.probe_maker_arm_ports(arm_type="maker")
+        assert seen["/api/v1/maker/probe-ports"] == {"arm_type": "maker"}
+
+
+def test_restart_shape():
+    import httpx
+    from helpers import mock_client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/system/restart"
+        return httpx.Response(200, json={"restarting": True, "message": "restarting"})
+
+    with mock_client(handler) as client:
+        assert client.system.restart().restarting is True

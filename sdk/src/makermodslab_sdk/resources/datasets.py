@@ -605,3 +605,54 @@ class DatasetsResource(Resource):
             poll_interval=poll_interval,
             sleep_fn=sleep_fn,
         )
+
+    @operation("datasets_excluded_episodes")
+    def excluded_episodes(self, repo_id: str) -> ExcludedEpisodes:
+        """The episodes marked as excluded from training for one dataset.
+
+        Example:
+            >>> client.datasets.excluded_episodes("maker/pick-place").episode_indices
+            [3, 17]
+        """
+        return ExcludedEpisodes.model_validate(
+            self._transport.request(
+                "GET",
+                "/api/v1/datasets/excluded-episodes",
+                params={"repo_id": repo_id},
+                action="Get excluded episodes",
+            )
+        )
+
+    @operation("datasets_set_excluded_episodes")
+    def set_excluded_episodes(self, repo_id: str, episode_indices: list[int]) -> ExcludedEpisodesSet:
+        """Replace the exclusion set (the FULL list, not a delta — pass ``[]``
+        to clear). Excluded episodes stay in the dataset; training skips them.
+
+        Example:
+            >>> client.datasets.set_excluded_episodes("maker/pick-place", [3, 17]).success
+            True
+        """
+        return ExcludedEpisodesSet.model_validate(
+            self._transport.request(
+                "PUT",
+                "/api/v1/datasets/excluded-episodes",
+                json={"repo_id": repo_id, "episode_indices": episode_indices},
+                action="Set excluded episodes",
+            )
+        )
+
+
+class ExcludedEpisodes(SdkModel):
+    """GET /api/v1/datasets/excluded-episodes — the training-time exclusion
+    set for one dataset (episodes marked bad; training skips them)."""
+
+    repo_id: str
+    episode_indices: list[int]
+
+
+class ExcludedEpisodesSet(SdkModel):
+    """PUT /api/v1/datasets/excluded-episodes — the persisted result."""
+
+    success: bool
+    repo_id: str
+    episode_indices: list[int]

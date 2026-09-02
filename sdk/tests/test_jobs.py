@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 from helpers import mock_client
-from makermodslab_sdk import ApiError, JobWaitTimeout, MakerModsError, NotFoundError
+from makermodslab_sdk import JobWaitTimeout, MakerModsError, NotFoundError
 from makermodslab_sdk.resources.jobs import (
     TERMINAL_STATES,
     Checkpoint,
@@ -471,17 +471,16 @@ def test_list_end_to_end(sdk_client):
         assert job.state in TERMINAL_STATES | {"running"}
 
 
-def test_get_missing_job_end_to_end_is_uncoded_404(sdk_client):
-    """SERVER FACT at this snapshot: get_job raises a plain HTTPException — the
-    404 body has a string detail and NO `code`, so it decodes as a plain
-    ApiError (code None), not NotFoundError."""
-    with pytest.raises(ApiError) as excinfo:
+def test_get_missing_job_end_to_end_is_coded_404(sdk_client):
+    """SERVER FACT since the 2026-09 staging sync: jobs-route 404s carry
+    job.not_found (they were uncoded at the c846d1d snapshot), so they decode
+    to the typed, remediated NotFoundError."""
+    with pytest.raises(NotFoundError) as excinfo:
         sdk_client.jobs.get("__sdk_test_missing__")
     err = excinfo.value
-    assert type(err) is ApiError
-    assert not isinstance(err, NotFoundError)
     assert err.status == 404
-    assert err.code is None
+    assert err.code == "job.not_found"
+    assert "client.jobs.list()" in str(err)
     assert "__sdk_test_missing__" in (err.detail or "")
 
 
@@ -571,3 +570,39 @@ def test_create_training_config_passthrough_skips_validation_and_wins():
     cfg = seen["body"]["config"]
     assert cfg["steps"] == 99
     assert cfg["field_newer_than_sdk"] is True
+
+
+def test_queue_and_reorder():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        if request.url.path.endswith("/reorder"):
+            seen["body"] = json.loads(request.read())
+        return httpx.Response(
+            200,
+            json={"jobs": [job_body(id="q1", state="queued", queue_position=1, queue_seq=7)]},
+        )
+
+    with mock_client(handler) as client:
+        queued = client.jobs.queue().jobs
+        assert seen["path"] == "/api/v1/jobs/queue"
+        assert queued[0].state == "queued"
+        assert queued[0].queue_position == 1
+        assert queued[0].queue_seq == 7
+        client.jobs.reorder_queue(["q2", "q1"])
+        assert seen["path"] == "/api/v1/jobs/queue/reorder"
+        assert seen["body"] == {"job_ids": ["q2", "q1"]}
+
+
+def test_wait_polls_through_queued_state():
+    states = iter(["queued", "queued", "running", "done"])
+    sleeps = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=job_body(state=next(states)))
+
+    with mock_client(handler) as client:
+        job = client.jobs.wait("j1", poll_interval=2.0, sleep_fn=sleeps.append)
+    assert job.state == "done"
+    assert sleeps == [2.0, 2.0, 2.0]  # queued is live, not terminal

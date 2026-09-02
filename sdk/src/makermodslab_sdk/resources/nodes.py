@@ -8,9 +8,17 @@ hint, never a promise.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.resources._base import Resource, SdkModel
+from makermodslab_sdk.resources.jobs import Job, JobList, JobLogs
+from makermodslab_sdk.resources.system import (
+    InstallStart,
+    InstallStatus,
+    PolicyExtraStatus,
+    RestartResult,
+)
 
 
 class Node(SdkModel):
@@ -74,3 +82,122 @@ class NodesResource(Resource):
         return NodeRemoveResult.model_validate(
             self._transport.request("DELETE", f"/api/v1/nodes/{instance_id}", action="Remove node")
         )
+
+    # --- workload proxies (this server relays to the peer's own v1 API) ------
+    # Peer-error semantics, by design: MUTATIONS pass the peer's coded
+    # refusals through untouched; a GET whose peer cannot be reached flattens
+    # to node.unreachable.
+
+    @operation("get_node_jobs")
+    def jobs(self, instance_id: str) -> JobList:
+        """The peer's recent training jobs (its own /jobs listing, relayed).
+
+        Example:
+            >>> [(j.name, j.state) for j in client.nodes.jobs(peer_id).jobs]
+            [('act_run', 'running')]
+        """
+        return JobList.model_validate(
+            self._transport.request("GET", self._path(instance_id, "/jobs"), action="List node jobs")
+        )
+
+    @operation("get_node_queue")
+    def job_queue(self, instance_id: str) -> JobList:
+        """The peer's local training queue, in promotion order."""
+        return JobList.model_validate(
+            self._transport.request(
+                "GET", self._path(instance_id, "/jobs/queue"), action="List node job queue"
+            )
+        )
+
+    @operation("get_node_job")
+    def job(self, instance_id: str, job_id: str) -> Job:
+        """One job on the peer by id. Known niggle at this snapshot: a
+        deleted job reads as node.unreachable here (the GET flattening)."""
+        return Job.model_validate(
+            self._transport.request(
+                "GET", self._path(instance_id, f"/jobs/{quote(job_id, safe='')}"), action="Get node job"
+            )
+        )
+
+    @operation("get_node_job_logs")
+    def job_logs(self, instance_id: str, job_id: str) -> JobLogs:
+        """Drain the peer job's live log tail (lines since the last call)."""
+        return JobLogs.model_validate(
+            self._transport.request(
+                "GET",
+                self._path(instance_id, f"/jobs/{quote(job_id, safe='')}/logs"),
+                action="Get node job logs",
+            )
+        )
+
+    @operation("stop_node_job")
+    def stop_job(self, instance_id: str, job_id: str, *, expect_state: str | None = None) -> Job:
+        """Stop (or cancel) a job on the peer. ``expect_state="queued"``
+        cancels a queued run and refuses with job.state_changed if it was
+        promoted meanwhile — the precondition that makes cancel race-safe."""
+        params = {"expect_state": expect_state} if expect_state is not None else None
+        return Job.model_validate(
+            self._transport.request(
+                "POST",
+                self._path(instance_id, f"/jobs/{quote(job_id, safe='')}/stop"),
+                params=params,
+                action="Stop node job",
+            )
+        )
+
+    @operation("delete_node_job")
+    def delete_job(self, instance_id: str, job_id: str) -> None:
+        """Delete a finished job's record and outputs on the peer."""
+        self._transport.request(
+            "DELETE",
+            self._path(instance_id, f"/jobs/{quote(job_id, safe='')}"),
+            action="Delete node job",
+        )
+
+    @operation("get_node_policy_extra")
+    def policy_extra(self, instance_id: str, policy_type: str) -> PolicyExtraStatus:
+        """Whether the PEER has a policy type's optional dependency installed
+        — check before offloading a run that needs it."""
+        return PolicyExtraStatus.model_validate(
+            self._transport.request(
+                "GET",
+                self._path(instance_id, f"/policy-extra/{quote(policy_type, safe='')}"),
+                action="Get node policy extra",
+            )
+        )
+
+    @operation("install_node_policy_extra")
+    def install_policy_extra(self, instance_id: str, policy_type: str) -> InstallStart:
+        """Start installing a policy extra ON THE PEER (async; poll
+        ``policy_extra_install_status``)."""
+        return InstallStart.model_validate(
+            self._transport.request(
+                "POST",
+                self._path(instance_id, f"/policy-extra/{quote(policy_type, safe='')}/install"),
+                action="Install node policy extra",
+            )
+        )
+
+    @operation("get_node_policy_extra_status")
+    def policy_extra_install_status(self, instance_id: str, policy_type: str) -> InstallStatus:
+        """Progress of the peer's policy-extra install."""
+        return InstallStatus.model_validate(
+            self._transport.request(
+                "GET",
+                self._path(instance_id, f"/policy-extra/{quote(policy_type, safe='')}/install-status"),
+                action="Node policy extra install status",
+            )
+        )
+
+    @operation("restart_node")
+    def restart(self, instance_id: str) -> RestartResult:
+        """Restart the peer's server process (refused while a live session is
+        driving its hardware). The peer drops offline briefly — client.nodes
+        listings show it alive again once it's back."""
+        return RestartResult.model_validate(
+            self._transport.request("POST", self._path(instance_id, "/restart"), action="Restart node")
+        )
+
+    @staticmethod
+    def _path(instance_id: str, suffix: str = "") -> str:
+        return f"/api/v1/nodes/{quote(instance_id, safe='')}{suffix}"

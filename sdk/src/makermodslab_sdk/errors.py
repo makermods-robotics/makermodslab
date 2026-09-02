@@ -55,6 +55,26 @@ REMEDIATIONS: dict[str, str] = {
     "robot.busy.releasing": (
         "The arm is still returning to rest from the previous session — wait a few seconds and retry."
     ),
+    "robot.busy.training": (
+        "A local training run holds the machine (GPU and the arms' USB bus). Wait for it or stop it "
+        "with client.jobs.stop(job_id); note a training SUBMIT never hits this — it queues instead "
+        "(client.jobs.queue())."
+    ),
+    "job.queue_stale": (
+        "The reorder named a set of runs that is no longer the queue — refetch client.jobs.queue() "
+        "and retry with the current ids. This is the one 409 in the queue family a retry can clear."
+    ),
+    "job.state_changed": (
+        "The job's state changed since you looked (your expect_state no longer holds) — refetch "
+        "client.jobs.get(job_id) and re-decide."
+    ),
+    "job.has_queued_dependents": (
+        "A QUEUED run will train from this job's checkpoint — cancel that queued run first "
+        "(client.jobs.queue() shows it), then retry."
+    ),
+    "job.removal_failed": (
+        "The record could not be unlinked; nothing was removed — safe to retry client.jobs.delete(job_id)."
+    ),
     "hardware.port_unavailable": (
         "The serial port could not be opened — check the USB cable is plugged in and that no other "
         "process holds the port, then retry."
