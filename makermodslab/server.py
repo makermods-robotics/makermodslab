@@ -2997,9 +2997,11 @@ def get_job_checkpoints(job_id: str, lineage: bool = False):
 )
 def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
-    policy_type, image_features (per-camera height/width), requires_task, and
-    the flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
-    modal uses to flag a single-arm/bimanual mismatch."""
+    policy_type, image_features (per-camera height/width), requires_task, the
+    flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
+    modal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type
+    (the arm the checkpoint was trained on, for the fine-tune panel's cross-arm
+    warning; null when it can't be established)."""
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:

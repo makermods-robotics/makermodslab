@@ -3501,3 +3501,39 @@ def test_dataset_in_use_sees_every_active_run_not_a_page(tmp_lerobot_home: Path)
     with _patch.object(jobs, "job_registry", reg):
         assert _dataset_in_use("user/held") is not None
         assert _dataset_in_use("user/untouched") is None
+
+
+# --- read_dataset_robot_type ------------------------------------------------
+
+
+def test_read_dataset_robot_type_reads_the_local_info_json(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import read_dataset_robot_type
+
+    _write_info(tmp_lerobot_home, "alice/pick", {"robot_type": "maker_follower", "features": {}})
+    assert read_dataset_robot_type("alice/pick") == "maker_follower"
+
+
+def test_read_dataset_robot_type_is_none_when_absent_or_blank(tmp_lerobot_home: Path) -> None:
+    from makermodslab.datasets import read_dataset_robot_type
+
+    _write_info(tmp_lerobot_home, "alice/no_tag", {"features": {}})
+    _write_info(tmp_lerobot_home, "alice/blank_tag", {"robot_type": "  ", "features": {}})
+    assert read_dataset_robot_type("alice/no_tag") is None
+    assert read_dataset_robot_type("alice/blank_tag") is None
+    assert read_dataset_robot_type("alice/not_local_and_offline") is None
+
+
+def test_read_dataset_robot_type_is_local_only_never_hits_the_hub() -> None:
+    """Deliberately no Hub fallback — the one caller is a synchronous GET
+    handler and this is a display nicety, so a not-cached dataset is just
+    "can't tell"."""
+    from makermodslab import datasets as ds
+
+    with (
+        patch("makermodslab.datasets._resolve_local_dataset_path", return_value=None),
+        patch(
+            "makermodslab.datasets.hf_hub_download",
+            side_effect=AssertionError("must not download"),
+        ),
+    ):
+        assert ds.read_dataset_robot_type("bob/not-cached") is None

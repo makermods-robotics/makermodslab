@@ -235,10 +235,16 @@ class ImportResponse(BaseModel):
 
 class MergeStartResponse(BaseModel):
     """merge.py MergeManager.start — unlike the download routes, the
-    started=False refusals return 200 with the reason in `message`."""
+    started=False refusals return 200 with the reason in `message`.
+
+    `warnings` is populated only when a merge is refused pending confirmation
+    (the sources span more than one arm family): the client shows them and
+    re-submits with `acknowledge_warnings=true`. Empty on every other outcome.
+    """
 
     started: bool
     message: str
+    warnings: list[str] = []
 
 
 class MergeLogEntry(BaseModel):

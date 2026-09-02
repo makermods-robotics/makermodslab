@@ -120,13 +120,17 @@ class CheckpointPolicyConfigResponse(BaseModel):
     """jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice
     of a checkpoint's pretrained_model/config.json. policy_type passes through
     from the file's "type" key (null when absent); state_dim/action_dim are
-    null when the checkpoint omits the feature."""
+    null when the checkpoint omits the feature. trained_on_robot_type is the
+    raw lerobot robot_type of the checkpoint's training dataset (recovered via
+    train_config.json), null when it can't be established — the fine-tune
+    panel compares it against the selected dataset's arm."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
     requires_task: bool
     state_dim: int | None
     action_dim: int | None
+    trained_on_robot_type: str | None
 
 
 class HubJobStatus(BaseModel):

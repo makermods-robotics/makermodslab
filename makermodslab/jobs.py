@@ -40,7 +40,7 @@ from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
 from tqdm.auto import tqdm as _base_tqdm
 
-from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
+from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features, read_dataset_robot_type
 from .train import TrainingRequest
 from .utils.config import validate_job_name
 from .utils.errors import is_out_of_memory
@@ -5113,7 +5113,14 @@ class JobRegistry:
     def get_policy_config_summary(self, job_id: str, step: int) -> dict[str, object]:
         """Read the checkpoint's pretrained_model/config.json and return only
         the UX-relevant slice: policy type, expected camera names + their
-        height/width, and whether the policy needs a --task string."""
+        height/width, whether the policy needs a --task string, the flat
+        state/action widths, and the arm the checkpoint was trained on.
+
+        The arm isn't in config.json — it's recovered via train_config.json's
+        dataset repo id → that dataset's meta/info.json robot_type. None
+        whenever any hop can't be made (an imported flat model, a deleted
+        training dataset, an untagged one); the fine-tune panel treats None as
+        "can't tell", not "matches"."""
         with self._lock:
             record = self._records.get(job_id)
         if record is None:
@@ -5135,6 +5142,27 @@ class JobRegistry:
             )
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
+        # The arm the checkpoint was trained on, for the fine-tune panel's
+        # cross-arm warning: train_config.json names the training dataset, and
+        # that dataset's meta/info.json names the robot. LOCAL checkpoints only
+        # — for a hub checkpoint read_checkpoint_train_config is itself a Hub
+        # download, and read_dataset_robot_type (local-only) would almost
+        # always return None for its training dataset anyway. Not worth a
+        # network round-trip on this synchronous GET.
+        train_cfg = read_checkpoint_train_config(match) if match.source == "local" else {}
+        train_dataset = train_cfg.get("dataset")
+        base_dataset_repo_id = (
+            train_dataset.get("repo_id") if isinstance(train_dataset, dict) else None
+        ) or record.config.dataset_repo_id
+        trained_on_robot_type = (
+            read_dataset_robot_type(base_dataset_repo_id)
+            # "(imported)" is the placeholder an import's config carries — not a
+            # real repo id, so don't even try to resolve it.
+            if isinstance(base_dataset_repo_id, str)
+            and base_dataset_repo_id
+            and base_dataset_repo_id != "(imported)"
+            else None
+        )
         input_features = cfg.get("input_features") or {}
         image_features: dict[str, dict[str, int]] = {}
         for full_name, feat in input_features.items():
@@ -5159,6 +5187,9 @@ class JobRegistry:
             # the user hits Start. None when the checkpoint omits the feature.
             "state_dim": _flat_feature_dim(input_features.get("observation.state")),
             "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
+            # Raw lerobot robot_type string (e.g. "maker_follower"); the client
+            # normalises it. None when it can't be established.
+            "trained_on_robot_type": trained_on_robot_type,
         }
 
     def _queued_dependents_of(self, record: JobRecord) -> builtins.list[str]:

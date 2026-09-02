@@ -32,6 +32,7 @@ def _write_info(
     codec: str | None = None,
     crf: int = 30,
     width: int = 640,
+    robot_type: str = "so101_follower",
 ) -> None:
     """Write a minimal ``<cache>/<repo_id>/meta/info.json`` for the helper to read.
 
@@ -74,7 +75,7 @@ def _write_info(
     meta_dir = cache / repo_id / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     (meta_dir / "info.json").write_text(
-        json.dumps({"fps": fps, "robot_type": "so101_follower", "features": features})
+        json.dumps({"fps": fps, "robot_type": robot_type, "features": features})
     )
 
 
@@ -124,6 +125,151 @@ def test_merge_incompatibility_skips_when_not_local(tmp_lerobot_home: Path) -> N
     # Only one source is present locally → can't compare → don't block.
     _write_info(tmp_lerobot_home, "a/one", cameras=("front", "wrist", "side"))
     assert _merge_incompatibility(["a/one", "a/hub-only"]) is None
+
+
+def test_merge_incompatibility_names_the_arm_difference_on_a_shape_clash(
+    tmp_lerobot_home: Path,
+) -> None:
+    """An SO-101 (6-DOF) vs Maker (7-DOF) merge is still refused on the
+    state/action shape — but the message now says the sources are different
+    robots instead of a bare 'differ in action, observation.state'."""
+    from makermodslab.merge import _merge_incompatibility
+
+    _write_info(tmp_lerobot_home, "a/so", action_shape=(6,), robot_type="so101_follower")
+    _write_info(tmp_lerobot_home, "a/maker", action_shape=(7,), robot_type="maker_follower")
+    msg = _merge_incompatibility(["a/so", "a/maker"])
+    assert msg is not None
+    assert "different robots" in msg
+    assert "SO-101" in msg and "Maker" in msg
+
+
+def test_arm_mismatch_warning_is_none_for_one_arm_family(tmp_lerobot_home: Path) -> None:
+    from makermodslab.merge import _arm_mismatch_warning
+
+    _write_info(tmp_lerobot_home, "a/one", robot_type="so101_follower")
+    _write_info(tmp_lerobot_home, "a/two", robot_type="bi_so_follower")
+    assert _arm_mismatch_warning(["a/one", "a/two"]) is None
+
+
+def test_arm_mismatch_warning_flags_two_arm_families(tmp_lerobot_home: Path) -> None:
+    """Maker and Metal are both 7-DOF, so this pair merges cleanly at the file
+    level — the warning is the only thing standing between the user and a
+    two-robot dataset."""
+    from makermodslab.merge import _arm_mismatch_warning
+
+    _write_info(tmp_lerobot_home, "a/maker", action_shape=(7,), robot_type="maker_follower")
+    _write_info(tmp_lerobot_home, "a/metal", action_shape=(7,), robot_type="metal_follower")
+    msg = _arm_mismatch_warning(["a/maker", "a/metal"])
+    assert msg is not None
+    assert "`a/maker`" in msg and "`a/metal`" in msg
+    assert "Maker" in msg and "Metal" in msg
+
+
+def test_arm_mismatch_warning_ignores_sources_with_an_unprovable_arm(
+    tmp_lerobot_home: Path,
+) -> None:
+    from makermodslab.merge import _arm_mismatch_warning
+
+    _write_info(tmp_lerobot_home, "a/maker", robot_type="maker_follower")
+    _write_info(tmp_lerobot_home, "a/mystery", robot_type="some-diy-rig")
+    assert _arm_mismatch_warning(["a/maker", "a/mystery"]) is None
+
+
+def test_arm_mismatch_warning_does_not_hub_probe_a_local_source_missing_a_tag(
+    tmp_lerobot_home: Path, monkeypatch
+) -> None:
+    """A local dataset with no robot_type key must NOT trigger a Hub fetch —
+    it's local, we already have its info.json."""
+    import makermodslab.datasets as datasets_mod
+    from makermodslab.merge import _arm_mismatch_warning
+
+    _write_info(tmp_lerobot_home, "a/maker", robot_type="maker_follower")
+    (tmp_lerobot_home / "a/untagged" / "meta").mkdir(parents=True)
+    (tmp_lerobot_home / "a/untagged" / "meta" / "info.json").write_text(json.dumps({"features": {}}))
+    monkeypatch.setattr(
+        datasets_mod,
+        "get_hub_dataset_info",
+        lambda repo_id: pytest.fail(f"unexpected Hub probe for {repo_id}"),
+    )
+    assert _arm_mismatch_warning(["a/maker", "a/untagged"]) is None
+
+
+def test_dataset_arm_types_reads_a_hub_only_source(tmp_lerobot_home: Path, monkeypatch) -> None:
+    import makermodslab.datasets as datasets_mod
+    from makermodslab.merge import _dataset_arm_types
+
+    _write_info(tmp_lerobot_home, "a/maker", robot_type="maker_follower")
+    monkeypatch.setattr(
+        datasets_mod,
+        "get_hub_dataset_info",
+        lambda repo_id: {"robot_type": "so101_follower"} if repo_id == "a/hub" else None,
+    )
+    assert _dataset_arm_types(["a/maker", "a/hub"]) == {"a/maker": "maker", "a/hub": "so101"}
+
+
+def test_merge_hard_refuses_cross_dof_arms_and_ack_cannot_bypass_it(
+    tmp_lerobot_home: Path,
+) -> None:
+    """SO-101 (6) vs Maker (7) is a real feature-shape incompatibility, not an
+    advisory: `acknowledge_warnings` must not get past it."""
+    from makermodslab.merge import MergeManager, MergeRequest
+
+    _write_dataset_tree(tmp_lerobot_home, "a/so", action_shape=(6,), robot_type="so101_follower")
+    _write_dataset_tree(tmp_lerobot_home, "a/maker", action_shape=(7,), robot_type="maker_follower")
+    mgr = MergeManager()
+    res = mgr.start(
+        MergeRequest(
+            source_repo_ids=["a/so", "a/maker"],
+            output_repo_id="a/mixed",
+            acknowledge_warnings=True,
+        )
+    )
+    assert res["started"] is False
+    assert res.get("warnings", []) == []
+    assert "different robots" in res["message"]
+    assert mgr.state == "idle"
+
+
+def test_merge_refuses_cross_arm_until_acknowledged(tmp_lerobot_home: Path) -> None:
+    from makermodslab.merge import MergeManager, MergeRequest
+
+    _write_dataset_tree(tmp_lerobot_home, "a/maker", action_shape=(7,), robot_type="maker_follower")
+    _write_dataset_tree(tmp_lerobot_home, "a/metal", action_shape=(7,), robot_type="metal_follower")
+    mgr = MergeManager()
+    res = mgr.start(MergeRequest(source_repo_ids=["a/maker", "a/metal"], output_repo_id="a/mixed"))
+    assert res["started"] is False
+    assert res["warnings"] and "different robot arms" in res["warnings"][0]
+    assert mgr.state == "idle"  # no subprocess spawned
+
+
+def test_merge_proceeds_cross_arm_once_acknowledged(tmp_lerobot_home: Path, monkeypatch) -> None:
+    import types
+
+    from makermodslab import merge as merge_mod
+    from makermodslab.merge import MergeManager, MergeRequest
+
+    _write_dataset_tree(tmp_lerobot_home, "a/maker", action_shape=(7,), robot_type="maker_follower")
+    _write_dataset_tree(tmp_lerobot_home, "a/metal", action_shape=(7,), robot_type="metal_follower")
+
+    monkeypatch.setattr(
+        merge_mod.subprocess,
+        "Popen",
+        lambda *a, **k: types.SimpleNamespace(stdout=iter(()), wait=lambda: 0, returncode=0),
+    )
+    monkeypatch.setattr(
+        merge_mod.threading, "Thread", lambda *a, **k: types.SimpleNamespace(start=lambda: None)
+    )
+
+    mgr = MergeManager()
+    res = mgr.start(
+        MergeRequest(
+            source_repo_ids=["a/maker", "a/metal"],
+            output_repo_id="a/mixed",
+            acknowledge_warnings=True,
+        )
+    )
+    assert res["started"] is True
+    assert mgr.state == "running"
 
 
 def test_merge_rejects_fewer_than_two_sources() -> None:
@@ -263,7 +409,14 @@ def test_run_cli_leaves_preexisting_output_on_failure(tmp_lerobot_home: Path, mo
     assert (output_root / "sentinel.txt").read_text() == "keep me"
 
 
-def _write_dataset_tree(cache: Path, repo_id: str, *, total_episodes: int = 1) -> None:
+def _write_dataset_tree(
+    cache: Path,
+    repo_id: str,
+    *,
+    total_episodes: int = 1,
+    robot_type: str = "so101_follower",
+    action_shape: tuple[int, ...] = (6,),
+) -> None:
     """Write a fully-populated local dataset (info.json + the required files)."""
     _write_info(cache, repo_id)
     root = cache / repo_id
@@ -271,11 +424,11 @@ def _write_dataset_tree(cache: Path, repo_id: str, *, total_episodes: int = 1) -
         json.dumps(
             {
                 "fps": 30,
-                "robot_type": "so101_follower",
+                "robot_type": robot_type,
                 "total_episodes": total_episodes,
                 "features": {
-                    "action": {"dtype": "float32", "shape": [6]},
-                    "observation.state": {"dtype": "float32", "shape": [6]},
+                    "action": {"dtype": "float32", "shape": list(action_shape)},
+                    "observation.state": {"dtype": "float32", "shape": list(action_shape)},
                     "observation.images.front": {"dtype": "video", "shape": [480, 640, 3]},
                     "observation.images.wrist": {"dtype": "video", "shape": [480, 640, 3]},
                 },

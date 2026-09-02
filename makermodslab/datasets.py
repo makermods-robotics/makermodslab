@@ -1632,22 +1632,15 @@ def is_dataset_private(repo_id: str) -> bool | None:
     return bool(getattr(info, "private", False))
 
 
-def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
-    """The RAW ``features`` map from a dataset's ``meta/info.json``.
-
-    The other readers above summarise info.json for a UI card (camera names,
-    episode counts); this one hands back the feature specs untouched —
-    ``dtype``/``shape``/``names`` per key — because the fine-tune preflight in
-    jobs.py compares them dimension-for-dimension against a checkpoint's own
-    ``input_features``/``output_features``. Local first (a plain file read, no
-    network), falling back to fetching just ``meta/info.json`` from the Hub for
-    a dataset with no local copy — the same tiny file get_hub_dataset_info
+def _read_dataset_info_json(repo_id: str) -> dict[str, Any] | None:
+    """A dataset's whole ``meta/info.json`` as a dict, local first (a plain file
+    read, no network) then falling back to fetching just that one tiny file from
+    the Hub for a dataset with no local copy — the same file get_hub_dataset_info
     uses.
 
     Returns None when it can't be read — not local, offline, absent/private
-    repo, malformed JSON, or no ``features`` map. None means "not established",
-    never "fine": a caller must treat it as a reason to stay silent rather than
-    as a clean bill of health.
+    repo, malformed JSON. None means "not established", never "fine": callers
+    must treat it as a reason to stay silent rather than a clean bill of health.
     """
     path = _resolve_local_dataset_path(repo_id)
     if path is not None:
@@ -1664,11 +1657,52 @@ def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
             )
             info = json.loads(Path(local).read_text())
         except Exception as exc:
-            logger.info("dataset features fetch for %s failed: %s", repo_id, exc)
+            logger.info("dataset info.json fetch for %s failed: %s", repo_id, exc)
             return None
+    return info if isinstance(info, dict) else None
 
-    features = info.get("features") if isinstance(info, dict) else None
+
+def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
+    """The RAW ``features`` map from a dataset's ``meta/info.json``.
+
+    The other readers above summarise info.json for a UI card (camera names,
+    episode counts); this one hands back the feature specs untouched —
+    ``dtype``/``shape``/``names`` per key — because the fine-tune preflight in
+    jobs.py compares them dimension-for-dimension against a checkpoint's own
+    ``input_features``/``output_features``.
+
+    Returns None when it can't be read (see _read_dataset_info_json) or carries
+    no ``features`` map. None means "not established", never "fine".
+    """
+    info = _read_dataset_info_json(repo_id)
+    features = info.get("features") if info is not None else None
     return features if isinstance(features, dict) else None
+
+
+def read_dataset_robot_type(repo_id: str) -> str | None:
+    """The raw ``robot_type`` string from a locally-cached dataset's
+    ``meta/info.json``, or None.
+
+    lerobot writes the recording robot's ``.name`` here (``so101_follower``,
+    ``bi_maker_follower``, …); a dataset recorded elsewhere can carry anything.
+    Callers normalise it with ``arm_capabilities.arm_type_from_robot_type`` to
+    decide whether a cross-arm fine-tune warning applies.
+
+    LOCAL ONLY — deliberately no Hub fallback. The one caller
+    (``get_policy_config_summary``) runs inside a synchronous GET handler and
+    this is a display nicety; a Hub round-trip there (for an imported model or
+    an uncached training dataset) would be a latency regression for no real
+    gain. None means "not established" — stay silent, don't warn.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    robot_type = info.get("robot_type") if isinstance(info, dict) else None
+    return robot_type if isinstance(robot_type, str) and robot_type.strip() else None
 
 
 class DatasetRenameError(Exception):
