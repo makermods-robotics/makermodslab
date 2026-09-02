@@ -98,6 +98,7 @@ from .eval_protocol import (
     REASON_STOPPED,
     format_event,
 )
+from .log_exceptions import restore_traceback_rendering
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,11 @@ def run(cfg: RolloutConfig) -> None:
     they mean there. `--duration` is the per-EPISODE limit, not a session
     budget: the runner has no idea how many episodes it will be asked for."""
     init_logging()
+    # lerobot's init_logging leaves a formatter that never renders exc_info, so
+    # every `logger.exception` in this process would otherwise be an ordinary
+    # one-line error. See log_exceptions — this cost a day of diagnosing a
+    # takeover glide failure whose exception was never written down.
+    restore_traceback_rendering()
 
     # Same handler lerobot's own CLI installs: a SIGTERM (the orchestrator's
     # fallback when a QUIT goes unanswered) sets an event rather than killing us

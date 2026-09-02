@@ -75,6 +75,7 @@ from lerobot.datasets.aggregate import aggregate_datasets
 # and the reader in datasets.py can never drift apart.
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import validate_dataset_repo_id
+from .utils.system import torchcodec_loads
 
 
 def _lerobot_cache_root() -> Path:
@@ -1007,7 +1008,14 @@ def _strip_features(
     from lerobot.datasets.dataset_tools import remove_feature
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    dataset = LeRobotDataset(repo_id, root=root)
+    # Same pyav fallback the training path takes (jobs.py): torchcodec is
+    # lerobot's default decoder and its dylibs do not load on a host without
+    # FFmpeg — `dlopen … libavutil.56.dylib` — so the first frame this dataset
+    # decodes raises and the merge dies. pyav ships its own bundled FFmpeg.
+    # `None` means "leave lerobot's default alone" on a host where torchcodec
+    # is fine.
+    video_backend = None if torchcodec_loads() else "pyav"
+    dataset = LeRobotDataset(repo_id, root=root, video_backend=video_backend)
     present = [name for name in drop if name in dataset.meta.features]
     if not present:
         return None

@@ -3797,6 +3797,46 @@
         "title": "RunnersHardwareResponse",
         "type": "object"
       },
+      "SessionCoachingBody": {
+        "additionalProperties": false,
+        "description": "POST /api/v1/sessions/{session_id}/coaching. One operator command for a\ncoaching (DAgger) inference session. The runner interprets the verb against\nthe live phase — this layer forwards it and never pre-checks (a stale phase\ncopy would sometimes reject a command the arm was ready for).",
+        "properties": {
+          "command": {
+            "enum": [
+              "takeover",
+              "handback",
+              "cancel",
+              "hold",
+              "resume",
+              "reset",
+              "recovered",
+              "drop_last"
+            ],
+            "title": "Command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "SessionCoachingBody",
+        "type": "object"
+      },
+      "SessionCoachingResponse": {
+        "description": "The runner's command result, verbatim (`success` plus a status message).\nRich coaching state stays on the /inference-status poll + the pushed\n`coaching_state` websocket event.",
+        "properties": {
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "SessionCoachingResponse",
+        "type": "object"
+      },
       "SessionHeartbeatBody": {
         "description": "POST /api/v1/sessions/{session_id}/heartbeat. `owner` must match the\nlease's owner (shape-checked in the handler like SessionStartBody's).",
         "properties": {
@@ -5579,7 +5619,7 @@
     },
     "/api/v1/coaching-cancel": {
       "post": {
-        "description": "Coaching mode only: end the correction and DISCARD it.\n\nThe fumbled-takeover escape. Upstream lerobot saves every correction\nunconditionally, which makes a botched takeover permanent training data;\nthis drops the buffer instead and parks in the held state.",
+        "description": "Coaching mode only: end the correction and DISCARD it.\n\nThe fumbled-takeover escape. Upstream lerobot saves every correction\nunconditionally, which makes a botched takeover permanent training data;\nthis drops the buffer instead.\n\nIt then runs the ordinary reset behind the discard — the follower eases home\nand the session parks for a scene rearrangement, and the leader is released\non the way. A discard means the last few seconds were a mess, and the scene\nalmost always needs setting up again after one. Accepted from EVERY phase,\nnot just mid-correction: with nothing in flight it is a plain reset, which\nis what still gives a wedged correction a way out.",
         "operationId": "coaching_cancel",
         "responses": {
           "200": {
@@ -5594,6 +5634,28 @@
           }
         },
         "summary": "Coaching Cancel",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-drop-last": {
+      "post": {
+        "description": "Coaching mode only: un-record the correction from the attempt just ended.\n\nA real delete, and it can be one only because nothing has been deleted: the\nrunner HOLDS a finished correction in memory rather than writing it at\nhand-back, and commits it when the operator takes over again or starts the\nnext attempt. This says don't.\n\nThat indirection is not an optimisation. `save_episode` interleaves an\nepisode's frames into a shared per-chunk parquet file and appends its video\ninto a shared per-chunk video file, and lerobot offers nothing that removes\none episode from a dataset that is still open — `dataset_tools.delete_episodes`\nrebuilds a FINALIZED dataset into a new directory by copying and re-encoding\neverything that survives. See \"The held correction\" in dagger_protocol.\n\nSo the window is narrow and the runner owns it: from the hand-back that\nended the correction until the operator either takes over again or starts\nthe next attempt — exactly the window they spend standing at a parked arm\ndeciding. Clients must read\n`droppable_correction` off /inference-status rather than infer it from the\nphase.\n\nRefused mid-correction — there the operator means the take they are still\nrecording, and /coaching-cancel is the control for that one.\n\n409 `coaching.nothing_to_drop` when the window is shut (mid-correction, or\nonce the correction has been committed or already dropped). That is the one\nstate check this surface makes, and it is not a phase guess: it reads\n`droppable_correction`, the runner's own published window. It used to answer\n200 \"sent\" and let the runner refuse in a log nobody reads.",
+        "operationId": "coaching_drop_last",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Drop Last",
         "tags": [
           "inference"
         ]
@@ -5643,28 +5705,6 @@
         ]
       }
     },
-    "/api/v1/coaching-recover": {
-      "post": {
-        "description": "Coaching mode only: get me out of here.\n\nThe same ease-home-and-park as /coaching-reset, but valid from EVERY phase\nincluding mid-correction, where it discards the correction in flight first.\n\nThat difference is the entire reason it exists. RESET refuses mid-correction\non purpose — it will not decide on the operator's behalf whether a\npart-recorded takeover is kept — but a correction can wedge (the leader is\nheld rigid, the follower holds its last commanded pose), and then every\ncommand that could help is either phase-gated or would silently keep frames\nthe operator has already given up on. This is the operator saying the frames\ndo not matter, put the arm somewhere safe.\n\nNot a substitute for discard: this one ALWAYS throws the correction away and\nALWAYS ends the attempt.",
-        "operationId": "coaching_recover",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CoachingCommandResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Coaching Recover",
-        "tags": [
-          "inference"
-        ]
-      }
-    },
     "/api/v1/coaching-recovered": {
       "post": {
         "description": "Coaching mode only: mark the end of RECOVERY inside the correction.\n\nAn intervention is two things wearing one name — first the operator rewinds\nthe arm back to a state the policy has actually seen, then they demonstrate\nthe behaviour that should follow. lerobot's own HIL guide names RaC\n(arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's\nentire claim rests on that decomposition; the strategy nonetheless records\nboth halves as one undifferentiated `intervention=True`.\n\nThis records the boundary out of band (a sidecar beside the dataset — see\ndagger_protocol) because the dataset's feature dict is assembled inside\nlerobot with no hook to add a column. It requests no phase change: recovery\nand correction are the same control mode.\n\nIgnored outside a correction, and ignored a second time within one — the\nfirst mark is the one the operator meant.",
@@ -5689,7 +5729,7 @@
     },
     "/api/v1/coaching-reset": {
       "post": {
-        "description": "Coaching mode only: end this ATTEMPT at the task and reset for the next.\n\nCorrections-only DAgger has no task-episode concept — an \"episode\" there is\none takeover — so this is what tells the session that the cube is finally in\nthe tray. The policy stops, the follower eases back to the pose captured at\nconnect, and the session parks so the scene can be rearranged. Nothing is\nwritten to the dataset: corrections are the only thing ever recorded.\n\nValid mid-correction, where it SAVES the correction in flight before\nresetting: an operator who finishes the task while still driving has\nalready decided those frames are the correction, and making them hand back\nand then reset as two presses let the policy briefly regain a finished\nscene in between. Use /coaching-recover for the opposite — discard, then\nreset.",
+        "description": "Coaching mode only: end this ATTEMPT at the task and reset for the next.\n\nCorrections-only DAgger has no task-episode concept — an \"episode\" there is\none takeover — so this is what tells the session that the cube is finally in\nthe tray. The policy stops, the follower eases back to the pose captured at\nconnect, and the session parks so the scene can be rearranged. Nothing is\nwritten to the dataset: corrections are the only thing ever recorded.\n\nValid mid-correction, where it SAVES the correction in flight before\nresetting: an operator who finishes the task while still driving has\nalready decided those frames are the correction, and making them hand back\nand then reset as two presses let the policy briefly regain a finished\nscene in between. Use /coaching-cancel for the opposite — discard, then\nreset.",
         "operationId": "coaching_reset",
         "responses": {
           "200": {
@@ -5733,7 +5773,7 @@
     },
     "/api/v1/coaching-takeover": {
       "post": {
-        "description": "Coaching mode only: take control from the policy and start recording.\n\nOne press covers the whole handover — the policy pauses, an actuated leader\nis driven to the follower's pose so the operator picks up an arm already\nwhere the robot is, and only then does the correction begin recording.",
+        "description": "Coaching mode only: take control from the policy and start recording.\n\nOne press covers the whole handover — the policy pauses, an actuated leader\nglides toward the follower's pose so the operator picks up an arm roughly\nwhere the robot is, and only then does the correction begin recording. The\nglide is best-effort and nothing checks that it arrived: whatever gap is\nleft is measured at the edge and cancelled out of every command, so the\nfollower cannot jump however far apart the two arms were.",
         "operationId": "coaching_takeover",
         "responses": {
           "200": {
@@ -9229,6 +9269,59 @@
           }
         },
         "summary": "Current Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/coaching": {
+      "post": {
+        "description": "Send one coaching (DAgger) command to the current inference session.\n\nSession-scoped like /stop: 404 `session.not_found` unless `session_id`\nnames the running session; a plain (non-coaching) inference session yields\nthe runner's coded 409. The verb — takeover / handback / cancel / hold /\nresume / reset / recovered / drop_last — is forwarded to the coaching\nrunner, which alone decides which phase it is legal from (a server-side\nphase copy is always one event stale). Never owner-gated: a physical arm\nmust stay controllable by whoever can reach the API.\n\nTHIS is the endpoint the browser uses. The flat `/coaching-*` verbs below\nremain for callers that only know \"an inference run is active\", exactly as\n`/stop-inference` does beside `/sessions/{id}/stop` — but anything holding a\nsession id must come through here, or a dialog left open across a session\nchange commands whichever session happens to be current instead of failing.",
+        "operationId": "coaching_command",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCoachingBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCoachingResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Coaching Command",
         "tags": [
           "sessions"
         ]

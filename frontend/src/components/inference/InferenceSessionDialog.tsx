@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   Hand,
   Loader2,
-  RotateCcw,
   Pause,
   Play,
   GitMerge,
@@ -18,7 +17,11 @@ import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { decideCoachKey, targetHandlesKey } from "./coachKeys";
+import {
+  controlToggleAllowedFor,
+  decideCoachKey,
+  targetHandlesKey,
+} from "./coachKeys";
 import { phaseCue } from "./coachCues";
 import {
   CoachingPhase,
@@ -31,14 +34,6 @@ import {
   InferencePhase,
   getInferenceStatus,
   getInferenceLog,
-  coachingCancel,
-  coachingHandback,
-  coachingRecovered,
-  coachingHold,
-  coachingRecover,
-  coachingReset,
-  coachingResume,
-  coachingTakeover,
   startNextInferenceEpisode,
   stopInference,
   stopInferenceEpisode,
@@ -49,7 +44,8 @@ import { formatBytes } from "@/lib/formatBytes";
 import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
 import { useUnloadWarning } from "@/hooks/useUnloadWarning";
 import { ApiError } from "@/lib/apiClient";
-import { stopSession } from "@/lib/sessionApi";
+import { stopSession, sendCoachingCommand } from "@/lib/sessionApi";
+import type { CoachingCommand } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import type { CoachingLineage } from "@/contexts/InferenceSessionContext";
 import { useCoachingStateSignal } from "@/hooks/useCoachingStateSignal";
@@ -94,15 +90,41 @@ const PHASE_META: Record<
 // peripherally — whether the robot or they are in control. `hintKey` is the
 // second line; `accent` drives border and text, never colour alone (the word
 // carries the meaning on its own for anyone who can't distinguish the hues).
-const COACH_BANNER: Record<
-  CoachingPhase,
-  { titleKey: string; hintKey: string; accent: string; bg: string }
-> = {
+// The four beats a coaching session repeats, in order. The banner shows ALL
+// FOUR, always, with the current one lit.
+//
+// A phase name says where you are; it does not say what comes next, and "what
+// comes next" is the question an operator standing at a robot with both hands
+// on a leader arm actually has. Reading a position in a fixed cycle answers
+// both at once, and it answers the second one without reading at all — the lit
+// stop moves left to right, so peripheral vision alone tells you the session
+// advanced. Never translated: these are four fixed landmarks, and their job is
+// to be the same four shapes in the same four places every time.
+const COACH_STEPS = ["WATCH", "DRIVE", "SAVE", "RESET"] as const;
+
+// Which stop each phase lights (1-4), and the qualifier that rides beside the
+// title. `step: 0` means no stop is lit — true only before the session has
+// reported a phase, when claiming a position in the loop would be a guess.
+//
+// `badgeKey` carries what the stop cannot: four different states light RESET,
+// and the three parked ones differ ONLY in whether the arm is safe to grab —
+// the one difference on this screen an operator can be hurt by getting wrong.
+type CoachBanner = {
+  titleKey: string;
+  hintKey: string;
+  accent: string;
+  bg: string;
+  step: 0 | 1 | 2 | 3 | 4;
+  badgeKey?: string;
+};
+
+const COACH_BANNER: Record<CoachingPhase, CoachBanner> = {
   autonomous: {
     titleKey: "inference.coachBanner.watching.title",
     hintKey: "inference.coachBanner.watching.hint",
     accent: "text-ok border-ok/40",
     bg: "bg-ok/10",
+    step: 1,
   },
   paused: {
     // Deliberately the QUIETEST of the four. Held is the safe state — nothing
@@ -112,24 +134,53 @@ const COACH_BANNER: Record<
     hintKey: "inference.coachBanner.held.hint",
     accent: "text-muted-foreground border-border",
     bg: "bg-muted/50",
+    // Still on WATCH, not a stop of its own: nothing has advanced, the policy
+    // has simply stopped. The badge is what says so.
+    step: 1,
+    badgeKey: "inference.coachBadge.paused",
   },
   handing_over: {
     titleKey: "inference.coachBanner.handingOver.title",
     hintKey: "inference.coachBanner.handingOver.hint",
     accent: "text-warn border-warn",
     bg: "bg-warn/20",
+    step: 2,
+    badgeKey: "inference.coachBadge.armMoving",
   },
   resetting: {
     titleKey: "inference.coachBanner.resetting.title",
     hintKey: "inference.coachBanner.resetting.hint",
     accent: "text-muted-foreground border-border",
     bg: "bg-muted/50",
+    step: 4,
+    badgeKey: "inference.coachBadge.armMoving",
   },
   saving: {
     titleKey: "inference.coachBanner.saving.title",
     hintKey: "inference.coachBanner.saving.hint",
     accent: "text-muted-foreground border-border",
     bg: "bg-muted/50",
+    step: 3,
+  },
+  poised: {
+    // The one banner that is an INSTRUCTION rather than a report, and it has to
+    // read as one from across the room. `poised` and `paused` are both lerobot
+    // `paused` — both arms still, nothing recording — but they ask for opposite
+    // things: HELD says "nothing is happening", this says "your arm is ready,
+    // take it". So it deliberately does NOT inherit HELD's muted treatment; it
+    // gets a saturated fill like `correcting`, in a different hue so the two
+    // loud states are never confused in peripheral vision (amber = act, red =
+    // you are driving and every frame is being kept).
+    titleKey: "inference.coachBanner.poised.title",
+    hintKey: "inference.coachBanner.poised.hint",
+    accent: "text-white border-warn",
+    bg: "bg-warn",
+    // DRIVE, not WATCH: the takeover has begun and the loop has advanced — the
+    // second press finishes it rather than starting something new.
+    step: 2,
+    // Says the thing the operator is about to bet their hand on: the leader is
+    // lined up with the follower and is holding still under torque.
+    badgeKey: "inference.coachBadge.aligned",
   },
   correcting: {
     // The LOUDEST thing on the display. This is the only phase where a human is
@@ -140,6 +191,8 @@ const COACH_BANNER: Record<
     hintKey: "inference.coachBanner.correcting.hint",
     accent: "text-destructive-foreground border-destructive",
     bg: "bg-destructive",
+    step: 2,
+    badgeKey: "inference.coachBadge.recording",
   },
 };
 
@@ -150,7 +203,7 @@ const COACH_BANNER: Record<
 // rearranged, and the next move is the NEXT ATTEMPT. Distinct from plain HELD
 // because the instruction is different — telling the operator "space to take
 // over" here is what produced the unwanted correction.
-const COACH_BANNER_PARKED = {
+const COACH_BANNER_PARKED: CoachBanner = {
   titleKey: "inference.coachBanner.parked.title",
   hintKey: "inference.coachBanner.parked.hint",
   // Warn/amber, matching the eval reset screen below (border-warn/40 bg-warn/10)
@@ -159,28 +212,35 @@ const COACH_BANNER_PARKED = {
   // operator to physically rearrange the scene before anything else happens.
   accent: "text-warn border-warn/40",
   bg: "bg-warn/10",
+  step: 4,
+  // The one badge that is a safety claim rather than a label.
+  badgeKey: "inference.coachBadge.limp",
 };
 
 // Same parked moment, but the reset did NOT finish cleanly: the follower never
 // reached home. The scene is safe to rearrange, the arm is not where the next
 // attempt expects it, and saying "RESET" there would be a lie the operator
 // only discovers when the next attempt starts from the wrong pose.
-const COACH_BANNER_PARKED_STUCK = {
+const COACH_BANNER_PARKED_STUCK: CoachBanner = {
   titleKey: "inference.coachBanner.parkedStuck.title",
   hintKey: "inference.coachBanner.parkedStuck.hint",
   accent: "text-warn border-warn",
   bg: "bg-warn/20",
+  step: 4,
+  badgeKey: "inference.coachBadge.notHome",
 };
 
 // Parked and homed, but we cannot confirm the follower went limp — either the
 // runner said so outright, or it's an older runner that reports nothing (null).
 // Both take this branch: never promise a limp arm we cannot confirm, because
 // the operator acts on that promise by grabbing it.
-const COACH_BANNER_PARKED_RIGID = {
+const COACH_BANNER_PARKED_RIGID: CoachBanner = {
   titleKey: "inference.coachBanner.parkedRigid.title",
   hintKey: "inference.coachBanner.parkedRigid.hint",
   accent: "text-warn border-warn",
   bg: "bg-warn/20",
+  step: 4,
+  badgeKey: "inference.coachBadge.mayBeStiff",
 };
 
 // Shown ONLY once the operator has marked the recovery boundary, i.e. only when
@@ -190,18 +250,24 @@ const COACH_BANNER_PARKED_RIGID = {
 // told, on the largest element on screen, to rewind an arm that needed no
 // rewinding. RaC's decomposition is worth surfacing, but it is a claim the
 // OPERATOR makes; the UI must not make it on their behalf.
-const COACH_BANNER_CORRECTING = {
+const COACH_BANNER_CORRECTING: CoachBanner = {
   titleKey: "inference.coachBanner.correcting2.title",
   hintKey: "inference.coachBanner.correcting2.hint",
   accent: "text-destructive-foreground border-destructive",
   bg: "bg-destructive",
+  step: 2,
+  badgeKey: "inference.coachBadge.recording",
 };
 
-const COACH_BANNER_STARTING = {
+const COACH_BANNER_STARTING: CoachBanner = {
   titleKey: "inference.coachBanner.starting.title",
   hintKey: "inference.coachBanner.starting.hint",
   accent: "text-muted-foreground border-border",
-  bg: "bg-muted/50"
+  bg: "bg-muted/50",
+  // No stop lit. The session has not reported a phase, so it has no position
+  // in the loop yet, and lighting WATCH to avoid an empty rail would claim the
+  // policy is driving an arm that is not even connected.
+  step: 0,
 };
 
 // Per-episode verdict styling for the tally + the final per-episode list.
@@ -329,6 +395,12 @@ const InferenceSessionDialog: React.FC<{
   // operator jabbing Escape because nothing happened must not be answered with
   // a stack of identical toasts.
   const escapeHintShownRef = useRef(false);
+
+  // Same one-per-mount discipline for "there is nothing left to take back".
+  // The runner holds exactly one correction, so a second Backspace in a row
+  // lands here; the operator needs the rule explained, not repeated at them
+  // every press while they are looking at the arm.
+  const nothingToDropHintShownRef = useRef(false);
 
   // Safety net: a policy must never keep driving the arm with nobody
   // watching. That guarantee is server-side now — while the run is live
@@ -726,18 +798,28 @@ const InferenceSessionDialog: React.FC<{
   // the arm actually handed over would be lying at the one moment it matters.
   // That is why the push mattered — it makes honesty cheap instead of slow.
   const sendCoachCommand = useCallback(
-    async (
-      send: (
-        baseUrl: string,
-        fetcher: typeof fetchWithHeaders,
-      ) => Promise<unknown>,
-      label: string,
-      pending: string,
-    ) => {
+    async (command: CoachingCommand, label: string, pending: string) => {
+      // No id, no command. Every coaching verb is addressed to a session, so a
+      // dialog that somehow has no id cannot safely send one — refusing loudly
+      // beats posting to a session-agnostic endpoint and hoping the running
+      // session is the one on screen.
+      if (!sessionId) {
+        toast({
+          title: t("inference.coach.cmd.failed", { action: label }),
+          description:
+            "This coaching session has no id — reload the page and start it again.",
+          variant: "destructive",
+        });
+        return;
+      }
       setCoachBusy(true);
       setPendingAction(pending);
       try {
-        await send(baseUrl, fetchWithHeaders);
+        // Addressed to THIS session's id, never to "whatever is running".
+        // A dialog left open across a session change then gets a 404 it can
+        // report, rather than silently taking over an arm in a session the
+        // operator is no longer looking at.
+        await sendCoachingCommand(baseUrl, fetchWithHeaders, sessionId, command);
       } catch (e) {
         setPendingAction(null);
         // A session that has already ended is not a failure the operator did.
@@ -751,10 +833,15 @@ const InferenceSessionDialog: React.FC<{
         //
         // Kept narrow on purpose: only the two 409s that mean "there is nothing
         // to command any more". Every other failure still shouts.
+        // Kept narrow: the two 409s that mean "there is nothing to command any
+        // more", plus the 404 that means this dialog's session is already gone
+        // — which only became reachable again when the command went back to
+        // being session-scoped. Every other failure still shouts.
         const benign =
           e instanceof ApiError &&
-          e.status === 409 &&
-          /no coaching session is active|shutting down/i.test(e.detail ?? "");
+          ((e.status === 409 &&
+            /no coaching session is active|shutting down/i.test(e.detail ?? "")) ||
+            e.status === 404);
         if (benign) {
           toast({
             title: t("inference.coach.sessionEnded.title"),
@@ -772,7 +859,30 @@ const InferenceSessionDialog: React.FC<{
         setCoachBusy(false);
       }
     },
-    [baseUrl, fetchWithHeaders, toast, t],
+    [baseUrl, fetchWithHeaders, sessionId, toast, t],
+  );
+
+  // Wrap every coaching button's click so the button does not KEEP focus.
+  //
+  // This is the other half of the duplicate-key complaint, and the harder half
+  // to see. `targetHandlesKey` deliberately lets a keystroke through to any
+  // focused control — without it, Space and Enter were swallowed for every
+  // button in the dialog and none could be operated by keyboard at all. But a
+  // MOUSE click also leaves the button focused, and from then on Space and
+  // Enter activate whatever was last clicked instead of reaching the coaching
+  // handler. Click "Take over" with the mouse, then press Enter expecting
+  // "task done", and you hand the arm back instead: one key, two meanings,
+  // decided by something invisible.
+  //
+  // Blurring on click puts focus back on the dialog container, so the keys mean
+  // what their labels say. Tab-focusing a button and pressing Enter still
+  // activates that button, which is what a keyboard user asks for.
+  const pressAndBlur = useCallback(
+    (fn: () => void) => (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.currentTarget.blur();
+      fn();
+    },
+    [],
   );
 
   // Space is the whole interaction. Upstream lerobot spends two keys and four
@@ -789,15 +899,20 @@ const InferenceSessionDialog: React.FC<{
   // teleoperated demonstration into the corrections dataset, and at training
   // time those frames are indistinguishable from real corrections. A stray
   // space during a reset was enough to do it.
-  const controlToggleAllowed =
-    coachPhase === "correcting" ||
-    ((coachPhase === "autonomous" || coachPhase === "paused") &&
-      !awaitingAttempt);
+  //
+  // The phase table itself lives in coachKeys.ts beside the key that spends it,
+  // so the rule is stated once and can be tested — `poised` (the second press
+  // of a takeover) is allowed there, and every phase where the policy is not
+  // driving the attempt still is not.
+  const controlToggleAllowed = controlToggleAllowedFor(
+    coachPhase,
+    awaitingAttempt,
+  );
 
   const handleCoachToggle = useCallback(() => {
     if (coachPhase === "correcting") {
       sendCoachCommand(
-        coachingHandback,
+        "handback",
         t("inference.coach.cmd.handBack"),
         t("inference.coach.cmd.handingBack"),
       );
@@ -808,47 +923,46 @@ const InferenceSessionDialog: React.FC<{
     // as a correction.
     if (!controlToggleAllowed) return;
     sendCoachCommand(
-      coachingTakeover,
+      "takeover",
       t("inference.coach.cmd.takeOver"),
       t("inference.coach.cmd.takingOver"),
     );
   }, [coachPhase, controlToggleAllowed, sendCoachCommand, t]);
 
-  // Shift+Space: freeze without committing to a correction — "wait, let me
-  // think" — and unfreeze again. Maps to lerobot's bare pause.
-  // Shift+space is the FREEZE key and it is unconditional. It used to no-op
-  // from `correcting` — i.e. it was dead in the one phase where an operator
-  // most wants to stop the arm. From a correction it hands back (which parks at
-  // the policy); from anywhere else it holds or resumes. It always does
-  // something, so it is worth learning.
-  const handleCoachHoldToggle = useCallback(() => {
-    if (coachPhase === "paused") {
-      sendCoachCommand(
-        coachingResume,
-        t("inference.coach.cmd.resume"),
-        t("inference.coach.cmd.resuming"),
-      );
-    } else if (coachPhase === "correcting") {
-      sendCoachCommand(
-        coachingHandback,
-        t("inference.coach.cmd.handBack"),
-        t("inference.coach.cmd.handingBack"),
-      );
-    } else {
-      sendCoachCommand(
-        coachingHold,
-        t("inference.coach.cmd.hold"),
-        t("inference.coach.cmd.holding"),
-      );
-    }
+  // Shift+Space: stop the policy without taking over — "wait, let me think".
+  // Maps to lerobot's bare pause, and that is now ALL it maps to.
+  //
+  // It used to be a three-way toggle: resume from `paused`, hand back from
+  // `correcting`, hold otherwise. Two of those three were a second key for
+  // something the operator already had one for — bare Space hands back, Enter
+  // starts the next attempt — so the same chord meant a different thing in
+  // every phase, and the phase is precisely what an operator with their hands
+  // on the leader cannot see. What is left is the one gesture nothing else
+  // offers: freezing a policy that is currently driving.
+  const handleCoachHold = useCallback(() => {
+    if (coachPhase !== "autonomous") return;
+    sendCoachCommand(
+      "hold",
+      t("inference.coach.cmd.hold"),
+      t("inference.coach.cmd.holding"),
+    );
   }, [coachPhase, sendCoachCommand, t]);
 
-  // Escape discards the correction in progress. THE feature that makes coaching
-  // usable: a fumbled takeover is poison training data, and upstream lerobot
-  // saves every correction permanently with no way to reject one.
+  // Discard the correction in progress — THE feature that makes coaching usable.
+  // A fumbled takeover is poison training data, and upstream lerobot saves every
+  // correction permanently with no way to reject one.
+  //
+  // It now also brings the arm home and parks for a scene reset. A discard means
+  // the last few seconds were a mess, and the scene almost always needs setting
+  // up again afterwards; leaving the follower holding the pose the fumble ended
+  // in made the operator work out what to press next. That pair — discard, then
+  // reset — was previously a SECOND control ("Arm stuck? Recover") with its own
+  // button, endpoint and keybinding, which is now gone: one decision, one
+  // control. It is accepted from every phase, which was that control's reason to
+  // exist and is what still gives a wedged correction a way out.
   const handleCoachDiscard = useCallback(() => {
     sendCoachCommand(
-      coachingCancel,
+      "cancel",
       t("inference.coach.cmd.discard"),
       t("inference.coach.cmd.discarding"),
     );
@@ -933,31 +1047,38 @@ const InferenceSessionDialog: React.FC<{
   // sidecar keeps distinct from "recovery took zero frames".
   const handleCoachRecovered = useCallback(() => {
     sendCoachCommand(
-      coachingRecovered,
+      "recovered",
       t("inference.coach.cmd.recovered"),
       t("inference.coach.cmd.marking"),
     );
   }, [sendCoachCommand, t]);
 
-  // "The cube is in the tray" — end this attempt and put the arm back so the
-  // next one starts from the same place. Corrections-only DAgger has no
-  // task-episode of its own, so without this the policy just keeps driving at a
-  // finished scene.
-  // The way out of a wedged correction. Always destructive — it discards
-  // whatever is in flight AND ends the attempt — so it is deliberately the
-  // quietest control on the screen and names its cost in the label. It exists
-  // because the alternative, when a correction sticks, is killing the session.
-  const handleCoachRecover = useCallback(() => {
+  const handleCoachReset = useCallback(() => {
+    sendCoachCommand("reset", "Task done", "Returning home…");
+  }, [sendCoachCommand]);
+
+  // The correction that can still be un-recorded, or null when there is none.
+  //
+  // The runner holds the most recent correction in memory rather than writing
+  // it the instant the operator hands back, and only commits it when the next
+  // takeover begins (or the session ends). That deferral is what makes a real
+  // delete possible at all: once `save_episode` has run, the frames are spread
+  // across shared parquet chunks and a concatenated video file, and lerobot has
+  // no supported way to take one back out of an open dataset. So this is not a
+  // delete-after-the-fact — it is the session declining to write it.
+  //
+  // Consequently the window is narrow and the backend, not the browser, decides
+  // when it is open. Null the moment the runner commits.
+  const droppableCorrection =
+    status?.droppable_correction ?? null;
+
+  const handleCoachDropLast = useCallback(() => {
     sendCoachCommand(
-      coachingRecover,
-      t("inference.coach.cmd.recover"),
-      t("inference.coach.cmd.recovering"),
+      "drop_last",
+      t("inference.coach.cmd.dropLast"),
+      t("inference.coach.cmd.dropping"),
     );
   }, [sendCoachCommand, t]);
-
-  const handleCoachReset = useCallback(() => {
-    sendCoachCommand(coachingReset, "Task done", "Returning home…");
-  }, [sendCoachCommand]);
 
   // ENTER is the whole between-attempts loop, pressed twice per iteration:
   //
@@ -975,7 +1096,7 @@ const InferenceSessionDialog: React.FC<{
   // the banner always names the next press.
   const handleCoachAdvance = useCallback(() => {
     if (awaitingAttempt) {
-      sendCoachCommand(coachingResume, "Next attempt", "Starting…");
+      sendCoachCommand("resume", "Next attempt", "Starting…");
     } else {
       handleCoachReset();
     }
@@ -1013,6 +1134,19 @@ const InferenceSessionDialog: React.FC<{
         title: t("inference.coach.deletedToast.title"),
         description: t("inference.coach.deletedToast.body", { dataset: repoId }),
       });
+      // Deleting the corrections is a WAY OUT of this dialog, not a state to
+      // sit in. Everything the summary screen still offers past this point —
+      // the merge-and-fine-tune handoff, the close button that carries the
+      // handoff with it — refers to a dataset that no longer exists, so
+      // leaving the operator parked on it means the next thing they click is
+      // one of two buttons that cannot work.
+      //
+      // `onExit`, deliberately NOT `exitWithHandoff`. The handoff's whole
+      // payload is the corrections dataset; carrying it to the Launchpad after
+      // deleting it would offer a merge against a directory that is gone.
+      // `exitWithHandoff` does guard on `datasetDeleted`, but that state was
+      // set one line ago and this closure still sees the old value.
+      onExit();
     } catch (e) {
       setConfirmDelete(false);
       toast({
@@ -1031,6 +1165,7 @@ const InferenceSessionDialog: React.FC<{
     fetchWithHeaders,
     toast,
     t,
+    onExit,
   ]);
 
   useEffect(() => {
@@ -1061,6 +1196,19 @@ const InferenceSessionDialog: React.FC<{
         // operator's keystrokes still land here, not on a control.
         targetHandlesKey: targetHandlesKey(e.target),
         controlToggleAllowed,
+        // Shift+Space is inert unless the policy is actually driving. See
+        // handleCoachHold: that is the only phase in which a freeze is a thing
+        // no other key already does.
+        policyIsDriving: coachPhase === "autonomous",
+        // Which correction Backspace throws away. Only while `correcting` is
+        // there one in flight to cancel; outside it a cancel would not no-op,
+        // it would end the attempt and move the arm, so the key un-records the
+        // previous correction instead. See the Backspace branch in coachKeys.
+        correcting: coachPhase === "correcting",
+        // Straight from the backend, never inferred from the phase — the drop
+        // window runs from the hand-back until the next takeover and the
+        // browser is explicitly told not to guess at those edges.
+        hasDroppableCorrection: droppableCorrection != null,
       });
       if (preventDefault) e.preventDefault();
       if (stopPropagation) e.stopPropagation();
@@ -1068,8 +1216,8 @@ const InferenceSessionDialog: React.FC<{
         case "takeover-toggle":
           handleCoachToggle();
           break;
-        case "hold-toggle":
-          handleCoachHoldToggle();
+        case "hold":
+          handleCoachHold();
           break;
         case "recovered":
           handleCoachRecovered();
@@ -1079,6 +1227,25 @@ const InferenceSessionDialog: React.FC<{
           break;
         case "discard":
           handleCoachDiscard();
+          break;
+        case "drop-last":
+          handleCoachDropLast();
+          break;
+        case "nothing-to-drop-hint":
+          // The press was real and the intent was clear, so answer it. Only the
+          // most recent correction is still in memory; everything before it is
+          // already in the dataset's parquet chunks and video files, which
+          // lerobot has no supported way to take an episode back out of. Saying
+          // nothing here would read as a dropped keystroke and get the key
+          // pressed again, harder.
+          if (!nothingToDropHintShownRef.current) {
+            nothingToDropHintShownRef.current = true;
+            toast({
+              title: t("inference.coach.nothingToDropHint.title"),
+              description: t("inference.coach.nothingToDropHint.body"),
+              duration: 8000,
+            });
+          }
           break;
         case "escape-hint":
           // Explains itself once per session, then stays quiet. Escape used to
@@ -1104,13 +1271,17 @@ const InferenceSessionDialog: React.FC<{
     coachMode,
     coachLive,
     coachBusy,
+    coachPhase,
     controlToggleAllowed,
     handleCoachToggle,
-    handleCoachHoldToggle,
+    handleCoachHold,
     handleCoachDiscard,
+    handleCoachDropLast,
     handleCoachAdvance,
     handleCoachRecovered,
+    droppableCorrection,
     toast,
+    t,
   ]);
 
   // Dismissal is blocked while the run is (or may still be) live — before the
@@ -1330,16 +1501,63 @@ const InferenceSessionDialog: React.FC<{
                     : coachPhase === "correcting" && recoveryMarkedAt != null
                       ? COACH_BANNER_CORRECTING
                       : COACH_BANNER[coachPhase];
+                // A coaching session is the same four beats over and over, so
+                // the banner shows ALL FOUR with the current one lit rather than
+                // naming the state and leaving the operator to remember what
+                // follows it. A phase name says where you are; a position in a
+                // fixed cycle says that AND what comes next, which is the
+                // question someone with both hands on a leader arm actually has.
+                //
+                // `poised` gets a HALF-lit DRIVE rather than a fifth stop. It is
+                // genuinely half of that step — the arms are lined up and held,
+                // and the second press is what commits to it — so a partial fill
+                // says "you are here but have not started" without costing a
+                // fifth label's worth of small text on a screen read from across
+                // a bench. Four stops stay scannable; five would not.
+                const poised = coachPhase === "poised";
                 return (
                   <div
-                    className={`mb-4 rounded-lg border-2 p-6 text-center ${banner.bg} ${banner.accent} ${
+                    className={`mb-4 rounded-lg border-2 p-5 ${banner.bg} ${banner.accent} ${
                       coachPhase === "correcting" ? "animate-pulse" : ""
                     }`}
                   >
-                    <div className="text-5xl font-bold tracking-wide leading-none">
-                      {t(banner.titleKey as never)}
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {COACH_STEPS.map((label, i) => {
+                        const step = i + 1;
+                        const lit = banner.step === step;
+                        return (
+                          <div
+                            key={label}
+                            className={`flex flex-col gap-1.5 ${lit ? "" : "opacity-30"}`}
+                          >
+                            <div className="h-1.5 overflow-hidden rounded-full bg-current/25">
+                              {/* Half-fill for the poised hold; a full bar
+                                  otherwise. The lit stop is the only one that
+                                  ever paints, so an unlit stop's inner bar is
+                                  deliberately zero-width rather than hidden. */}
+                              <div
+                                className="h-full rounded-full bg-current transition-[width] duration-300"
+                                style={{ width: lit ? (poised ? "50%" : "100%") : "0%" }}
+                              />
+                            </div>
+                            <div className="font-mono text-[10px] tracking-[0.12em]">
+                              {label}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <p className="mt-3 text-sm leading-relaxed opacity-90">
+                    <div className="mt-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <span className="text-4xl font-bold leading-none tracking-tight">
+                        {t(banner.titleKey as never)}
+                      </span>
+                      {banner.badgeKey && (
+                        <span className="rounded-full border border-current px-2 py-0.5 font-mono text-[10px] tracking-[0.12em]">
+                          {t(banner.badgeKey as never)}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-2 text-sm leading-relaxed opacity-90">
                       {pendingAction ? (
                         <span className="inline-flex items-center gap-2 font-semibold">
                           <Loader2 className="h-4 w-4 animate-spin" />
@@ -1831,12 +2049,22 @@ const InferenceSessionDialog: React.FC<{
                 )}
               </div>
             ) : coachLive ? (
-              // One primary control, whose meaning flips with the phase, plus
-              // the two escapes. Every button names its key: the operator's
-              // hands are on the leader arm, not the mouse.
+              // FOUR controls at most, and never six.
+              //
+              // The old screen stacked take-over, recovered, discard, advance,
+              // recover and end-session as six equal-weight full-width buttons.
+              // An operator who is looking at the arm and not the screen cannot
+              // pick out of six, and the two that end or unwind the session sat
+              // in the same visual register as the one they press every few
+              // seconds. So: one primary, one that moves the session forward,
+              // the correction-only pair that only exist while there IS a
+              // correction, and the two "something is wrong" exits demoted to a
+              // single quiet row at the bottom.
+              //
+              // Every button blurs itself on click — see `pressAndBlur`.
               <div className="space-y-2">
                 <Button
-                  onClick={handleCoachToggle}
+                  onClick={pressAndBlur(handleCoachToggle)}
                   disabled={coachBusy || !controlToggleAllowed}
                   className="w-full font-semibold py-6 text-lg disabled:opacity-50"
                   variant={
@@ -1844,52 +2072,29 @@ const InferenceSessionDialog: React.FC<{
                   }
                 >
                   <Hand className="w-5 h-5 mr-2" />
+                  {/* Three labels, one button, because it is one key. While
+                      `poised` the operator is NOT asking for control — they
+                      already asked, the arms are lined up and holding, and this
+                      press confirms their hand is on the leader and starts
+                      recording. Labelling it "Take control" there would ask the
+                      same question twice and hide the fact that the second
+                      press is the one that keeps frames. */}
                   {coachPhase === "correcting"
                     ? t("inference.coach.handBack")
-                    : t("inference.coach.takeOver")}
+                    : coachPhase === "poised"
+                      ? t("inference.coach.confirmHold")
+                      : t("inference.coach.takeOver")}
                   {/* Key names are the physical keys — never translated. */}
                   <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
                     space
                   </kbd>
                 </Button>
-                {coachPhase === "correcting" && recoveryMarkedAt == null && (
-                  <Button
-                    onClick={handleCoachRecovered}
-                    disabled={coachBusy}
-                    variant="outline"
-                    className="w-full font-semibold disabled:opacity-50"
-                  >
-                    <CheckCircle2 className="w-4 h-4 mr-2" />
-                    {t("inference.coach.recovered")}
-                    <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
-                      g
-                    </kbd>
-                  </Button>
-                )}
-                {/* Only ONE button carries a space chord now: the primary
-                    take/give-back control above. The freeze (shift+space) kept
-                    its keybinding but lost its button — two space-labelled
-                    buttons side by side read as two ways to do the same thing. */}
-                {coachPhase === "correcting" && (
-                  <Button
-                    onClick={handleCoachDiscard}
-                    disabled={coachBusy}
-                    variant="outline"
-                    className="w-full font-semibold disabled:opacity-50"
-                  >
-                    <Trash2 className="w-4 h-4 mr-2" />
-                    {t("inference.coach.discard")}
-                    <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
-                      ⌫
-                    </kbd>
-                  </Button>
-                )}
                 {/* Shown mid-correction too, now that Enter SAVES the
                     correction in flight before resetting. Hiding it there
                     predated that, and left the operator who finished the task
                     while still driving with no visible way to say so. */}
                 <Button
-                  onClick={handleCoachAdvance}
+                  onClick={pressAndBlur(handleCoachAdvance)}
                   disabled={coachBusy}
                   variant={awaitingAttempt ? "default" : "outline"}
                   className="w-full font-semibold disabled:opacity-50"
@@ -1909,29 +2114,107 @@ const InferenceSessionDialog: React.FC<{
                     enter
                   </kbd>
                 </Button>
-                {/* Sits directly above End session because they are the two
-                    "something is wrong" exits, and this is the one that does
-                    NOT cost the operator their whole session. */}
-                <Button
-                  onClick={handleCoachRecover}
-                  disabled={coachBusy}
-                  variant="ghost"
-                  className="w-full text-xs text-muted-foreground disabled:opacity-50"
-                >
-                  <RotateCcw className="w-3.5 h-3.5 mr-2" />
-                  Arm stuck? Recover — discards this correction and resets
-                </Button>
-                <Button
-                  onClick={handleStop}
-                  disabled={stopping}
-                  variant="ghost"
-                  className="w-full font-semibold text-muted-foreground disabled:opacity-50"
-                >
-                  <Square className="w-4 h-4 mr-2" />
-                  {stopping
-                    ? t("inference.coach.ending")
-                    : t("inference.coach.endSession")}
-                </Button>
+                {/* Bin the correction from the attempt that just ended.
+                    Shown for exactly as long as the backend says it can be
+                    honoured, and not one phase less. This was gated on
+                    `awaitingAttempt` as well, which is precisely the inference
+                    dagger_protocol.py and inferenceApi.ts both forbid: the drop
+                    window runs from the hand-back until the next takeover, not
+                    from a phase the browser can see. After a plain hand-back
+                    the policy resumes, `awaiting_attempt` is false, and the
+                    button vanished while the runner was still holding the
+                    correction and still honouring the verb — confirmed on
+                    hardware, pressed by keyboard in a window with no button.
+                    See dagger_protocol's DROP_LAST. */}
+                {droppableCorrection != null && (
+                  <Button
+                    onClick={pressAndBlur(handleCoachDropLast)}
+                    disabled={coachBusy}
+                    variant="outline"
+                    className="w-full font-semibold text-destructive hover:text-destructive disabled:opacity-50"
+                  >
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    {t("inference.coach.dropLast", {
+                      seconds: formatTime(droppableCorrection.seconds),
+                    })}
+                    {/* The same key the discard button names, because it is the
+                        same key: Backspace means "throw away the thing that just
+                        happened" in both phases, and the operator has to be able
+                        to see that it does. Withheld only while `correcting`,
+                        where the key is claimed by the discard button below —
+                        two visible ⌫ badges promising different deletions is
+                        worse than one. */}
+                    {coachPhase !== "correcting" && (
+                      <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
+                        ⌫
+                      </kbd>
+                    )}
+                  </Button>
+                )}
+                {/* The correction-only pair. Both are meaningless outside a
+                    takeover, so neither is on screen outside one — which is
+                    most of what took the live screen from six buttons to
+                    three. */}
+                {coachPhase === "correcting" && recoveryMarkedAt == null && (
+                  <Button
+                    onClick={pressAndBlur(handleCoachRecovered)}
+                    disabled={coachBusy}
+                    variant="outline"
+                    className="w-full font-semibold disabled:opacity-50"
+                  >
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                    {t("inference.coach.recovered")}
+                    <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
+                      g
+                    </kbd>
+                  </Button>
+                )}
+                {coachPhase === "correcting" && (
+                  <Button
+                    onClick={pressAndBlur(handleCoachDiscard)}
+                    disabled={coachBusy}
+                    variant="outline"
+                    className="w-full font-semibold disabled:opacity-50"
+                  >
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    {t("inference.coach.discardAndReset")}
+                    <kbd className="ml-2 rounded bg-foreground/10 px-1.5 py-0.5 text-xs font-mono">
+                      ⌫
+                    </kbd>
+                  </Button>
+                )}
+                {/* The two "something is wrong" exits, together and quiet.
+                    They are the rarest presses on the screen and the most
+                    expensive to hit by accident, and as full-width buttons they
+                    read as ordinary steps in the loop. Recover comes first
+                    because it is the one that does NOT cost the whole session. */}
+                {/* The one "something is wrong" exit left, and the rarest and
+                    most expensive press on the screen — so it is quiet.
+                    "Arm stuck? Recover" used to sit beside it doing what
+                    Discard now does on its own. */}
+                <div className="flex justify-center pt-1">
+                  <Button
+                    onClick={pressAndBlur(handleStop)}
+                    disabled={stopping}
+                    variant="ghost"
+                    className="text-xs text-muted-foreground disabled:opacity-50"
+                  >
+                    <Square className="w-3.5 h-3.5 mr-1.5" />
+                    {stopping
+                      ? t("inference.coach.ending")
+                      : t("inference.coach.endSession")}
+                  </Button>
+                </div>
+                {/* The freeze has no button on purpose — it is the one control
+                    an operator reaches for without looking, and a seventh
+                    button would undo the point of the cull. Named here so the
+                    binding is not invisible. */}
+                {coachPhase === "autonomous" && (
+                  <p className="pt-1 text-center text-[11px] text-muted-foreground">
+                    Need the policy to stop without taking over? Press{" "}
+                    <span className="font-mono">shift+space</span>.
+                  </p>
+                )}
               </div>
             ) : isResetting ? (
               // Reset screen: continue is the primary action, abort stays

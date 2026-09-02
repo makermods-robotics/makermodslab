@@ -231,6 +231,44 @@ export async function stopSession(
   );
 }
 
+export type CoachingCommand =
+  | "takeover"
+  | "handback"
+  | "cancel"
+  | "hold"
+  | "resume"
+  | "reset"
+  | "recovered"
+  | "drop_last";
+
+/** One coaching (DAgger) command for the current inference session, by id.
+ *
+ * Session-scoped and never owner-gated, exactly like `stopSession` — a
+ * physical arm must stay controllable by whoever can reach the API. 404 once
+ * the session is gone; the runner returns a 409 for a plain (non-coaching)
+ * inference session or one that is still starting up. The verb is NOT
+ * phase-checked client-side: the runner's phase is authoritative and the
+ * browser only holds a copy that is one poll stale, so a mistimed command is a
+ * harmless no-op the runner logs.
+ *
+ * The id is the whole point, and it is what a restack quietly dropped: without
+ * it the dialog posts to a session-agnostic verb, so a dialog left open across
+ * a session change commands whichever session happens to be current rather
+ * than failing with a 404 the UI can report. */
+export async function sendCoachingCommand(
+  baseUrl: string,
+  fetcher: Fetcher,
+  sessionId: string,
+  command: CoachingCommand
+): Promise<{ result: Record<string, unknown> }> {
+  return apiRequest(
+    baseUrl,
+    fetcher,
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/coaching`,
+    { method: "POST", body: { command }, action: "Coaching command" }
+  );
+}
+
 // --- 409 session.held rendering ---------------------------------------------
 
 /** The holder named by a 409 session.held error, or null when `e` is any

@@ -42,6 +42,15 @@ export default {
 
   // 指导过程中的大横幅。标题刻意醒目：操作者盯着的是机械臂而不是屏幕，
   // 只能用余光扫到这里。
+  coachBadge: {
+    paused: "已暂停",
+    armMoving: "机械臂移动中",
+    recording: "录制中",
+    limp: "已松力",
+    notHome: "未回到原位",
+    aligned: "已对齐并保持",
+    mayBeStiff: "可能仍有力矩",
+  },
   coachBanner: {
     watching: {
       title: "观察中",
@@ -62,6 +71,12 @@ export default {
     saving: {
       title: "正在保存…",
       hint: "正在把这次纠正写入磁盘。机械臂保持不动；写完后策略会继续。",
+    },
+    // 接管的第一次按键。两条手臂都静止、也还没有开始录制 —— 事实与 “已保持”
+    // 相同，但给出的指示正好相反，所以措辞以 “要做什么” 开头。
+    poised: {
+      title: "请握住主臂",
+      hint: "主臂已对齐到机器人的姿态并保持不动 — 此时还没有开始录制。请握住主臂，然后再次按空格键：那一按会松开主臂并同时开始驾驶和录制。如果两条手臂没有对上，先用手把它们对齐。",
     },
     correcting: {
       title: "你在驾驶",
@@ -106,6 +121,9 @@ export default {
     // space 和 esc 指的是键盘上的实体键。
     takeOver: "接管控制",
     handBack: "交还控制",
+    // 接管的第二次按键：确认手已握住静止且已对齐的主臂，并开始录制。
+    confirmHold: "我已握住 — 开始驾驶",
+    discardAndReset: "丢弃这次纠正并复位",
     discard: "丢弃这次纠正",
     hold: "保持 — 冻结机械臂",
     resume: "让策略继续",
@@ -117,6 +135,17 @@ export default {
     offerWithGap: "指导它 — 修好它做错的那 {{percent}}%",
     reset: "任务完成 — 复位以开始下一次尝试",
     recovered: "已挽回 — 纠正从这里开始",
+    // {{seconds}} 由调用方预先格式化。用时长而不是编号来指代这次纠正：操作员刚
+    // 刚亲眼看着它发生，脑子里没有回合编号，但知道自己大概操作了多久。
+    dropLast: "删除这段 {{seconds}} 的纠正",
+    // 在可删除窗口已经关闭之后按下退格键。运行器只会在内存里保留最近一次纠正，
+    // 并在下一次接管时把它写入数据集；写入之后 lerobot 无法再从已打开的数据集里
+    // 取出某一个回合。所以这里要把规则讲清楚，而不是保持沉默，并指向仍然可用的
+    // 那条撤销路径。
+    nothingToDropHint: {
+      title: "那次纠正已经保存了",
+      body: "只有最近一次纠正可以撤回，而现在没有待撤回的纠正。在它之前的都已经写入数据集了。会话结束后你仍然可以删除整个数据集。",
+    },
     nothingToDelete: "没有可删除的纠正数据",
     // 在运行器收尾之后才送达的指令。这不算失败。
     sessionEnded: {
@@ -174,8 +203,8 @@ export default {
       startNextAttempt: "开始下一次尝试",
       recovered: "标记挽回结束",
       marking: "正在标记…",
-      recover: "脱困",
-      recovering: "正在脱困…",
+      dropLast: "删除最后一次纠正",
+      dropping: "正在删除…",
       starting: "正在启动…",
     },
   },

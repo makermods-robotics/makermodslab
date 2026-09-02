@@ -1736,7 +1736,7 @@ def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch
     from makermodslab.record import UploadManager, UploadRequest
 
     ds = _fake_dataset()
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     invalidated: list[str] = []
     # The push invalidates the cached Hub facts from inside push_dataset_to_hub
     # (the single push home), not from this call site — see its docstring.
@@ -1775,7 +1775,7 @@ def test_upload_manager_qualifies_bare_repo_id_with_namespace(monkeypatch: pytes
     from makermodslab.record import UploadManager, UploadRequest
 
     ds = _fake_dataset()
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
     monkeypatch.setattr("makermodslab.datasets.cached_whoami", lambda: {"name": "makermods", "orgs": []})
 
@@ -1802,7 +1802,7 @@ def test_upload_manager_bare_repo_id_unauthenticated_errors(monkeypatch: pytest.
     from makermodslab.record import UploadManager, UploadRequest
 
     ds = _fake_dataset()
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
     monkeypatch.setattr("makermodslab.datasets.cached_whoami", lambda: None)
 
@@ -1832,7 +1832,7 @@ def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch
         raise RuntimeError("401 Client Error: you must be authenticated")
 
     ds = _fake_dataset(push=_raise_401)
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
 
     mgr = UploadManager()
@@ -1853,7 +1853,7 @@ def test_upload_manager_error_generic_message(monkeypatch: pytest.MonkeyPatch) -
         raise RuntimeError("disk exploded")
 
     ds = _fake_dataset(push=_boom)
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
 
     mgr = UploadManager()

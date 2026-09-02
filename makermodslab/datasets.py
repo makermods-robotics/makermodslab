@@ -44,6 +44,7 @@ from .utils.config import (
     with_makermodslab_tag,
 )
 from .utils.hf_auth import cached_whoami, canonical_writable_namespace, hf_hub_offline, shared_hf_api
+from .utils.system import torchcodec_loads
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,12 @@ def push_dataset_to_hub(local_repo_id: str, *, tags: list[str] | None, private: 
         # upload worker returns the friendly login instruction + docs link.
         raise RuntimeError("You must be authenticated with the Hugging Face Hub")
 
-    dataset = LeRobotDataset(local_repo_id)
+    # Same pyav fallback the training path takes (jobs.py): torchcodec is
+    # lerobot's default decoder and its dylibs do not load on a host without
+    # FFmpeg — `dlopen … libavutil.56.dylib` — so any frame access on this
+    # dataset raises. `None` means "leave lerobot's default alone" where
+    # torchcodec is fine.
+    dataset = LeRobotDataset(local_repo_id, video_backend=None if torchcodec_loads() else "pyav")
     logger.info(
         "Uploading %s to the Hub as %s (%d episodes)", local_repo_id, hub_repo_id, dataset.num_episodes
     )

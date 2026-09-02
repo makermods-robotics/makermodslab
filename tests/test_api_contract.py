@@ -222,8 +222,8 @@ def test_no_new_routes_outside_api_v1():
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
         # Coaching (DAgger) controls. Born versioned: the flat mount was frozen
-        # before coaching landed, so these five verbs plus the attempt reset
-        # exist only under /api/v1.
+        # before coaching landed, so every coaching verb exists only under
+        # /api/v1.
         "POST /api/v1/coaching-takeover",
         "POST /api/v1/coaching-handback",
         "POST /api/v1/coaching-cancel",
@@ -231,7 +231,11 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/coaching-resume",
         "POST /api/v1/coaching-reset",
         "POST /api/v1/coaching-recovered",
-        "POST /api/v1/coaching-recover",
+        "POST /api/v1/coaching-drop-last",
+        # The session-scoped coaching verb — what the browser actually uses.
+        # Born versioned like the flat ones, and restored after a restack
+        # dropped it along with its handler and its frontend caller.
+        "POST /api/v1/sessions/{session_id}/coaching",
         # Node registry (multi-node): static/manual peer source.
         "GET /api/v1/nodes/{instance_id}/jobs/queue",
         "DELETE /api/v1/nodes/{instance_id}",

@@ -46,6 +46,21 @@ export default {
 
   // The big in-session coaching banner. Titles are SHOUTED on purpose: the
   // operator is looking at the arm, not the screen, and reads this peripherally.
+  // Qualifiers that ride beside the banner title. Short and shouty on purpose:
+  // three of the four parked states sit on the same step of the loop and differ
+  // only in whether the arm is safe to grab, which is the one difference on
+  // this screen an operator can be hurt by getting wrong.
+  coachBadge: {
+    paused: "PAUSED",
+    armMoving: "ARM MOVING",
+    recording: "RECORDING",
+    limp: "LIMP",
+    notHome: "NOT HOME",
+    // Not a state label but a promise the operator acts on with their hands:
+    // the leader matches the follower and is holding still under torque.
+    aligned: "ALIGNED & HELD",
+    mayBeStiff: "MAY BE STIFF",
+  },
   coachBanner: {
     watching: {
       title: "WATCHING",
@@ -66,6 +81,13 @@ export default {
     saving: {
       title: "SAVING…",
       hint: "Writing the correction to disk. The arm is held; the policy resumes when this finishes.",
+    },
+    // The first of the two presses that make up a takeover. Both arms are
+    // still and nothing is being recorded — the same facts as HELD — but the
+    // instruction is the opposite, so the wording leads with what to DO.
+    poised: {
+      title: "TAKE THE ARM",
+      hint: "The leader is lined up with the robot and holding still — nothing is being recorded yet. Take hold of the leader, then press space again: that releases it and starts driving AND recording. If the two arms don't match, line them up by hand first.",
     },
     correcting: {
       title: "YOU'RE DRIVING",
@@ -111,7 +133,15 @@ export default {
     // translated — "space" and "esc" are the physical keys.
     takeOver: "Take control",
     handBack: "Give back control",
+    // The SECOND takeover press. Names what the operator is confirming (their
+    // hand is on a stationary, aligned leader) and what it costs (recording
+    // starts) — not a second invitation to take control they already asked for.
+    confirmHold: "I have the arm — start driving",
     discard: "Discard this correction",
+    // Names BOTH halves. The control used to stop at "discarded" and leave the
+    // arm holding the pose the fumble ended in; it now brings the arm home too,
+    // and a label that hid that would make the arm move unexpectedly.
+    discardAndReset: "Discard this correction and reset",
     hold: "Hold — freeze the arm",
     resume: "Let the policy continue",
     ending: "Ending…",
@@ -122,6 +152,20 @@ export default {
     offerWithGap: "Coach it — fix the {{percent}}% it got wrong",
     reset: "Task done — reset for next attempt",
     recovered: "Recovered — the correction starts here",
+    // {{seconds}} is the correction's own length, pre-formatted by the caller.
+    // The DURATION is what identifies it: the operator has just watched it
+    // happen and has no episode number in their head, but they know roughly how
+    // long they were driving.
+    dropLast: "Delete that {{seconds}} correction",
+    // Backspace pressed when the delete window has already closed. Only the
+    // most recent correction is still held in memory; the runner writes it at
+    // the next takeover, and lerobot cannot take an episode back out of an open
+    // dataset afterwards. The operator gets told the rule rather than silence,
+    // and is pointed at the one undo that IS still available.
+    nothingToDropHint: {
+      title: "That one's already saved",
+      body: "Only the most recent correction can be taken back, and there isn't one waiting. Everything before it is already written to the dataset. You can still delete the whole dataset when the session ends.",
+    },
     nothingToDelete: "No corrections to delete",
     // A command that lands after the runner finalized. Not a failure.
     sessionEnded: {
@@ -183,8 +227,8 @@ export default {
       startNextAttempt: "Start next attempt",
       recovered: "Recovery marked",
       marking: "Marking…",
-      recover: "Recover",
-      recovering: "Recovering…",
+      dropLast: "Delete the last correction",
+      dropping: "Deleting…",
       starting: "Starting…",
     },
   },

@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -47,6 +49,7 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rollout, "_inference_proc", None)
     monkeypatch.setattr(rollout, "_inference_started_at", None)
     monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
+    monkeypatch.setattr(rollout, "_runner_ready", False)
     monkeypatch.setattr(rollout, "_inference_meta", {})
     monkeypatch.setattr(rollout, "_inference_cancel", None)
     monkeypatch.setattr(rollout, "_last_result", None)
@@ -2129,6 +2132,10 @@ def _arm_eval_session(
     monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(rollout, "_inference_started_at", 1000.0)
     monkeypatch.setattr(rollout, "_inference_rollout_started_at", 1005.0 if running else None)
+    # An episode in flight means the runner reported READY long ago; a session
+    # parked in a reset with a dead runner has not (its respawn earns a fresh
+    # one).
+    monkeypatch.setattr(rollout, "_runner_ready", running)
     monkeypatch.setattr(
         rollout,
         "_inference_meta",
@@ -2678,11 +2685,11 @@ def test_stop_inference_quits_the_runner_instead_of_signalling_it(monkeypatch) -
     session.results.extend(["success", "failure"])
     runner = rollout._inference_proc
     quit_calls = []
-    monkeypatch.setattr(rollout, "_quit_runner", lambda proc: quit_calls.append(proc))
+    monkeypatch.setattr(rollout, "_quit_runner", lambda proc, **kw: quit_calls.append((proc, kw)))
 
     result = rollout.handle_stop_inference()
     assert result["success"] is True
-    assert quit_calls == [runner]
+    assert [c[0] for c in quit_calls] == [runner]
     assert session.quitting is True
 
     status = rollout.handle_inference_status()
@@ -3510,14 +3517,22 @@ def test_coaching_start_refuses_a_missing_leader(monkeypatch) -> None:
     assert rollout.inference_active is False
 
 
-def test_coaching_start_refuses_a_missing_right_leader_when_bimanual(monkeypatch) -> None:
+def test_bimanual_coaching_is_refused_before_the_per_arm_checks(monkeypatch) -> None:
+    """This used to assert the missing-right-leader message. It cannot any more,
+    and the reason is the point: bimanual coaching is refused outright, ahead of
+    every per-arm check, so an operator is told the real answer instead of being
+    sent to find a leader port that would not have helped.
+
+    Restore the per-arm assertion when bimanual coaching is supported again —
+    see `_bimanual_robot_args`' docstring for what that needs."""
     from makermodslab import rollout
 
     request = _coaching_request(mode="bimanual", right_follower_port="/dev/ttyUSB2")
     result = rollout.handle_start_inference(request)
     assert result["success"] is False
     assert result["status_code"] == 400
-    assert "right leader" in result["message"].lower()
+    assert "bimanual" in result["message"].lower()
+    assert "right leader" not in result["message"].lower()
 
 
 def test_coaching_start_refuses_a_blank_task(monkeypatch) -> None:
@@ -4060,34 +4075,6 @@ def test_reset_saves_the_correction_in_flight_then_resets() -> None:
     assert s._cancel_correction is False
 
 
-def test_recover_discards_the_correction_in_flight_then_resets() -> None:
-    """RECOVER is RESET's twin for a takeover the operator has given up on: the
-    same edge and the same reset, but with the discard armed. The pair must stay
-    distinguishable — one keeps the frames, one throws them away."""
-    from lerobot.rollout.configs import DAggerStrategyConfig
-    from lerobot.rollout.strategies.dagger import DAggerPhase
-    from makermodslab.dagger_protocol import CMD_RECOVER
-    from makermodslab.dagger_runner import _EV_CORRECTION, WebDAggerStrategy
-
-    s = WebDAggerStrategy(DAggerStrategyConfig(num_episodes=5))
-    assert s._translate(CMD_RECOVER, DAggerPhase.CORRECTING) == [_EV_CORRECTION]
-    assert s._reset_requested is True
-    assert s._cancel_correction is True
-
-
-def test_recover_resets_from_every_other_phase_too() -> None:
-    """Its whole purpose is being reachable when nothing else is."""
-    from lerobot.rollout.configs import DAggerStrategyConfig
-    from lerobot.rollout.strategies.dagger import DAggerPhase
-    from makermodslab.dagger_protocol import CMD_RECOVER
-    from makermodslab.dagger_runner import WebDAggerStrategy
-
-    for phase in (DAggerPhase.AUTONOMOUS, DAggerPhase.PAUSED):
-        s = WebDAggerStrategy(DAggerStrategyConfig(num_episodes=5))
-        assert s._translate(CMD_RECOVER, phase) == []
-        assert s._reset_requested is True
-
-
 def test_reset_requests_no_transition_from_the_non_correcting_phases() -> None:
     """From every phase that is not mid-correction it arms the flag and requests
     NO transition. Routing it through `pause_resume` made `_apply_transition`
@@ -4605,3 +4592,743 @@ def test_the_reset_outcome_reaches_the_session(monkeypatch) -> None:
     _drive(["ATTEMPT_RESET n=2 homed=true limp=true", "PHASE phase=paused"])
     assert session.reset_homed is True
     assert session.reset_limp is True
+
+
+# --- The held correction, orchestrator side ----------------------------------
+
+
+def _coach(**overrides):
+    from makermodslab import rollout
+
+    return rollout._CoachSession(request=_coaching_request(), corrections_target=5, **overrides)
+
+
+def test_a_held_correction_counts_and_opens_the_drop_window(monkeypatch) -> None:
+    """CORRECTION_HELD tallies exactly like CORRECTION_SAVED — the correction is
+    real and recorded — and additionally says the operator can still take it
+    back."""
+    from makermodslab import rollout
+
+    session = _coach()
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved({"n": "1", "frames": "90", "seconds": "4.5", "labelled": "false"}, held=True)
+    assert session.corrections_saved == 1
+    assert session.droppable_correction == {"n": 1, "frames": 90, "seconds": 4.5}
+
+
+def test_a_plain_saved_correction_opens_no_drop_window(monkeypatch) -> None:
+    """CORRECTION_SAVED means it is already on disk, and there is no supported
+    way to take one episode back out of an open lerobot dataset. Offering the
+    button anyway would be a delete that cannot happen."""
+    from makermodslab import rollout
+
+    session = _coach()
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved({"n": "1", "frames": "90", "seconds": "4.5"})
+    assert session.corrections_saved == 1
+    assert session.droppable_correction is None
+
+
+def test_committing_closes_the_window_without_counting_again(monkeypatch) -> None:
+    """THE double-count trap. The correction was tallied when it was recorded;
+    a commit handler that tallied it again would report two corrections for
+    every one the operator gave."""
+    from makermodslab import rollout
+
+    session = _coach()
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved({"n": "1", "frames": "90", "seconds": "4.5"}, held=True)
+    rollout._on_correction_committed()
+    assert session.corrections_saved == 1
+    assert session.droppable_correction is None
+
+
+def test_dropping_takes_the_correction_back_off_the_session(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _coach()
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved({"n": "1", "frames": "90", "seconds": "4.5"}, held=True)
+    rollout._on_correction_dropped({"n": "0", "frames": "90"})
+    assert session.corrections_saved == 0
+    assert session.droppable_correction is None
+    # The seconds were added when it was recorded, and it is not part of the
+    # session any more.
+    assert session.correction_seconds == pytest.approx(0.0)
+
+
+def test_dropping_removes_the_rac_entry_for_that_episode(monkeypatch) -> None:
+    """The sidecar is keyed by episode index. Leaving the dropped episode's
+    entry behind would describe an episode the dataset does not contain, and
+    every later entry would then be attributed to the wrong one."""
+    from makermodslab import rollout
+
+    session = _coach()
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved(
+        {"n": "1", "frames": "90", "seconds": "4.5", "recovery": "30", "labelled": "true"},
+        held=True,
+    )
+    assert 0 in session.rac_episodes
+    rollout._on_correction_dropped({"n": "0", "frames": "90"})
+    assert session.rac_episodes == {}
+
+
+def test_a_dropped_correction_leaves_the_next_one_at_the_right_index(monkeypatch) -> None:
+    """Two corrections, the second dropped, then a third. The third has to land
+    on episode 1 — the slot the dropped one vacated — or the sidecar describes
+    the wrong episodes for the rest of the session."""
+    from makermodslab import rollout
+
+    session = _coach()
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved({"n": "1", "frames": "60", "seconds": "3.0"}, held=True)
+    rollout._on_correction_committed()
+    rollout._on_correction_saved({"n": "2", "frames": "90", "seconds": "4.5"}, held=True)
+    rollout._on_correction_dropped({"n": "1", "frames": "90"})
+    rollout._on_correction_saved({"n": "2", "frames": "70", "seconds": "3.5"}, held=True)
+    assert session.corrections_saved == 2
+    assert sorted(session.rac_episodes) == [0, 1]
+
+
+def test_the_drop_window_is_reported_to_the_browser(monkeypatch) -> None:
+    """The browser must not infer the window from the phase — the runner owns
+    when it opens and closes, and it closes on a commit the UI never sees."""
+    from makermodslab import rollout
+
+    session = _coach()
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    rollout._on_correction_saved({"n": "1", "frames": "90", "seconds": "4.5"}, held=True)
+    assert rollout._coach_fields(session)["droppable_correction"] == {
+        "n": 1,
+        "frames": 90,
+        "seconds": 4.5,
+    }
+    assert rollout._coach_fields(None)["droppable_correction"] is None
+
+
+# --- Stopping before the runner can hear us ----------------------------------
+#
+# Both runners start their stdin reader only AFTER the robot is connected,
+# because `SOFollower.calibrate()` prompts with `input()` on that same stdin
+# during `connect()`. So a Stop pressed while the policy is loading or the arms
+# are connecting writes QUIT into a buffer nobody is reading — and the stop path
+# then waited the full 45s for an answer that could not come, while the runner
+# carried on loading the policy, opening the cameras and connecting both arms.
+# Watched from the browser that is a Stop that does nothing for most of a minute
+# and then aborts after everything has connected.
+
+
+def test_a_stop_before_ready_terminates_instead_of_waiting_for_quit(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=5)
+    monkeypatch.setattr(rollout, "_runner_ready", False)
+    seen = []
+    monkeypatch.setattr(rollout, "_quit_runner", lambda proc, **kw: seen.append(kw))
+
+    rollout.handle_stop_inference()
+    assert seen == [{"listening": False}]
+    assert session.quitting is True
+
+
+def test_a_stop_after_ready_still_asks_the_runner_to_wind_down(monkeypatch) -> None:
+    """The escalation is ONLY for the window where nothing is reading. Once the
+    runner is live, QUIT is what finalises the dataset and eases the arm home —
+    signalling there would risk the corrections the operator just collected."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=5)
+    monkeypatch.setattr(rollout, "_runner_ready", True)
+    seen = []
+    monkeypatch.setattr(rollout, "_quit_runner", lambda proc, **kw: seen.append(kw))
+
+    rollout.handle_stop_inference()
+    assert seen == [{"listening": True}]
+
+
+def test_quit_runner_skips_the_wait_entirely_when_nothing_is_listening(monkeypatch) -> None:
+    """The point is the ABSENCE of the 45s wait, so assert the wait never
+    happens rather than that a terminate eventually does."""
+    from makermodslab import rollout
+
+    waited, terminated = [], []
+    proc = types.SimpleNamespace(wait=lambda timeout=None: waited.append(timeout), stdin=None)
+    monkeypatch.setattr(rollout, "_terminate_tree", lambda p, **kw: terminated.append(p))
+    monkeypatch.setattr(rollout, "_send_runner_command", lambda p, c: waited.append("sent"))
+
+    rollout._quit_runner(proc, listening=False)
+    assert waited == []
+    assert terminated == [proc]
+
+
+# --- A stop is an abort whenever it lands ------------------------------------
+#
+# Stopping a coaching session while the policy was still loading ended with
+# `phase: "error", outcome: "failed"`, and the `error` string was whatever the
+# runner had last written to stderr — before READY that is only macOS's benign
+# "objc[…]: Class AVFFrameReceiver is implemented in both …/cv2/… and …/av/…"
+# warning. The frontend renders `outcome === "failed"` as a red destructive
+# toast showing that last line, so cancelling a startup looked exactly like the
+# app crashing on a dylib fault. Confirmed on hardware three times.
+
+
+def _quitting_coach(monkeypatch, rollout, proc):
+    """A coaching session whose operator has pressed Stop, runner still up."""
+    session = _coach()
+    session.quitting = True
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_proc", proc)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    return session
+
+
+def test_a_stop_before_ready_is_an_abort_not_a_crash(monkeypatch) -> None:
+    """The pre-READY stop path SIGNALS the runner, so it exits non-zero. That
+    exit code used to drive the classification, turning an operator-requested
+    stop into `failed` — the bug the operator saw as a crash toast."""
+    from makermodslab import rollout
+
+    proc = object()
+    session = _quitting_coach(monkeypatch, rollout, proc)
+    session.corrections_saved = 0
+    monkeypatch.setattr(
+        rollout,
+        "_extract_error_from_log",
+        lambda path: (
+            "objc[41521]: Class AVFFrameReceiver is implemented in both "
+            ".../cv2/cv2.abi3.so and .../av/_core.cpython-311-darwin.so. "
+            "This may cause spurious casting failures and mysterious crashes."
+        ),
+    )
+
+    rollout._handle_dagger_exit(proc, -15)
+
+    assert rollout._last_result["phase"] == "aborted"
+    assert rollout._last_result["outcome"] == "ok"
+    # The benign dylib warning must never reach the operator as an error.
+    assert rollout._last_result["error"] is None
+
+
+def test_a_stop_after_ready_is_still_an_abort(monkeypatch) -> None:
+    """The other window: a live session stopped with QUIT already classified
+    correctly, and must keep doing so."""
+    from makermodslab import rollout
+
+    proc = object()
+    session = _quitting_coach(monkeypatch, rollout, proc)
+    session.corrections_saved = 3
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", 1005.0)
+
+    rollout._handle_dagger_exit(proc, 0)
+
+    assert rollout._last_result["phase"] == "aborted"
+    assert rollout._last_result["outcome"] == "ok"
+    assert rollout._last_result["corrections_saved"] == 3
+
+
+def test_a_runner_that_reported_its_own_error_is_still_a_failure(monkeypatch) -> None:
+    """The one exit a stop does NOT excuse: the runner said what broke. Hiding
+    that behind "stopped" would hide a half-written dataset."""
+    from makermodslab import rollout
+
+    proc = object()
+    session = _quitting_coach(monkeypatch, rollout, proc)
+    session.runner_error = "RuntimeError: bus went away"
+
+    rollout._handle_dagger_exit(proc, 1)
+
+    assert rollout._last_result["phase"] == "error"
+    assert rollout._last_result["outcome"] == "failed"
+    assert rollout._last_result["error"] == "RuntimeError: bus went away"
+
+
+def test_a_status_poll_that_wins_the_race_reports_the_abort_too(monkeypatch) -> None:
+    """`handle_inference_status` is the backstop for the pump, and whichever
+    path arrives first writes the terminal payload — so it has to reach the
+    same verdict or the operator's toast depends on a thread race."""
+    from makermodslab import rollout
+
+    proc = types.SimpleNamespace(poll=lambda: -15, returncode=-15)
+    _quitting_coach(monkeypatch, rollout, proc)
+    monkeypatch.setattr(rollout, "_extract_error_from_log", lambda path: "objc[41521]: Class …")
+
+    payload = rollout.handle_inference_status()
+
+    assert payload["phase"] == "aborted"
+    assert payload["outcome"] == "ok"
+    assert payload["error"] is None
+
+
+# --- drop_last must not claim it dropped something ---------------------------
+#
+# POST /sessions/{id}/coaching {"command": "drop_last"} answered
+# 200 {"success": true, "message": "Drop_last sent"} even with nothing held —
+# seen mid-correction and again straight after a previous drop. The runner logs
+# its refusal and does nothing, so the caller was told a correction had been
+# un-recorded when none had been.
+
+
+def _armed_coaching_command(monkeypatch, rollout, written):
+    """A live coaching session whose commands land in `written`."""
+    session = _coach()
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_proc", object())
+    monkeypatch.setattr(rollout, "_send_runner_command", lambda proc, cmd: (written.append(cmd), True)[1])
+    return session
+
+
+def test_drop_last_is_refused_when_no_correction_is_held(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    written: list[str] = []
+    _armed_coaching_command(monkeypatch, rollout, written)
+
+    result = rollout.handle_coaching_command("drop_last")
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert result["code"] == "coaching.nothing_to_drop"
+    # And nothing was written: a refusal the runner would only have logged.
+    assert written == []
+
+
+def test_drop_last_is_forwarded_while_the_window_is_open(monkeypatch) -> None:
+    """The refusal reads `droppable_correction`, so an open window still sends."""
+    from makermodslab import rollout
+
+    written: list[str] = []
+    session = _armed_coaching_command(monkeypatch, rollout, written)
+    session.droppable_correction = {"n": 1, "frames": 90, "seconds": 4.5}
+
+    result = rollout.handle_coaching_command("drop_last")
+
+    assert result["success"] is True
+    assert written == ["DROP_LAST"]
+
+
+def test_every_other_verb_is_still_forwarded_without_a_state_check(monkeypatch) -> None:
+    """The narrowness is the point: a server-side phase copy is one event stale,
+    so pre-checking the rest would reject commands the arm was ready for."""
+    from makermodslab import rollout
+
+    written: list[str] = []
+    _armed_coaching_command(monkeypatch, rollout, written)
+
+    for verb in ("takeover", "handback", "cancel", "hold", "resume", "reset", "recovered"):
+        assert rollout.handle_coaching_command(verb)["success"] is True
+    assert written == [
+        "TAKEOVER",
+        "HANDBACK",
+        "CANCEL",
+        "HOLD",
+        "RESUME",
+        "RESET",
+        "RECOVERED",
+    ]
+
+
+def test_the_command_message_is_not_a_protocol_token(monkeypatch) -> None:
+    """ "Drop_last sent" is the wire verb leaking into a sentence a person reads."""
+    from makermodslab import rollout
+
+    written: list[str] = []
+    session = _armed_coaching_command(monkeypatch, rollout, written)
+    session.droppable_correction = {"n": 1, "frames": 90, "seconds": 4.5}
+
+    assert rollout.handle_coaching_command("drop_last")["message"] == "Drop last sent"
+    assert rollout.handle_coaching_command("takeover")["message"] == "Takeover sent"
+
+
+# --- The pyav decoder fallback, at every dataset call site --------------------
+#
+# torchcodec is lerobot's default video decoder and its native libraries do not
+# load on a host without FFmpeg (`dlopen … libavutil.56.dylib` fails — this
+# machine). The training path already probes for that (jobs.py, via
+# utils.system.torchcodec_loads) and asks for pyav, which bundles its own
+# FFmpeg. Two dataset call sites did not, and would raise on first frame
+# access: merge's `_strip_features` and datasets' `push_dataset_to_hub`.
+
+
+class _RecordingDataset:
+    """A LeRobotDataset stand-in that records the kwargs it was built with."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        _RecordingDataset.seen = kwargs
+        self.meta = types.SimpleNamespace(features={})
+        self.repo_id = args[0] if args else None
+        self.num_episodes = 0
+
+    def push_to_hub(self, **kwargs) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("loads", "expected"),
+    [(False, "pyav"), (True, None)],
+)
+def test_merge_strip_features_falls_back_to_pyav(monkeypatch, tmp_path, loads, expected) -> None:
+    """`None` is not "no opinion by accident": it is what leaves lerobot's own
+    default in place on a host where torchcodec works."""
+    import lerobot.datasets.lerobot_dataset as lerobot_dataset
+    from makermodslab import merge
+
+    monkeypatch.setattr(lerobot_dataset, "LeRobotDataset", _RecordingDataset)
+    monkeypatch.setattr(merge, "torchcodec_loads", lambda: loads)
+
+    # No feature to drop, so it returns before touching dataset_tools — the
+    # construction is the whole point of the test.
+    assert merge._strip_features("user/set", tmp_path, ["intervention"], tmp_path, 0) is None
+    assert _RecordingDataset.seen["video_backend"] == expected
+
+
+@pytest.mark.parametrize(
+    ("loads", "expected"),
+    [(False, "pyav"), (True, None)],
+)
+def test_push_dataset_to_hub_falls_back_to_pyav(monkeypatch, loads, expected) -> None:
+    import lerobot.datasets as lerobot_datasets
+    from makermodslab import datasets
+
+    monkeypatch.setattr(lerobot_datasets, "LeRobotDataset", _RecordingDataset)
+    monkeypatch.setattr(datasets, "torchcodec_loads", lambda: loads)
+    monkeypatch.setattr(datasets, "resolve_hub_repo_id", lambda repo_id: f"someone/{repo_id}")
+    monkeypatch.setattr(datasets, "invalidate_hub_status", lambda repo_id: None)
+    monkeypatch.setattr(datasets, "invalidate_hub_dataset_info", lambda repo_id: None)
+
+    datasets.push_dataset_to_hub("my_set", tags=None, private=False)
+    assert _RecordingDataset.seen["video_backend"] == expected
+
+
+# --- The recovery mark must not outlive its correction ------------------------
+#
+# `recovery_marked_at` only ever cleared on the NEXT takeover, so it still read
+# 96 after that correction was cancelled — through the whole parked window —
+# and still read 66 after a drop_last. Both describe an episode that no longer
+# exists, and a UI reading the field shows it as this session's live state.
+
+
+def test_a_cancelled_correction_clears_the_recovery_mark(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _coach()
+    session.recovery_marked_at = 96
+    monkeypatch.setattr(rollout, "_coach_session", session)
+
+    rollout._on_correction_cancelled({"reason": "operator", "frames": "140"})
+
+    assert session.recovery_marked_at is None
+    assert rollout._coach_fields(session)["recovery_marked_at"] is None
+
+
+def test_a_too_short_discard_clears_the_recovery_mark_too(monkeypatch) -> None:
+    """The other cancel reason takes an early return of its own — the mark has
+    to be gone before either path leaves."""
+    from makermodslab import rollout
+
+    session = _coach()
+    session.recovery_marked_at = 12
+    monkeypatch.setattr(rollout, "_coach_session", session)
+
+    rollout._on_correction_cancelled({"reason": "too_short", "frames": "4", "seconds": "0.2"})
+
+    assert session.recovery_marked_at is None
+    # …and the notice the operator does need still arrives.
+    assert session.discard_notice is not None
+
+
+def test_a_dropped_correction_clears_the_recovery_mark(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _coach()
+    session.corrections_saved = 1
+    session.droppable_correction = {"n": 1, "frames": 120, "seconds": 6.0}
+    session.recovery_marked_at = 66
+    monkeypatch.setattr(rollout, "_coach_session", session)
+
+    rollout._on_correction_dropped({"n": "0"})
+
+    assert session.recovery_marked_at is None
+    assert rollout._coach_fields(session)["recovery_marked_at"] is None
+
+
+# --- "Listening" has to mean READY for BOTH runner kinds ----------------------
+#
+# `_quit_runner(listening=...)` used to be derived from
+# `_inference_rollout_started_at`. Coaching sets that from `_on_dagger_ready`,
+# so it really was READY there; EVAL sets it from `_on_episode_started`, one
+# command later. A stop landing after the eval runner started reading its pipe
+# but before episode 1 began therefore signalled a runner that could have been
+# asked to quit. Short window and lerobot's signal handler kept it graceful, so
+# this fixes a false premise rather than a lost dataset — but the premise is the
+# thing the escalation is built on.
+
+
+def test_an_eval_stop_between_ready_and_the_first_episode_asks_nicely(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    session.episode_pending = True
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+    seen = []
+    monkeypatch.setattr(rollout, "_quit_runner", lambda proc, **kw: seen.append(kw))
+
+    # READY arrives; the first episode has been issued but has not started, so
+    # `_inference_rollout_started_at` is still None.
+    rollout._on_runner_ready()
+    assert rollout._inference_rollout_started_at is None
+    rollout.handle_stop_inference()
+
+    assert seen == [{"listening": True}]
+
+
+def test_ready_with_no_episode_pending_still_counts_as_listening(monkeypatch) -> None:
+    """READY says the runner is reading its pipe. Whether we had an episode to
+    give it is a different question, and the early return must not swallow it."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    session.episode_pending = False
+
+    rollout._on_runner_ready()
+
+    assert rollout._runner_ready is True
+
+
+def test_a_coaching_ready_still_marks_the_runner_listening(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", _coach())
+    monkeypatch.setattr(rollout, "_inference_started_at", 1000.0)
+
+    rollout._on_dagger_ready()
+
+    assert rollout._runner_ready is True
+
+
+def test_a_dead_eval_runner_is_no_longer_listening(monkeypatch) -> None:
+    """Its respawn earns a fresh READY — a stop before that must not write QUIT
+    into a pipe belonging to a process that has gone."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    monkeypatch.setattr(rollout, "_runner_ready", True)
+
+    with rollout._state_lock:
+        rollout._finalise_runner_exit_locked(1, session)
+
+    assert rollout._runner_ready is False
+
+
+def test_a_finished_episode_leaves_a_live_runner_listening(monkeypatch) -> None:
+    """The control: between episodes the runner never stopped reading its pipe,
+    so the next stop must still be a QUIT."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    monkeypatch.setattr(rollout, "_runner_ready", True)
+
+    with rollout._state_lock:
+        rollout._finalise_eval_episode_locked(0, session, keep_runner=True)
+
+    assert rollout._runner_ready is True
+
+
+def test_going_idle_clears_the_listening_flag(monkeypatch) -> None:
+    """It describes ONE process. Leaking it into the next session would have a
+    stop QUIT a runner that is still loading its policy."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    monkeypatch.setattr(rollout, "_runner_ready", True)
+
+    with rollout._state_lock:
+        rollout._go_idle_locked()
+
+    assert rollout._runner_ready is False
+
+
+# --- Aborted startups must not leave empty datasets behind --------------------
+#
+# A coaching session killed during startup left a dataset directory whose
+# meta/info.json reported `total_episodes: 0, total_frames: 0`. GET
+# /api/v1/datasets filters those out, so they were invisible — and accumulated,
+# one per cancelled start.
+
+
+def _coaching_dataset_dir(tmp_path, *, episodes: int, frames: int) -> Path:
+    root = tmp_path / "rollout_shirt_fixes_20260901_120000"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text(json.dumps({"total_episodes": episodes, "total_frames": frames}))
+    return root
+
+
+def _abort_coaching(monkeypatch, rollout, session) -> None:
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    with rollout._state_lock:
+        rollout._finalise_coaching_locked(None, session, aborted=True)
+
+
+def test_an_abort_with_no_episodes_removes_the_dataset_directory(monkeypatch, tmp_path) -> None:
+    from makermodslab import rollout
+
+    root = _coaching_dataset_dir(tmp_path, episodes=0, frames=0)
+    session = _coach()
+    session.dataset_root = str(root)
+    session.dataset_repo_id = root.name
+
+    _abort_coaching(monkeypatch, rollout, session)
+
+    assert not root.exists()
+    # And the abort itself is still reported exactly as before.
+    assert rollout._last_result["phase"] == "aborted"
+
+
+def test_an_abort_after_one_correction_keeps_everything(monkeypatch, tmp_path) -> None:
+    """The whole point of the guards: corrections on disk are the deliverable,
+    and a stop is the normal way a session ends."""
+    from makermodslab import rollout
+
+    root = _coaching_dataset_dir(tmp_path, episodes=1, frames=120)
+    session = _coach()
+    session.dataset_root = str(root)
+    session.dataset_repo_id = root.name
+    session.corrections_saved = 1
+
+    _abort_coaching(monkeypatch, rollout, session)
+
+    assert (root / "meta" / "info.json").exists()
+
+
+def test_a_zero_tally_disagreeing_with_the_dataset_is_left_alone(monkeypatch, tmp_path) -> None:
+    """Two independent sources say whether anything was recorded, and it takes
+    BOTH to remove a directory — a dropped CORRECTION_SAVED event must not cost
+    the operator the episodes lerobot did write."""
+    from makermodslab import rollout
+
+    root = _coaching_dataset_dir(tmp_path, episodes=2, frames=240)
+    session = _coach()
+    session.dataset_root = str(root)
+
+    _abort_coaching(monkeypatch, rollout, session)
+
+    assert root.exists()
+
+
+def test_an_unreadable_info_json_is_never_removed(monkeypatch, tmp_path) -> None:
+    """A directory we cannot prove is empty is one we keep."""
+    from makermodslab import rollout
+
+    root = tmp_path / "rollout_shirt_fixes_20260901_120000"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text("{not json")
+    session = _coach()
+    session.dataset_root = str(root)
+
+    _abort_coaching(monkeypatch, rollout, session)
+
+    assert root.exists()
+
+
+def test_a_session_that_ran_to_target_is_never_cleaned_up(monkeypatch, tmp_path) -> None:
+    """Cleanup is the ABORT path only. A finished (or crashed) session's
+    directory is somebody's dataset, however it reads."""
+    from makermodslab import rollout
+
+    root = _coaching_dataset_dir(tmp_path, episodes=0, frames=0)
+    session = _coach()
+    session.dataset_root = str(root)
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    with rollout._state_lock:
+        rollout._finalise_coaching_locked(0, session)
+
+    assert root.exists()
+
+
+# --- A stop before READY should not wait out a grace nobody can use ----------
+#
+# `dagger_runner` installs lerobot's signal handler before `build_rollout_context`,
+# and that handler only sets an event which `build_rollout_context` never reads.
+# So pre-READY the child provably cannot act on SIGTERM: the policy load and the
+# camera opens run to completion regardless. Measured on the station, the full
+# 5s grace elapsed every time and cameras kept connecting after the stop.
+
+
+def test_a_stop_before_ready_uses_the_short_grace(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    seen = []
+    monkeypatch.setattr(rollout, "_terminate_tree", lambda p, **kw: seen.append(kw))
+    monkeypatch.setattr(rollout, "_send_runner_command", lambda p, c: pytest.fail("must not send QUIT"))
+
+    rollout._quit_runner(object(), listening=False)
+    assert seen == [{"timeout": rollout._PRE_READY_TERMINATE_TIMEOUT_S}]
+    assert pytest.approx(1.0) == rollout._PRE_READY_TERMINATE_TIMEOUT_S
+
+
+def test_the_post_ready_fallback_keeps_the_patient_grace(monkeypatch) -> None:
+    """THE one that must not regress. After READY the runner may be mid
+    `save_episode()` encoding video; SIGKILLing it there leaves the parquet
+    footers unwritten while the summary offers to fine-tune on the result. That
+    is why the short grace is passed at the pre-READY sites rather than made the
+    default — a forgotten keyword must fail towards patience."""
+    import subprocess
+
+    from makermodslab import rollout
+
+    seen = []
+    monkeypatch.setattr(rollout, "_terminate_tree", lambda p, **kw: seen.append(kw))
+    monkeypatch.setattr(rollout, "_send_runner_command", lambda p, c: True)
+
+    class _Wedged:
+        stdin = None
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="runner", timeout=timeout)
+
+    rollout._quit_runner(_Wedged(), listening=True)
+    # No timeout override: _terminate_tree's patient default stands.
+    assert seen == [{}]
+
+
+def test_the_short_grace_is_never_the_default(monkeypatch) -> None:
+    """If someone flips the default, every post-READY caller silently becomes
+    aggressive and the failure is a corrupted dataset, not a test error."""
+    import inspect
+
+    from makermodslab import rollout
+
+    default = inspect.signature(rollout._terminate_tree).parameters["timeout"].default
+    assert default > rollout._PRE_READY_TERMINATE_TIMEOUT_S
+
+
+def test_bimanual_coaching_is_refused_before_any_hardware_is_touched(monkeypatch) -> None:
+    """It cannot work on this pin — the left_* camera prefix defeats every policy
+    trained on unprefixed names — and without this guard the operator waits ~30s
+    while the policy downloads and four arms connect, only to be told about a
+    CLI flag they cannot reach. Refuse in the launch panel instead."""
+    from makermodslab import rollout
+
+    req = _coaching_request(mode="bimanual")
+    result = rollout.handle_start_inference(req)
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "bimanual" in result["message"].lower()
+    # And nothing was claimed: the slot must be free for the next attempt.
+    assert rollout.inference_active is False
+
+
+def test_single_arm_coaching_is_not_caught_by_that_guard(monkeypatch) -> None:
+    """The guard keys on mode alone, so it is exactly one `==` away from
+    disabling the feature entirely."""
+
+    req = _coaching_request()
+    assert req.mode != "bimanual"

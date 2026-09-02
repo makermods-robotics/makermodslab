@@ -55,6 +55,17 @@ export type CoachingPhase =
   | "autonomous"
   | "paused"
   | "correcting"
+  // Also ours. The FIRST of the two presses that make up a takeover: the policy
+  // has stopped, the leader has been glided onto the follower's pose and is
+  // HELD THERE UNDER TORQUE, and nothing is being recorded. Takeover used to be
+  // a single press, which meant a failed glide was invisible — on a real
+  // session the first glide raised, the leader never moved, and the offset that
+  // should have absorbed the gap walked the FOLLOWER 114 degrees across the
+  // workspace to meet a stationary leader. Splitting the press gives the
+  // operator a still, aligned arm to inspect and take hold of before the second
+  // press releases the leader, captures the offset, and starts teleoperation
+  // and recording together.
+  | "poised"
   // NOT one of lerobot's — ours. Covers the window where `_apply_transition`
   // is driving an arm and no lerobot phase describes what is happening:
   // single-arm the leader is being driven to the follower's pose, bimanual
@@ -178,6 +189,13 @@ export interface InferenceStatus {
   // live so the habit is visible while it is still formable, rather than only
   // in the end-of-session summary.
   corrections_labelled?: number | null;
+  // The correction the operator can still un-record, or null when there is
+  // none. Present only while the runner is HOLDING that correction in memory —
+  // between the hand-back that ended it and the takeover (or session end) that
+  // commits it to disk. Once committed there is no supported way to take one
+  // episode back out of an open lerobot dataset, so the backend owns this
+  // window and the browser only renders it.
+  droppable_correction?: { n: number; frames: number; seconds: number } | null;
 }
 
 // The coaching block on its own, as pushed over the websocket the instant it
@@ -201,6 +219,7 @@ export const COACHING_STATE_KEYS = [
   "reset_limp",
   "recovery_marked_at",
   "corrections_labelled",
+  "droppable_correction",
   "coach_seq",
 ] as const;
 
@@ -245,6 +264,7 @@ export type CoachingState = Pick<
   | "recovery_marked_at"
   | "coach_seq"
   | "corrections_labelled"
+  | "droppable_correction"
 >;
 
 // Kind-agnostic fallback stop. The session dialog stops by session id
@@ -380,20 +400,26 @@ export async function coachingReset(
   });
 }
 
-// The escape hatch from a wedged correction: discard whatever is in flight and
-// run the ordinary reset. Unlike `coachingReset` this is accepted mid-correction
-// — that is the whole point, since a stuck correction is exactly when RESET's
-// deliberate refusal leaves the operator with nowhere to go.
+// Un-record the last correction — the one from the attempt that just ended.
 //
-// ALWAYS destructive: it throws the correction away and ends the attempt. Not a
-// gentler discard; the loud one.
-export async function coachingRecover(
+// A real delete, not a tombstone, and that is only possible because it is not a
+// delete at all: the runner HOLDS the finished correction in memory rather than
+// writing it at hand-back, and commits it when the next takeover begins. This
+// tells it not to. Once `save_episode` has run the frames are interleaved into
+// shared parquet chunks and a concatenated per-chunk video file, and lerobot
+// offers no way to remove one episode from a dataset that is still open —
+// `dataset_tools.delete_episodes` rebuilds a finalized dataset by copying it.
+//
+// So the window is real and narrow: hand back, park, decide. The backend
+// reports whether it is open (`droppable_correction`); do not infer it from the
+// phase. A 409 here means the correction was already committed.
+export async function coachingDropLast(
   baseUrl: string,
   fetcher: Fetcher,
 ): Promise<{ message: string }> {
-  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-recover", {
+  return apiRequest<{ message: string }>(baseUrl, fetcher, "/api/v1/coaching-drop-last", {
     method: "POST",
-    action: "Recover",
+    action: "Delete the last correction",
   });
 }
 
