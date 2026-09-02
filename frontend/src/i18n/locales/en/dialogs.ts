@@ -50,6 +50,21 @@ export default {
     play: "Play",
     pause: "Pause",
     trainSkill: "Train a skill from this",
+    // Episode curation: pick which episodes of this dataset a training run
+    // uses. Nothing is deleted — excluded episodes stay on disk and on the
+    // Hub, they are just left out of the next run's subset.
+    curateEpisodes: "Curate episodes",
+    curateDone: "Done",
+    // Summary under the heading while some episodes are excluded. Plain
+    // tallies, not pluralized sentences, hence `included`/`total`.
+    includedCount: "{{included}} of {{total}} included",
+    // aria-label on each row's checkbox. {{index}} is the dataset's own
+    // episode index.
+    includeEpisodeAria: "Include episode {{index}} in training",
+    curateSaveFailedTitle: "Couldn't save episode selection",
+    curateSaveFailedBody: "Your changes weren't saved — try again.",
+    // title on the disabled Train button while curation is still open.
+    finishCuratingFirst: "Finish selecting episodes first",
   },
 
   jointChart: {
@@ -105,6 +120,11 @@ export default {
     private: "private",
     // <0> is the emphasized lead-in, <1> the dataset repo id (mono, verbatim).
     trainedOn: "<0>Trained on</0> <1>{{dataset}}</1>",
+    // How much of that dataset the skill actually trained on, when it was
+    // curated down to a subset. The "of total" variant needs the dataset's
+    // own episode count, which is unavailable for a Hub-only dataset.
+    episodeSubset: "{{used}} episodes",
+    episodeSubsetOfTotal: "{{used}} of {{total}} episodes",
     notTrained: "Not trained yet — this skill is still in development.",
     // {{robot}} is the selected robot's name, or `robotFallback` when none is
     // selected.

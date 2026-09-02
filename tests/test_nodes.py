@@ -82,6 +82,13 @@ class FakeNetwork:
         # None ⇒ an empty response (the peer's own DELETE answers 204).
         self.stop_results: dict[tuple[str, str], tuple[int, dict | None]] = {}
         self.delete_results: dict[tuple[str, str], tuple[int, dict | None]] = {}
+        # The peer's system group, for the environment proxies: policy-extra
+        # status docs keyed (base url, policy type), install/restart answers
+        # programmed like the stop/delete forwards above.
+        self.policy_extras: dict[tuple[str, str], dict] = {}
+        self.extra_statuses: dict[tuple[str, str], dict] = {}
+        self.extra_install_results: dict[tuple[str, str], tuple[int, dict | None]] = {}
+        self.restart_results: dict[str, tuple[int, dict | None]] = {}
         self.down: set[str] = set()
         self.probes: dict[str, int] = {}
         # Every request that reached the transport, for asserting what the
@@ -110,6 +117,25 @@ class FakeNetwork:
                 if base not in self.peers:
                     return httpx.Response(404, json={"detail": "Not Found"})
                 return httpx.Response(200, json=self.peers[base])
+            # The peer's system group: policy-extra + self-restart (the
+            # environment proxies).
+            if path == "/api/v1/system/restart":
+                assert request.method == "POST", f"restart must be POSTed, got {request.method}"
+                status, body = self.restart_results.get(base, (404, {"detail": "Not Found"}))
+                return httpx.Response(status) if body is None else httpx.Response(status, json=body)
+            extra = re.fullmatch(r"/api/v1/system/policy-extra/([^/]+)(?:/(install|install-status))?", path)
+            if extra:
+                key = (base, extra.group(1))
+                not_found = {"detail": "Not Found"}
+                if extra.group(2) == "install":
+                    assert request.method == "POST"
+                    status, body = self.extra_install_results.get(key, (404, not_found))
+                    return httpx.Response(status) if body is None else httpx.Response(status, json=body)
+                assert request.method == "GET"
+                docs = self.extra_statuses if extra.group(2) == "install-status" else self.policy_extras
+                if key not in docs:
+                    return httpx.Response(404, json=not_found)
+                return httpx.Response(200, json=docs[key])
             # The peer's own per-job surface: /api/v1/jobs/{id}[/logs|/stop].
             match = re.fullmatch(r"/api/v1/jobs/([^/]+)(?:/(logs|stop))?", path)
             assert match, f"unexpected probe path: {request.url}"
@@ -1218,6 +1244,139 @@ def test_node_job_delete_dead_peer_502(client, api_registry, network):
     client.post("/api/v1/nodes", json={"url": PEER_A_URL})
     network.down.add(PEER_A_URL)
     resp = client.delete(f"/api/v1/nodes/{PEER_A_ID}/jobs/job-1")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def _extra_doc(available: bool = False) -> dict:
+    """A PolicyExtraStatus as the peer's own GET serves it — built from the
+    real handler's shape, because the peer runs this same code."""
+    return {
+        "policy_type": "smolvla",
+        "needs_extra": True,
+        "available": available,
+        "package": "transformers",
+        "install_target": "lerobot[smolvla]",
+        "install_hint": "pip install 'lerobot[smolvla]'",
+    }
+
+
+def test_node_policy_extra_proxies_the_peers_answer(client, api_registry, network):
+    """The proxy answers with the PEER's environment, not the local one — the
+    offloaded run imports from the peer's site-packages."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.policy_extras[(PEER_A_URL, "smolvla")] = _extra_doc(available=False)
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/policy-extra/smolvla")
+    assert resp.status_code == 200
+    assert resp.json()["needs_extra"] is True
+    assert resp.json()["available"] is False
+    assert resp.json()["install_target"] == "lerobot[smolvla]"
+    forwarded = [(m, u) for m, u in network.requests if "policy-extra" in u]
+    assert forwarded == [("GET", f"{PEER_A_URL}/api/v1/system/policy-extra/smolvla")]
+
+
+def test_node_policy_extra_unknown_node_404(client, api_registry):
+    resp = client.get("/api/v1/nodes/deadbeef/policy-extra/smolvla")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "node.not_found"
+
+
+def test_node_policy_extra_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/policy-extra/smolvla")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def test_node_policy_extra_install_forwards_post(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.extra_install_results[(PEER_A_URL, "smolvla")] = (
+        200,
+        {"started": True, "message": "Install started"},
+    )
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/policy-extra/smolvla/install")
+    assert resp.status_code == 200
+    assert resp.json() == {"started": True, "message": "Install started"}
+    forwarded = [(m, u) for m, u in network.requests if u.endswith("/install")]
+    assert forwarded == [("POST", f"{PEER_A_URL}/api/v1/system/policy-extra/smolvla/install")]
+
+
+def test_node_policy_extra_install_peer_refusal_passes_through(client, api_registry, network):
+    """A peer that answered with an error keeps ITS status and body — same
+    mutation stance as the forwarded stop/delete."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.extra_install_results[(PEER_A_URL, "smolvla")] = (
+        500,
+        {"detail": "pip exploded"},
+    )
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/policy-extra/smolvla/install")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "pip exploded"
+
+
+def test_node_policy_extra_install_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/policy-extra/smolvla/install")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "node.unreachable"
+
+
+def test_node_policy_extra_status_proxies_progress(client, api_registry, network):
+    """The install-status proxy is incremental like the log-tail proxy: the
+    peer drains pending pip lines per call, whoever made it."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.extra_statuses[(PEER_A_URL, "smolvla")] = {
+        "state": "installing",
+        "error": None,
+        "logs": [{"timestamp": 1.0, "message": "Collecting transformers"}],
+    }
+    resp = client.get(f"/api/v1/nodes/{PEER_A_ID}/policy-extra/smolvla/install-status")
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "installing"
+    assert resp.json()["logs"][0]["message"] == "Collecting transformers"
+
+
+def test_node_restart_forwards_and_returns_the_peers_answer(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.restart_results[PEER_A_URL] = (
+        200,
+        {"restarting": True, "message": "Restarting — the server will be back in a few seconds."},
+    )
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/restart")
+    assert resp.status_code == 200
+    assert resp.json()["restarting"] is True
+    forwarded = [(m, u) for m, u in network.requests if u.endswith("/system/restart")]
+    assert forwarded == [("POST", f"{PEER_A_URL}/api/v1/system/restart")]
+
+
+def test_node_restart_peer_refusal_passes_through(client, api_registry, network):
+    """The peer's own busy guard travels back whole: a node mid-training says
+    WHY it refused, with its own status and code."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.restart_results[PEER_A_URL] = (
+        409,
+        {"detail": "Cannot restart while a local training run is active.", "code": "robot.busy.training"},
+    )
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/restart")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "robot.busy.training"
+
+
+def test_node_restart_old_peer_404_passes_through(client, api_registry, network):
+    """A peer too old to have the endpoint answers a plain 404 — that verdict
+    reaches the caller as-is (degradation, not unreachable)."""
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/restart")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not Found"
+
+
+def test_node_restart_dead_peer_502(client, api_registry, network):
+    client.post("/api/v1/nodes", json={"url": PEER_A_URL})
+    network.down.add(PEER_A_URL)
+    resp = client.post(f"/api/v1/nodes/{PEER_A_ID}/restart")
     assert resp.status_code == 502
     assert resp.json()["code"] == "node.unreachable"
 

@@ -141,7 +141,21 @@ class HubJobItem(BaseModel):
     """One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is
     always present; the nullables mirror huggingface_hub's JobInfo (docker_image
     and space_id are mutually exclusive on the Hub side, status/owner can be
-    absent objects → null, name is _hub_job_run_name's best effort)."""
+    absent objects → null, name is _hub_job_run_name's best effort).
+
+    `policy_type` / `dataset` / `total_steps` / `hf_repo_id` are the run's
+    identity, recovered from the job's own argv by _hub_job_identity so a run
+    launched on another machine reads like a tracked one. Each is independently
+    nullable and for a real reason: a RESUMED cloud run carries `--config_path`
+    instead of `--policy.type` / `--dataset.repo_id`, so it reports a repo and a
+    step target with no policy or dataset.
+
+    `kind` and the `base_*` / `dataset_repo_id` / `steps` fields are what the run
+    started FROM, parsed by _hub_job_provenance off the same argv (kind chip +
+    base-checkpoint row on the card). `kind` is always one of
+    scratch/foundation/finetune/resume; the rest are null when the argv doesn't
+    answer them. All of it is decoration on a listing — never identity — so a
+    row that answers none of them still renders."""
 
     id: str
     name: str | None
@@ -152,6 +166,17 @@ class HubJobItem(BaseModel):
     status: HubJobStatus | None
     owner: str | None
     url: str
+    policy_type: str | None
+    dataset: str | None
+    total_steps: int | None
+    hf_repo_id: str | None
+    kind: Literal["scratch", "foundation", "finetune", "resume"] | None = None
+    base_ref: str | None = None
+    base_repo: str | None = None
+    base_step: str | None = None
+    base_job_id: str | None = None
+    dataset_repo_id: str | None = None
+    steps: str | None = None
 
 
 class HubModelItem(BaseModel):

@@ -117,6 +117,10 @@ export default {
       resumeHint: "继承自被继续的那次训练。",
       remove: "移除 {{repoId}}",
       searchPlaceholder: "搜索数据集，或输入公开的 org/name Hub id",
+      episodeSubset:
+        "将使用 {{used}} 个回合进行训练 — 可在「我的库」中该数据集的查看器里调整。",
+      episodeSubsetOfTotal:
+        "将使用 {{total}} 个回合中的 {{used}} 个进行训练 — 可在「我的库」中该数据集的查看器里调整。",
       choose: "选择数据集",
       useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
       useHubHint: "公开数据集 — 训练时按需拉取。",

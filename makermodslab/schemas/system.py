@@ -29,7 +29,12 @@ from makermodslab.update import UpdateResult, UpdateStatus
 
 # Handlers in makermodslab/utils/system.py return dicts with exactly these
 # fields (InstallManager.start / .get_status and handle_get_*_extra).
-from makermodslab.utils.system import ExtraStatus, InstallStartResponse, InstallStatusResponse
+from makermodslab.utils.system import (
+    ExtraStatus,
+    InstallStartResponse,
+    InstallStatusResponse,
+    RestartResponse,
+)
 
 __all__ = [
     "AvailableCamerasResponse",
@@ -42,9 +47,13 @@ __all__ = [
     "HfLoginResponse",
     "InstallStartResponse",
     "InstallStatusResponse",
+    "MakerIdentifyArmResponse",
+    "MakerProbePortsResponse",
+    "ReleaseCanTorqueResponse",
     "PolicyExtraStatus",
     "PolicyOptimizerDefaultsResponse",
     "PolicyOptimizerPreset",
+    "RestartResponse",
     "RobotPortResponse",
     "SupplyVoltageResponse",
     "UpdateResult",
@@ -175,3 +184,44 @@ class PolicyOptimizerDefaultsResponse(BaseModel):
 
     defaults: dict[str, PolicyOptimizerPreset | None]
     available: dict[str, bool]
+
+
+class MakerProbePortsResponse(BaseModel):
+    """maker_ports.probe_maker_ports — which ports answered which protocol.
+
+    Every list is always present (empty rather than absent) so a client can
+    read them unconditionally; `message` is always a human-readable summary,
+    including on the nothing-found path.
+    """
+
+    success: bool
+    follower_ports: list[str]
+    leader_ports: list[str]
+    unknown_ports: list[str]
+    message: str
+
+
+class ReleaseCanTorqueResponse(BaseModel):
+    """can_recovery.handle_release_can_torque — the crash-recovery release.
+
+    `problems` is always present (empty on success) so a client can render
+    the loud per-bus alarms unconditionally.
+    """
+
+    success: bool
+    message: str
+    problems: list[str]
+
+
+class MakerIdentifyArmResponse(BaseModel):
+    """maker_ports.identify_maker_arm_by_motion — which port saw the gesture.
+
+    `port` is absent on failure rather than null, so the route excludes None.
+    `skipped` lists ports that could not be opened (usually the other half of
+    the rig, which speaks a different protocol).
+    """
+
+    success: bool
+    message: str
+    port: str | None = None
+    skipped: list[str] = []

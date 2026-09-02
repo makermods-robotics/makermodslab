@@ -187,6 +187,12 @@ export default {
         "The job runs on <0>{{name}}</0>; datasets sync via the Hub — this dataset uploads to your HF account first, and <1>{{name}}</1> pulls it from there.",
       goneBody:
         "This node is no longer in the registry. Pick another compute target — starting the run would be refused.",
+      // The remote-restart button (two-step arm/confirm) and its status line.
+      // {{name}} is the node's display name — data, rendered verbatim.
+      restartAction: "Restart node",
+      restartConfirm: "Confirm restart?",
+      restartRequested:
+        "Restart requested — {{name}} will drop off for a few seconds and come back.",
     },
     // The drill-in dialog for one run ON a peer node (NodeJobDialog). Run
     // names, numbers and log lines are data, rendered verbatim; the state
@@ -377,6 +383,9 @@ export default {
       "Install complete — {{policy}} training is available immediately, no restart needed. Reload the page if it doesn't unlock on its own.",
     readyPolicyInference:
       "Install complete — {{policy}} inference is available immediately, no restart needed. Reload the page if it doesn't unlock on its own.",
+    // {{node}} is a LAN node's display name — data, rendered verbatim.
+    readyPolicyTrainingNode:
+      "Install complete on {{node}} — {{policy}} training is available there immediately, no restart needed. Start the run again.",
   },
 
   extraGate: {
@@ -408,6 +417,13 @@ export default {
       "Training a <0>{{policy}}</0> policy needs the <1>{{packageName}}</1> package (installed via <2>{{target}}</2>), which isn't in this environment yet. Install it to train this policy.",
     descriptionInference:
       "Running a <0>{{policy}}</0> policy needs the <1>{{packageName}}</1> package (installed via <2>{{target}}</2>), which isn't in this environment yet. Install it to run this policy.",
+    // The LAN-node variant: the extra lands on the PEER's environment, and
+    // every sentence says so. {{node}} is the node's display name (data).
+    titleNode: "{{policy}} needs an extra package on {{node}}",
+    srDescriptionTrainingNode:
+      "Install {{target}} on the node {{node}} for training with {{policy}}.",
+    descriptionTrainingNode:
+      "Training a <0>{{policy}}</0> policy on <3>{{node}}</3> needs the <1>{{packageName}}</1> package (installed via <2>{{target}}</2>), which isn't in that node's environment yet. Install it there — the pip install runs on the node.",
   },
 
   monitoring: {

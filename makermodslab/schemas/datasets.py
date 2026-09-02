@@ -53,10 +53,12 @@ __all__ = [
     "DownloadStatusResponse",
     "EpisodeJointSeriesResponse",
     "EpisodeSummary",
+    "ExcludedEpisodesResponse",
     "ImportResponse",
     "MergeLogEntry",
     "MergeStartResponse",
     "MergeStatusResponse",
+    "SetExcludedEpisodesResponse",
     "SuccessRepoIdResponse",
     "UploadStartResponse",
     "UploadStatusResponse",
@@ -128,6 +130,24 @@ class EpisodeJointSeriesResponse(BaseModel):
     values: list[list[float]]
 
 
+class ExcludedEpisodesResponse(BaseModel):
+    """server.py datasets_excluded_episodes — the episode indices left OUT of
+    the training subset for one dataset. Empty list when nothing is excluded;
+    the dataset itself is untouched (curation, not deletion)."""
+
+    repo_id: str
+    episode_indices: list[int]
+
+
+class SetExcludedEpisodesResponse(BaseModel):
+    """server.py datasets_set_excluded_episodes — echoes the set actually
+    persisted (re-read from disk), not the caller's input."""
+
+    success: bool
+    repo_id: str
+    episode_indices: list[int]
+
+
 class DatasetHubStatusResponse(BaseModel):
     """datasets.py get_hub_status — url is null (not absent) for every status
     except on_hub, so None must NOT be excluded on this route."""
@@ -135,6 +155,12 @@ class DatasetHubStatusResponse(BaseModel):
     repo_id: str
     status: Literal["on_hub", "local_only", "absent", "unknown"]
     url: str | None
+    # Qualifies "on_hub": False when the repo exists but holds no dataset (a
+    # half-finished upload left the empty repo behind — see
+    # datasets.hub_copy_has_data); None = no claim. The response model FILTERS
+    # undeclared fields, so leaving this out silently strips the emptiness
+    # warning the info card and cache dialog render from it.
+    hub_has_data: bool | None
 
 
 class DatasetHubSettingsResponse(BaseModel):

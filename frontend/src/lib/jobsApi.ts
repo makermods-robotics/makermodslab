@@ -37,6 +37,9 @@ export type MetricsHistoryPoint = {
 // these; defaults on the server fill in the rest.
 export interface TrainingRequest {
   dataset_repo_id: string;
+  // Episode indices to train on; omitted ⇒ every episode (see
+  // TrainingConfig.dataset_episodes).
+  dataset_episodes?: number[];
   policy_type: string;
   // Optional user-supplied display name; blank ⇒ backend auto-names the run.
   job_name?: string;
@@ -496,6 +499,14 @@ export interface HubJob {
   status: { stage: string; message: string | null } | null;
   owner: string | null;
   url: string;
+  // What the run trains, recovered Hub-side from the job's own argv
+  // (_hub_job_identity). Each is independently null: a RESUMED cloud run passes
+  // --config_path instead of --policy.type/--dataset.repo_id, so it reports a
+  // repo and a step target with no policy or dataset.
+  policy_type: string | null;
+  dataset: string | null;
+  total_steps: number | null;
+  hf_repo_id: string | null;
   // What the run started from, parsed backend-side off the job's own argv (see
   // _hub_job_provenance). All optional: a job submitted by something other than
   // MakerMods Lab carries argv we can't read, and the card simply omits the rows.
@@ -507,7 +518,6 @@ export interface HubJob {
   // originating local run's job id, which is what a person recognizes.
   base_job_id?: string | null;
   dataset_repo_id?: string | null;
-  policy_type?: string | null;
   steps?: string | null;
 }
 
