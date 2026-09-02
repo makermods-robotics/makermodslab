@@ -326,6 +326,16 @@ class CalibrationManager:
                         "code": ErrorCode.ROBOT_BUSY_REPLAY,
                     }
 
+                # Lazy, because jobs imports this module back the same way.
+                from . import jobs as _jobs
+
+                if (training := _jobs.training_is_active()) is not None:
+                    return {
+                        "success": False,
+                        "message": (f"Training run '{training}' is using this machine. Stop it first."),
+                        "code": ErrorCode.ROBOT_BUSY_TRAINING,
+                    }
+
                 # Refuse to silently overwrite an existing config file. Completing a
                 # calibration saves "<config_file>.json"; if that name is taken, the
                 # caller must pass overwrite=True (after confirming) or pick another
@@ -862,10 +872,19 @@ calibration_manager = CalibrationManager()
 
 
 def calibration_is_active() -> bool:
-    """True while a manual calibration session owns the serial bus.
+    """True while ANY calibration session owns a bus.
 
-    Reads the singleton's real state (no separately-tracked boolean) so other
+    Reads the singletons' real state (no separately-tracked boolean) so other
     feature modules' reciprocal mutex checks (see CLAUDE.md) can't drift from
-    the manager's own status.
+    the managers' own status.
+
+    Covers both calibration flows: the SO-101's step-by-step range sweep in
+    this module, and the Maker arm's zero-pose flow in ``zero_calibrate``.
+    They are separate managers because the procedures share nothing, but from
+    the mutual-exclusion standpoint they are one fact — "a calibration owns
+    this bus" — so every existing reciprocal check gets the Maker flow for
+    free, with no new ``robot.busy.*`` discriminant to register.
     """
-    return calibration_manager.status.calibration_active
+    from .zero_calibrate import zero_calibration_is_active
+
+    return calibration_manager.status.calibration_active or zero_calibration_is_active()

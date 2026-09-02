@@ -222,14 +222,53 @@ def test_no_new_routes_outside_api_v1():
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
         # Node registry (multi-node): static/manual peer source.
+        "GET /api/v1/nodes/{instance_id}/jobs/queue",
         "DELETE /api/v1/nodes/{instance_id}",
         "GET /api/v1/nodes",
+        # Workload proxy: the peer's own typed jobs listing, passed through.
+        "GET /api/v1/nodes/{instance_id}/jobs",
         "POST /api/v1/nodes",
+        # Maker arm port detection (maker_ports.py). No flat mirror: the flat
+        # surface only ever shrinks, and the SO-101's /identify-arm cannot
+        # serve these — a Maker rig answers RobStride over CAN and FashionStar
+        # over UART, neither of which a Feetech bus can open.
+        "POST /api/v1/maker/identify-arm",
+        "POST /api/v1/maker/probe-ports",
+        # CAN crash recovery (can_recovery.py): de-energize a follower whose
+        # process died holding torque. Not a session (see the module
+        # docstring), and no flat mirror for the same only-shrinks reason.
+        "POST /api/v1/arms/release-torque",
+        # Peer-job drill-in proxies: record + incremental log tail (GET, any
+        # HTTP failure = node.unreachable) and forwarded stop/delete (the
+        # peer's own coded refusals pass through with THEIR status and body).
+        "GET /api/v1/nodes/{instance_id}/jobs/{job_id}",
+        "GET /api/v1/nodes/{instance_id}/jobs/{job_id}/logs",
+        "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
+        "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
+        # Environment proxies: the peer's own policy-extra status / install /
+        # install-progress (the pip subprocess runs on the PEER), plus the
+        # forwarded self-restart that makes a just-installed environment
+        # reachable without a shell on the node.
+        "GET /api/v1/nodes/{instance_id}/policy-extra/{policy_type}",
+        "GET /api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install-status",
+        "POST /api/v1/nodes/{instance_id}/policy-extra/{policy_type}/install",
+        "POST /api/v1/nodes/{instance_id}/restart",
+        # Self-restart (the peer half of the proxy above): re-exec in place,
+        # guarded by the busy matrix + the training queue.
+        "POST /api/v1/system/restart",
+        # Local training queue (PR #83): the machine's plan, in run order, and
+        # the whole-list reorder that goes with it.
+        "GET /api/v1/jobs/queue",
+        "POST /api/v1/jobs/queue/reorder",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
         "POST /api/v1/sessions/{session_id}/heartbeat",
         "POST /api/v1/sessions/{session_id}/stop",
+        # Episode curation (PR #84): which episodes of a dataset a training
+        # run is launched with. Read/replace only — never deletes an episode.
+        "GET /api/v1/datasets/excluded-episodes",
+        "PUT /api/v1/datasets/excluded-episodes",
     ]
 )
 
@@ -268,6 +307,8 @@ RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
     [
         # 204 No Content: a successful job delete has no body to model.
         "DELETE /api/v1/jobs/{job_id}",
+        # 204 No Content: the forwarded peer-job delete mirrors the peer's own.
+        "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Raw Response: calibration JSON served as an attachment download.
         "GET /api/v1/calibration-configs/{device_type}/{config_name}/download",
         # StreamingResponse: MJPEG camera preview stream.

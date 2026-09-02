@@ -1,8 +1,18 @@
 export interface TrainingConfig {
-  target: { runner: "local" | "hf_cloud"; flavor?: string };
+  // Where the run executes. "lan_node" carries the chosen peer's
+  // node_instance_id (required by the backend); "hf_cloud" carries the flavor.
+  target: {
+    runner: "local" | "hf_cloud" | "lan_node";
+    flavor?: string;
+    node_instance_id?: string;
+  };
 
   // Dataset configuration
   dataset_repo_id: string;
+  // Episode indices to train on — a subset the caller narrowed down (e.g. the
+  // dataset viewer's exclude-from-training checkboxes). undefined ⇒ train on
+  // every episode, same as omitting the field entirely.
+  dataset_episodes?: number[];
 
   // Policy configuration
   policy_type: string;

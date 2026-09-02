@@ -155,6 +155,19 @@ def test_list_local_models_reads_train_config_over_record(registry) -> None:
     assert m["dataset"] == "cfg/other"
 
 
+def test_list_local_models_gates_dataset_episodes_same_as_get_model_info(registry) -> None:
+    """The listing (GET /models) must never carry an ungated dataset_episodes
+    for a private-dataset run — the privacy rule has to hold everywhere the
+    field is emitted, not only on the per-model detail view."""
+    from makermodslab.models import list_local_models
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[0, 1])
+    with patch("makermodslab.models.is_dataset_private", return_value=True):
+        assert list_local_models()[0]["dataset_episodes"] is None
+    with patch("makermodslab.models.is_dataset_private", return_value=False):
+        assert list_local_models()[0]["dataset_episodes"] == [0, 1]
+
+
 def test_list_local_models_skips_running_but_keeps_checkpointed_interrupted(registry) -> None:
     """A run counts as usable once it's "done" or "interrupted" (not
     "running") and has a real checkpoint on disk (MT10). An "interrupted" run
@@ -880,6 +893,65 @@ def test_get_model_info_unknown_returns_none(registry) -> None:
 
     with patch("makermodslab.models.hf_hub_offline", return_value=True):
         assert get_model_info("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# dataset_episodes — training-episode provenance, gated on the source
+# dataset's Hub privacy (see models._gate_dataset_episodes).
+# ---------------------------------------------------------------------------
+
+
+def _seed_run_with_episodes(registry, job_id: str, *, dataset: str, episodes: list[int]) -> Path:
+    """_seed_run, then rewrite train_config.json with a dataset.episodes
+    subset — mirrors test_list_local_models_reads_train_config_over_record's
+    pattern of overwriting the file _seed_run already wrote."""
+    pretrained = _seed_run(registry, job_id, dataset=dataset)
+    (pretrained / "train_config.json").write_text(
+        json.dumps({"policy": {"type": "act"}, "dataset": {"repo_id": dataset, "episodes": episodes}})
+    )
+    return pretrained
+
+
+def test_get_model_info_local_shows_episodes_for_public_dataset(registry) -> None:
+    from makermodslab.models import get_model_info
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[3, 1, 1, 2])
+    with patch("makermodslab.models.is_dataset_private", return_value=False) as gate:
+        info = get_model_info("curated_run")
+    assert info["dataset_episodes"] == [1, 2, 3]  # deduped, sorted
+    gate.assert_called_once_with("user/pick")
+
+
+def test_get_model_info_local_hides_episodes_for_private_dataset(registry) -> None:
+    from makermodslab.models import get_model_info
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[0, 1])
+    with patch("makermodslab.models.is_dataset_private", return_value=True):
+        info = get_model_info("curated_run")
+    assert info["dataset_episodes"] is None
+
+
+def test_get_model_info_local_hides_episodes_when_dataset_unresolvable(registry) -> None:
+    """Fail closed: a dataset that can't be resolved (never pushed to the Hub,
+    deleted, offline) is treated the same as an explicit private=True."""
+    from makermodslab.models import get_model_info
+
+    _seed_run_with_episodes(registry, "curated_run", dataset="user/pick", episodes=[0, 1])
+    with patch("makermodslab.models.is_dataset_private", return_value=None):
+        info = get_model_info("curated_run")
+    assert info["dataset_episodes"] is None
+
+
+def test_get_model_info_local_no_subset_skips_privacy_check(registry) -> None:
+    """A run trained on every episode has nothing to gate, so the Hub privacy
+    lookup — a real network call for an arbitrary dataset — never fires."""
+    from makermodslab.models import get_model_info
+
+    _seed_run(registry, "full_run", dataset="user/pick")
+    with patch("makermodslab.models.is_dataset_private") as gate:
+        info = get_model_info("full_run")
+    assert info["dataset_episodes"] is None
+    gate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -2024,6 +2096,47 @@ def test_hub_model_info_maps_expanded_fields() -> None:
     fake_api.model_info.assert_called_once()
 
 
+def test_hub_model_info_reads_episodes_from_final_checkpoint_train_config() -> None:
+    """dataset_episodes for a Hub skill comes from its final checkpoint's
+    train_config.json — a file read separate from the card-metadata dataset
+    name, since the Hub card only ever carries the repo id, not episode
+    granularity."""
+    import makermodslab.models as m
+    from makermodslab.jobs import JobCheckpoint
+
+    _clear_model_hub_info_cache()
+    fake_api = MagicMock()
+    fake_api.model_info.return_value = _fake_model_info(model_name="act", datasets=["user/pick"])
+    final_ckpt = JobCheckpoint(step=1000, source="hub", ref="user/policy@checkpoints/001000")
+    with (
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.jobs._list_imported_hub", return_value=[final_ckpt]),
+        patch(
+            "makermodslab.jobs.read_checkpoint_train_config",
+            return_value={"dataset": {"repo_id": "user/pick", "episodes": [2, 0]}},
+        ),
+    ):
+        row = m._hub_model_info("user/policy")
+    assert row["dataset_episodes"] == [0, 2]
+
+
+def test_hub_model_info_no_dataset_skips_episode_lookup() -> None:
+    """No dataset from the card ⇒ no point fetching a checkpoint just to look
+    for its episodes."""
+    import makermodslab.models as m
+
+    _clear_model_hub_info_cache()
+    fake_api = MagicMock()
+    fake_api.model_info.return_value = _fake_model_info(model_name="act", datasets=None)
+    with (
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.jobs._list_imported_hub") as list_ckpts,
+    ):
+        row = m._hub_model_info("user/policy")
+    assert row["dataset_episodes"] is None
+    list_ckpts.assert_not_called()
+
+
 def test_hub_model_info_falls_back_to_probe_on_error() -> None:
     """model_info raising degrades to the old probe (never propagates)."""
     import makermodslab.models as m
@@ -2284,3 +2397,153 @@ def test_resolve_pretrained_dir_skips_a_half_written_newest_checkpoint(tmp_lerob
     (partial / "config.json").write_text(json.dumps({"type": "act"}))
 
     assert m._resolve_pretrained_dir(root) == good.resolve()
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (PR #83 queue): /models/delete vs the training queue.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_local_model_refuses_a_queued_run_instead_of_cancelling_it(registry) -> None:
+    """POST /models/delete with a QUEUED run's id used to silently cancel the
+    queued run and answer {deleted: true}: the registry's delete() guard only
+    refuses `running`, so a queued record sailed through `job_registry.delete`
+    and left the queue — a cancel the user never asked for, reported as a
+    model deletion. Only terminal runs (done / interrupted / failed) hold
+    deletable artifacts; everything else is refused with a coded 409 naming
+    the queue as the place to act."""
+    from makermodslab.models import ModelError, delete_local_model
+
+    _seed_run(registry, "queued_run", state="queued", with_checkpoint=False)
+    registry._records["queued_run"].queue_seq = 10
+    # A real queued record always has its job dir (start() claims it at submit).
+    (registry._output_root / "queued_run").mkdir(parents=True)
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("queued_run")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.not_terminal"
+    assert "queue" in ei.value.message.lower()
+    # The run is still queued — nothing was cancelled or removed.
+    assert registry._records["queued_run"].state == "queued"
+    assert (registry._output_root / "queued_run").exists()
+
+
+def test_delete_local_model_running_refusal_carries_the_same_code(registry) -> None:
+    """The running-run refusal is the same condition (not terminal yet), so it
+    speaks the same code. Message unchanged — codes are additive."""
+    from makermodslab.models import ModelError, delete_local_model
+
+    _seed_run(registry, "live_run2", state="running")
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("live_run2")
+    assert ei.value.status == 409
+    assert ei.value.code == "job.not_terminal"
+
+
+def test_models_delete_route_forwards_the_refusal_code(client, monkeypatch, tmp_path) -> None:
+    """The HTTP layer must not drop the code: the 409 body carries `code`
+    beside the legacy string `detail` (the ApiError shape every coded refusal
+    uses)."""
+    from makermodslab.jobs import JobRecord, JobRegistry, job_registry
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(JobRegistry, "_drain_queue", lambda self: None)
+    record = JobRecord(
+        id="queued-on-wire",
+        name="queued-on-wire",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir=str(tmp_path / "queued-on-wire" / "run"),
+        started_at=0.0,
+        runner="local",
+        queue_seq=10,
+    )
+    original = dict(job_registry._records)
+    try:
+        job_registry._records["queued-on-wire"] = record
+        resp = client.post("/models/delete", json={"id": "queued-on-wire"})
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["code"] == "job.not_terminal"
+        assert isinstance(body["detail"], str)
+        assert job_registry._records["queued-on-wire"].state == "queued"
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
+
+
+def test_delete_local_model_names_the_queued_finetune_instead_of_502ing(registry) -> None:
+    """JobRegistry.delete raises JobSourceOfQueuedRunError when a QUEUED run
+    froze this run's checkpoint path at submit time. models.py didn't catch
+    it, so the refusal fell into the catch-all and surfaced as a 502 'Failed
+    to delete model' — a deliberate guard reported as an infrastructure
+    failure. Same 409 + job.has_queued_dependents the /jobs route emits."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
+
+    _seed_run(registry, "src_run", state="done")
+    registry._records["queued_ft"] = JobRecord(
+        id="queued_ft",
+        name="queued_ft",
+        state="queued",
+        config=TrainingRequest(dataset_repo_id="user/pick", finetune_from_job_id="src_run"),
+        output_dir=str(registry._output_root / "queued_ft" / "run"),
+        started_at=2.0,
+        runner="local",
+        queue_seq=10,
+    )
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("src_run")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.has_queued_dependents"
+    assert "queued_ft" in ei.value.message
+    # The source run — and the checkpoint the queued fine-tune will read — is
+    # untouched.
+    assert "src_run" in registry._records
+    assert (registry._output_root / "src_run").exists()
+
+
+def test_delete_downloaded_model_refuses_when_a_queued_run_reads_it(registry, tmp_lerobot_home: Path) -> None:
+    """The downloaded/imported branch of delete_local_model checked only the
+    live-inference guard (_model_in_use) — a QUEUED run whose frozen
+    policy_pretrained_path points inside the store dir sailed past it, and the
+    rmtree pulled the base out from under a run that fails at launch, hours
+    later, with a path nobody could tie to this click. Same guard, same 409 +
+    job.has_queued_dependents as every other queued-dependency refusal."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
+
+    model_dir = _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/base")
+    registry._records["queued_ft"] = JobRecord(
+        id="queued_ft",
+        name="queued_ft",
+        state="queued",
+        config=TrainingRequest(
+            dataset_repo_id="user/pick",
+            policy_pretrained_path=str(model_dir.resolve()),
+        ),
+        output_dir=str(registry._output_root / "queued_ft" / "run"),
+        started_at=1.0,
+        runner="local",
+        queue_seq=10,
+    )
+
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("user/base")
+
+    assert ei.value.status == 409
+    assert ei.value.code == "job.has_queued_dependents"
+    assert "queued_ft" in ei.value.message
+    assert model_dir.exists(), "the refusal must leave the checkpoint on disk"
+
+    # Without the dependent, the delete works exactly as before.
+    del registry._records["queued_ft"]
+    result = delete_local_model("user/base")
+    assert result["deleted"] is True
+    assert not model_dir.exists()

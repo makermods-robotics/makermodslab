@@ -69,3 +69,40 @@ def test_no_ui_env_disables_frontend(monkeypatch):
     assert server.ui_enabled() == server.FRONTEND_DIST.exists()
     monkeypatch.setenv("MAKERMODSLAB_NO_UI", "1")
     assert server.ui_enabled() is False
+
+
+def test_health_reports_gpu_when_torch_sees_one(client, monkeypatch):
+    """capabilities.gpu comes from the torch probe (cached per process): a
+    display-ready {name, vram} dict, or the key absent when there is no
+    accelerator. torch is already resident in the server process (the lerobot
+    import chain pulls it in), so the probe costs nothing."""
+    from makermodslab.utils import system as sysmod
+
+    monkeypatch.setattr(sysmod, "_gpu_cache", sysmod._GPU_UNPROBED)
+    monkeypatch.setattr(
+        sysmod, "_probe_gpu_uncached", lambda: {"name": "NVIDIA GeForce RTX 4090", "vram": "24GB"}
+    )
+    caps = client.get("/api/v1/health").json()["capabilities"]
+    assert caps["gpu"] == {"name": "NVIDIA GeForce RTX 4090", "vram": "24GB"}
+
+
+def test_health_omits_gpu_when_probe_finds_none(client, monkeypatch):
+    from makermodslab.utils import system as sysmod
+
+    monkeypatch.setattr(sysmod, "_gpu_cache", sysmod._GPU_UNPROBED)
+    monkeypatch.setattr(sysmod, "_probe_gpu_uncached", lambda: None)
+    caps = client.get("/api/v1/health").json()["capabilities"]
+    assert "gpu" not in caps
+
+
+def test_gpu_probe_is_cached(monkeypatch):
+    from makermodslab.utils import system as sysmod
+
+    calls = []
+    monkeypatch.setattr(sysmod, "_gpu_cache", sysmod._GPU_UNPROBED)
+    monkeypatch.setattr(
+        sysmod, "_probe_gpu_uncached", lambda: calls.append(1) or {"name": "x", "vram": "1GB"}
+    )
+    assert sysmod.probe_gpu() == {"name": "x", "vram": "1GB"}
+    assert sysmod.probe_gpu() == {"name": "x", "vram": "1GB"}
+    assert len(calls) == 1
