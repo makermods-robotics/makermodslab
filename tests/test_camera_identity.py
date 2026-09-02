@@ -422,3 +422,171 @@ def test_subprocess_enumeration_is_none_off_macos(monkeypatch: pytest.MonkeyPatc
     )
     assert list_cameras_in_subprocess() is None
     assert called == []
+
+
+# ---------------------------------------------------------------------------
+# The enumeration SCRIPT itself, executed for real
+#
+# Every test above fakes `subprocess.run`, so none of them ever runs the script
+# body — and the whole None-vs-[] contract lives inside that body. The child is
+# the only thing that can tell "could not ask" from "asked, saw nothing", so a
+# child that prints `[]` when the ask failed makes the parent's careful
+# distinction cosmetic: `_verify_camera_identities` would read a PyObjC/TCC
+# failure as a bare machine and refuse every inference start.
+#
+# These tests therefore spawn the REAL script with fake `objc`/`Foundation`
+# modules shadowing PyObjC on PYTHONPATH, so each failure mode can be induced
+# on any host (and without camera permission) while the code under test is the
+# shipped script, character for character.
+# ---------------------------------------------------------------------------
+
+_FAKE_OBJC = '''
+import json, os
+
+class error(Exception):
+    """Stands in for objc.error, which the script catches per-constant."""
+
+def loadBundleVariables(bundle, into, names):
+    wanted = [n for n in os.environ.get("FAKE_TYPES", "").split(",") if n]
+    for name, _enc in names:
+        if name in wanted:
+            into[name] = "avf-type:" + name
+
+class _Device:
+    def __init__(self, raw):
+        self._raw = raw
+
+    def uniqueID(self):
+        return self._raw["unique_id"]
+
+    def localizedName(self):
+        return self._raw["name"]
+
+class _Session:
+    def __init__(self, types, media_type):
+        self._types = types
+        self._media_type = media_type
+
+    def devices(self):
+        # No device types means a query that can only match nothing — which is
+        # what real AVFoundation returns, not an error. Modelling it faithfully
+        # is the point: the script cannot be allowed to pass that off as an
+        # empty machine.
+        if not self._types:
+            return []
+        # Muxed devices are a separate (usually empty) query; only the video
+        # query is scripted, so a `null` here models exactly one query failing
+        # to answer while the other answers honestly.
+        raw = os.environ.get("FAKE_DEVICES_" + self._media_type, "[]")
+        if raw == "null":
+            return None
+        return [_Device(d) for d in json.loads(raw)]
+
+class _DiscoverySession:
+    @staticmethod
+    def discoverySessionWithDeviceTypes_mediaType_position_(types, media_type, position):
+        return _Session(types, media_type)
+
+def lookUpClass(name):
+    return _DiscoverySession
+'''
+
+_FAKE_FOUNDATION = """
+import os
+
+class _Bundle:
+    def load(self):
+        return os.environ.get("FAKE_BUNDLE_LOAD", "1") == "1"
+
+class NSBundle:
+    @staticmethod
+    def bundleWithPath_(path):
+        return _Bundle()
+"""
+
+
+@pytest.fixture
+def run_real_enum_script(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Run `list_cameras_in_subprocess` for real against a fake AVFoundation.
+
+    Only PyObjC is faked (via PYTHONPATH shadowing); the script body, the spawn
+    and the parent's parsing are all the shipped code."""
+    import os
+    import subprocess as _subprocess
+
+    (tmp_path / "objc.py").write_text(_FAKE_OBJC)
+    (tmp_path / "Foundation.py").write_text(_FAKE_FOUNDATION)
+
+    def _set(**env) -> list[dict] | None:
+        real_run = _subprocess.run
+
+        def _run(cmd, **kwargs):
+            kwargs["env"] = {
+                **os.environ,
+                "PYTHONPATH": str(tmp_path),
+                **{k: str(v) for k, v in env.items()},
+            }
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(camera_identity.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(camera_identity.subprocess, "run", _run)
+        return camera_identity.list_cameras_in_subprocess()
+
+    return _set
+
+
+def test_real_script_reports_a_genuinely_empty_machine_as_an_empty_list(run_real_enum_script) -> None:
+    """The control: an ask that succeeded and saw nothing still returns [], so
+    the failure signalling below cannot be blamed for over-triggering."""
+    assert run_real_enum_script(FAKE_TYPES="AVCaptureDeviceTypeExternal") == []
+
+
+def test_real_script_returns_the_devices_it_saw(run_real_enum_script) -> None:
+    assert run_real_enum_script(
+        FAKE_TYPES="AVCaptureDeviceTypeExternal",
+        FAKE_DEVICES_vide='[{"name": "Wrist", "unique_id": "uid-B"},'
+        ' {"name": "Front", "unique_id": "uid-A"}]',
+    ) == [
+        {"index": 0, "name": "Front", "unique_id": "uid-A"},
+        {"index": 1, "name": "Wrist", "unique_id": "uid-B"},
+    ]
+
+
+def test_real_script_signals_failure_when_no_device_type_constant_resolves(
+    run_real_enum_script,
+) -> None:
+    """A macOS point release renaming the AVCaptureDeviceType constants leaves
+    the script with an empty type list, which can only ever match nothing. That
+    nothing must not reach the parent as [] — `_verify_camera_identities` would
+    then declare every bound camera missing and 400 every start, telling the
+    user to re-select cameras that are sitting right there."""
+    assert run_real_enum_script(FAKE_TYPES="") is None
+
+
+def test_real_script_signals_failure_when_the_framework_does_not_load(run_real_enum_script) -> None:
+    """Without AVFoundation loaded no constant resolves and no device can be
+    found — a failure to ask, not an empty machine."""
+    assert run_real_enum_script(FAKE_BUNDLE_LOAD="0", FAKE_TYPES="AVCaptureDeviceTypeExternal") is None
+
+
+def test_real_script_signals_failure_when_no_discovery_query_answered(run_real_enum_script) -> None:
+    """`devices()` returning nil is a query that did not answer. Flattening it
+    with `or []` is exactly what turns a failed query into an empty machine."""
+    assert (
+        run_real_enum_script(
+            FAKE_TYPES="AVCaptureDeviceTypeExternal",
+            FAKE_DEVICES_vide="null",
+            FAKE_DEVICES_muxx="null",
+        )
+        is None
+    )
+
+
+def test_real_script_trusts_one_answering_query(run_real_enum_script) -> None:
+    """Mirrors list_cameras_in_process's `answered` flag: the muxed query going
+    nil is normal, and one query answering is enough to trust the result."""
+    assert run_real_enum_script(
+        FAKE_TYPES="AVCaptureDeviceTypeExternal",
+        FAKE_DEVICES_vide='[{"name": "Front", "unique_id": "uid-A"}]',
+        FAKE_DEVICES_muxx="null",
+    ) == [{"index": 0, "name": "Front", "unique_id": "uid-A"}]

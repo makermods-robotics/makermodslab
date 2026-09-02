@@ -851,9 +851,10 @@ def _bimanual_request():
 
 
 def test_single_robot_args_uses_so101_follower_type() -> None:
-    from makermodslab.rollout import _single_robot_args
+    from makermodslab.rollout import _session_cameras, _single_robot_args
 
-    args = _single_robot_args(_stub_request(), "robot_a")
+    req = _stub_request()
+    args = _single_robot_args(req, "robot_a", _session_cameras(req))
     assert "--robot.type=so101_follower" in args
     assert "--robot.port=/dev/ttyUSB0" in args
     assert "--robot.id=robot_a" in args
@@ -866,7 +867,7 @@ def test_single_robot_args_appends_bound_record_cameras(
 ) -> None:
     """The binding names a RECORD camera ("wrist"); the CLI arg is keyed by the
     POLICY-expected name ("front") and carries the record's own settings."""
-    from makermodslab.rollout import InferenceRequest, _single_robot_args
+    from makermodslab.rollout import InferenceRequest, _session_cameras, _single_robot_args
 
     _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
     req = InferenceRequest(
@@ -876,7 +877,7 @@ def test_single_robot_args_appends_bound_record_cameras(
         robot_name="solo",
         camera_bindings={"front": "wrist"},
     )
-    args = _single_robot_args(req, "robot_a")
+    args = _single_robot_args(req, "robot_a", _session_cameras(req))
     cam_arg = next(a for a in args if a.startswith("--robot.cameras="))
     assert "front:" in cam_arg
     assert "wrist" not in cam_arg
@@ -895,7 +896,7 @@ def test_single_robot_args_captures_at_the_checkpoints_resolution(
     """The rollout pipeline doesn't resize frames to the policy's input shape,
     so `camera_dims` (from the checkpoint) must win over the record's own
     configured size — while identity still comes from the record."""
-    from makermodslab.rollout import InferenceRequest, _single_robot_args
+    from makermodslab.rollout import InferenceRequest, _session_cameras, _single_robot_args
 
     _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
     req = InferenceRequest(
@@ -906,7 +907,8 @@ def test_single_robot_args_captures_at_the_checkpoints_resolution(
         camera_bindings={"front": "wrist"},
         camera_dims={"front": {"width": 320, "height": 240}},
     )
-    cam_arg = next(a for a in _single_robot_args(req, "robot_a") if a.startswith("--robot.cameras="))
+    args = _single_robot_args(req, "robot_a", _session_cameras(req))
+    cam_arg = next(a for a in args if a.startswith("--robot.cameras="))
 
     assert "width: 320" in cam_arg
     assert "height: 240" in cam_arg
@@ -915,9 +917,10 @@ def test_single_robot_args_captures_at_the_checkpoints_resolution(
 
 
 def test_bimanual_robot_args_uses_bi_so_follower_with_both_ports() -> None:
-    from makermodslab.rollout import _bimanual_robot_args
+    from makermodslab.rollout import _bimanual_robot_args, _session_cameras
 
-    args = _bimanual_robot_args(_bimanual_request(), "dual_arm", "/staging/follower")
+    req = _bimanual_request()
+    args = _bimanual_robot_args(req, "dual_arm", "/staging/follower", _session_cameras(req))
     assert "--robot.type=bi_so_follower" in args
     assert "--robot.id=dual_arm" in args
     assert "--robot.calibration_dir=/staging/follower" in args
@@ -928,7 +931,7 @@ def test_bimanual_robot_args_uses_bi_so_follower_with_both_ports() -> None:
 def test_bimanual_robot_args_puts_cameras_on_left_arm_only(
     tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from makermodslab.rollout import InferenceRequest, _bimanual_robot_args
+    from makermodslab.rollout import InferenceRequest, _bimanual_robot_args, _session_cameras
 
     _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "dual_arm")
     req = InferenceRequest(
@@ -941,7 +944,7 @@ def test_bimanual_robot_args_puts_cameras_on_left_arm_only(
         robot_name="dual_arm",
         camera_bindings={"front": "wrist"},
     )
-    args = _bimanual_robot_args(req, "dual_arm", "/staging/follower")
+    args = _bimanual_robot_args(req, "dual_arm", "/staging/follower", _session_cameras(req))
     assert any(a.startswith("--robot.left_arm_config.cameras=") for a in args)
     assert not any(a.startswith("--robot.right_arm_config.cameras=") for a in args)
 
@@ -3473,3 +3476,194 @@ def test_handle_start_inference_refuses_a_camera_that_moved(
     assert "wrist" in result["message"]
     assert "restart" not in result["message"].lower()
     assert rollout.inference_active is False
+
+
+# ---------------------------------------------------------------------------
+# WHEN the camera check fires relative to the hardware
+#
+# The request-thread check is a fast reject for a stale record; it is NOT the
+# guarantee. Minutes can pass between it and the run (a Hub download), and a
+# camera reseated in that window is exactly the case the guard exists for. So
+# the check inside `_prepare_robot` has to come before the preflights, which
+# open the follower bus and write torque/velocity registers — a refusal that
+# lands after those has already claimed and rewritten the arm.
+# ---------------------------------------------------------------------------
+
+
+def _trap_preflights(monkeypatch, rollout) -> list[str]:
+    """Make both hardware-touching preflights record (and forbid) themselves."""
+    touched: list[str] = []
+
+    def _identity(port, follower_id, config_name=None):
+        touched.append(f"identity:{port}")
+        return []
+
+    def _registers(port, follower_id):
+        touched.append(f"registers:{port}")
+        return []
+
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", _identity)
+    monkeypatch.setattr(rollout, "_preflight_motor_registers", _registers)
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg, arm: "robot_a")
+    return touched
+
+
+def test_prepare_robot_verifies_cameras_before_opening_the_bus(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A camera that moved during the download must be caught with the arm
+    untouched: no identity read, and above all no torque-limit write."""
+    from makermodslab import rollout
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(monkeypatch, [{"index": 1, "name": "Other", "unique_id": "uid-X"}])
+    touched = _trap_preflights(monkeypatch, rollout)
+
+    with pytest.raises(CameraResolutionError):
+        rollout._prepare_robot(_cam_request("solo", {"front": "wrist"}))
+
+    assert touched == [], f"the bus was opened before the camera check: {touched}"
+
+
+def test_prepare_robot_bimanual_verifies_cameras_before_opening_either_bus(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two buses, twice the exposure — and the bimanual path builds its camera
+    args last of all, so it is the one most likely to regress."""
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "dual_arm", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(monkeypatch, [{"index": 1, "name": "Other", "unique_id": "uid-X"}])
+    touched = _trap_preflights(monkeypatch, rollout)
+    monkeypatch.setattr(
+        rollout, "stage_bimanual_follower_calibrations", lambda *a, **k: ("/staging/follower", None)
+    )
+
+    req = InferenceRequest(
+        follower_port="/dev/left",
+        follower_config="left_cal",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="bimanual",
+        right_follower_port="/dev/right",
+        right_follower_config="right_cal",
+        robot_name="dual_arm",
+        camera_bindings={"front": "wrist"},
+    )
+    with pytest.raises(CameraResolutionError):
+        rollout._prepare_robot(req)
+
+    assert touched == [], f"a bus was opened before the camera check: {touched}"
+
+
+def test_startup_worker_reports_a_moved_camera_in_its_own_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CameraResolutionError` carries finished, actionable prose (re-select the
+    camera). Falling through to the generic handler would bury it behind
+    "Failed to start inference:", which reads like a crash the user caused."""
+    import threading
+
+    from makermodslab import rollout
+    from makermodslab.utils.config import CameraResolutionError
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING, "policy_ref": "/tmp/model"}
+    )
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/tmp/model")
+
+    def _refuse(request):
+        raise CameraResolutionError("This camera is no longer at the position saved for this robot.")
+
+    monkeypatch.setattr(rollout, "_prepare_robot", _refuse)
+    monkeypatch.setattr(
+        rollout.subprocess,
+        "Popen",
+        lambda *a, **k: pytest.fail("no subprocess may spawn after a camera refusal"),
+    )
+
+    rollout._run_inference_startup(
+        rollout.InferenceRequest(
+            follower_port="/dev/f", follower_config="follower_a", policy_ref="/tmp/model"
+        ),
+        threading.Event(),
+    )
+
+    status = rollout.handle_inference_status()
+    assert status["outcome"] == "failed"
+    assert status["error"] == "This camera is no longer at the position saved for this robot."
+
+
+# ---------------------------------------------------------------------------
+# Eval respawn: the bench gets rearranged between episodes
+#
+# The reset is deliberately unrushed, which is precisely when a user reaches
+# behind the rig and moves a camera. On the live-runner path that is harmless —
+# the child is holding the verified devices open, and an index it never re-reads
+# cannot renumber underneath it. A respawn re-opens by index against the NEW
+# AVFoundation order, so it must re-verify or it silently films something else
+# for every remaining episode.
+# ---------------------------------------------------------------------------
+
+
+def test_next_episode_respawn_refuses_when_a_camera_moved(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab import rollout
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=None)
+    session.request = _cam_request("solo", {"front": "wrist"})
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(
+        rollout,
+        "_launch_eval_runner",
+        lambda *a, **k: pytest.fail("a runner must not respawn against an unverified camera set"),
+    )
+    _fake_enumeration(monkeypatch, [{"index": 1, "name": "Other", "unique_id": "uid-X"}])
+
+    result = rollout.handle_next_episode()
+
+    assert result["success"] is False
+    assert "wrist" in result["message"]
+
+
+def test_next_episode_respawn_proceeds_when_the_cameras_still_match(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard must not tax the ordinary crash-respawn: an unchanged bench
+    continues on the cached args, with no re-download and no second preflight."""
+    from makermodslab import rollout
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=None)
+    session.request = _cam_request("solo", {"front": "wrist"})
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+    _fake_enumeration(monkeypatch, [{"index": 1, "name": "Wrist", "unique_id": "uid-W"}])
+
+    launched = {}
+
+    def _fake_launch(request, policy_path, robot_args):
+        launched["robot_args"] = robot_args
+        proc = _FakeRunner()
+        proc.stdout = _EmptyStdout()
+        return proc, io.StringIO(), Path("/tmp/ep2.log")
+
+    monkeypatch.setattr(rollout, "_launch_eval_runner", _fake_launch)
+    monkeypatch.setattr(rollout, "_handle_runner_exit", lambda proc, rc: None)
+
+    result = rollout.handle_next_episode()
+
+    assert result["success"] is True
+    assert launched["robot_args"][0] == "--robot.type=so101_follower"

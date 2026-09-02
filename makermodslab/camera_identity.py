@@ -177,10 +177,30 @@ def list_cameras_in_process() -> list[dict] | None:
 # uniqueID (cap_avfoundation_mac.mm), so the returned index matches what
 # cv2.VideoCapture will open.
 _AVF_ENUM_SCRIPT = """
-import json, objc
+import json, sys, objc
 from Foundation import NSBundle
+
+
+def fail(reason):
+    # The child is the ONLY place that can tell "could not ask" from "asked and
+    # saw nothing", so every could-not-ask path funnels through here rather than
+    # falling through to an empty device list. The parent's [] is acted on as a
+    # fact about the machine (rollout refuses a start on it), so a failure that
+    # printed [] would 400 every inference run and send the user to re-select
+    # cameras that never moved. Signalled twice on purpose, since neither
+    # channel is guaranteed to be read: a JSON null on stdout, which the parent
+    # maps to None, and a non-zero exit, which trips subprocess.run(check=True)
+    # on its own even if stdout were lost or truncated.
+    sys.stderr.write(reason + "\\n")
+    print(json.dumps(None))
+    sys.exit(1)
+
+
 bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework")
-bundle.load()
+if not bundle.load():
+    # Nothing below can work with the framework unloaded: no device-type
+    # constant resolves and the discovery session reports an empty device set.
+    fail("AVFoundation framework did not load")
 types = []
 for name in (
     "AVCaptureDeviceTypeBuiltInWideAngleCamera",
@@ -196,10 +216,27 @@ for name in (
         continue
     if loaded.get(name) is not None:
         types.append(loaded[name])
+if not types:
+    # Never run a discovery session with an empty type list: it can only match
+    # nothing, and that nothing would be a lie. Individual names are expected to
+    # miss (they are version-gated); all of them missing means the lookup is
+    # broken -- a macOS release renaming them, say.
+    fail("No AVFoundation camera device-type constants resolved (renamed by macOS?)")
 cls = objc.lookUpClass("AVCaptureDeviceDiscoverySession")
 devs = []
+answered = False
 for mt in ("vide", "muxx"):
-    devs.extend(cls.discoverySessionWithDeviceTypes_mediaType_position_(types, mt, 0).devices() or [])
+    found = cls.discoverySessionWithDeviceTypes_mediaType_position_(types, mt, 0).devices()
+    # nil (a query that did not answer) is tracked apart from an empty array (a
+    # query that answered "none"); flattening both with `or []` is what would
+    # let a failed query read as an empty machine. One query answering is
+    # enough to trust the result -- the muxed query going nil is unremarkable.
+    if found is None:
+        continue
+    answered = True
+    devs.extend(found)
+if not answered:
+    fail("AVFoundation discovery answered nothing")
 devs.sort(key=lambda d: d.uniqueID())
 print(json.dumps([
     {"index": i, "name": str(d.localizedName()), "unique_id": str(d.uniqueID())}
@@ -229,11 +266,19 @@ def list_cameras_in_subprocess() -> list[dict] | None:
     wrong physical device.
 
     None and ``[]`` are **different answers**, exactly as in
-    :func:`list_cameras_in_process`:
+    :func:`list_cameras_in_process` — and that parity is the child's job, not
+    this function's: nothing here can see WHY the script printed what it
+    printed, so the script itself distinguishes the two and only ever prints
+    ``[]`` for a machine it really did enumerate (see :data:`_AVF_ENUM_SCRIPT`,
+    whose ``fail()`` guards the same three could-not-ask steps
+    :func:`list_cameras_in_process` guards, with the same ``answered``-flag
+    reasoning).
 
     - None — the enumeration could not be performed (non-macOS, the subprocess
-      failing to run, unparseable output). Nothing is known about the device
-      set, so callers must fall back to trusting the index they were given.
+      failing to run, unparseable output, or the script reporting a failure to
+      ask: AVFoundation not loading, no device-type constant resolving, no
+      discovery query answering). Nothing is known about the device set, so
+      callers must fall back to trusting the index they were given.
     - ``[]`` — the enumeration ran and found zero cameras; a requested device
       is then definitively absent.
 
@@ -250,14 +295,31 @@ def list_cameras_in_subprocess() -> list[dict] | None:
             timeout=10,
             check=True,
         )
+    except subprocess.CalledProcessError as e:
+        # The script's own could-not-ask signal (fail() exits non-zero after
+        # naming the reason on stderr). Surfaced with that reason, because
+        # "AVFoundation did not load" and "the constants were renamed" are the
+        # difference between a transient and a needs-a-code-change failure.
+        logger.warning(
+            "AVFoundation enumeration could not be performed: %s",
+            (e.stderr or "").strip() or e,
+        )
+        return None
     except (subprocess.SubprocessError, OSError) as e:
         logger.warning("AVFoundation enumeration subprocess failed: %s", e)
         return None
     try:
-        return json.loads(result.stdout)
+        cameras = json.loads(result.stdout)
     except json.JSONDecodeError as e:
         logger.warning("AVFoundation enumeration returned invalid JSON: %s", e)
         return None
+    if not isinstance(cameras, list):
+        # The script's other failure channel: a JSON null. Belt and braces with
+        # the exit code above — a null that arrived without one still means the
+        # child could not ask, and only a real list may be trusted as [].
+        logger.warning("AVFoundation enumeration reported no answer: %r", cameras)
+        return None
+    return cameras
 
 
 def resolve_in_enumeration(

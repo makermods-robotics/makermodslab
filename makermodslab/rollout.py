@@ -1322,25 +1322,36 @@ def _robot_cli_type(request: InferenceRequest) -> str:
     return _ROBOT_CLI_TYPES[(normalize_arm_type(request.arm_type), request.mode == "bimanual")]
 
 
-def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]:
+def _single_robot_args(
+    request: InferenceRequest, follower_id: str, cameras: dict[str, dict[str, Any]]
+) -> list[str]:
     """`--robot.*` args for a single follower (SO-101 or Maker).
 
     Both follower types take the same three flags: `port` is the Feetech
     USB-serial device for an SO-101 and the CAN adapter's serial port for a
     Maker arm (slcan, the only transport that works on macOS), so the shape is
-    identical and only the type key differs."""
+    identical and only the type key differs.
+
+    `cameras` is handed in rather than resolved here: resolving it also VERIFIES
+    it (see _session_cameras), and that check must happen before the caller
+    touches the arm — not while formatting argv, which is the last thing
+    _prepare_robot does."""
     args = [
         f"--robot.type={_robot_cli_type(request)}",
         f"--robot.port={request.follower_port}",
         f"--robot.id={follower_id}",
     ]
-    cameras = _session_cameras(request)
     if cameras:
         args.append(f"--robot.cameras={_format_cameras_arg(cameras)}")
     return args
 
 
-def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging: str) -> list[str]:
+def _bimanual_robot_args(
+    request: InferenceRequest,
+    base: str,
+    follower_staging: str,
+    cameras: dict[str, dict[str, Any]],
+) -> list[str]:
     """`--robot.*` args for a bimanual follower (BiSO or BiMaker).
 
     Both bimanual follower configs have the same shape — two sub-arms sharing
@@ -1351,7 +1362,9 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
     (left_arm_config / right_arm_config) sharing ONE calibration_dir + base id,
     loading each sub-arm's calibration as "<base>_left.json"/"<base>_right.json".
     `follower_staging` is the per-session dir the two library calibrations were
-    staged into under that convention (see stage_bimanual_follower_calibrations).
+    staged into under that convention (see stage_bimanual_follower_calibrations);
+    `cameras` is pre-resolved and pre-verified by the caller, for the reason
+    given on _single_robot_args.
     Cameras
     go on the LEFT arm (BiSO re-exposes them prefixed "left_*"); the right arm is
     camera-free, matching the record/teleop bimanual shape."""
@@ -1362,10 +1375,36 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
         f"--robot.left_arm_config.port={request.follower_port}",
         f"--robot.right_arm_config.port={request.right_follower_port}",
     ]
-    cameras = _session_cameras(request)
     if cameras:
         args.append(f"--robot.left_arm_config.cameras={_format_cameras_arg(cameras)}")
     return args
+
+
+def _reverified_robot_args(request: InferenceRequest, robot_args: list[str]) -> list[str]:
+    """Cached `--robot.*` args, re-checked against the CURRENT device set.
+
+    For the eval respawn only. Between episodes the user is explicitly invited
+    to take their time rearranging the bench, and a camera unplugged (or a new
+    one added) there renumbers every AVFoundation index — the cached args carry
+    the index the record held at session start, and a FRESHLY spawned runner
+    resolves it against the new order, so it would open a different physical
+    camera for every remaining episode with nothing anywhere saying so. The
+    live-runner path needs none of this: that child already holds the verified
+    devices open, and a handle cannot renumber underneath itself.
+
+    Raises CameraResolutionError (the caller turns it into a refusal that leaves
+    the session parked in its reset). The camera args are rebuilt from the same
+    re-read record the check ran against, so a record the user fixed mid-session
+    takes effect instead of relaunching against the stale index that just
+    passed. Everything else — ports, ids, the staged calibration dir — is reused
+    verbatim: those came from preflights we deliberately do not re-run.
+    """
+    cameras = _session_cameras(request)
+    flag = "--robot.left_arm_config.cameras=" if request.mode == "bimanual" else "--robot.cameras="
+    rebuilt = [arg for arg in robot_args if not arg.startswith(flag)]
+    if cameras:
+        rebuilt.append(f"{flag}{_format_cameras_arg(cameras)}")
+    return rebuilt
 
 
 def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
@@ -1376,8 +1415,19 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
     follower serial bus (read-only identity check + RAM torque-limit priming).
     It runs in the background startup worker AFTER the model download, so a stop
     pressed during the (long) download never reaches here — no bus is opened and
-    no register is written. Raises ArmIdentityError on a hard arm mismatch;
-    returns (robot_args, warn-but-allow messages)."""
+    no register is written. Raises ArmIdentityError on a hard arm mismatch, or
+    CameraResolutionError before anything is touched at all; returns
+    (robot_args, warn-but-allow messages)."""
+    # Cameras FIRST, and not merely because the args need them. Resolving them
+    # verifies that each stored index still holds the camera the record names
+    # (_session_cameras -> _verify_camera_identities), and that check is only
+    # worth anything while the arm is still untouched: the request-thread check
+    # ran before the model download, which can be minutes long and is exactly
+    # when a user reseats a camera. Building the args last — after the
+    # preflights had read the identity EEPROM and rewritten the torque and
+    # velocity registers — meant the refusal arrived with the bus already
+    # opened and the arm already reconfigured for a run that will not happen.
+    cameras = _session_cameras(request)
     is_bimanual = request.mode == "bimanual"
     if is_bimanual:
         # BiSO loads each sub-arm's calibration as "<base>_left/right.json"
@@ -1421,7 +1471,7 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
             identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
             identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
 
-        return _bimanual_robot_args(request, base, follower_staging), identity_warnings
+        return _bimanual_robot_args(request, base, follower_staging, cameras), identity_warnings
 
     # `setup_follower_calibration_file` returns the basename without the
     # .json extension. We need that stripped form for `--robot.id`,
@@ -1437,7 +1487,7 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
         # writes homing_offset=0 for every joint, so the EEPROM fingerprint has
         # nothing to compare and the torque-limit register does not exist.
         logger.info("CAN arm: skipping the Feetech identity + register preflights")
-        return _single_robot_args(request, follower_id), identity_warnings
+        return _single_robot_args(request, follower_id, cameras), identity_warnings
 
     if request.skip_identity_check:
         logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
@@ -1448,7 +1498,7 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
     # when the arm was never power-cycled.
     identity_warnings += _preflight_motor_registers(request.follower_port, follower_id)
 
-    return _single_robot_args(request, follower_id), identity_warnings
+    return _single_robot_args(request, follower_id, cameras), identity_warnings
 
 
 def _fail_startup(error: str) -> None:
@@ -1695,6 +1745,15 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
     except ArmIdentityError as exc:
         # The connected arm doesn't match its assigned calibration; the message
         # is already user-facing.
+        _fail_startup(str(exc))
+        return
+    except CameraResolutionError as exc:
+        # A camera moved between the request-thread check and here (the model
+        # download is the window). Same deal as ArmIdentityError: the message
+        # already tells the user exactly what to do — re-select the camera in
+        # Robot settings — and a "Failed to start inference:" prefix would read
+        # as an internal crash and bury the one instruction that helps.
+        logger.warning("Refusing inference after the camera check: %s", exc)
         _fail_startup(str(exc))
         return
     except Exception as exc:
@@ -2285,6 +2344,27 @@ def handle_next_episode() -> dict[str, Any]:
     # The runner died during the previous episode (or during the reset). Respawn
     # it — one policy load — and let the READY handler issue the episode, the
     # same way the session's first episode is issued.
+    #
+    # A respawn re-opens the cameras BY INDEX against whatever AVFoundation
+    # ordering exists now, so the session-start verification does not carry: the
+    # reset the user just spent rearranging the bench in is precisely when a
+    # camera gets unplugged or added. Re-check before spawning, outside the lock
+    # (it reads the record and spawns an enumeration child).
+    try:
+        robot_args = _reverified_robot_args(request, robot_args)
+    except CameraResolutionError as exc:
+        logger.warning("Refusing the next eval episode: %s", exc)
+        with _state_lock:
+            # Roll back the "we are starting" bookkeeping done under the lock
+            # above so the session stays parked in its reset: the tally and the
+            # runner-less state are intact, and Continue works again the moment
+            # the user re-selects the camera (or reattaches it). Failing the
+            # whole session here would throw away the episodes already scored.
+            if _eval_session is ev and inference_active:
+                ev.episode_pending = False
+                _inference_meta["phase"] = PHASE_RESETTING
+        return {"success": False, "status_code": 400, "message": str(exc)}
+
     try:
         proc, log_handle, log_path = _launch_eval_runner(request, policy_path, robot_args)
     except Exception as exc:
