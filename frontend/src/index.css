@@ -27,7 +27,14 @@
     --accent: 240 4.8% 95.9%;
     --accent-foreground: 240 5.9% 10%;
 
-    --destructive: 0 84.2% 60.2%;
+    /* Vermilion, not Tailwind red-500. The stock shadcn value (0 84.2% 60.2%)
+       is hue 0 at 84% saturation — the default every starter ships with, and
+       white text on it measures 3.8:1, under the 4.5:1 AA floor. This is 5.2:1.
+       Dark is LIGHTER than light here, on purpose: shadcn's dark destructive
+       (0 62.8% 30.6%) is darker than its light one, which renders a Stop
+       button brown. --ok / --warn / --info in this file already go the right
+       way; destructive now matches them. */
+    --destructive: 10 72% 45%;
     --destructive-foreground: 0 0% 98%;
 
     --border: 240 5.9% 90%;
@@ -77,7 +84,12 @@
     --accent: 240 3.7% 15.9%;
     --accent-foreground: 0 0% 98%;
 
-    --destructive: 0 62.8% 30.6%;
+    /* Vermilion again, lighter than the light-mode value but NOT the 56% the
+       swatch page showed: white on that measures 3.6:1, which fails AA for
+       body text and would have swapped one contrast bug for another. 46% is
+       4.9:1 and still reads as brick red rather than the brown shadcn's
+       30.6% produced. */
+    --destructive: 9 70% 46%;
     --destructive-foreground: 0 0% 98%;
 
     --border: 240 3.7% 15.9%;
