@@ -375,6 +375,10 @@ export default {
         "One policy forward per control step. The arm pauses briefly between action chunks.",
       rtcHint:
         "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
+      // Shown under the picker when the selected checkpoint's architecture
+      // can't run RTC (the server refuses it), which also disables the option.
+      rtcUnavailable:
+        "Real-Time Chunking isn't available for this checkpoint's policy.",
       // Shown INSTEAD of the picker in coaching mode, which is pinned to sync.
       coachingNote:
         "Coaching always uses the Sync engine. Real-Time Chunking makes the arm jump back toward its pre-correction pose when the policy resumes, which isn't safe with a hand nearby.",

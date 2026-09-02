@@ -348,6 +348,9 @@ export default {
     engineRtcHint:
       "Real-Time Chunking 让推理与运动重叠，消除动作块之间的停顿。它同时改变了动作的生成方式 —— 在采信结果前请与 Sync 对比。",
     engineSyncHint: "每个控制步进行一次策略前向计算。机械臂在动作块之间会短暂停顿。",
+    // 当所选检查点的架构无法运行 RTC（服务端会拒绝）时显示在选择器下方，
+    // 同时该选项也会被禁用。
+    engineRtcUnavailable: "该检查点的策略不支持 Real-Time Chunking。",
     camerasSection: "摄像头",
     policyConfigLoading: "正在读取策略配置…",
     policyConfigError: "无法加载策略配置：{{message}}",
