@@ -524,6 +524,20 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
 
     # Follower-only: inference never opens the leader bus, so only the
     # follower half of the record travels (right follower iff bimanual).
+    # COACHING is the one exception — the operator takes over THROUGH the
+    # leader — so its arms come off the same record, and only then. Sending
+    # them unconditionally would hand every plain rollout a leader port it has
+    # no business holding.
+    leader = (
+        {
+            "leader_port": record["leader_port"],
+            "leader_config": record["leader_config"],
+            "right_leader_port": record["right_leader_port"],
+            "right_leader_config": record["right_leader_config"],
+        }
+        if opts.coaching
+        else {}
+    )
     return InferenceRequest(
         follower_port=record["follower_port"],
         follower_config=record["follower_config"],
@@ -542,6 +556,10 @@ def _build_inference_request(record: dict, opts: InferenceOptions):
         skip_identity_check=opts.skip_identity_check,
         inference_engine=opts.inference_engine,
         temporal_ensemble_coeff=opts.temporal_ensemble_coeff,
+        coaching=opts.coaching,
+        target_corrections=opts.target_corrections,
+        coaching_dataset_name=opts.coaching_dataset_name,
+        **leader,
     )
 
 
@@ -742,7 +760,19 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
     # The setup kinds skip the record-clean gate (they exist to make records
     # clean); their builders below still refuse a slot with no port.
     if kind not in _SETUP_KINDS:
-        arms = "follower" if kind in _FOLLOWER_ONLY_KINDS else "all"
+        # Inference is normally follower-only, but a COACHING inference session
+        # DRIVES THE LEADER ARM — the operator takes over through it and the
+        # runner enables torque on it during the handover — so it needs the same
+        # "all arms" readiness the non-follower-only kinds get.
+        #
+        # This exception was lost when the branch was restacked, and losing it is
+        # not cosmetic: a coaching session then starts with only the follower
+        # checked and reserved, so the leader arm is never verified present and
+        # never held against another feature grabbing its port.
+        follower_only = kind in _FOLLOWER_ONLY_KINDS and not (
+            kind == "inference" and bool(body.options.get("coaching"))
+        )
+        arms = "follower" if follower_only else "all"
         if not is_robot_record_clean(record, arms=arms):
             needs = "follower arm" if arms == "follower" else "arms"
             raise ApiError(
@@ -964,3 +994,35 @@ def handle_stop_session(session_id: str) -> dict[str, Any]:
         if ended is not None and ended["id"] == before["id"]:
             session = dict(before, phase=ended["phase"])
     return {"session": _public_session(session), "result": result}
+
+
+def handle_coaching_command_for_session(session_id: str, command: str) -> dict[str, Any]:
+    """Forward one coaching (DAgger) command to the current inference session.
+
+    Session-scoped like `handle_stop_session`: `session_id` must name the
+    session that is actually running (404 `session.not_found` otherwise), so a
+    stale command can never hit a session it did not mean. Whether it is a
+    coaching session, and which phase each verb is legal from, is the runner's
+    call — `rollout.handle_coaching_command` returns a coded 409 for a plain
+    inference session, so no kind check is duplicated here.
+
+    Deliberately NOT owner-gated, exactly like stop: a physical arm must stay
+    controllable by whoever can reach the API.
+    """
+    from . import rollout
+
+    before = tracker.current()
+    if before is None or before["id"] != session_id:
+        raise ApiError(
+            status_code=404,
+            detail=f"No active session with id {session_id!r}.",
+            code=ErrorCode.SESSION_NOT_FOUND,
+        )
+    result = rollout.handle_coaching_command(command)
+    if not result.get("success"):
+        raise ApiError(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "The coaching command failed."),
+            code=result.get("code"),
+        )
+    return {"result": result}

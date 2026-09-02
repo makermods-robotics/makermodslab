@@ -155,6 +155,16 @@ export default {
     },
   },
 
+  // 指导结束后的交接卡片，与 Launchpad 上的 CollectHandoff 并列：
+  // 产出了数据的会话，应该把下一步放在操作者真正会看到的地方。
+  coachHandoff: {
+    saved_other: "已保存 {{count}} 次纠正到 <0>{{dataset}}</0>",
+    next: "把它们与 <0>{{dataset}}</0>（该技能最近一次训练所用的数据集）合并，然后基于合并结果微调它。训练只接受一个数据集，所以合并这一步不能省。",
+    manual:
+      "要把它们变成更好的策略，请与该检查点<0>最近一次</0>训练所用的数据集合并，然后基于同一个检查点在合并结果上微调。两个步骤分别在数据集库和训练面板中。",
+    action: "合并并微调",
+  },
+
   deploy: {
     title: "运行",
     picker: {
@@ -176,6 +186,54 @@ export default {
     noRobot: "选择要运行的机器人 — 使用本窗口右上角的机器人菜单。",
     robotNotReady_other:
       "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（推理只使用从臂 — 无需配置主臂。）",
+    // 指导模式的变体：它要通过主臂遥操作，所以这里的 {{gap}} 是全部机械臂的
+    // 缺项，括号里说明主臂为什么也必须配好。
+    robotNotReadyCoach_other:
+      "<0>{{name}}</0>{{gap}}。请先打开机器人设置，然后再运行推理。（指导还会用到主臂 — 接管时你要用它遥操作，因此它也需要端口和标定。）",
+    // 本次运行的形态。选项的取值（"single"/"eval"/"coach"）是前端据以分支的
+    // 标识符 — 只有这些标签会被翻译。
+    runMode: {
+      label: "你想用这个技能做什么？",
+      // 每一行在被选中之前就先说明它要你付出什么：这三者并不是可以随手互换的
+      // 菜单项，而选错往往要等到人站在机械臂前才发现。
+      single: {
+        title: "直接跑一次",
+        what: "尝试一次，然后停止。",
+        commitment: "无需上手",
+      },
+      eval: {
+        title: "给它打分",
+        what: "反复执行该任务，由你为每次尝试评判，汇总为成功率。",
+        commitment: "片段之间需要上手 — 由你复位现场并为每次尝试评分",
+      },
+      coach: {
+        title: "指导它",
+        what: "在它快要失败时接管。每次挽救都会保存为可用于微调的训练数据。",
+        commitment: "需要上手 — 整个会话你都要握着主臂",
+      },
+    },
+    // 仅在运行模式为 “指导” 时显示的参数。
+    coaching: {
+      correctionsLabel: "计划采集的纠正次数",
+      correctionsHint:
+        "保存到这个数量后会话就会结束。你也可以随时提前停止，此前录到的内容都会保留。",
+      datasetLabel: "纠正数据集",
+      datasetPlaceholder: "例如：fold_shirt_fixes",
+      // 输入框为空时，名称中由用户输入的那一半的替代文字。
+      datasetFallback: "correction",
+      // <0> 包住 {{prefix}}，即磁盘上的实际名称 —— 它是标识符，
+      // 无论什么语言都保持拉丁字母。
+      datasetHint:
+        "保存为 <0>{{prefix}}</0> 加一个时间戳。留空即使用灰显的名称，它取自该模型训练所用的数据集；你输入的内容会替换它，清空输入框则会恢复。",
+      leaderLabel: "主臂",
+      leaderNoRobot: "请先在上方选择一台机器人。",
+      leaderMissing:
+        "这台机器人没有配置主臂。请在机器人设置中补上它的端口和标定 — 没有主臂就无法进行指导。",
+      // {{configs}} 是一到两个标定文件名 —— 属于数据，不做翻译。
+      leaderFrom: "取自 {{name}}：{{configs}}。接管时你将用它进行遥操作。",
+      bimanualWarning:
+        "双臂注意：接管前请先把两条主臂停到接近机器人当前姿态的位置。双臂模式下是机器人去迎合主臂，而不是反过来，因此从工作台另一头接管会让两条机械臂横扫整个场景。移动距离过大的接管会被拒绝。",
+    },
     checkpoint: {
       label: "检查点",
       none: "该技能暂无可用的检查点。",
@@ -190,16 +248,29 @@ export default {
       label: "任务描述",
       placeholder: "例如：拿起红色方块",
       hint: "该策略以语言为条件（{{policyType}}）。",
+      // 当任务描述是从该检查点自己的训练数据集自动填入时，追加在 hint 之后。
+      // 前面的空格由调用方补上。
+      prefilled: "已根据它训练所用的数据集自动填入。",
+      // 当血缘里根本没有任务时使用的占位文字。绝不编造示例：把假任务灰显在
+      // 真正继承来的任务所用的同一位置，二者将无法区分。
+      placeholderNone: "训练数据集里没有找到任务 — 请手动输入一个",
+      // 用于不读取任务的策略。指导仍会保存这个字符串。
+      hintCoach: "它会随每次纠正一起保存，方便你日后知道这次会话教的是什么。",
+      leaveEmpty: "留空即使用灰显的任务，它取自该模型训练所用的数据集。",
+      multiTaskHint_other:
+        "它的训练数据集里有 {{count}} 个任务，按出现次数从多到少排列 — 请选择你要执行的那个：",
     },
     duration: {
       label: "最长时长（秒）",
       hint: "按单个片段计。片段跑满该时长而你没有判定成功，即记为失败。",
+      singleHint: "运行到这个时长后就停止。",
     },
     episodes: {
       label: "片段数",
       evalHint:
         "评测运行：共 {{episodes}} 个片段，每个之间会复位，最终统计为准确率。",
       hint: "保持为 1 即单次运行。大于 1 则启动带评分的评测。",
+      scoreHint: "要计入准确率的片段数量。",
     },
     engine: {
       label: "推理引擎",
@@ -209,6 +280,9 @@ export default {
         "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
       rtcHint:
         "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
+      // 指导模式固定使用 sync，因此显示这句话来代替引擎选择器。
+      coachingNote:
+        "指导始终使用 Sync 引擎。Real-Time Chunking 会让策略恢复时机械臂朝纠正前的姿态弹回，手就在旁边时这并不安全。",
     },
     cameras: {
       title: "摄像头",
@@ -239,9 +313,32 @@ export default {
       coeffHint:
         "权重为 exp(-系数 × 时间差)：系数越大越偏向最新的预测，越小则平均得越均匀。ACT 论文取 {{value}}。",
     },
+    // 操作行：每个动词都在一次按下中同时选定模式并启动。
+    runVerbs: {
+      groupLabel: "开始一次运行",
+      single: "直接跑一次",
+      // {{count}} 是片段数 / 纠正次数目标，是数字，因此没有复数形式。
+      eval: "打分 · {{count}}",
+      coach: "指导 · {{count}}",
+    },
+    // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
+    blocked: {
+      noRobot: "请先在上方选择一台机器人。",
+      followerNotReady: "这台机器人的从臂尚未就绪。",
+      noCheckpoint: "请选择一个技能和一个检查点。",
+      armMismatch: "该检查点与这台机器人的机械臂数量不匹配。",
+      camerasUnbound: "请为检查点所需的每个摄像头完成绑定。",
+      temporalEnsemble: "请先修正时间集成设置。",
+      runInProgress: "已有一次运行正在进行中。",
+      taskRequired: "请先描述任务 — 该策略以语言为条件。",
+      leaderMissing: "指导需要一条主臂 — 请在机器人设置中补上它的端口和标定。",
+      coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
+    },
     actions: {
       start: "开始推理",
       startEval: "开始评测（{{episodes}}）",
+      // 与 startEval 同理，用 {{corrections}} 而不是 {{count}}。
+      startCoach: "开始指导（{{corrections}}）",
       starting: "正在启动…",
       checking: "正在检查…",
       stop: "停止推理",

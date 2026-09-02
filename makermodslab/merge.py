@@ -59,6 +59,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -71,12 +72,14 @@ from huggingface_hub.utils import (
 )
 from pydantic import BaseModel
 
+from lerobot.configs import VIDEO_ENCODER_INFO_KEYS
 from lerobot.datasets.aggregate import aggregate_datasets
 
 # The column name lives with the sampler that consumes it, so the writer here
 # and the reader in datasets.py can never drift apart.
 from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import validate_dataset_repo_id
+from .utils.system import torchcodec_loads
 
 
 def _lerobot_cache_root() -> Path:
@@ -251,15 +254,125 @@ def _merge_source_problem(repo_ids: list[str]) -> str | None:
     return None
 
 
-def _merge_incompatibility(repo_ids: list[str]) -> str | None:
+# Features that may be DROPPED to make otherwise-identical datasets mergeable,
+# rather than blocking the merge.
+#
+# Exactly one entry, and the allowlist is deliberately closed rather than "any
+# scalar the sources disagree about". A coaching (DAgger) dataset carries an
+# `intervention` bool that a recorded dataset does not, so merging corrections
+# back into the demos they were collected against — the entire point of a
+# coaching session — hits `features_equal_for_merge`'s `set(a) != set(b)` and is
+# refused. Dropping it is lossless HERE because coaching runs in lerobot's
+# corrections-only mode, where every recorded frame is a human correction and
+# the column is therefore constant True: it distinguishes nothing.
+#
+# That reasoning is load-bearing. If continuous recording
+# (`--strategy.record_autonomous=true`) is ever enabled, autonomous frames enter
+# the same dataset with `intervention=False`, the column starts carrying real
+# provenance, and dropping it silently discards the signal a weighted fine-tune
+# would need (lerobot PR #4222). Revisit this before flipping that flag —
+# see makermodslab/dagger_runner.py, which refuses the mode outright today.
+DROPPABLE_FEATURES = frozenset({"intervention"})
+
+
+def _looks_like_our_coaching_dataset(repo_id: str) -> bool:
+    """True when the `rollout_` prefix says WE produced this dataset.
+
+    That prefix is the only evidence available at this point, and it is the only
+    thing that makes the losslessness argument hold: our coaching runner refuses
+    `record_autonomous=true` (`dagger_runner.WebDAggerStrategy.run`) and writes
+    `intervention=True` on every frame it records, so the column really is
+    constant. It says nothing about a dataset from anywhere else."""
+    return repo_id.split("/", 1)[-1].startswith("rollout_")
+
+
+def _droppable_prompt(features: list[str], sources: list[str]) -> str:
+    """Ask to drop a column, claiming only what we can actually support.
+
+    The losslessness claim is TRUE for datasets this app produced and unfounded
+    for anything else. Upstream lerobot's DAgger has a `record_autonomous=true`
+    mode we refuse but do not own — a dataset recorded that way, or pulled from
+    the Hub, carries real provenance in `intervention`, and dropping it
+    relabels every autonomous frame as a human demonstration. Nothing here
+    opens a parquet, so the column's values are genuinely unknown; the honest
+    move is to say which case we are in rather than assert the reassuring one.
+    """
+    names = ", ".join(f"`{f}`" for f in features)
+    base = f"These datasets are identical apart from the {names} column, which only one of them has."
+    # Which source the column came from is not knowable here — nothing opens a
+    # parquet — so attribute it to the coaching dataset among the sources and
+    # NAME that attribution, so an operator merging something else can see the
+    # guess and catch it.
+    ours = [s for s in sources if _looks_like_our_coaching_dataset(s)]
+    if ours:
+        return (
+            f"{base} It comes from {', '.join(ours)}, a coaching session, where every frame "
+            "is a human correction — so the column is the same on all of them and drops "
+            "losslessly. Drop it and merge?"
+        )
+    return (
+        f"{base} None of these came from a coaching session here, so the column's values "
+        "have not been checked. If those frames are a mix of autonomous and human control, "
+        "dropping it makes them indistinguishable in the merged dataset. Your originals are "
+        "not modified. Drop it and merge?"
+    )
+
+
+def merge_droppable_features(repo_ids: list[str]) -> list[str]:
+    """Allowlisted features present in SOME but not all sources.
+
+    These are the only feature differences the merge will offer to resolve
+    instead of refusing. Returned sorted so the message and the client's
+    acknowledgement agree on the order."""
+    infos = [info for repo_id in repo_ids if (info := _load_info(repo_id)) is not None]
+    if len(infos) < 2:
+        return []
+    feature_sets = [set(info.get("features") or {}) for info in infos]
+    in_all = set.intersection(*feature_sets)
+    not_in_all = set().union(*feature_sets) - in_all
+    return sorted(not_in_all & DROPPABLE_FEATURES)
+
+
+def _comparable_video_info(feature: Any) -> dict[str, Any]:
+    """The stream properties lerobot actually COMPARES for a video feature, or
+    ``{}`` when they cannot be read.
+
+    `features_equal_for_merge` ignores the six encoder-TUNING keys in
+    `VIDEO_ENCODER_INFO_KEYS` (crf, preset, g, fast_decode, extra_options,
+    video_backend) — those legitimately differ between two recordings of the
+    same thing — and compares every other key in the block. The constant is
+    imported rather than restated so this tracks the lerobot pin instead of
+    drifting away from it.
+
+    Returns ``{}`` when there is no `video.codec`, which means either a dataset
+    old enough to predate the stream block or one that has never encoded a frame
+    (a 0-episode coaching dataset carries only `is_depth_map`). Neither can be
+    compared, so they take the same route as a Hub-only source: silence here,
+    and the subprocess backstop covers it.
+    """
+    if not isinstance(feature, dict):
+        return {}
+    info = feature.get("info")
+    if not isinstance(info, dict) or "video.codec" not in info:
+        return {}
+    return {key: value for key, value in info.items() if key not in VIDEO_ENCODER_INFO_KEYS}
+
+
+def _merge_incompatibility(repo_ids: list[str], drop_features: Sequence[str] = ()) -> str | None:
     """Return a friendly one-line message describing the first incompatibility
     between the source datasets, or None if they're compatible (or can't be
     checked because their metadata isn't available locally).
 
     Hub-only sources with no local ``info.json`` are skipped — the subprocess
     backstop covers those. Compares every readable source against the first
-    readable one on fps, camera set, and feature keys/shapes.
+    readable one on fps, camera set, video stream format, and feature
+    keys/shapes.
+
+    ``drop_features`` names features the caller has agreed to strip before
+    aggregating (see :data:`DROPPABLE_FEATURES`); they are excluded from the
+    comparison because they will not exist by the time lerobot sees the data.
     """
+    dropped = set(drop_features)
     infos: list[tuple[str, dict[str, Any]]] = []
     for repo_id in repo_ids:
         info = _load_info(repo_id)
@@ -304,11 +417,63 @@ def _merge_incompatibility(repo_ids: list[str]) -> str | None:
                 "All datasets must share the same cameras to merge."
             )
 
+        # video stream format — compared by lerobot, invisible to the checks above
+        #
+        # Placed BEFORE the feature-key comparison on purpose. A coaching
+        # dataset differs from the demonstrations twice over: it carries an
+        # `intervention` column (droppable, prompted for) and it is encoded with
+        # a different codec (not droppable, not fixable here). Reporting the
+        # column first would walk the operator through agreeing to drop a column
+        # permanently and only THEN fail — `start()` withholds the drop prompt
+        # unless dropping actually makes the sources mergeable, so surfacing the
+        # codec here is what makes that guard fire.
+        #
+        # `video.codec` is derived from the encoded stream, not from the
+        # requested setting (video_utils stamps `codec.canonical_name`), so the
+        # two flows disagree by construction: record.py asks for `vcodec="auto"`
+        # and gets hardware H.264, while rollout.py deliberately takes the
+        # software default and gets AV1 (see its comment — "auto" resolves to
+        # h264_nvenc on the station and PyAV then fails to open it). Without
+        # this, merging corrections into the demos they were collected against
+        # — the entire point of a coaching session — dies inside
+        # `validate_all_metadata` as a subprocess crash whose message is both
+        # features dicts dumped as JSON.
+        for cam in sorted(base_cams):
+            base_stream = _comparable_video_info(base_features.get(cam))
+            other_stream = _comparable_video_info(other_features.get(cam))
+            if not base_stream or not other_stream:
+                continue  # unencoded or too old to say; the subprocess still backstops it
+            differing_props = sorted(
+                key
+                for key in set(base_stream) | set(other_stream)
+                if base_stream.get(key) != other_stream.get(key)
+            )
+            if not differing_props:
+                continue
+            if "video.codec" in differing_props:
+                return (
+                    f"Datasets were encoded with different video codecs: `{base_id}` is "
+                    f"{base_stream['video.codec']}, `{other_id}` is "
+                    f"{other_stream['video.codec']} (camera {_short_cam(cam)}). lerobot "
+                    "refuses to merge video streams whose codecs differ. Coaching "
+                    "sessions encode with the software AV1 encoder while recordings use "
+                    "hardware H.264, so one side has to be re-encoded before these can "
+                    "be merged — dropping a column will not help."
+                )
+            pretty = ", ".join(key.removeprefix("video.") for key in differing_props)
+            return (
+                f"Datasets have different video formats: `{base_id}` and `{other_id}` "
+                f"differ in {pretty} (camera {_short_cam(cam)}). All datasets must share "
+                "the same video format to merge."
+            )
+
         # non-camera feature keys or per-feature shape mismatch
         differing: list[str] = []
         for key in sorted(set(base_features) | set(other_features)):
             if key in base_cams or key in other_cams:
                 continue  # camera differences handled above
+            if key in dropped:
+                continue  # stripped from every source before aggregation
             base_spec = base_features.get(key)
             other_spec = other_features.get(key)
             if base_spec is None or other_spec is None:  # noqa: SIM114 — missing feature spec vs shape mismatch are distinct cases; merging the branches would obscure that
@@ -430,6 +595,13 @@ class MergeRequest(BaseModel):
     #: Stored per episode in the merged dataset and applied at training time — it
     #: costs no extra disk. ``None`` means "all 1" (the pre-weights behaviour).
     source_weights: list[int] | None = None
+    # Features the caller has agreed to strip so the sources become mergeable
+    # (see DROPPABLE_FEATURES). Empty on a first attempt: a merge that needs a
+    # drop is refused with `droppable_features` in the payload, and the client
+    # re-submits echoing them back. An explicit acknowledgement rather than a
+    # silent strip — dropping a column from a dataset is not something to do on
+    # the user's behalf without telling them.
+    drop_features: list[str] = []
     #: Set once the user has seen and accepted an advisory warning (today: the
     #: sources were recorded on different arm families). A merge that raises such
     #: a warning refuses with ``started=False`` + ``warnings`` until this is
@@ -671,8 +843,25 @@ class MergeManager:
             if problem is not None:
                 logger.warning("Rejected merge: unusable source %s (%s)", sources, problem)
                 return {"started": False, "message": problem}
-            incompat = _merge_incompatibility(sources)
+            # Only strip what the caller actually acknowledged AND what is
+            # genuinely mismatched — echoing back a name that isn't droppable,
+            # or isn't in disagreement, must not quietly remove a column.
+            droppable = merge_droppable_features(sources)
+            drop = [name for name in droppable if name in set(request.drop_features)]
+            incompat = _merge_incompatibility(sources, drop)
             if incompat is not None:
+                unacknowledged = [name for name in droppable if name not in drop]
+                if unacknowledged and _merge_incompatibility(sources, droppable) is None:
+                    # The ONLY thing standing between these datasets is a
+                    # droppable column. Ask rather than refuse — this is the
+                    # ordinary case when merging coaching corrections back into
+                    # the demonstrations they were collected against.
+                    logger.info("Merge needs a dropped feature %s for %s", unacknowledged, sources)
+                    return {
+                        "started": False,
+                        "droppable_features": unacknowledged,
+                        "message": _droppable_prompt(unacknowledged, sources),
+                    }
                 logger.warning("Rejected merge: incompatible sources %s (%s)", sources, incompat)
                 return {"started": False, "message": incompat}
             # Advisory (not a hard incompatibility): the sources span more than
@@ -696,6 +885,8 @@ class MergeManager:
         cmd = [sys.executable, "-m", "makermodslab.merge", output, *sources]
         if weighted:
             cmd.extend(["--weights", *(str(weight) for weight in weights)])
+        for name in drop:
+            cmd += ["--drop-feature", name]
         logger.info("Starting dataset merge: %s", " ".join(cmd))
         try:
             self.process = subprocess.Popen(
@@ -935,6 +1126,55 @@ def _ensure_local_source(repo_id: str, cache_root: Path) -> Path:
     return root
 
 
+# Where a stripped working copy of a source lives while a merge runs. Prefixed
+# so it is recognisable as machine-made residue if a crash ever leaves one
+# behind, and kept inside the lerobot cache root so it shares the filesystem
+# with the source it was copied from.
+_STRIP_PREFIX = "_makermodslab_merge_tmp"
+
+
+def _strip_features(
+    repo_id: str, root: Path | None, drop: list[str], cache_root: Path, index: int
+) -> tuple[str, Path] | None:
+    """Write a copy of `repo_id` without `drop`, or None when it has none of them.
+
+    A COPY, never in place. The source is the operator's own coaching dataset,
+    and the `intervention` column is the only record of which frames were human
+    corrections — stripping it from the original to satisfy a merge would
+    destroy that provenance permanently, for a merge the operator might well
+    discard afterwards.
+
+    Correction datasets are small (a handful of short takeovers), so the copy is
+    cheap; the temporary is deleted once aggregation is done.
+
+    The two lerobot imports are local because only the SUBPROCESS ever reaches
+    this function, while the module itself is imported by the FastAPI server at
+    boot — `dataset_tools` pulls in the dataset-writing stack, and paying for it
+    on every server start to serve a code path that runs in another process
+    entirely would be pure cost."""
+    from lerobot.datasets.dataset_tools import remove_feature
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    # Same pyav fallback the training path takes (jobs.py): torchcodec is
+    # lerobot's default decoder and its dylibs do not load on a host without
+    # FFmpeg — `dlopen … libavutil.56.dylib` — so the first frame this dataset
+    # decodes raises and the merge dies. pyav ships its own bundled FFmpeg.
+    # `None` means "leave lerobot's default alone" on a host where torchcodec
+    # is fine.
+    video_backend = None if torchcodec_loads() else "pyav"
+    dataset = LeRobotDataset(repo_id, root=root, video_backend=video_backend)
+    present = [name for name in drop if name in dataset.meta.features]
+    if not present:
+        return None
+    tmp_repo_id = f"{_STRIP_PREFIX}_{index}"
+    tmp_root = cache_root / tmp_repo_id
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root)
+    print(f"Removing {', '.join(present)} from a working copy of {repo_id}…", flush=True)
+    remove_feature(dataset, present, output_dir=str(tmp_root), repo_id=tmp_repo_id)
+    return tmp_repo_id, tmp_root
+
+
 def _run_cli(argv: list[str] | None = None) -> int:
     """Subprocess entry: aggregate the source datasets into the output repo."""
     parser = argparse.ArgumentParser(description="Merge LeRobot datasets")
@@ -959,6 +1199,13 @@ def _run_cli(argv: list[str] | None = None) -> int:
             "that many times instead of writing sampling weights. Costs N x disk "
             "and cannot be retuned without re-merging. Not reachable from the UI."
         ),
+    )
+    parser.add_argument(
+        "--drop-feature",
+        action="append",
+        default=[],
+        dest="drop_features",
+        help="Feature to strip from a working copy of any source that has it, before merging.",
     )
     args = parser.parse_args(argv)
 
@@ -1020,9 +1267,39 @@ def _run_cli(argv: list[str] | None = None) -> int:
     output_root = cache_root / args.output_repo_id
     output_pre_existed = output_root.exists()
 
+    # Swap in stripped working copies for any source carrying a dropped feature.
+    # Done AFTER every source is local (the strip reads the dataset) and BEFORE
+    # aggregation, so lerobot only ever sees sources whose feature sets already
+    # agree. Stripped once per UNIQUE source and then fanned out over `expanded`,
+    # for the same reason downloads are: under --duplicate a weight-3 source must
+    # not be copied three times. `root_by_repo` deliberately keeps pointing at the
+    # ORIGINALS — the temporaries are gone by the time the weights are stamped.
+    repo_ids = list(expanded)
+    temporaries: list[Path] = []
+    if args.drop_features:
+        try:
+            stripped_by_repo: dict[str, tuple[str, Path]] = {}
+            for index, repo_id in enumerate(args.source_repo_ids):
+                stripped = _strip_features(
+                    repo_id, root_by_repo[repo_id], args.drop_features, cache_root, index
+                )
+                if stripped is not None:
+                    stripped_by_repo[repo_id] = stripped
+                    temporaries.append(stripped[1])
+            repo_ids = [stripped_by_repo.get(repo_id, (repo_id, None))[0] for repo_id in expanded]
+            roots = [
+                stripped_by_repo[repo_id][1] if repo_id in stripped_by_repo else root_by_repo[repo_id]
+                for repo_id in expanded
+            ]
+        except Exception as exc:
+            print(f"Could not remove {', '.join(args.drop_features)}: {exc}", flush=True)
+            for tmp_root in temporaries:
+                _cleanup_partial_output(tmp_root)
+            return 1
+
     try:
         aggregate_datasets(
-            repo_ids=expanded,
+            repo_ids=repo_ids,
             aggr_repo_id=args.output_repo_id,
             roots=roots,
         )
@@ -1032,6 +1309,12 @@ def _run_cli(argv: list[str] | None = None) -> int:
         if not output_pre_existed and output_root.exists():
             _cleanup_partial_output(output_root)
         return 1
+    finally:
+        # Best-effort either way: a stranded temporary would show up in the
+        # dataset library as a mystery entry, which is worse than the disk it
+        # occupies.
+        for tmp_root in temporaries:
+            _cleanup_partial_output(tmp_root)
 
     # Stamp the weights only after aggregation has written the metadata it owns.
     # A failure here leaves a correct-but-unweighted dataset, which R6 forbids

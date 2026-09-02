@@ -488,22 +488,40 @@ export interface MergeStatus {
  * `MAX_SOURCE_WEIGHT` in makermodslab/merge.py — keep the two in step). */
 export const MAX_SOURCE_WEIGHT = 20;
 
+export interface MergeStartResult {
+  started: boolean;
+  message: string;
+  // Present (and `started` false) when the sources differ ONLY by a column the
+  // merge is willing to drop — in practice the `intervention` flag a coaching
+  // dataset carries and a recorded one doesn't. Not an error: re-submit with
+  // `dropFeatures` set to these names once the user has agreed. See
+  // DROPPABLE_FEATURES in makermodslab/merge.py for why dropping it is lossless.
+  droppable_features?: string[];
+  // Present (and `started` false) when the sources span more than one arm
+  // family — an advisory the user confirms rather than a hard block. Re-submit
+  // with `acknowledgeWarnings: true` to proceed.
+  warnings?: string[];
+}
+
 /** Start a merge. `sourceWeights` is a per-source integer repeat count,
  * positionally aligned with `sourceRepoIds`; omit it (or pass all 1s) for an
  * unweighted merge. A source with weight 3 contributes its episodes three
  * times, so training samples them three times as often.
  *
- * When the sources span more than one arm family the merge is refused with
- * `started: false` and a non-empty `warnings`; the caller shows them and
- * re-calls with `acknowledgeWarnings: true` to proceed. */
+ * When the sources differ only by a droppable column the merge is refused with
+ * `started: false` and `droppable_features`; re-call with `dropFeatures` set to
+ * those names. When the sources span more than one arm family it is refused
+ * with `started: false` and a non-empty `warnings`; re-call with
+ * `acknowledgeWarnings: true` to proceed. */
 export async function startDatasetMerge(
   baseUrl: string,
   fetcher: Fetcher,
   sourceRepoIds: string[],
   outputRepoId: string,
   sourceWeights?: number[],
+  dropFeatures: string[] = [],
   acknowledgeWarnings?: boolean,
-): Promise<{ started: boolean; message: string; warnings?: string[] }> {
+): Promise<MergeStartResult> {
   // Only send weights when at least one is non-default, so an ordinary merge
   // keeps the exact request body it had before weights existed.
   const weighted = sourceWeights?.some((w) => w !== 1) ?? false;
@@ -514,6 +532,7 @@ export async function startDatasetMerge(
       source_repo_ids: sourceRepoIds,
       output_repo_id: outputRepoId,
       ...(weighted ? { source_weights: sourceWeights } : {}),
+      drop_features: dropFeatures,
       ...(acknowledgeWarnings ? { acknowledge_warnings: true } : {}),
     },
     action: "Merge datasets",

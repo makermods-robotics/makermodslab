@@ -1,7 +1,9 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { Trans, useTranslation } from "react-i18next";
@@ -10,7 +12,6 @@ import {
   Download,
   Loader2,
   Play,
-  Square,
   VideoOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -39,17 +40,15 @@ import {
   getCheckpointPolicyConfig,
   listJobCheckpoints,
 } from "@/lib/checkpointsApi";
-import {
-  InferenceStatus,
-  getInferenceStatus,
-  stopInference,
-} from "@/lib/inferenceApi";
+import { InferenceStatus, getInferenceStatus } from "@/lib/inferenceApi";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { JobRecord, getJob, jobDisplayName } from "@/lib/jobsApi";
+import { getDatasetInfo } from "@/lib/replayApi";
 import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
 import { importSourceForModel } from "@/lib/inferenceLaunch";
+import { deployBlockedReason } from "./deployGuards";
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
@@ -93,6 +92,16 @@ import { useOnceFlag } from "@/lib/onboarding/storage";
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
 // just stops the stepper from offering a number that would be silently reduced.
 const MAX_EVAL_EPISODES = 200;
+
+// Mirrors rollout.MAX_COACHING_CORRECTIONS. Far lower than the eval bound
+// because every correction is a hands-on takeover — the operator is standing at
+// the arm for all of them.
+const MAX_COACHING_CORRECTIONS = 100;
+
+// The three shapes a Deploy run can take. One control instead of inferring the
+// mode from an episode count, which was already a little cryptic at 1-vs-many
+// and would be worse with a third option folded in.
+type RunMode = "single" | "eval" | "coach";
 
 /** Coefficient of the original ACT paper's exponential weighting (see
  * lerobot's ACTTemporalEnsembler). Offered as the starting point when the user
@@ -183,6 +192,209 @@ function cameraMappings(
     return { feature: f, display: name, requestKey: name };
   });
 }
+
+/**
+ * The three things you can do with a trained skill, as selectable rows.
+ *
+ * Replaces a dropdown. A dropdown renders these as interchangeable list items
+ * of equal weight, which they are not: one is a minute-long hands-off run, one
+ * is an unattended twenty-minute evaluation, and one requires the operator to
+ * stand at the robot holding a leader arm for the entire session and produces a
+ * dataset. Picking the wrong one from a menu is discovered mid-session, at the
+ * arm — so each row states its commitment BEFORE it is chosen, and the row that
+ * demands your hands says so in its own line rather than in help text below.
+ *
+ * Rows rather than a fourth studio panel (deploy owns the checkpoint picker,
+ * the camera binding and the arm preflight — all three modes need them) and
+ * rather than side-by-side cards (this panel is a third of the overlay wide).
+ */
+/**
+ * The nearest ancestor that actually scrolls this element, so a compensating
+ * nudge lands on the right box.
+ *
+ * Matched on computed `overflow-y` alone, deliberately — not on
+ * `scrollHeight > clientHeight`. The studio's three panels are each their own
+ * scroller only at `lg` and up; below that the whole grid scrolls as one, so
+ * which ancestor is the scroller is a media query, not a fixed answer. And a
+ * box that declares `auto` but has nothing to scroll simply takes a
+ * `scrollTop` write that goes nowhere, which is the harmless outcome.
+ */
+export const scrollParent = (el: HTMLElement): Element | null => {
+  for (
+    let node = el.parentElement;
+    node && node !== document.documentElement;
+    node = node.parentElement
+  ) {
+    const overflowY = getComputedStyle(node).overflowY;
+    if (
+      overflowY === "auto" ||
+      overflowY === "scroll" ||
+      overflowY === "overlay"
+    ) {
+      return node;
+    }
+  }
+  return document.scrollingElement;
+};
+
+const RUN_MODES: {
+  value: RunMode;
+  // Key stem under `studio.deploy.runMode`; the component resolves
+  // `${stem}.title` / `.what` / `.commitment`.
+  stem: string;
+  handsOn?: boolean;
+}[] = [
+  { value: "single", stem: "single" },
+  // NOT "hands off". Eval parks after every episode and waits for the operator
+  // to rearrange the scene and call the outcome — see rollout.py's reset phase
+  // and POST /inference-next-episode; there is no timer. An operator who read
+  // "hands off" and walked away came back to a run stalled on episode 2.
+  { value: "eval", stem: "eval", handsOn: true },
+  { value: "coach", stem: "coach", handsOn: true },
+];
+
+/**
+ * The three things you can do with a trained skill, as the panel's action row.
+ *
+ * This replaces a chooser-plus-Start pair. A chooser is a control you set and
+ * then forget you set: the operator picks "Score it", gets distracted by the
+ * camera bindings, comes back and presses a button that says Start — and the
+ * button's own label is the only thing telling them which of three quite
+ * different sessions is about to begin. One of those sessions asks them to
+ * stand at the robot holding a leader arm for an hour.
+ *
+ * So the verb IS the button. Pressing one selects that mode and launches it in
+ * the same gesture; there is nothing left in a position to be wrong about.
+ * Each verb still states its own commitment, and a verb that cannot run right
+ * now says why on itself rather than greying out the whole panel — a missing
+ * leader arm blocks coaching, and should say so on the coaching button, not
+ * disable "Just run it".
+ *
+ * `onArm` fires on focus/hover so the options above follow the verb the
+ * operator is considering, which keeps the old chooser's one real virtue: you
+ * can see what a mode will do before you commit to it.
+ */
+export const RunVerbs: React.FC<{
+  active: RunMode;
+  onArm: (mode: RunMode) => void;
+  onLaunch: (mode: RunMode) => void;
+  blockedReason: (mode: RunMode) => string | null;
+  ready: boolean;
+  busy: boolean;
+  counts: { eval: number; coach: number };
+}> = ({ active, onArm, onLaunch, blockedReason, ready, busy, counts }) => {
+  const { t } = useTranslation();
+  const label = (m: RunMode) =>
+    m === "coach"
+      ? t("studio.deploy.runVerbs.coach", { count: counts.coach })
+      : m === "eval"
+        ? t("studio.deploy.runVerbs.eval", { count: counts.eval })
+        : t("studio.deploy.runVerbs.single");
+  const blocked = blockedReason(active);
+  return (
+    <div className="flex flex-col gap-2">
+      <div
+        className="grid grid-cols-3 gap-2"
+        role="group"
+        aria-label={t("studio.deploy.runVerbs.groupLabel")}
+      >
+        {RUN_MODES.map((m) => {
+          const reason = blockedReason(m.value);
+          const isActive = active === m.value;
+          // aria-disabled, NOT disabled.
+          //
+          // `disabled` in this codebase carries `disabled:pointer-events-none`
+          // (ui/button.tsx), which swallows title, onMouseEnter AND onFocus. A
+          // blocked verb therefore could not be armed, hovered or tabbed to, so
+          // the reason it was blocked appeared nowhere: the visible line below
+          // only ever describes the ARMED mode.
+          //
+          // That produced a dead end with no exit. Coaching is blocked while
+          // the task is empty, but the task field only renders once coach is
+          // ARMED — and arming requires hovering the button that `disabled`
+          // made inert. On a checkpoint whose task prefill found nothing, the
+          // operator could not reach coaching at all, by any route.
+          //
+          // Kept focusable and hoverable: arming a blocked mode is harmless
+          // (it only reveals that mode's fields, which is exactly how the
+          // operator fixes what is blocking it), and the launch itself stays
+          // guarded below.
+          const blockedHere = !ready || busy || reason !== null;
+          return (
+            <div key={m.value} className="relative">
+              <Button
+                onClick={() => (blockedHere ? onArm(m.value) : onLaunch(m.value))}
+                onMouseEnter={() => onArm(m.value)}
+                onFocus={() => onArm(m.value)}
+                aria-disabled={blockedHere}
+                aria-pressed={isActive}
+                title={
+                  reason ?? t(`studio.deploy.runMode.${m.stem}.what` as never)
+                }
+                variant={isActive ? "default" : "outline"}
+                className={cn(
+                  "h-full w-full flex-col items-start gap-0.5 px-3 py-2 text-left whitespace-normal",
+                  // Reads as unavailable without being inert. `disabled:` variants
+                  // no longer apply, so the dimming is stated directly.
+                  blockedHere && "opacity-50",
+                  // `border-transparent` is load-bearing, not decoration. The
+                  // outline variant carries `border border-input`; the default
+                  // variant carries no border at all. The button is sized by
+                  // its own content, so arming a mode on hover
+                  // swapped outline→default, dropped 2px of vertical border, and
+                  // the label visibly jumped. Keeping a border in BOTH states
+                  // makes the box model identical and the swap purely a repaint.
+                  // ring-2 ring-ring with an OFFSET, not ring-1 ring-primary.
+                  // The armed variant is `default`, i.e. bg-primary — so a
+                  // primary-coloured ring was drawn flush against a
+                  // primary-coloured fill, with no offset width set (the base
+                  // supplies ring-offset-background, a colour, and Tailwind's
+                  // default offset width is 0). The armed affordance did not
+                  // render at all, in either theme.
+                  isActive &&
+                    "border border-transparent ring-2 ring-ring ring-offset-2",
+                )}
+              >
+                <span className="flex items-center gap-1.5 text-sm font-semibold">
+                  <Play className="h-3.5 w-3.5 shrink-0" />
+                  {busy && isActive
+                    ? t("studio.deploy.actions.starting")
+                    : label(m.value)}
+                </span>
+                {/* The commitment travels with the verb, so "hands on" is read
+                    at the moment of pressing rather than in a form field above. */}
+                <span
+                  className={cn(
+                    "text-[0.7rem] leading-tight font-normal",
+                    // `text-warn-foreground` was a dead class: tailwind.config
+                    // declares `warn` as a scalar and index.css defines no
+                    // --warn-foreground, so Tailwind emitted no rule and the one
+                    // line that must shout "hands on" silently lost its styling
+                    // exactly when its mode was armed. Weight carries the
+                    // emphasis on the armed fill instead of a colour that would
+                    // fail contrast against bg-primary — and weight survives
+                    // greyscale and peripheral vision, which colour alone does
+                    // not.
+                    m.handsOn
+                      ? isActive
+                        ? "font-semibold"
+                        : "text-warn font-semibold"
+                      : "opacity-70",
+                  )}
+                >
+                  {t(`studio.deploy.runMode.${m.stem}.commitment` as never)}
+                </span>
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+      {blocked ? (
+        <p className="text-xs leading-relaxed text-warn">{blocked}</p>
+      ) : null}
+    </div>
+  );
+};
 
 const DeployPanel: React.FC = () => {
   const { t } = useTranslation();
@@ -278,6 +490,61 @@ const DeployPanel: React.FC = () => {
   // switches the session dialog into eval mode — N scored episodes with a reset
   // between each and an accuracy at the end. Clamped again server-side.
   const [evalEpisodes, setEvalEpisodes] = useState(1);
+  // Which of the three run shapes this launch is. `evalEpisodes` still carries
+  // the count, but the MODE is explicit now rather than implied by it being >1.
+  const [runMode, setRunMode] = useState<RunMode>("single");
+  // Scroll anchor for the verb row. -------------------------------------
+  //
+  // The three modes render quite different forms above the buttons —
+  // coaching alone adds a readiness card, a corrections count, a dataset
+  // name and a leader-arm block while dropping Max duration and the engine
+  // picker. Arming a mode (hover, focus, or the click that launches it)
+  // rewrites that form, and because the verb row sits BELOW it in a
+  // scrolling column, the row jumped under the operator's cursor — a lurch
+  // in whichever direction the net height went, on every one of the six
+  // transitions between the three modes.
+  //
+  // So the row is treated as the fixed point: its viewport position is
+  // captured before the swap, and the scroll container is nudged by however
+  // far it actually moved after. The form grows and shrinks above; the
+  // buttons stay exactly where the operator is pointing.
+  const actionsRef = useRef<HTMLDivElement>(null);
+  const anchorTopRef = useRef<number | null>(null);
+  const armRunMode = useCallback(
+    (mode: RunMode) => {
+      if (mode === runMode) return;
+      anchorTopRef.current =
+        actionsRef.current?.getBoundingClientRect().top ?? null;
+      setRunMode(mode);
+    },
+    [runMode],
+  );
+  // Layout effect, not effect: this must run in the same frame as the
+  // re-layout, before paint. A passive effect would let the jumped frame
+  // render and turn the lurch into a flicker.
+  useLayoutEffect(() => {
+    const before = anchorTopRef.current;
+    anchorTopRef.current = null;
+    // null == the mode changed from somewhere other than the verb row (a
+    // prefill, say), so there is no cursor to hold still.
+    if (before == null) return;
+    const el = actionsRef.current;
+    if (!el) return;
+    const delta = el.getBoundingClientRect().top - before;
+    if (Math.abs(delta) < 1) return;
+    const scroller = scrollParent(el);
+    if (scroller) scroller.scrollTop += delta;
+  }, [runMode]);
+  // Coaching (DAgger): run the policy, take over when it's about to fail, and
+  // record each takeover as training data. See StartInferenceRequest.coaching.
+  const [targetCorrections, setTargetCorrections] = useState(10);
+  const [coachDatasetName, setCoachDatasetName] = useState("");
+  // Task strings from the dataset this checkpoint was trained on. A
+  // language-conditioned policy is steered by this string, and a wrong one
+  // doesn't fail loudly — it just makes the policy worse in ways that look
+  // like the policy being bad. So a single unambiguous task is filled in, and
+  // several are offered as choices rather than guessed between.
+  const [datasetTasks, setDatasetTasks] = useState<string[]>([]);
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
@@ -319,10 +586,9 @@ const DeployPanel: React.FC = () => {
   >({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
 
-  // Light status poll while the panel is visible so ⏹ Stop enables only when a
-  // rollout is actually active.
+  // Light status poll while the panel is visible so the launch guards (and
+  // the camera previews) know whether a rollout is already running.
   const [status, setStatus] = useState<InferenceStatus | null>(null);
-  const [stopping, setStopping] = useState(false);
 
   // Edge-triggered "consume once": handleStart sets the pending flag, and the
   // effect below latches it into showDeployMilestone the first time the live
@@ -354,7 +620,10 @@ const DeployPanel: React.FC = () => {
 
   const cameraMap = useMemo(
     () =>
-      cameraMappings(Object.keys(policyConfig?.image_features ?? {}), isBimanual),
+      cameraMappings(
+        Object.keys(policyConfig?.image_features ?? {}),
+        isBimanual,
+      ),
     [policyConfig, isBimanual],
   );
 
@@ -645,7 +914,7 @@ const DeployPanel: React.FC = () => {
     });
   }, [policyConfig, recordCameraByName]);
 
-  // Poll inference status while visible so ⏹ Stop reflects a live rollout.
+  // Poll inference status while visible so the guards reflect a live rollout.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -708,7 +977,25 @@ const DeployPanel: React.FC = () => {
   // Inference drives the follower(s) only — gate on follower_ready, not
   // is_clean, so a robot with no leader port/calibration (which inference
   // never touches) can still deploy.
-  const canStart =
+  // Coaching drives the leader as well — and drives it under torque during the
+  // handover — so "follower is ready" is not enough. Without this the panel
+  // showed green lights, Start was enabled, and the leader gap only surfaced
+  // as a 400 from the server after the user had committed to a launch.
+  const leaderMissing =
+    !robot?.leader_port ||
+    !robot?.leader_config ||
+    (robot?.mode === "bimanual" &&
+      (!robot?.right_leader_port || !robot?.right_leader_config));
+  const coachLeaderMissing = runMode === "coach" && leaderMissing;
+  // Coaching writes the task string into every recorded frame, so the server
+  // refuses an empty one for ANY policy — including one that doesn't condition
+  // on language and therefore never showed the field. That combination gave a
+  // green panel, an enabled Start, and a 400 naming a control the operator
+  // could not make appear.
+  const coachTaskMissing = task.trim() === "";
+
+  // Everything a launch needs that does NOT depend on which verb was pressed.
+  const canStartAnyMode =
     !!robot &&
     robot.follower_ready &&
     !robotCheckpointArmMismatch &&
@@ -720,7 +1007,121 @@ const DeployPanel: React.FC = () => {
     !checkingExtra &&
     !inferenceActive;
 
-  const handleStart = async () => {
+  /** Why `mode` cannot be launched right now, or null when it can.
+   *
+   * Per-mode rather than a single `canStart`, because the three verbs are now
+   * three buttons: each has to be able to say what IT is waiting for, rather
+   * than the panel disabling everything because the mode that happens to be
+   * selected is short a leader arm. */
+  const blockedReason = (mode: RunMode): string | null => {
+    const key = deployBlockedReason(mode, {
+      hasRobot: !!robot,
+      followerReady: !!robot?.follower_ready,
+      hasCheckpoint: selectedRef != null && !!policyConfig,
+      armMismatch: robotCheckpointArmMismatch,
+      allCamerasBound,
+      temporalEnsembleInvalid,
+      inferenceActive,
+      leaderMissing,
+      requiresTask: !!policyConfig?.requires_task,
+      // The effective value: an empty box that falls back to a real default is
+      // not a missing task, and blocking on it would be a dead end.
+      task: effectiveTask,
+    });
+    return key === null ? null : t(key as never);
+  };
+
+  // Prefill the corrections dataset name from the model being coached, so the
+  // pair reads as one thing in the library: `correction_<model>`. Naming it by
+  // hand produced datasets nobody could match back to a policy a week later.
+  //
+  // `correction_` leads so the kind of dataset is the first thing read, but it
+  // cannot be the WHOLE name: lerobot refuses a rollout dataset whose repo name
+  // does not start with `rollout_` (lerobot/rollout/context.py), and merge.py's
+  // `_looks_like_our_coaching_dataset` keys the lossless `intervention`-column
+  // drop on that same prefix — so dropping it would break merging corrections
+  // back into the demos they were collected against. The final name is
+  // `rollout_correction_<model>_<timestamp>`.
+  //
+  // Held as a DEFAULT, never written into the field.
+  //
+  // Prefilling meant the operator could not tell a name the app had guessed
+  // from one they had chosen, and clearing the box left them staring at an
+  // empty field with no hint of what would happen. As a placeholder the default
+  // is visibly not-their-input, survives clearing the box, and needs no ref to
+  // track whether it is still "the auto value".
+  //
+  // Named after the DATASET the checkpoint was trained on, falling back to the
+  // model. That is the thing the corrections will be merged back into, so it is
+  // the name that makes the pair findable a week later.
+  const defaultCoachName = useMemo(() => {
+    if (!selectedJob) return "";
+    const trainedOn = selectedJob.config?.dataset_repo_id;
+    const base =
+      trainedOn && trainedOn !== "(imported)"
+        ? trainedOn.split("/").pop()
+        : jobDisplayName(selectedJob);
+    // Same character class the backend accepts in a repo id; collapse anything
+    // else so a name with spaces or slashes cannot produce a bad path.
+    const slug = (base ?? "")
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return slug ? `correction_${slug}` : "";
+  }, [selectedJob]);
+
+  // What actually gets sent: whatever they typed, else the default.
+  const effectiveCoachName = coachDatasetName.trim() || defaultCoachName;
+
+  // The task the checkpoint was trained on, most-represented first. Same
+  // placeholder contract as the name above: shown greyed, sent when the field
+  // is left empty, and restored the moment the operator clears what they typed.
+  const defaultTask = datasetTasks[0] ?? "";
+  const effectiveTask = task.trim() || defaultTask;
+
+  // Prefill the task from the dataset the selected checkpoint was trained on.
+  // Typing it by hand means retyping a sentence that already exists, and a
+  // typo'd task is invisible until the policy underperforms.
+  useEffect(() => {
+    const repoId = selectedJob?.config?.dataset_repo_id;
+    if (!repoId || repoId === "(imported)") {
+      setDatasetTasks([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await getDatasetInfo(baseUrl, fetchWithHeaders, repoId);
+        if (cancelled) return;
+        // Most-represented task first: if the operator has to choose, the one
+        // the policy saw most is the likeliest answer and should be nearest.
+        const tasks = [...(info.tasks ?? [])]
+          .sort((a, b) => b.num_episodes - a.num_episodes)
+          .map((t) => t.task)
+          .filter(Boolean);
+        // Offered as a PLACEHOLDER default (see `defaultTask`), not written
+        // into the field: the operator should be able to tell the app's guess
+        // from their own sentence, and clearing the box should fall back to the
+        // guess rather than to nothing.
+        setDatasetTasks(tasks);
+      } catch {
+        // A Hub-only or missing dataset simply has no tasks to offer; the
+        // field stays as the user left it.
+        if (!cancelled) setDatasetTasks([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedJob, baseUrl, fetchWithHeaders]);
+
+  // A prefill may name the run mode — that is how "Policy failing? Coach it"
+  // lands the user in coaching without them having to know the control exists.
+  useEffect(() => {
+    if (deployPrefill?.mode) setRunMode(deployPrefill.mode);
+  }, [deployPrefill]);
+
+  const handleStart = async (mode: RunMode = runMode) => {
     if (
       !robot ||
       robotCheckpointArmMismatch ||
@@ -793,19 +1194,35 @@ const DeployPanel: React.FC = () => {
       // Robot NAME + policy-shaped options only — ports, configs, mode and
       // the camera devices behind the bindings resolve server-side from the
       // saved record. The owner attaches the lease the session dialog renews.
+      // Coaching's LEADER arms resolve there too, off the same record: no
+      // separate picker, because the record already pairs leader with follower
+      // and re-asking would only be a chance to get it wrong.
       const { session } = await startSession(baseUrl, fetchWithHeaders, {
         kind: "inference",
         robot: robot.name,
         owner: tabOwnerId(),
         options: {
           policy_ref: selectedRef,
-          task,
+          task: effectiveTask,
           camera_bindings: cameraBindingPayload,
           camera_dims: cameraDimsPayload,
           duration_s: durationS,
           checkpoint_state_dim: policyConfig.state_dim ?? undefined,
-          eval_episodes: evalEpisodes,
-          inference_engine: inferenceEngine,
+          // Only ever >1 in eval mode — the count field is hidden otherwise,
+          // but pinning it here means a stale value left over from switching
+          // modes can't quietly turn a single run into a 20-episode evaluation.
+          eval_episodes: mode === "eval" ? evalEpisodes : 1,
+          // Coaching is pinned to sync server-side too (RTC snaps the arm back
+          // toward its pre-correction pose on hand-back); sending it correctly
+          // from here keeps the request honest rather than relying on that.
+          inference_engine: mode === "coach" ? "sync" : inferenceEngine,
+          ...(mode === "coach"
+            ? {
+                coaching: true,
+                target_corrections: targetCorrections,
+                coaching_dataset_name: effectiveCoachName,
+              }
+            : {}),
           // ACT-only, and only while the switch is on — otherwise omitted so
           // the checkpoint's own (ensembling-off) config stands.
           temporal_ensemble_coeff:
@@ -814,7 +1231,23 @@ const DeployPanel: React.FC = () => {
       });
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
-      openInferenceSession(session.id);
+      // Coaching only: hand the session what it needs to offer the merge +
+      // fine-tune when it ends. A plain run or an eval produces no dataset and
+      // has nothing to hand on. See CoachingLineage.
+      openInferenceSession(
+        session.id,
+        mode === "coach" && jobId
+          ? {
+              jobId,
+              jobName: selectedJob?.name ?? undefined,
+              trainingDatasetRepoId:
+                selectedJob?.config?.dataset_repo_id &&
+                selectedJob.config.dataset_repo_id !== "(imported)"
+                  ? selectedJob.config.dataset_repo_id
+                  : undefined,
+            }
+          : null,
+      );
       if (!hasSeenDeployMilestone) {
         setDeployMilestonePending(true);
         markDeployMilestoneSeen();
@@ -842,25 +1275,6 @@ const DeployPanel: React.FC = () => {
       });
       // Failure: bring the previews back so the user can adjust.
       setSubmitting(false);
-    }
-  };
-
-  const handleStop = async () => {
-    setStopping(true);
-    try {
-      await stopInference(baseUrl, fetchWithHeaders);
-      toast({
-        title: t("studio.deploy.toast.stoppingTitle"),
-        description: t("studio.deploy.toast.stoppingBody"),
-      });
-    } catch (e) {
-      toast({
-        title: t("studio.deploy.toast.stopFailed"),
-        description: e instanceof Error ? e.message : String(e),
-        variant: "destructive",
-      });
-    } finally {
-      setStopping(false);
     }
   };
 
@@ -1029,18 +1443,41 @@ const DeployPanel: React.FC = () => {
             ) : (
               /* The plural is on the follower ARM count — 2 for a bimanual
                  robot, 1 otherwise. The number itself is never printed; it
-                 only picks the variant, replacing the old `{s}` splice. */
+                 only picks the variant, replacing the old `{s}` splice.
+                 Coaching gets its own key AND its own gap scope: it teleoperates
+                 through the leader too, so a missing leader port is a real
+                 blocker there and noise in every other mode. */
               <Trans
-                i18nKey="studio.deploy.robotNotReady"
+                i18nKey={
+                  runMode === "coach"
+                    ? "studio.deploy.robotNotReadyCoach"
+                    : "studio.deploy.robotNotReady"
+                }
                 count={isBimanual ? 2 : 1}
                 values={{
                   name: robot.name,
-                  gap: formatRobotSetupGap(t, robot, "follower"),
+                  gap: formatRobotSetupGap(
+                    t,
+                    robot,
+                    runMode === "coach" ? "all" : "follower",
+                  ),
                 }}
                 components={[<strong key="0" />]}
               />
             )}
           </RobotStatus>
+
+          {/* Run mode. ABOVE the checkpoint and OUTSIDE the policy-config
+              guard, deliberately: it decides what every control below it
+              means, and it used to be the fourth field down and to vanish
+              entirely while a checkpoint's config was still loading. It has no
+              dependency on that config. ------------------------------------ */}
+          {/* The mode chooser used to live here, as a widget you set before
+              pressing a generic Start. The verb buttons at the bottom of the
+              panel are now the chooser AND the action: pressing one selects
+              that mode and launches it, so there is one decision instead of
+              two and nothing to leave in the wrong position. The options
+              below still follow whichever verb is armed. */}
 
           {/* Checkpoint ------------------------------------------------------- */}
           <div className="space-y-2">
@@ -1094,7 +1531,13 @@ const DeployPanel: React.FC = () => {
               they are. --------------------------------------------------- */}
           {policyConfig ? (
             <>
-              {policyConfig.requires_task ? (
+              {/* Coaching ALWAYS needs it, language-conditioned or not: the
+                  string is written into every recorded frame and the server
+                  refuses an empty one. Gating this on `requires_task` alone
+                  meant a plain ACT checkpoint gave a green panel, an enabled
+                  Start, and then a 400 naming a field that was not on screen
+                  and could not be made to appear. */}
+              {policyConfig.requires_task || runMode === "coach" ? (
                 <div className="space-y-2">
                   <Label htmlFor="deploy-task">
                     {t("studio.deploy.task.label")}
@@ -1103,81 +1546,251 @@ const DeployPanel: React.FC = () => {
                     id="deploy-task"
                     value={task}
                     onChange={(e) => setTask(e.target.value)}
-                    placeholder={t("studio.deploy.task.placeholder")}
+                    // The trained-on sentence, shown greyed rather than typed
+                    // in. Leaving the box empty sends it; clearing what you
+                    // typed brings it back. No invented example: a fake task
+                    // shown greyed in the same slot the REAL inherited task
+                    // uses is indistinguishable from one. When the lineage
+                    // yields nothing, say so instead.
+                    placeholder={
+                      defaultTask || t("studio.deploy.task.placeholderNone")
+                    }
                   />
                   <p className="text-xs text-muted-foreground">
-                    {/* The policy type is an identifier — rendered verbatim. */}
-                    {t("studio.deploy.task.hint", {
-                      policyType: policyConfig.policy_type ?? "",
-                    })}
+                    {policyConfig.requires_task
+                      ? /* The policy type is an identifier — verbatim. */
+                        t("studio.deploy.task.hint", {
+                          policyType: policyConfig.policy_type ?? "",
+                        })
+                      : t("studio.deploy.task.hintCoach")}
+                    {/* Says where the greyed sentence comes from. Only while
+                        the box is EMPTY — once the operator types, the default
+                        is not what will be sent and claiming otherwise would be
+                        a lie. */}
+                    {task.trim() === "" && defaultTask
+                      ? ` ${t("studio.deploy.task.leaveEmpty")}`
+                      : ""}
+                  </p>
+                  {datasetTasks.length > 1 && (
+                    <div className="space-y-1">
+                      <p className="text-xs text-muted-foreground">
+                        {t("studio.deploy.task.multiTaskHint", {
+                          count: datasetTasks.length,
+                        })}
+                      </p>
+                      <div className="flex flex-wrap gap-1">
+                        {datasetTasks.map((t) => (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => setTask(t)}
+                            className={cn(
+                              "rounded border px-2 py-0.5 text-xs transition-colors",
+                              task === t
+                                ? "border-primary bg-primary/10"
+                                : "border-border hover:bg-muted",
+                            )}
+                          >
+                            {t}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+              {runMode !== "coach" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-duration">
+                    {t("studio.deploy.duration.label")}
+                  </Label>
+                  <NumberInput
+                    id="deploy-duration"
+                    min={1}
+                    value={durationS}
+                    onChange={(v) => {
+                      if (v !== undefined) setDurationS(v);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {runMode === "eval"
+                      ? t("studio.deploy.duration.hint")
+                      : t("studio.deploy.duration.singleHint")}
                   </p>
                 </div>
               ) : null}
-              <div className="space-y-2">
-                <Label htmlFor="deploy-duration">
-                  {t("studio.deploy.duration.label")}
-                </Label>
-                <NumberInput
-                  id="deploy-duration"
-                  min={1}
-                  value={durationS}
-                  onChange={(v) => {
-                    if (v !== undefined) setDurationS(v);
-                  }}
-                />
+              {runMode === "eval" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-episodes">
+                    {t("studio.deploy.episodes.label")}
+                  </Label>
+                  <NumberInput
+                    id="deploy-episodes"
+                    min={1}
+                    max={MAX_EVAL_EPISODES}
+                    value={evalEpisodes}
+                    onChange={(v) => {
+                      if (v !== undefined) setEvalEpisodes(v);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("studio.deploy.episodes.scoreHint")}
+                  </p>
+                </div>
+              ) : null}
+              {runMode === "coach" ? (
+                <>
+                  {/* Readiness, stated before the operator commits an hour to
+                      it. Coaching corrects a policy's OWN failures, so it has
+                      nothing to work with until the policy sometimes succeeds:
+                      CR-DAgger (arXiv:2506.16685) recommends starting only once
+                      the base policy is at 10-20%, and below that the honest
+                      answer is more demonstrations, not more corrections. This
+                      is the cheapest possible place to say so — the alternative
+                      is discovering it after a session spent rescuing an arm
+                      that never got close. */}
+                  <div className="rounded-lg border border-border bg-muted/40 p-3">
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      <span className="font-semibold text-foreground">
+                        Coaching pays off once the skill already works
+                        sometimes.
+                      </span>{" "}
+                      It learns from rescuing the policy's own mistakes, so it
+                      needs the policy to get far enough to make interesting
+                      ones — roughly a 1-in-10 success rate. If it fails
+                      immediately every time, record more demonstrations first;
+                      that's faster than correcting your way there.{" "}
+                      <span className="whitespace-nowrap">
+                        Score it above to check.
+                      </span>
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="deploy-corrections">
+                      {t("studio.deploy.coaching.correctionsLabel")}
+                    </Label>
+                    <NumberInput
+                      id="deploy-corrections"
+                      min={1}
+                      max={MAX_COACHING_CORRECTIONS}
+                      value={targetCorrections}
+                      onChange={(v) => {
+                        if (v !== undefined) setTargetCorrections(v);
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("studio.deploy.coaching.correctionsHint")}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="deploy-coach-dataset">
+                      {t("studio.deploy.coaching.datasetLabel")}
+                    </Label>
+                    {/* `rollout_` is rendered as a fixed, unfocusable part of
+                        the field rather than left in the operator's text. It is
+                        not optional — lerobot refuses a rollout dataset whose
+                        repo name lacks it (rollout/context.py), and merge.py
+                        keys the lossless `intervention`-column drop on the same
+                        prefix — so it must never be something a person can
+                        delete or forget. What they type follows it. */}
+                    <div className="flex items-center rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                      <span
+                        aria-hidden
+                        className="select-none pl-3 pr-0.5 font-mono text-sm text-muted-foreground"
+                      >
+                        rollout_
+                      </span>
+                      <Input
+                        id="deploy-coach-dataset"
+                        value={coachDatasetName}
+                        onChange={(e) => setCoachDatasetName(e.target.value)}
+                        placeholder={
+                          defaultCoachName ||
+                          t("studio.deploy.coaching.datasetFallback")
+                        }
+                        className="border-0 bg-transparent pl-0 font-mono shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {/* <0> wraps the literal on-disk prefix, which is an
+                          identifier and stays in the Latin script. */}
+                      <Trans
+                        i18nKey="studio.deploy.coaching.datasetHint"
+                        values={{
+                          prefix: `rollout_${
+                            effectiveCoachName ||
+                            t("studio.deploy.coaching.datasetFallback")
+                          }_`,
+                        }}
+                        components={[<span key="0" className="font-mono" />]}
+                      />
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("studio.deploy.coaching.leaderLabel")}</Label>
+                    <p
+                      className={`text-xs ${
+                        coachLeaderMissing
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      }`}
+                    >
+                      {!robot
+                        ? t("studio.deploy.coaching.leaderNoRobot")
+                        : coachLeaderMissing
+                          ? t("studio.deploy.coaching.leaderMissing")
+                          : t("studio.deploy.coaching.leaderFrom", {
+                              name: robot.name,
+                              // Calibration file names — data, never translated.
+                              configs: isBimanual
+                                ? `${robot.leader_config} + ${robot.right_leader_config}`
+                                : robot.leader_config,
+                            })}
+                    </p>
+                    {isBimanual ? (
+                      <p className="text-xs text-warn">
+                        {t("studio.deploy.coaching.bimanualWarning")}
+                      </p>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+              {runMode !== "coach" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-engine">
+                    {t("studio.deploy.engine.label")}
+                  </Label>
+                  <Select
+                    value={inferenceEngine}
+                    onValueChange={(v) =>
+                      setInferenceEngine(v as "sync" | "rtc")
+                    }
+                  >
+                    <SelectTrigger id="deploy-engine">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {/* Option VALUES ("sync" / "rtc") are what the backend
+                          parses — only the labels are translated. */}
+                      <SelectItem value="sync">
+                        {t("studio.deploy.engine.sync")}
+                      </SelectItem>
+                      <SelectItem value="rtc">
+                        {t("studio.deploy.engine.rtc")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {inferenceEngine === "rtc"
+                      ? t("studio.deploy.engine.rtcHint")
+                      : t("studio.deploy.engine.syncHint")}
+                  </p>
+                </div>
+              ) : (
                 <p className="text-xs text-muted-foreground">
-                  {t("studio.deploy.duration.hint")}
+                  {t("studio.deploy.engine.coachingNote")}
                 </p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="deploy-episodes">
-                  {t("studio.deploy.episodes.label")}
-                </Label>
-                <NumberInput
-                  id="deploy-episodes"
-                  min={1}
-                  max={MAX_EVAL_EPISODES}
-                  value={evalEpisodes}
-                  onChange={(v) => {
-                    if (v !== undefined) setEvalEpisodes(v);
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {evalEpisodes > 1
-                    ? t("studio.deploy.episodes.evalHint", {
-                        episodes: evalEpisodes,
-                      })
-                    : t("studio.deploy.episodes.hint")}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="deploy-engine">
-                  {t("studio.deploy.engine.label")}
-                </Label>
-                <Select
-                  value={inferenceEngine}
-                  onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
-                >
-                  <SelectTrigger id="deploy-engine">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {/* Option VALUES ("sync" / "rtc") are what the backend
-                        parses — only the labels are translated. */}
-                    <SelectItem value="sync">
-                      {t("studio.deploy.engine.sync")}
-                    </SelectItem>
-                    <SelectItem value="rtc">
-                      {t("studio.deploy.engine.rtc")}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {inferenceEngine === "rtc"
-                    ? t("studio.deploy.engine.rtcHint")
-                    : t("studio.deploy.engine.syncHint")}
-                </p>
-              </div>
+              )}
             </>
           ) : null}
 
@@ -1368,35 +1981,25 @@ const DeployPanel: React.FC = () => {
       )}
 
       {/* Actions — pinned directly above the skill library. Side by side so
-          the row sits level with Collect's and Train's single Start. -------- */}
-      <div className="mt-auto flex gap-2 pt-2">
-        <Button
-          onClick={handleStart}
-          disabled={!canStart}
-          className="flex-1 gap-2"
-        >
-          <Play className="h-4 w-4" />
-          {submitting
-            ? t("studio.deploy.actions.starting")
-            : checkingExtra
-              ? t("studio.deploy.actions.checking")
-              : evalEpisodes > 1
-                ? t("studio.deploy.actions.startEval", {
-                    episodes: evalEpisodes,
-                  })
-                : t("studio.deploy.actions.start")}
-        </Button>
-        <Button
-          onClick={handleStop}
-          variant="outline"
-          disabled={!inferenceActive || stopping}
-          className="flex-1 gap-2"
-        >
-          <Square className="h-4 w-4" />
-          {stopping
-            ? t("studio.deploy.actions.stopping")
-            : t("studio.deploy.actions.stop")}
-        </Button>
+          the row sits level with Collect's and Train's single Start.
+          No Stop here: a live rollout owns the InferenceSessionDialog, which
+          is modal and carries its own Stop. A second stop control sitting on
+          a panel the operator cannot see during a run was dead weight the
+          rest of the time, and enabled only in the one state where it was
+          unreachable. -------------------------------------------------- */}
+      <div ref={actionsRef} className="mt-auto flex flex-col gap-2 pt-2">
+        <RunVerbs
+          active={runMode}
+          onArm={armRunMode}
+          onLaunch={(mode) => {
+            armRunMode(mode);
+            void handleStart(mode);
+          }}
+          blockedReason={blockedReason}
+          ready={canStartAnyMode}
+          busy={submitting || checkingExtra}
+          counts={{ eval: evalEpisodes, coach: targetCorrections }}
+        />
       </div>
 
       {/* Model / policy library — imported models + uploaded Hub repos.

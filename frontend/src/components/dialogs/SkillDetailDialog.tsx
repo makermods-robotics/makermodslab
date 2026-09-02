@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { ExternalLink, Heart, Play, Sparkles } from "lucide-react";
+import {
+  ExternalLink,
+  GraduationCap,
+  Heart,
+  Play,
+  Sparkles,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -139,14 +145,22 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   // second Hub pseudo-job would duplicate the record and break offline runs.
   const hubOnly = model.source === "hub";
 
-  const handleRun = () => {
-    if (hubOnly && hubRepoId) {
-      openStudio("deploy", { deploy: { source: "hub", id: hubRepoId } });
-    } else {
-      openStudio("deploy", { deploy: { source: "job", id: model.id } });
-    }
+  const openDeploy = (mode?: "coach") => {
+    const base =
+      hubOnly && hubRepoId
+        ? ({ source: "hub", id: hubRepoId } as const)
+        : ({ source: "job", id: model.id } as const);
+    openStudio("deploy", { deploy: { ...base, ...(mode ? { mode } : {}) } });
     onOpenChange(false);
   };
+
+  const handleRun = () => openDeploy();
+
+  // The third place an operator knows a skill is imperfect — the other two are
+  // a finished run and an evaluation summary. All three used to offer no route
+  // to improving it except "fine-tune", which needs data they do not have yet.
+  // Coaching is how they GET that data.
+  const handleCoach = () => openDeploy("coach");
 
   const handleFineTune = () => {
     openStudio("train", {
@@ -243,6 +257,17 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
                   <Button onClick={handleRun} className="w-full gap-2">
                     <Play className="h-4 w-4" />
                     {t("dialogs.skillDetail.run", { robot: robotName })}
+                  </Button>
+                  {/* Between running and fine-tuning, because that is the real
+                      order: fine-tuning needs data the operator does not have
+                      yet, and coaching is how they get it. */}
+                  <Button
+                    variant="outline"
+                    onClick={handleCoach}
+                    className="w-full gap-2"
+                  >
+                    <GraduationCap className="h-4 w-4" />
+                    {t("dialogs.skillDetail.coach")}
                   </Button>
                   <Button
                     variant="outline"

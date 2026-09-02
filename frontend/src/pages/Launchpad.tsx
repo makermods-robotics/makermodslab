@@ -14,6 +14,7 @@ import ActivityStrip from "@/components/launchpad/ActivityStrip";
 import LibrarySheet from "@/components/launchpad/LibrarySheet";
 import RobotCorner from "@/components/launchpad/RobotCorner";
 import CollectHandoff from "@/components/studio/CollectHandoff";
+import CoachHandoff from "@/components/studio/CoachHandoff";
 import StudioOverlay from "@/components/studio/StudioOverlay";
 import { useStudio } from "@/contexts/StudioContext";
 import { isHostedSpace } from "@/lib/isHostedSpace";
@@ -78,6 +79,7 @@ const Launchpad = () => {
           of the viewport rather than hugging the header. */}
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col items-center justify-center gap-10 px-4 py-8 sm:px-6">
         <CollectHandoff />
+        <CoachHandoff />
         <Hero search={search} onSearchChange={setSearch} />
         <SkillSlider search={search} />
         <ActivityStrip />

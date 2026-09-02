@@ -55,7 +55,23 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   datasets: DatasetItem[];
-  onMerged: () => void;
+  /** Called when a merge finishes, with the repo id it produced. The argument
+   * lets a caller chain onward — a coaching handoff goes straight from here
+   * into the training panel with the merged dataset selected. */
+  onMerged: (outputRepoId?: string) => void;
+  /** Datasets to tick on open. The coaching handoff arrives with both halves
+   * already known — the corrections it just recorded, and the dataset the
+   * coached checkpoint was last trained on — and asking the operator to find
+   * two names in a list they were just shown is busywork with a wrong answer
+   * available (merging against the ORIGINAL demos rather than the fine-tuning
+   * set is easy to do and hard to notice). */
+  initialSources?: string[];
+  /** Output name to prefill alongside them. */
+  initialOutput?: string;
+  /** Mirrors the running merge's state to the caller, so a parent holding a
+   * coaching handoff can tell "the operator closed this" from "the operator
+   * closed this while a merge they started is still running". */
+  onStatusChange?: (status: MergeStatus | null) => void;
 }
 
 const POLL_MS = 1500;
@@ -77,6 +93,9 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   onOpenChange,
   datasets,
   onMerged,
+  initialSources,
+  initialOutput,
+  onStatusChange,
 }) => {
   const { t } = useTranslation();
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -91,28 +110,47 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   const [status, setStatus] = useState<MergeStatus | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  // Set when the merge is one confirmation away: the sources are identical
+  // apart from a column we're willing to drop (see MergeStartResult).
+  const [dropPrompt, setDropPrompt] = useState<{
+    message: string;
+    features: string[];
+  } | null>(null);
   // Non-null while the backend has refused pending confirmation (cross-arm
   // sources); confirming re-submits with acknowledge_warnings.
   const [pendingWarnings, setPendingWarnings] = useState<string[] | null>(null);
   const logBoxRef = useRef<HTMLDivElement>(null);
   const notifiedDone = useRef(false);
+  // The name the running merge is writing to, captured at start. Read when it
+  // completes: `output` is still editable while the merge runs, so reading the
+  // live state then could report a name that was never created.
+  const mergedOutputRef = useRef<string | null>(null);
+  // The drop-feature names from the last merge attempt, so confirming a
+  // cross-arm warning re-submits with the column drop still in effect.
+  const lastDropFeatures = useRef<string[]>([]);
 
   // Reset on open, and re-attach to an already-running merge (survives closing
   // the dialog / reloading the page) by seeding from the backend.
   useEffect(() => {
     if (!open) return;
-    setSelected(new Set());
+    // A prefill only seeds the form — everything stays editable, and reopening
+    // without one clears back to empty rather than resurrecting a stale pick.
+    setSelected(new Set(initialSources ?? []));
     setWeights({});
     // Dropped rather than kept across opens: recording or deleting episodes
     // between opens would leave a stale mix preview on screen.
     setInfos({});
-    setOutput("");
+    setOutput(initialOutput ?? "");
     setStartError(null);
     setPendingWarnings(null);
     notifiedDone.current = false;
     getDatasetMergeStatus(baseUrl, fetchWithHeaders)
       .then((s) => setStatus(s.state === "running" ? s : null))
       .catch(() => setStatus(null));
+    // Seeding is an ON-OPEN action. Re-running it whenever the caller
+    // re-creates the prefill array would wipe edits the operator has already
+    // made to the selection, which is why the deps stay narrow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, baseUrl, fetchWithHeaders]);
 
   // Fetch dataset info: for the mix preview's episode counts, and — once an
@@ -171,7 +209,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         );
         if (s.state === "done" && !notifiedDone.current) {
           notifiedDone.current = true;
-          onMerged();
+          onMerged(mergedOutputRef.current ?? undefined);
         }
       } catch {
         // transient — retry next tick
@@ -179,6 +217,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     }, POLL_MS);
     return () => clearInterval(id);
   }, [open, status?.state, baseUrl, fetchWithHeaders, onMerged]);
+
+  const statusChangeRef = useRef(onStatusChange);
+  statusChangeRef.current = onStatusChange;
+  useEffect(() => {
+    statusChangeRef.current?.(status);
+  }, [status]);
 
   useEffect(() => {
     if (logBoxRef.current)
@@ -363,26 +407,45 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     !selected.has(effectiveOutput) &&
     status?.state !== "running";
 
-  const doMerge = async (acknowledgeWarnings: boolean) => {
+  // `dropFeatures` is empty on the first attempt. If the server comes back
+  // saying the sources differ only by a droppable column, we surface the ask
+  // and the user's confirmation retries with the names filled in.
+  // `acknowledgeWarnings` is the parallel flow for an advisory (cross-arm)
+  // warning. Both survive a warning confirmation via `lastDropFeatures`.
+  const doMerge = async (
+    acknowledgeWarnings: boolean,
+    dropFeatures: string[] = [],
+  ) => {
+    lastDropFeatures.current = dropFeatures;
     setStarting(true);
     setStartError(null);
+    setDropPrompt(null);
     try {
+      mergedOutputRef.current = effectiveOutput;
       const res = await startDatasetMerge(
         baseUrl,
         fetchWithHeaders,
         selectedIds,
         effectiveOutput,
         selectedIds.map((repoId) => weightOf(repoId)),
+        dropFeatures,
         acknowledgeWarnings,
       );
       if (!res.started) {
+        // Not a failure — a question. Merging coaching corrections back into
+        // the demos they were collected against lands here every time, and
+        // showing it as a red error would read as "you can't do this".
+        if (res.droppable_features?.length) {
+          setDropPrompt({ message: res.message, features: res.droppable_features });
+          return;
+        }
         // A refusal carrying warnings is "confirm to proceed", not an error.
         if (res.warnings && res.warnings.length > 0 && !acknowledgeWarnings) {
           setPendingWarnings(res.warnings);
-        } else {
-          setPendingWarnings(null);
-          setStartError(res.message);
+          return;
         }
+        setPendingWarnings(null);
+        setStartError(res.message);
         return;
       }
       setPendingWarnings(null);
@@ -401,7 +464,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     }
   };
 
-  const handleMerge = () => doMerge(false);
+  const handleMerge = (dropFeatures: string[] = []) => doMerge(false, dropFeatures);
 
   const state = status?.state ?? "idle";
 
@@ -656,9 +719,29 @@ const MergeDatasetsDialog: React.FC<Props> = ({
             {startError ? (
               <p className="text-sm text-destructive">{startError}</p>
             ) : null}
+            {dropPrompt ? (
+              <div className="rounded-lg border border-warn/40 bg-warn/10 p-3">
+                <p className="text-sm leading-relaxed text-warn">
+                  {dropPrompt.message}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Your original datasets aren't modified — the column is removed
+                  from a working copy used only for this merge.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-3"
+                  disabled={starting}
+                  onClick={() => handleMerge(dropPrompt.features)}
+                >
+                  Drop {dropPrompt.features.join(", ")} and merge
+                </Button>
+              </div>
+            ) : null}
             <div className="flex justify-end">
               <Button
-                onClick={handleMerge}
+                onClick={() => handleMerge()}
                 disabled={!canMerge || starting}
                 className=""
               >
@@ -766,7 +849,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                 // Keep the dialog mounted until doMerge resolves; close it by
                 // clearing pendingWarnings on success/failure inside doMerge.
                 e.preventDefault();
-                void doMerge(true);
+                void doMerge(true, lastDropFeatures.current);
               }}
             >
               {t("landing.mergeDatasets.confirmProceed")}

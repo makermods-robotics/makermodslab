@@ -43,7 +43,7 @@ from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
 from .datasets import get_episode_action_series
 from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
-from .motor_power import clear_goal_velocity, reset_torque_limit
+from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .session_events import notify_session_changed
 from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
@@ -389,8 +389,8 @@ def _connect_follower(request: ReplayRequest):
             )
             time.sleep(_CONNECT_RETRY_DELAY_S)
 
-    identity_warnings += reset_torque_limit(robot, "follower arm")
-    identity_warnings += clear_goal_velocity(robot, "follower arm")
+    identity_warnings += reset_torque_limit(robot, FOLLOWER)
+    identity_warnings += clear_goal_velocity(robot, FOLLOWER)
     return robot, identity_warnings
 
 
@@ -425,7 +425,7 @@ def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
     survives, rather than replaying at a fraction of the recorded speed with no
     indication why.
     """
-    clear_goal_velocity(robot, label)
+    clear_goal_velocity(robot, FOLLOWER, label)
     try:
         caps = robot.bus.sync_read("Goal_Velocity", normalize=False)
     except Exception as e:
@@ -435,7 +435,7 @@ def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
     if not stuck:
         return
     logger.warning(f"Speed cap survived on the {label} ({stuck}) — retrying before playback")
-    clear_goal_velocity(robot, label)
+    clear_goal_velocity(robot, FOLLOWER, label)
     try:
         still = {m: v for m, v in robot.bus.sync_read("Goal_Velocity", normalize=False).items() if v}
         if still:

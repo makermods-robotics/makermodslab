@@ -47,30 +47,18 @@ def test_auto_calibration_is_so101_only_and_zero_calibration_is_maker_only() -> 
     assert uses_zero_calibration("so101") is False
 
 
-def test_dagger_is_refused_on_the_maker_arm() -> None:
+def test_dagger_is_refused_on_the_maker_and_metal_arms() -> None:
     """A hardware limit, not a policy choice.
 
-    The Star Arm 102 leader that drives a Maker follower has encoders and no
-    motors in its joints, so there is nothing to back-drive it with during a
-    policy-to-human handover.
+    The Star Arm 102 leader that drives a Maker or Metal follower has encoders
+    and no motors in its joints, so there is nothing to back-drive it with
+    during a policy-to-human handover. Coaching (DAgger) consults this in
+    rollout.handle_start_inference — see
+    test_rollout.test_coaching_is_refused_on_a_can_arm for the enforcement.
     """
     assert supports_dagger("maker") is False
+    assert supports_dagger("metal") is False
     assert supports_dagger("so101") is True
-
-
-def test_makermodslab_never_requests_a_dagger_rollout() -> None:
-    """The other half of the DAgger guarantee: nothing here can ask for one.
-
-    `supports_dagger` is a value nothing reads yet, so on its own it would not
-    stop a DAgger run. What actually stops one is that rollout.py hardcodes
-    `--strategy.type=base` and exposes no strategy option at all. Pin that, so
-    adding a strategy picker has to come past this test.
-    """
-    from pathlib import Path
-
-    rollout_src = Path("makermodslab/rollout.py").read_text()
-    assert "--strategy.type=base" in rollout_src
-    assert "dagger" not in rollout_src.lower()
 
 
 @pytest.mark.parametrize("value", [None, "", "SO101", "star", 7, object()])

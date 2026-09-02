@@ -70,6 +70,16 @@ from .calibrate import CalibrationRequest, calibration_manager
 from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .can_recovery import ReleaseCanTorqueRequest, handle_release_can_torque
+from .dagger_protocol import (
+    CMD_CANCEL,
+    CMD_DROP_LAST,
+    CMD_HANDBACK,
+    CMD_HOLD,
+    CMD_RECOVERED,
+    CMD_RESET,
+    CMD_RESUME,
+    CMD_TAKEOVER,
+)
 from .identify import identify_arm_by_motion
 from .jobs import (
     _KNOWN_FOUNDATION_BASE_REPO_IDS,
@@ -141,6 +151,7 @@ from .replay import (
 )
 from .rollout import (
     InferenceRequest,
+    handle_coaching_command,
     handle_inference_log,
     handle_inference_status,
     handle_next_episode,
@@ -198,7 +209,10 @@ from .schemas.nodes import (
     NodeRemoveResponse,
 )
 from .schemas.sessions import (
+    CoachingCommandResponse,
     CurrentSessionResponse,
+    SessionCoachingBody,
+    SessionCoachingResponse,
     SessionHeartbeatBody,
     SessionHeartbeatResponse,
     SessionStartBody,
@@ -226,6 +240,7 @@ from .schemas.system import (
     UpdateStatus,
 )
 from .sessions import (
+    handle_coaching_command_for_session,
     handle_current_session,
     handle_heartbeat_session,
     handle_start_session,
@@ -593,6 +608,24 @@ class ConnectionManager:
             with contextlib.suppress(queue.Full):
                 self.broadcast_queue.put_nowait(event)
 
+    def notify_coaching_state(self, fields: dict[str, Any]) -> None:
+        """Push the coaching block the instant it changes, ahead of the poll.
+
+        Unlike `notify_jobs_changed` this carries the STATE rather than a
+        "refetch me" nudge, because the thing it carries is safety-relevant and
+        a refetch round-trip is most of the latency we are trying to remove:
+        the operator has to know who is holding the arm now, not after another
+        request. See rollout._on_coaching_state for the full argument.
+
+        Dropped silently with no clients — the dialog polls once a second and
+        reconciles itself, so a missed push costs a second, never correctness.
+        """
+        if self.is_running and self.active_connections:
+            with contextlib.suppress(queue.Full):
+                self.broadcast_queue.put_nowait(
+                    {"type": "coaching_state", "timestamp": time.time(), **fields}
+                )
+
     def notify_job_progress(self, snapshots: list[dict]) -> None:
         """Push a 'job_progress' event with per-running-job snapshots.
 
@@ -637,6 +670,10 @@ def _on_jobs_changed() -> None:
 job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
 session_events.set_notifier(manager.notify_session_changed)
+# Coaching phase changes reach the browser by push, not by poll — the banner
+# names who is holding the arm, and a second of lag there is a second of the
+# operator not knowing. See rollout._on_coaching_state.
+rollout_state.set_on_coaching_state(manager.notify_coaching_state)
 
 
 # Frontend policy_type -> lerobot registry name. In this lerobot pin the names
@@ -804,6 +841,148 @@ def inference_next_episode():
     return result
 
 
+def _coaching_route(command: str):
+    """Shared body for the eight flat coaching controls.
+
+    They differ only in the verb they forward, so the route layer's job is
+    entirely uniform: hand the verb to the orchestrator and translate a refusal
+    into the right status code. Which transitions the verb is legal from is the
+    RUNNER's call, not this layer's — see `handle_coaching_command`."""
+    result = handle_coaching_command(command)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to send the coaching command"),
+        )
+    return result
+
+
+@v1_router.post("/coaching-takeover", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_takeover():
+    """Coaching mode only: take control from the policy and start recording.
+
+    One press covers the whole handover — the policy pauses, an actuated leader
+    glides toward the follower's pose so the operator picks up an arm roughly
+    where the robot is, and only then does the correction begin recording. The
+    glide is best-effort and nothing checks that it arrived: whatever gap is
+    left is measured at the edge and cancelled out of every command, so the
+    follower cannot jump however far apart the two arms were."""
+    return _coaching_route(CMD_TAKEOVER)
+
+
+@v1_router.post("/coaching-handback", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_handback():
+    """Coaching mode only: end the correction, SAVE it, and resume the policy."""
+    return _coaching_route(CMD_HANDBACK)
+
+
+@v1_router.post("/coaching-cancel", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_cancel():
+    """Coaching mode only: end the correction and DISCARD it.
+
+    The fumbled-takeover escape. Upstream lerobot saves every correction
+    unconditionally, which makes a botched takeover permanent training data;
+    this drops the buffer instead.
+
+    It then runs the ordinary reset behind the discard — the follower eases home
+    and the session parks for a scene rearrangement, and the leader is released
+    on the way. A discard means the last few seconds were a mess, and the scene
+    almost always needs setting up again after one. Accepted from EVERY phase,
+    not just mid-correction: with nothing in flight it is a plain reset, which
+    is what still gives a wedged correction a way out."""
+    return _coaching_route(CMD_CANCEL)
+
+
+@v1_router.post("/coaching-hold", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_hold():
+    """Coaching mode only: freeze the policy without taking over.
+
+    The arm holds its pose and nothing is recorded — for when the operator needs
+    a moment to decide, or to reposition the scene, without committing to a
+    correction."""
+    return _coaching_route(CMD_HOLD)
+
+
+@v1_router.post("/coaching-resume", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_resume():
+    """Coaching mode only: hand control back to the policy from a hold."""
+    return _coaching_route(CMD_RESUME)
+
+
+@v1_router.post("/coaching-reset", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_reset():
+    """Coaching mode only: end this ATTEMPT at the task and reset for the next.
+
+    Corrections-only DAgger has no task-episode concept — an "episode" there is
+    one takeover — so this is what tells the session that the cube is finally in
+    the tray. The policy stops, the follower eases back to the pose captured at
+    connect, and the session parks so the scene can be rearranged. Nothing is
+    written to the dataset: corrections are the only thing ever recorded.
+
+    Valid mid-correction, where it SAVES the correction in flight before
+    resetting: an operator who finishes the task while still driving has
+    already decided those frames are the correction, and making them hand back
+    and then reset as two presses let the policy briefly regain a finished
+    scene in between. Use /coaching-cancel for the opposite — discard, then
+    reset."""
+    return _coaching_route(CMD_RESET)
+
+
+@v1_router.post("/coaching-drop-last", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_drop_last():
+    """Coaching mode only: un-record the correction from the attempt just ended.
+
+    A real delete, and it can be one only because nothing has been deleted: the
+    runner HOLDS a finished correction in memory rather than writing it at
+    hand-back, and commits it when the operator takes over again or starts the
+    next attempt. This says don't.
+
+    That indirection is not an optimisation. `save_episode` interleaves an
+    episode's frames into a shared per-chunk parquet file and appends its video
+    into a shared per-chunk video file, and lerobot offers nothing that removes
+    one episode from a dataset that is still open — `dataset_tools.delete_episodes`
+    rebuilds a FINALIZED dataset into a new directory by copying and re-encoding
+    everything that survives. See "The held correction" in dagger_protocol.
+
+    So the window is narrow and the runner owns it: from the hand-back that
+    ended the correction until the operator either takes over again or starts
+    the next attempt — exactly the window they spend standing at a parked arm
+    deciding. Clients must read
+    `droppable_correction` off /inference-status rather than infer it from the
+    phase.
+
+    Refused mid-correction — there the operator means the take they are still
+    recording, and /coaching-cancel is the control for that one.
+
+    409 `coaching.nothing_to_drop` when the window is shut (mid-correction, or
+    once the correction has been committed or already dropped). That is the one
+    state check this surface makes, and it is not a phase guess: it reads
+    `droppable_correction`, the runner's own published window. It used to answer
+    200 "sent" and let the runner refuse in a log nobody reads."""
+    return _coaching_route(CMD_DROP_LAST)
+
+
+@v1_router.post("/coaching-recovered", response_model=CoachingCommandResponse, tags=["inference"])
+def coaching_recovered():
+    """Coaching mode only: mark the end of RECOVERY inside the correction.
+
+    An intervention is two things wearing one name — first the operator rewinds
+    the arm back to a state the policy has actually seen, then they demonstrate
+    the behaviour that should follow. lerobot's own HIL guide names RaC
+    (arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's
+    entire claim rests on that decomposition; the strategy nonetheless records
+    both halves as one undifferentiated `intervention=True`.
+
+    This records the boundary out of band (a sidecar beside the dataset — see
+    dagger_protocol) because the dataset's feature dict is assembled inside
+    lerobot with no hook to add a column. It requests no phase change: recovery
+    and correction are the same control mode.
+
+    Ignored outside a correction, and ignored a second time within one — the
+    first mark is the one the operator meant."""
+    return _coaching_route(CMD_RECOVERED)
+
+
 @router.get("/inference-status")
 def inference_status():
     return handle_inference_status()
@@ -920,6 +1099,31 @@ def stop_session(session_id: str):
     Returns the kind's stop-handler result verbatim beside the final
     identity."""
     return handle_stop_session(session_id)
+
+
+@v1_router.post(
+    "/sessions/{session_id}/coaching",
+    response_model=SessionCoachingResponse,
+    tags=["sessions"],
+)
+def coaching_command(session_id: str, body: SessionCoachingBody):
+    """Send one coaching (DAgger) command to the current inference session.
+
+    Session-scoped like /stop: 404 `session.not_found` unless `session_id`
+    names the running session; a plain (non-coaching) inference session yields
+    the runner's coded 409. The verb — takeover / handback / cancel / hold /
+    resume / reset / recovered / drop_last — is forwarded to the coaching
+    runner, which alone decides which phase it is legal from (a server-side
+    phase copy is always one event stale). Never owner-gated: a physical arm
+    must stay controllable by whoever can reach the API.
+
+    THIS is the endpoint the browser uses. The flat `/coaching-*` verbs below
+    remain for callers that only know "an inference run is active", exactly as
+    `/stop-inference` does beside `/sessions/{id}/stop` — but anything holding a
+    session id must come through here, or a dialog left open across a session
+    change commands whichever session happens to be current instead of failing.
+    """
+    return handle_coaching_command_for_session(session_id, body.command)
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
