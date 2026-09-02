@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
-from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
+from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -52,7 +52,6 @@ from lerobot.policies.factory import make_policy_config
 from . import (
     datasets as dataset_browser,
     models as model_browser,
-    presence,
     record as record_state,
     rollout as rollout_state,
     session_events,
@@ -165,8 +164,6 @@ from .schemas.datasets import (
 )
 from .schemas.jobs import (
     CheckpointPolicyConfigResponse,
-    DeviceRunsResponse,
-    ForgetDeviceResponse,
     HubJobDismissResponse,
     HubJobsResponse,
     HubModelDeleteResponse,
@@ -176,7 +173,6 @@ from .schemas.jobs import (
     JobMetricsHistoryResponse,
     JobQueueResponse,
     JobRecord,
-    PresenceSettingsResponse,
     RunnersHardwareResponse,
 )
 from .schemas.models import (
@@ -617,15 +613,7 @@ def _on_jobs_changed() -> None:
     """
     model_browser.invalidate_model_listing_cache()
     manager.notify_jobs_changed()
-    # Cross-device presence: a run starting or ending is exactly the event
-    # another machine wants promptly, rather than up to a keepalive later. Flag
-    # only — this runs on registry mutation paths, so it must never touch the
-    # network (and the ~1Hz progress tick deliberately does NOT come through
-    # here; see set_on_progress below).
-    presence_publisher.mark_dirty()
 
-
-presence_publisher = presence.PresencePublisher(job_registry)
 
 job_registry.set_on_change(_on_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
@@ -2280,159 +2268,6 @@ def _fan_out_model_authors(authors: list[str], call) -> list:
     return [r for r in results if r is not None]
 
 
-_devices_cache_lock = threading.Lock()
-_devices_cache: dict[str, Any] | None = None  # {"at": monotonic, "value": {...}}
-
-
-class PresenceSettingsRequest(BaseModel):
-    """Per-device presence settings. Both fields optional — a request carries
-    only what it changes."""
-
-    enabled: bool | None = None
-    label: str | None = None
-    #: Set by the UI once it has actually shown the first-publish notice.
-    announced: bool | None = None
-
-
-def _invalidate_devices_cache() -> None:
-    global _devices_cache
-    with _devices_cache_lock:
-        _devices_cache = None
-
-
-@v1_router.get("/jobs/devices", response_model=DeviceRunsResponse, tags=["jobs"])
-def list_device_runs():
-    """Local training runs on the user's OTHER devices.
-
-    The cross-device gap this closes: a cloud run is listed from any machine by
-    HF Jobs, but a LOCAL run is visible only where it runs. Devices signed into
-    the same account publish a small presence file each (see presence.py), and
-    this reads the board.
-
-    Read-only by nature. There is no channel to another machine, so nothing
-    here can stop, resume, or download a remote run, and the response carries no
-    field that would suggest otherwise.
-
-    Never 500s: an absent board (nobody has published yet) and an unreachable
-    Hub are both simply an empty list, exactly like /jobs/hub's degradation.
-    Declared before `/jobs/{job_id}` so FastAPI's first-match routing doesn't
-    treat "devices" as a job id.
-    """
-    global _devices_cache
-
-    now = time.monotonic()
-    with _devices_cache_lock:
-        if _devices_cache is not None and (now - _devices_cache["at"]) < _HUB_JOBS_CACHE_TTL_S:
-            return _devices_cache["value"]
-
-    settings = presence.load_settings()
-    status = presence_publisher.status()
-    # Under a DEADLINE, on its own thread. read_board makes one tree call plus a
-    # download per device against a client whose timeout is None, and this runs
-    # in FastAPI's worker pool — a blackholed Hub would otherwise pin a worker
-    # indefinitely, and enough cold requests would exhaust the pool.
-    devices = []
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        devices = pool.submit(presence.read_board).result(timeout=presence.READ_BOARD_TIMEOUT_S)
-    except concurrent.futures.TimeoutError:
-        logger.warning(
-            "Presence board read exceeded %ss; serving an empty board.", presence.READ_BOARD_TIMEOUT_S
-        )
-    except Exception as exc:  # noqa: BLE001 - presence must never break the library
-        logger.warning("Reading the presence board failed: %s", exc)
-    finally:
-        # Never joins: a hung read is left to die with its socket rather than
-        # holding the request open at the executor's exit.
-        pool.shutdown(wait=False)
-
-    response = {
-        "enabled": settings["enabled"],
-        "label": settings["label"],
-        "device_id": status["device_id"],
-        # The repo this device publishes to, so the UI can NAME it in the
-        # first-publish notice. None when signed out.
-        "repo_id": presence.presence_repo_id(username)
-        if (username := (cached_whoami() or {}).get("name"))
-        else None,
-        # Non-null when publishing has given up for this session: "offline", or
-        # "forbidden" when the token cannot write. The UI says so rather than
-        # leaving the toggle claiming this device is sharing when it is not.
-        "disabled_reason": status["disabled_reason"],
-        # `published` is the FACT (this device has written at least once);
-        # `announced` is whether the UI has already told the user about it. The
-        # UI announces when published and not yet announced, then acknowledges.
-        # The writer deliberately does not set `announced` itself — doing so
-        # marked the notice delivered when nothing had been shown, so it could
-        # never fire.
-        "published": status["last_write"] > 0,
-        "announced": settings.get("announced", False),
-        "devices": devices,
-    }
-    with _devices_cache_lock:
-        _devices_cache = {"at": time.monotonic(), "value": response}
-    return response
-
-
-@v1_router.post("/jobs/devices/settings", response_model=PresenceSettingsResponse, tags=["jobs"])
-def update_presence_settings(request: PresenceSettingsRequest):
-    """Turn this device's run-sharing on or off, or rename it on the board."""
-    changes: dict[str, Any] = {}
-    if request.enabled is not None:
-        changes["enabled"] = request.enabled
-    if request.label is not None and request.label.strip():
-        changes["label"] = request.label.strip()
-    if request.announced is not None:
-        changes["announced"] = request.announced
-    settings = presence.save_settings(**changes)
-    _invalidate_devices_cache()
-    # Publish the change straight away so the other machines reflect it without
-    # waiting out a keepalive.
-    presence_publisher.mark_dirty()
-    return {"enabled": settings["enabled"], "label": settings["label"]}
-
-
-@v1_router.delete("/jobs/devices/{device_id}", response_model=ForgetDeviceResponse, tags=["jobs"])
-def forget_device(device_id: str):
-    """Remove one device's file from the presence board.
-
-    For a machine that is gone for good (wiped, sold, reinstalled): its last
-    payload would otherwise sit at "presumed stopped" forever. This deletes the
-    presence record only — it touches nothing on the device itself, which by
-    then may not exist.
-
-    Refuses this device's own id: that file is rewritten on the next publish, so
-    deleting it would be a no-op that looks like it worked.
-    """
-    mine = presence.device_id()
-    if device_id == mine:
-        raise HTTPException(
-            status_code=400,
-            detail="That is this device. Turn sharing off instead of forgetting it.",
-        )
-    info = cached_whoami()
-    username = (info or {}).get("name")
-    if not username:
-        raise HTTPException(status_code=400, detail="Sign in to Hugging Face first.")
-    try:
-        shared_hf_api().delete_file(
-            path_in_repo=presence.device_file_path(device_id),
-            repo_id=presence.presence_repo_id(username),
-            repo_type="model",
-            commit_message=f"presence: forget {device_id}",
-        )
-    except EntryNotFoundError:
-        pass  # Already gone: the caller's intent is satisfied.
-    except Exception as exc:  # noqa: BLE001 - mapped to an honest refusal below
-        # Do NOT report success here. The UI toasts "Device removed" on a 2xx,
-        # and a 403 from a read-only token or a dropped connection would make
-        # that a lie about a row the user can still see.
-        logger.warning("Forgetting device %s failed: %s", device_id, exc)
-        raise HTTPException(status_code=502, detail=f"Could not remove that device: {exc}") from exc
-    _invalidate_devices_cache()
-    return {"status": "ok"}
-
-
 @router.get(
     "/jobs/hub",
     response_model=HubJobsResponse,
@@ -4052,9 +3887,6 @@ def delete_robot(name: str):
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
-    # Cross-device presence. Self-disables when offline or when the token
-    # cannot write, so this is safe to call unconditionally.
-    presence_publisher.start()
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.
@@ -4159,14 +3991,6 @@ async def shutdown_event():
             )
     except Exception:
         logger.exception("Failed to stop local training jobs during shutdown")
-
-    # Deliberately AFTER the local runs are stopped, so the final presence write
-    # carries their terminal state. Other devices then see "finished" at once,
-    # instead of watching this one age out through `unknown` over 25 minutes.
-    try:
-        await asyncio.to_thread(presence_publisher.stop)
-    except Exception:
-        logger.exception("Failed to publish the final presence state during shutdown")
 
     if manager:
         manager.stop_broadcast_thread()

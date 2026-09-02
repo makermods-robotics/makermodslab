@@ -13,7 +13,6 @@ import { useToast } from "@/hooks/use-toast";
 import { useJobsChangedSignal } from "@/hooks/useJobsChangedSignal";
 import { ApiError } from "@/lib/apiClient";
 import {
-  DeviceRunsResponse,
   HubJob,
   HubModel,
   JobProgressSnapshot,
@@ -21,7 +20,6 @@ import {
   deleteJob,
   dismissHubJob,
   getJob,
-  listDeviceRuns,
   listHubJobs,
   listJobQueue,
   listJobs,
@@ -45,11 +43,6 @@ interface JobsDataValue {
   untrackedHubJobs: HubJob[];
   /** Uploaded hub model repos no job (cloud run or import) tracks. */
   untrackedHubModels: HubModel[];
-  /** Local runs on the user's OTHER devices, plus this device's own sharing
-   * state. Kept OUT of `jobs` on purpose: these are not this machine's runs,
-   * cannot be stopped/resumed/downloaded from here, and must never reach a
-   * component that would offer to. */
-  presence: DeviceRunsResponse;
   /** Parents hidden from top-level lists because a successor resumed them. */
   supersededIds: Set<string>;
   /** Resume lineage of a job, nearest parent first. */
@@ -109,16 +102,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
   const [ancestorCache, setAncestorCache] = useState<Record<string, JobRecord>>(
     {},
   );
-  const [presence, setPresence] = useState<DeviceRunsResponse>({
-    enabled: false,
-    label: "",
-    device_id: "",
-    disabled_reason: null,
-    published: false,
-    announced: false,
-    repo_id: null,
-    devices: [],
-  });
   const [hubJobs, setHubJobs] = useState<HubJob[]>([]);
   const [hubModels, setHubModels] = useState<HubModel[]>([]);
   const [hubAuthenticated, setHubAuthenticated] = useState(false);
@@ -132,15 +115,12 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     // queue is its own uncapped listing (the /jobs page truncates and orders
     // by submit time, both wrong for a queue); a failed queue fetch keeps the
     // last known list rather than blanking the dashboard — the reorder
-    // endpoint's stale check is the correctness backstop. Presence is the
-    // least important of the four and must never be able to blank the others.
-    const [localRes, hubRes, queueRes, presenceRes] = await Promise.allSettled([
+    // endpoint's stale check is the correctness backstop.
+    const [localRes, hubRes, queueRes] = await Promise.allSettled([
       listJobs(baseUrl, fetchWithHeaders, LIMIT),
       listHubJobs(baseUrl, fetchWithHeaders),
       listJobQueue(baseUrl, fetchWithHeaders),
-      listDeviceRuns(baseUrl, fetchWithHeaders),
     ]);
-    if (presenceRes.status === "fulfilled") setPresence(presenceRes.value);
     if (localRes.status === "fulfilled") {
       setJobs(localRes.value);
       setError(null);
@@ -546,7 +526,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       importedJobs,
       untrackedHubJobs,
       untrackedHubModels,
-      presence,
       supersededIds,
       ancestorsOf,
       chainCheckpointCount,
@@ -571,7 +550,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       importedJobs,
       untrackedHubJobs,
       untrackedHubModels,
-      presence,
       supersededIds,
       ancestorsOf,
       chainCheckpointCount,

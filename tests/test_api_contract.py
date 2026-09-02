@@ -241,11 +241,6 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "POST /api/v1/jobs/queue/reorder",
         # Skills: the deployable projection of the /models build (PR #94).
         "GET /api/v1/skills",
-        # Cross-device presence board: other machines' local runs, read-only,
-        # plus this device's own sharing settings (presence.py, PR #94).
-        "GET /api/v1/jobs/devices",
-        "POST /api/v1/jobs/devices/settings",
-        "DELETE /api/v1/jobs/devices/{device_id}",
         # Sessions: identity + server-side robot resolution (sessions.py).
         "GET /api/v1/sessions/current",
         "POST /api/v1/sessions",
