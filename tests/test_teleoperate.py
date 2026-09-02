@@ -981,6 +981,51 @@ def test_force_disconnect_partial_returns_problems_instead_of_none() -> None:
     assert any("TORQUE MAY STILL BE ENABLED" in p and "elbow_flex" in p for p in problems)
 
 
+def test_force_disconnect_partial_releases_vanished_cameras_capture_handle() -> None:
+    """A camera whose DEVICE disappeared mid-connect (unplugged between the
+    cv2 open and the read thread starting) reports not-connected with no
+    thread — but still owns the OS capture session via ``videocapture``.
+    lerobot's disconnect() raises without releasing it (its guard is
+    ``if not self.is_connected and self.thread is None: raise``), and left in
+    place the stale in-process session poisons every later open of the
+    replugged camera until MakerMods Lab restarts. The helper must release the raw
+    handle on exactly this path.
+    """
+    from lerobot.utils.errors import DeviceNotConnectedError
+    from makermodslab.teleoperate import force_disconnect_partial
+
+    class _FakeVideoCapture:
+        def __init__(self) -> None:
+            self.released = False
+
+        def release(self) -> None:
+            self.released = True
+
+    class _VanishedCamera:
+        """lerobot OpenCVCamera's shape at the vanished-device point."""
+
+        def __init__(self) -> None:
+            self.is_connected = False  # isOpened() is False on the dead device
+            self.thread = None  # unplug hit before _start_read_thread
+            self.videocapture = _FakeVideoCapture()
+
+        def disconnect(self) -> None:
+            # Real OpenCVCamera.disconnect() guard, verbatim semantics.
+            if not self.is_connected and self.thread is None:
+                raise DeviceNotConnectedError("OpenCVCamera(0) not connected.")
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER")
+    cam = _VanishedCamera()
+    capture = cam.videocapture
+    robot = _FakePartialRobot(bus, {"wrist": cam})
+
+    force_disconnect_partial(robot, "robot")
+
+    assert capture.released is True
+    assert cam.videocapture is None
+    assert bus.is_connected is False
+
+
 def test_force_disconnect_partial_is_idempotent_and_handles_bimanual_and_none() -> None:
     from makermodslab.teleoperate import force_disconnect_partial
 

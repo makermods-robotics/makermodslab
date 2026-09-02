@@ -165,6 +165,13 @@ def friendly_hint(error_text: str | None) -> str | None:
             "cable/daisy-chain link is loose. Power-cycle the arm, re-seat the cables, then try "
             "teleoperation before inference."
         )
+    # A camera that won't open at all is unplugged (or the index is stale
+    # after a port change) — distinct from the turbulence family below, where
+    # the device opens but comes up degraded. Kept ahead of the Hub branches:
+    # lerobot raises this as a ConnectionError too, so the arm/camera families
+    # are all resolved before anything can be read as a download problem.
+    if "failed to open" in low and "camera" in low:
+        return "A camera couldn't be opened — it looks unplugged. Check its cable, then try again."
     # Hub model-download failures (snapshot_download, before the arm is ever
     # touched). Keyed on hub-specific tokens so a network/404/disk error while
     # fetching a checkpoint isn't mistaken for an arm-connection problem below.
@@ -189,6 +196,46 @@ def friendly_hint(error_text: str | None) -> str | None:
         return "Couldn't download the model — check your internet connection, then confirm the repo id."
     if "could not connect" in low or "failed to connect" in low or "not connected" in low:
         return "Couldn't connect to the arm — make sure it's plugged in, powered on, and on the right port."
+    # Camera-session turbulence at connect time (N13): the device opened in a
+    # degraded mode or never delivered a warmup frame — either another app
+    # (usually a browser preview) still holds it, or it was just unplugged.
+    # lerobot's message is misleading here, so translate. Must precede the
+    # slow-frames branch: "timed out waiting for frame" would also match
+    # "waiting for frame" there.
+    #
+    # "failed to set fps" is deliberately NOT in this set, even though a
+    # vanished device also reports a nonsense actual_fps. The same marker is
+    # raised by a plain misconfiguration — an operator typing an fps the
+    # device can't do — and nothing in the string separates the two. The
+    # dedicated fps branch below owns it and says "click Auto", which is
+    # actionable for the misconfiguration and harmless for the vanished
+    # device; the reverse (telling someone to check the plug when their
+    # camera simply can't do 60fps) is not. The markers kept here are
+    # unambiguous: they cannot be produced by a settings mistake.
+    #
+    # Marker set kept in sync with record.py's _is_transient_camera_error — a
+    # string that module retries must end up with advice here, or the operator
+    # waits out the retries and is told nothing (credit: #38).
+    #
+    # "read thread is not running" is the marker that actually fires for the
+    # wrong-native-format case (session lands 640x360 instead of 640x480).
+    # lerobot detects that in _postprocess_image, whose only caller is
+    # _read_loop (camera_opencv.py:453) — connect()'s warmup goes through
+    # async_read instead — so the mismatch never propagates synchronously and
+    # the caller sees the dead reader instead. "do not match configured" is
+    # kept only as a forward guard in case upstream ever raises it inline; it
+    # cannot fire on today's connect path, so it must not be the only marker
+    # covering that failure.
+    if (
+        "timed out waiting for frame" in low
+        or "read thread is not running" in low
+        or "do not match configured" in low
+    ):
+        return (
+            "A camera couldn't start in its recording mode — it's either held by another app "
+            "(close other tabs/apps using it, or quit the browser) or was unplugged. "
+            "Check the plug, then try again."
+        )
     if "frame is too old" in low or "no frame" in low or "frame timeout" in low:
         return (
             "A camera can't keep up — frames are arriving too slowly. Lower its resolution/FPS, "
