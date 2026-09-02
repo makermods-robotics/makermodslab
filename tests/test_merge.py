@@ -634,6 +634,46 @@ def test_run_cli_duplicate_flag_restores_physical_expansion(tmp_lerobot_home: Pa
     assert "sampling_weight" not in _column_names(tmp_lerobot_home / "a/out")
 
 
+def _fake_aggregate_carrying_weights(cache: Path):
+    """Like _fake_aggregate, but the merged output carries a `sampling_weight`
+    column — as it does when a source was itself a weighted merge and
+    aggregate_datasets copies its episode rows straight through."""
+
+    def _aggregate(repo_ids, aggr_repo_id, roots):  # noqa: ARG001
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        total = sum(
+            int(json.loads((cache / r / "meta" / "info.json").read_text())["total_episodes"])
+            for r in repo_ids
+        )
+        _write_output_episodes(cache, aggr_repo_id, [list(range(total))])
+        path = sorted((cache / aggr_repo_id / "meta" / "episodes").glob("**/*.parquet"))[0]
+        table = pq.read_table(path).append_column(
+            "sampling_weight", pa.array([3.0] + [1.0] * (total - 1), type=pa.float64())
+        )
+        pq.write_table(table, path)
+        (cache / aggr_repo_id / "meta" / "info.json").write_text(json.dumps({"total_episodes": total}))
+
+    return _aggregate
+
+
+def test_run_cli_strips_sampling_weights_inherited_from_a_weighted_source(
+    tmp_lerobot_home: Path, monkeypatch
+) -> None:
+    """M4: merging a weighted dataset without --weights must not silently produce
+    a weighted output — dataset_is_weighted would then launch the weighted
+    trainer for a merge the UI called plain."""
+    from makermodslab import merge
+
+    _write_source(tmp_lerobot_home, "a/one", 2)
+    _write_source(tmp_lerobot_home, "a/two", 3)
+    monkeypatch.setattr(merge, "aggregate_datasets", _fake_aggregate_carrying_weights(tmp_lerobot_home))
+
+    assert merge._run_cli(["a/out", "a/one", "a/two"]) == 0
+    assert "sampling_weight" not in _column_names(tmp_lerobot_home / "a/out")
+
+
 def test_run_cli_removes_the_output_when_weights_cannot_be_stored(
     tmp_lerobot_home: Path, monkeypatch
 ) -> None:

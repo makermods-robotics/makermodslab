@@ -1535,6 +1535,43 @@ def test_list_hub_jobs_exposes_the_run_name(client: TestClient, monkeypatch, tmp
     assert resp.json()["jobs"][0]["name"] == "act_cube_2026-08-01_12-00-00"
 
 
+def test_list_hub_jobs_row_carries_provenance_through_the_response_model(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    # Through the ROUTE, not _hub_job_provenance directly: HubJobItem's
+    # response_model silently drops any field it doesn't declare, so a fine-tune
+    # chip / base-model row would render blank on every cloud card if the schema
+    # and the handler dict ever drift apart.
+    finetuned = _job_with(
+        command=[
+            "python",
+            "-c",
+            "…",
+            "--",
+            "--policy.type",
+            "act",
+            "--dataset.repo_id",
+            "makermods/cubes",
+            "--policy.pretrained_path",
+            "makermods/act_cubes_2026-07-01_10-00-00",
+            "--steps",
+            "40000",
+        ],
+    )
+    finetuned.id = "job-ft"
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([finetuned]))
+
+    row = client.get("/jobs/hub").json()["jobs"][0]
+    assert row["kind"] == "finetune"
+    assert row["base_repo"] == "makermods/act_cubes_2026-07-01_10-00-00"
+    assert row["dataset_repo_id"] == "makermods/cubes"
+    assert row["steps"] == "40000"
+    # Staging's identity fields ride the same row.
+    assert row["policy_type"] == "act"
+    assert row["dataset"] == "makermods/cubes"
+    assert row["total_steps"] == 40000
+
+
 # --- Hub job run identity --------------------------------------------------
 #
 # A cloud run stores its whole trainer invocation on the job, so what a foreign

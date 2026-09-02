@@ -241,9 +241,9 @@ export default {
     // {{size}} is a pre-formatted byte size ("1.4 GB") — not a `count`.
     diskEstimate: "~{{size}} on disk",
     weightHint:
-      "Raise a dataset's weight to include its episodes more than once, so training samples them more often.",
+      "Raise a dataset's weight so training samples its episodes more often.",
     weightedHint:
-      "Weighted sources are copied on disk, so the merged dataset will be larger.",
+      "Weights are stored as per-episode metadata, not by duplicating episodes, so the merged dataset is the same size on disk whatever the weights.",
   },
   usageInstructions: {
     title: "Get Started with MakerMods Lab",

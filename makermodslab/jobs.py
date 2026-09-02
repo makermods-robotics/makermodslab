@@ -724,13 +724,21 @@ class LocalJobRunner:
             *cmd,
         ]
 
-        # start_new_session=True puts the wrapper (and the trainer it forks)
-        # in their own session/process group. Without it, signals sent to the
-        # uvicorn worker (e.g. when --reload restarts it on a .py file change)
-        # cascade to the child and kill the training. With it, the child
-        # survives reloads; the next worker re-attaches via TailingJobRunner
-        # using job.json's pid — see stop()'s use of killpg for the other side
-        # of this: the tracked pid is the wrapper's, not the trainer's.
+        # start_new_session=True puts the wrapper (and the trainer it forks) in
+        # their own session/process group, so a signal sent to the uvicorn
+        # worker (e.g. --reload restarting it on a .py change) does not cascade
+        # straight to the trainer — the shutdown handler decides what happens to
+        # a local run, not a stray SIGHUP. See stop()'s use of killpg for the
+        # other side of this: the tracked pid is the wrapper's, not the
+        # trainer's.
+        #
+        # This does NOT make a run outlive the process. stdout is a PIPE this
+        # process owns, so once it exits the trainer's next write gets EPIPE and
+        # it dies anyway (that is exactly the silent "exited with code 1" the
+        # shutdown handler now pre-empts by stopping local runs deliberately and
+        # filing them `interrupted`). The exit-status file + TailingJobRunner
+        # still cover the narrower case of a worker reload that this same process
+        # survives.
         self._process = subprocess.Popen(
             wrapped_cmd,
             stdout=subprocess.PIPE,

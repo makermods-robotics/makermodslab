@@ -306,7 +306,10 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         weight,
         baseEpisodes,
         episodes: baseEpisodes === null ? null : baseEpisodes * weight,
-        bytes: info?.size_bytes == null ? null : info.size_bytes * weight,
+        // Weight never multiplies bytes: the merge writes one copy of each
+        // source's episodes plus a per-episode `sampling_weight` column, so the
+        // merged dataset is the sum of the source sizes regardless of weights.
+        bytes: info?.size_bytes ?? null,
         share: null as number | null,
       };
     });

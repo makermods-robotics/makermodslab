@@ -127,9 +127,21 @@ def episode_weights_from_dataset(dataset: object) -> np.ndarray | None:
     except Exception as exc:
         logger.warning("Could not read `%s` from dataset metadata: %s", SAMPLING_WEIGHT_COLUMN, exc)
         return None
+
     # A null in the column is a missing weight, which is 1.0 (R3) — not a zero,
-    # which would silently drop the episode from training.
-    return np.asarray([1.0 if value is None else float(value) for value in raw], dtype=np.float64)
+    # which would silently drop the episode from training. A negative / infinite
+    # / NaN cell (only reachable with a hand-edited parquet) is also 1.0, so this
+    # reader agrees with `datasets._sampling_weight` — its twin, which decides
+    # `dataset_is_weighted` and so whether this sampler runs at all. If the two
+    # disagreed, a garbage cell could pass that gate and then raise here mid-run.
+    def _clean(value: object) -> float:
+        try:
+            weight = 1.0 if value is None else float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        return weight if 0 <= weight < float("inf") else 1.0
+
+    return np.asarray([_clean(value) for value in raw], dtype=np.float64)
 
 
 class WeightedEpisodeAwareSampler(EpisodeAwareSampler):

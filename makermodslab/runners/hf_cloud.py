@@ -72,10 +72,9 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 #   Bad Request: `tags` must be 1-256 characters and contain only
 #   alphanumeric characters, '-', '_', or '='
 _RUN_LABEL = "makermodslab_run"
-
-# Read-only: the dotted key every job submitted before that rename carries.
-# Dropping it would un-name the entire existing cloud backlog in the jobs UI.
-_LEGACY_RUN_LABELS = ("makermodslab.run",)
+# The dotted key every job submitted before the rename carries is read back
+# (never written) on the server side — see `_HUB_RUN_LABELS` in server.py, which
+# is what un-names the existing cloud backlog if dropped.
 
 # The charset the Hub accepts in the "key=value" tag a label becomes. Checked
 # BEFORE submission (see _run_job_naming_kwargs) so a non-conforming label is
@@ -574,7 +573,10 @@ print(f"[wrapper] launching trainer: {shlex.join(trainer_argv)}", flush=True)
 # package and put it on PYTHONPATH. Their sources ride in as base64 so no
 # quoting in this template can corrupt them.
 trainer_env = os.environ.copy()
-if any("makermodslab" in tok for tok in trainer_argv):
+# Key on the trainer MODULE token (`python -m makermodslab.train_weighted ...`,
+# from _WEIGHTED_TRAINER_MODULE), not on any argv token that merely contains the
+# string — a plain `--dataset.repo_id makermodslab/foo` would otherwise trip it.
+if "makermodslab.train_weighted" in trainer_argv:
     import base64 as _b64, tempfile as _tmp
 
     _pkg_root = _tmp.mkdtemp(prefix="makermodslab_pkg_")

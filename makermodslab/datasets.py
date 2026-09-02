@@ -55,6 +55,11 @@ def _sampling_weight(value: Any) -> float:
 
     Absent column, null cell, or an unreadable value all mean 1.0 (R3) — never an
     error, and never 0.0, which would drop the episode from training entirely.
+
+    Kept in step with `sampling.episode_weights_from_dataset`'s clamp: this reader
+    gates `dataset_is_weighted` (so whether the weighted sampler runs), that one
+    feeds the sampler, and a cell one accepts but the other rejects would crash a
+    run mid-training.
     """
     if value is None:
         return 1.0
@@ -1110,7 +1115,8 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         # affordances (rename, size, task counts) on this.
         "source": "local",
         # Per-episode sampling weights present. Drives the "weighted" badge and
-        # the cloud-target block (weighted datasets are local-only for now).
+        # the training mix panel; both runners honour it (the cloud wrapper
+        # materializes the sampler pod-side).
         "weighted": _has_sampling_weight_column(path),
     }
 

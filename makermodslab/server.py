@@ -2114,10 +2114,10 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
-# Mirrors _RUN_LABEL + _LEGACY_RUN_LABELS in runners/hf_cloud.py — the label a
-# submitted job carries, newest first. The dotted key is read but never
-# written: the Hub now rejects a "key=value" tag containing a dot, so it was
-# renamed, and every job submitted before that still carries the old one.
+# The label keys a submitted job may carry, newest first. `makermodslab_run` is
+# what hf_cloud._RUN_LABEL writes now; the dotted key is read but never written
+# — the Hub now rejects a "key=value" tag containing a dot, so it was renamed,
+# and every job submitted before that still carries the old one.
 _HUB_RUN_LABELS = ("makermodslab_run", "makermodslab.run")
 
 
@@ -4264,17 +4264,13 @@ async def shutdown_event():
     # job watchdog, so the local training queue cannot promote a run while we
     # are shutting down.
     #
-    # `_drain_queue` runs every second from a thread uvicorn does not manage,
-    # and `LocalJobRunner` spawns a DETACHED wrapper — that detachment is
-    # deliberate (it is what `process_pid` + `exit_status` reattachment exists
-    # for), so a trainer started here outlives the server. The user would close
-    # MakerMods Lab and be left with a GPU training they never saw start and no
-    # UI able to stop it until they relaunch. Before the queue this was
-    # impossible: starting a run required an HTTP request, and uvicorn stops
-    # accepting those before this handler runs.
-    #
-    # Only the watchdog stops. A run already training is left alone on purpose,
-    # exactly as it is across a restart today.
+    # `_drain_queue` runs every second from a thread uvicorn does not manage, so
+    # without this a queued run could still be promoted after uvicorn has
+    # stopped accepting the HTTP requests that are the only other way to start
+    # one. The run already training is then ended deliberately further down (see
+    # `stop_local_for_shutdown`), because its stdout pipe dies with this process
+    # regardless — the exit-status file + TailingJobRunner still cover a worker
+    # reload that this same process survives.
     job_registry.shutdown()
 
     # Stop the AVFoundation pump first so its next tick can't interleave with

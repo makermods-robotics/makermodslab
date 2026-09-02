@@ -47,9 +47,11 @@ import { getDatasetInfo } from "@/lib/replayApi";
 // Policies whose lerobot preset returns NO LR scheduler — a constant learning
 // rate, so changing the step total cannot produce a schedule seam and the
 // warning below would be a plain falsehood. Taken from
-// `get_scheduler_preset() -> None` across the pinned lerobot v0.6.0's
-// `policies/*/configuration_*.py`. If lerobot adds another such policy this
-// list goes stale in the safe-ish direction: a warning that does not apply.
+// `get_scheduler_preset() -> None` across the pinned fork lerobot's
+// `policies/*/configuration_*.py` (act, tdmpc, fastwam, gaussian_actor as of
+// the makermods-robotics/lerobot 0.6.2 pin). If lerobot adds another such
+// policy this list goes stale in the safe-ish direction: a warning that does
+// not apply.
 const POLICIES_WITHOUT_LR_SCHEDULE = new Set([
   "act",
   "tdmpc",

@@ -191,9 +191,9 @@ export default {
     episodesUnknown: "无法获取",
     sharePercent: "{{percent}}%",
     diskEstimate: "占用约 {{size}}",
-    weightHint:
-      "提高某个数据集的权重，可以让它的回合被重复收录，训练时也就会更频繁地采样到它。",
-    weightedHint: "带权重的来源会在磁盘上复制多份，合并后的数据集会更大。",
+    weightHint: "提高某个数据集的权重，训练时就会更频繁地采样到它的回合。",
+    weightedHint:
+      "权重以每回合的元数据形式记录，不会复制回合，因此无论权重如何，合并后的数据集在磁盘上大小相同。",
   },
   usageInstructions: {
     title: "开始使用 MakerMods Lab",

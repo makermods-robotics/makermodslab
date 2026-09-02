@@ -32,7 +32,11 @@ not a re-merge.
 
 Stamping is skipped entirely when every weight is 1, so an unweighted merge
 writes byte-for-byte what it wrote before this feature existed and the output
-carries no new column at all.
+carries no new column at all — except that if a SOURCE was itself a weighted
+merge, ``aggregate_datasets`` copies its ``sampling_weight`` column straight
+through; ``_strip_sampling_weights`` removes that inherited column on any merge
+that is not deliberately stamping weights, so "weighted" is always a choice this
+run made rather than one a source smuggled in.
 
 ``--duplicate`` restores the old physical-duplication behaviour: each source is
 passed to ``aggregate_datasets`` ``weight`` times (``_expand_weighted``) and no
@@ -386,6 +390,34 @@ def _weight_per_episode(episode_counts: list[int], weights: list[int]) -> list[f
     return [
         float(weight) for count, weight in zip(episode_counts, weights, strict=True) for _ in range(count)
     ]
+
+
+def _strip_sampling_weights(output_root: Path) -> int:
+    """Drop any inherited ``sampling_weight`` column from the merged dataset's
+    ``meta/episodes/**/*.parquet``. Returns the number of chunk files rewritten.
+
+    ``aggregate_datasets`` copies each source's episode rows verbatim, so merging
+    a dataset that ALREADY carries weights leaves a partial column on the output
+    (the weighted source's rows keep their values, everyone else's read back as
+    1.0). ``dataset_is_weighted`` would then return True and the weighted trainer
+    would launch for a merge the UI called unweighted. An unweighted merge must
+    produce an unweighted dataset — so unless this run is deliberately stamping
+    weights, the column is removed here.
+    """
+    episodes_dir = output_root / "meta" / "episodes"
+    if not episodes_dir.is_dir():
+        return 0
+    rewritten = 0
+    for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+        table = pq.read_table(parquet_path)
+        if SAMPLING_WEIGHT_COLUMN not in table.column_names:
+            continue
+        table = table.drop_columns([SAMPLING_WEIGHT_COLUMN])
+        tmp_path = parquet_path.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmp_path)
+        os.replace(tmp_path, parquet_path)
+        rewritten += 1
+    return rewritten
 
 
 def _stamp_sampling_weights(output_root: Path, weight_by_episode: list[float]) -> int:
@@ -919,6 +951,28 @@ def _run_cli(argv: list[str] | None = None) -> int:
                 _cleanup_partial_output(output_root)
             return 1
         print(f"Stored sampling weights on {stamped} episodes.", flush=True)
+    else:
+        # A source that was itself a weighted merge carries a `sampling_weight`
+        # column that aggregate_datasets copies straight through. Left in place it
+        # would make this output read as weighted when the caller asked for a
+        # plain merge. Drop it so "weighted" stays a deliberate choice.
+        try:
+            cleared = _strip_sampling_weights(output_root)
+        except Exception as exc:
+            print(
+                f"Merged the datasets but could not clear inherited sampling weights: {exc}\n"
+                "The output has been removed — training on it would have honoured "
+                "weights this merge never asked for.",
+                flush=True,
+            )
+            if not output_pre_existed and output_root.exists():
+                _cleanup_partial_output(output_root)
+            return 1
+        if cleared:
+            print(
+                f"Cleared sampling weights inherited from a weighted source ({cleared} chunk(s)).",
+                flush=True,
+            )
 
     print(f"Done. Created {args.output_repo_id}", flush=True)
     return 0
