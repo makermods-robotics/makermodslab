@@ -7,6 +7,7 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -39,13 +40,14 @@ import {
   ChevronDown,
   Loader2,
   Play,
-  Plus,
   Square,
   Circle,
   Camera,
   ShieldQuestion,
   Hand,
+  MoveHorizontal,
   RefreshCw,
+  ScanSearch,
   Wand2,
   Trash2,
   FolderOpen,
@@ -63,6 +65,12 @@ import {
 } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
+// The same two product photos the "Create a new robot" arm cards use. One per
+// FAMILY: the two zero poses are opposites at the gripper, so showing one
+// family's picture to the other would zero the gripper at the wrong end of its
+// travel.
+import makerArmPhoto from "@/assets/arms/maker.jpg";
+import metalArmPhoto from "@/assets/arms/metal.jpg";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
@@ -136,44 +144,82 @@ interface ArmSlot {
 // definition of a configured arm: a port AND a calibration config assigned —
 // plus that port actually being plugged in right now (`portDetected`, which
 // the card can't work out itself; it lives outside the window's closure).
-const ArmSlotCard = ({
+/**
+ * Radix Select rejects "" as an item value, so the "no port" row carries a
+ * sentinel that is mapped back to "" at the boundary. Private to this module:
+ * no handler ever sees it.
+ */
+const NO_PORT = "__no_port__";
+
+/**
+ * One device in section 01: its label, status, port picker and actions in a
+ * single cell.
+ *
+ * This replaces a card that only SELECTED a slot, paired with one shared port
+ * control below the grid. That control was modal — what it edited depended on
+ * which card was selected — so configuring a bimanual rig meant four round
+ * trips between the grid and the controls. Here every slot is directly
+ * editable and nothing has to be selected first.
+ *
+ * Detect and Wiggle are icons; the paragraphs that used to sit beside them
+ * moved into their tooltips. Instructions shown WHILE a detect runs stay on
+ * screen (see the section body): both of the user's hands are on the arm, so a
+ * tooltip is unreachable exactly when it is needed.
+ */
+const DeviceSlotCell = ({
   slot,
-  selected,
   port,
   portDetected,
   configured,
-  onSelect,
+  availablePorts,
+  heldByLabel,
+  busy,
+  detecting,
+  wiggling,
+  showWiggle,
+  detectIsGesture,
+  onPortChange,
+  onDetect,
+  onWiggle,
 }: {
   slot: ArmSlot;
-  selected: boolean;
   port: string;
   portDetected: boolean;
   configured: boolean;
-  onSelect: () => void;
+  availablePorts: string[];
+  /** Label of the OTHER slot holding a port, or null when it is free. */
+  heldByLabel: (port: string) => string | null;
+  /** A calibration or auto-cal run holds the hardware. */
+  busy: boolean;
+  detecting: boolean;
+  wiggling: boolean;
+  showWiggle: boolean;
+  /** True when Detect needs a hand gesture rather than a silent probe. */
+  detectIsGesture: boolean;
+  onPortChange: (port: string) => void;
+  onDetect: () => void;
+  onWiggle: () => void;
 }) => {
   const { t } = useTranslation();
   // A saved port that isn't currently detected outranks "ready": the arm may
-  // be unplugged (or moved to another port, or renamed by the OS), and a green
-  // check there reads as "connected, all good" when nothing is on that bus.
-  // Same rule the Port dropdown and the batch already apply — no detected
-  // port, no port.
+  // be unplugged (or moved, or renamed by the OS), and a green check there
+  // reads as "connected, all good" when nothing is on that bus.
   const undetected = !!port && !portDetected;
   const ready = !!port && portDetected && configured;
+  const detectLabel = detectIsGesture
+    ? t("robotConfig.port.detect")
+    : t("robotConfig.port.detectAuto");
+  const detectTip = detectIsGesture
+    ? t("robotConfig.port.detectTip")
+    : t("robotConfig.port.detectTipAuto");
   return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={onSelect}
-      className={cn(
-        "w-full rounded-md border px-3 py-2 text-left transition-colors",
-        selected
-          ? "border-primary bg-accent"
-          : "border-border bg-card hover:bg-accent",
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium text-foreground">
+    // A plain container, not a control. Selecting a slot used to decide which
+    // one the single shared port picker edited; every slot now carries its own,
+    // so there is nothing left for a selection to mean here. Calibration still
+    // has a current device, and section 02's own rows set it.
+    <div className="rounded-md border border-border bg-card px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="truncate text-xs font-medium text-foreground">
           {slot.label}
         </span>
         {undetected ? (
@@ -186,21 +232,110 @@ const ArmSlotCard = ({
             <AlertTriangle aria-hidden className="h-4 w-4" />
           </span>
         ) : ready ? (
-          <CheckCircle className="h-4 w-4 shrink-0 text-ok" />
+          <CheckCircle
+            className="h-4 w-4 shrink-0 text-ok"
+            aria-label={t("robotConfig.slotCard.readyLabel")}
+          />
         ) : null}
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={onDetect}
+            disabled={busy || detecting || wiggling}
+            aria-label={detectLabel}
+            // Radix tooltips never open on touch, and an unlabelled icon is
+            // unusable without a fallback, so the native title carries it too.
+            title={`${detectLabel}. ${detectTip}`}
+            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          >
+            {detecting ? (
+              <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
+            ) : detectIsGesture ? (
+              <MoveHorizontal aria-hidden className="h-4 w-4" />
+            ) : (
+              <ScanSearch aria-hidden className="h-4 w-4" />
+            )}
+          </Button>
+          {showWiggle && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={onWiggle}
+              disabled={busy || !port || wiggling || detecting}
+              aria-label={t("robotConfig.port.wiggle")}
+              title={`${t("robotConfig.port.wiggle")}. ${t(
+                "robotConfig.port.wiggleTip",
+              )}`}
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            >
+              <Hand aria-hidden className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
       </div>
-      {/* The path stays visible (it says WHICH port went missing); the warn
-          colour is what marks it as absent, matching the "no port assigned"
-          styling below. */}
-      <p
-        className={cn(
-          "mt-0.5 truncate font-mono text-xs",
-          port && !undetected ? "text-muted-foreground" : "text-warn/80",
-        )}
+
+      <Select
+        value={port || NO_PORT}
+        onValueChange={(v) => onPortChange(v === NO_PORT ? "" : v)}
+        disabled={busy}
       >
-        {port || t("robotConfig.slotCard.noPort")}
-      </p>
-    </button>
+        <SelectTrigger
+          aria-label={t("robotConfig.port.forSlot", { slot: slot.label })}
+          className={cn(
+            "mt-1.5 h-8 font-mono text-xs",
+            !port && "text-muted-foreground",
+            undetected && "border-warn/50 text-warn",
+          )}
+        >
+          {/* The label is rendered here rather than by <SelectValue> on
+              purpose. A saved-but-undetected port is deliberately absent from
+              the item list below, and SelectValue renders NOTHING for a value
+              with no matching item — so the one case where the user most needs
+              to read the path (which port went missing?) is exactly the case
+              where it would disappear. */}
+          <span className="truncate">
+            {port || t("robotConfig.port.noneAssigned")}
+          </span>
+        </SelectTrigger>
+        <SelectContent>
+          {/* The blank row IS the clear action, which is why the separate
+              trash button is gone: "which port" and "no port" are one
+              question, so they belong to one control. */}
+          <SelectItem value={NO_PORT} className="text-xs text-muted-foreground">
+            {t("robotConfig.port.noneAssigned")}
+          </SelectItem>
+          {availablePorts.length > 0 && <SelectSeparator />}
+          {availablePorts.map((p) => {
+            // In-use ports stay selectable: picking one prompts a swap (this
+            // slot's current port goes to the other arm) or, if this slot is
+            // empty, a take-with-warning.
+            const heldBy = heldByLabel(p);
+            return (
+              <SelectItem key={p} value={p}>
+                <span className="flex items-center gap-2 font-mono text-xs">
+                  {p}
+                  {/* Naming the holder beats a bare "in use": on a bimanual
+                      rig there are three other slots it could be, and picking
+                      this port takes it off whichever one is named. */}
+                  {heldBy && (
+                    <span className="rounded border border-warn/40 px-1 font-body text-[10px] text-warn">
+                      {heldBy}
+                    </span>
+                  )}
+                </span>
+              </SelectItem>
+            );
+          })}
+          {/* A saved-but-undetected port is intentionally NOT offered here: an
+              unplugged bus can't be calibrated against, so it's treated as no
+              port. It re-selects on its own once the arm is plugged back in
+              and ports are rescanned. */}
+        </SelectContent>
+      </Select>
+    </div>
   );
 };
 
@@ -390,6 +525,11 @@ const RobotConfigWindow = ({
   // row's panel also points deviceType/arm at that slot, so the whole
   // calibration flow (port lookup, save name, start request) targets it.
   const [newCalibFor, setNewCalibFor] = useState<string | null>(null);
+  // Which flow the open panel is set to. Chosen by the two mode buttons on an
+  // SO-101; a CAN arm has only the zero pose, so it needs no choice and this
+  // stays null there. Reset whenever the panel closes so reopening starts at
+  // the choice again.
+  const [calibMode, setCalibMode] = useState<"auto" | "manual" | null>(null);
   // Keep the expanded panel attached to the slot the calibration flow actually
   // targets: if device/arm changes while a panel is open (e.g. via the step-01
   // selector), the panel follows to the matching calibration-file row.
@@ -408,10 +548,12 @@ const RobotConfigWindow = ({
   ) => {
     if (newCalibFor === field) {
       setNewCalibFor(null);
+      setCalibMode(null);
       return;
     }
     setDeviceType(device);
     setArm(whichArm);
+    setCalibMode(null);
     setNewCalibFor(field);
   };
 
@@ -462,7 +604,9 @@ const RobotConfigWindow = ({
   };
   const [wiggling, setWiggling] = useState(false);
   // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
-  const [detecting, setDetecting] = useState(false);
+  // Which slot's Detect is running, or null. A field rather than a boolean so
+  // the spinner and the live instructions appear on the row that started it.
+  const [detecting, setDetecting] = useState<keyof RobotRecord | null>(null);
   // Picking a port that's in use by another arm (via the dropdown OR Detect)
   // stages the assignment here and opens a confirmation dialog instead of
   // applying immediately. Two shapes, distinguished by `source`:
@@ -478,6 +622,11 @@ const RobotConfigWindow = ({
     source: "detect" | "manual";
     port: string;
     message: string;
+    // The slot the assignment lands on, captured when the prompt is staged.
+    // Section 01 now edits every slot in place, so the selected device can
+    // change while this dialog is open; without pinning the field here, a
+    // confirm would write whichever slot happened to be selected by then.
+    targetField: keyof RobotRecord;
     targetLabel: string;
     releasedField: keyof RobotRecord | null;
     releasedLabel: string | null;
@@ -532,10 +681,12 @@ const RobotConfigWindow = ({
   // enumerated, and the browser permission prompt is requested.
   const [camerasActive, setCamerasActive] = useState(false);
 
+  // No releaseStreamsRef call here, on purpose. CameraConfiguration stays
+  // mounted and drops its own streams when `active` goes false — that is what
+  // keeps the picked camera and its preview across an off/on cycle. Calling
+  // release as well would latch its internal pause flag on and the preview
+  // would never come back.
   const handleCamerasActiveChange = (active: boolean) => {
-    if (!active) {
-      releaseStreamsRef.current?.();
-    }
     setCamerasActive(active);
   };
 
@@ -783,8 +934,10 @@ const RobotConfigWindow = ({
     }
   };
 
-  const handleWiggle = async () => {
-    if (!port) {
+  // Defaults to the selected slot's port; section 01's per-row button passes
+  // its own row's port so it never depends on what is selected.
+  const handleWiggle = async (wigglePort: string = port) => {
+    if (!wigglePort) {
       toast({
         title: t("robotConfig.port.toast.missingPortTitle"),
         description: t("robotConfig.port.toast.missingPortWiggle"),
@@ -797,7 +950,7 @@ const RobotConfigWindow = ({
       const res = await fetchWithHeaders(`${baseUrl}/api/v1/wiggle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ port }),
+        body: JSON.stringify({ port: wigglePort }),
       });
       const data = await res.json();
       if (data.success) {
@@ -896,8 +1049,8 @@ const RobotConfigWindow = ({
     return await res.json();
   };
 
-  const handleDetect = async () => {
-    setDetecting(true);
+  const handleDetect = async (field: keyof RobotRecord = portField) => {
+    setDetecting(field);
     try {
       const data = isCanArm
         ? await detectCanArmPort()
@@ -913,13 +1066,11 @@ const RobotConfigWindow = ({
         // the same portFields set the dropdown uses (right_* only in bimanual),
         // so a single-arm robot's stale right_* ports don't trigger a release.
         const conflictingField = robot
-          ? portFields.find(
-              (f) => f !== portField && draftPort(f) === data.port,
-            )
+          ? portFields.find((f) => f !== field && draftPort(f) === data.port)
           : undefined;
         // The port THIS slot currently holds — handed to the other slot on a
         // swap. Null/empty means the swap degenerates to a take-with-warning.
-        const currentPort = draftPort(portField);
+        const currentPort = draftPort(field);
 
         // Stage the result and open the confirmation dialog. No assignment or
         // persist happens here — that's deferred to handleConfirmPortAssign.
@@ -927,7 +1078,8 @@ const RobotConfigWindow = ({
           source: "detect",
           port: data.port,
           message: data.message,
-          targetLabel: portFieldLabel(portField),
+          targetField: field,
+          targetLabel: portFieldLabel(field),
           releasedField: conflictingField ?? null,
           releasedLabel: conflictingField
             ? portFieldLabel(conflictingField)
@@ -948,7 +1100,7 @@ const RobotConfigWindow = ({
         variant: "destructive",
       });
     } finally {
-      setDetecting(false);
+      setDetecting(null);
     }
   };
 
@@ -966,13 +1118,13 @@ const RobotConfigWindow = ({
     if (!prompt) return;
     setPortAssignPrompt(null);
 
-    setPort(prompt.port);
+    if (prompt.targetField === portField) setPort(prompt.port);
     const detected = prompt.source === "detect";
 
     if (prompt.releasedField) {
       const nextRobot = await persistPorts({
         [prompt.releasedField]: prompt.swapPort ?? "",
-        [portField]: prompt.port,
+        [prompt.targetField]: prompt.port,
       });
       if (nextRobot) {
         if (prompt.swapPort) {
@@ -1003,7 +1155,7 @@ const RobotConfigWindow = ({
       }
       // persistPorts surfaces its own error toast on failure.
     } else {
-      persistPort(prompt.port);
+      persistPort(prompt.port, prompt.targetField);
       toast({
         title: detected
           ? t("robotConfig.port.toast.identifiedTitle")
@@ -1020,25 +1172,31 @@ const RobotConfigWindow = ({
   // Manual dropdown pick. In-use ports are now selectable (no longer greyed
   // out): picking one that another slot holds stages a swap/take confirmation
   // (same dialog as Detect). Picking a free port assigns immediately.
-  const handleSelectPort = (nextPort: string) => {
+  const handleSelectPort = (
+    nextPort: string,
+    field: keyof RobotRecord = portField,
+  ) => {
     const conflictingField = robot
-      ? portFields.find((f) => f !== portField && draftPort(f) === nextPort)
+      ? portFields.find((f) => f !== field && draftPort(f) === nextPort)
       : undefined;
     if (conflictingField) {
-      const currentPort = draftPort(portField);
+      const currentPort = draftPort(field);
       setPortAssignPrompt({
         source: "manual",
         port: nextPort,
         message: "",
-        targetLabel: portFieldLabel(portField),
+        targetField: field,
+        targetLabel: portFieldLabel(field),
         releasedField: conflictingField,
         releasedLabel: portFieldLabel(conflictingField),
         swapPort: currentPort || null,
       });
       return;
     }
-    setPort(nextPort);
-    persistPort(nextPort);
+    // `port` mirrors the SELECTED slot, so only touch it when this edit is
+    // the selected one. A row edit elsewhere is picked up by the sync effect.
+    if (field === portField) setPort(nextPort);
+    persistPort(nextPort, field);
   };
 
   // --- Concurrent multi-arm auto-calibration ---
@@ -1078,6 +1236,24 @@ const RobotConfigWindow = ({
   // the saved value so it re-selects automatically once the arm is plugged back
   // in and ports are rescanned.
   const portDetected = !!port && availablePorts.includes(port);
+
+  // Anything holding the hardware disables section 01's controls. Clearing or
+  // reassigning a port mid-calibration wouldn't stop the run (the subprocess
+  // holds the serial port), it would just desync the UI from the arm being
+  // measured.
+  const hardwareBusy =
+    calibrationStatus.calibration_active || batchAutoCal.active;
+
+  // How Detect works, which differs by FAMILY and by LAYOUT:
+  //  - SO-101: always a hand gesture. Nothing on the bus announces which arm
+  //    it is, so the user has to move one.
+  //  - CAN single: no gesture at all. Follower and leader answer different
+  //    protocols, so probing each port identifies both outright.
+  //  - CAN bimanual: back to the gesture — the two arms on a side are
+  //    identical to a probe, so only motion says which side is which.
+  // The icon follows this: a side-to-side arrow for the gesture, a scan glyph
+  // for the silent probe, because they are different acts.
+  const detectIsGesture = !isCanArm || isBimanual;
 
   // The slots the user ticked, in canonical order, with their inputs.
   const selectedBatchSlots = armSlots.filter((s) => batchSelected[s.key]);
@@ -1182,6 +1358,12 @@ const RobotConfigWindow = ({
                 count: data.completed,
               }),
             });
+            // Same collapse-on-success behaviour as the manual flow: back to
+            // the resting view, nothing left open to dismiss.
+            setBatchAutoCalOpen(false);
+            setBatchAutoCalResultsOpen(false);
+            setNewCalibFor(null);
+            setCalibMode(null);
           } else {
             toast({
               title: t("robotConfig.batch.toast.issuesTitle"),
@@ -1530,6 +1712,13 @@ const RobotConfigWindow = ({
     // per-side libraries to re-fetch their config lists so it shows up.
     setCalibReloadToken((t) => t + 1);
     fetchRobot();
+    // Success collapses the panel back to the resting view; the toast is the
+    // only trace. Errors deliberately do NOT collapse — an error panel that
+    // vanishes is an error nobody reads.
+    toast({ title: t("robotConfig.calib.completed") });
+    setNewCalibFor(null);
+    setCalibMode(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [calibrationStatus.status, fetchRobot]);
 
   // Stage the current side's port into the local draft (no network write). A
@@ -1537,10 +1726,13 @@ const RobotConfigWindow = ({
   // and only committed on Save. An empty string is a valid value: it CLEARS the
   // assignment (arm disconnected). The batched Save sends every dirty port slot
   // together so the backend's duplicate-port guard sees the merged record.
+  // `field` defaults to the selected slot for legacy callers; section 01's
+  // per-row controls pass their own slot explicitly, so an edit never depends
+  // on a selection state-update having landed first.
   const persistPort = useCallback(
-    (nextPort: string) => {
+    (nextPort: string, field: keyof RobotRecord = portField) => {
       if (!robotName) return;
-      setPortDraft((prev) => ({ ...prev, [portField]: nextPort }));
+      setPortDraft((prev) => ({ ...prev, [field]: nextPort }));
     },
     [robotName, portField],
   );
@@ -1777,543 +1969,211 @@ const RobotConfigWindow = ({
   // it doesn't push the controls down. The auto-calibration torque slider is
   // tucked under an Advanced settings disclosure. `rowSlot` is the arm slot
   // the row stands for — what its "Auto-calibrate" button targets.
-  const newCalibrationPanel = (rowLabel: string, rowSlot?: ArmSlot) => (
-    <div className="ml-6 mt-2 space-y-3 rounded-md border border-border bg-muted/20 p-3">
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-semibold text-foreground">
-          {t("robotConfig.calib.panelTitle", { row: rowLabel })}
-        </span>
-        <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-          <span
-            aria-hidden
-            className={`inline-block h-2 w-2 rounded-full ${statusDisplay.color}`}
-          />
-          {statusDisplay.text}
-        </span>
-      </div>
+  const newCalibrationPanel = (rowLabel: string, rowSlot?: ArmSlot) => {
+    const running = calibrationStatus.calibration_active;
+    const batchBusy =
+      batchAutoCal.active || batchAutoCalOpen || batchAutoCalResultsOpen;
+    // The pre-start stack (mode choice, demo, pose, advanced, Start) shows
+    // only while nothing is running and no batch UI is up. Everything below
+    // it is one column, in the order things happen: choose, watch, pose,
+    // start, follow the live data, save.
+    const preStart = !running && !batchBusy;
+    const mode = isCanArm ? "zero" : calibMode;
 
-      <div className="grid grid-cols-[minmax(0,1fr)_320px] items-start gap-3">
-        {/* Main vertical: actions, batch picker, status, live data. */}
-        <div className="flex min-w-0 flex-col gap-3">
-          {calibrationStatus.calibration_active ? (
-            <Button
-              onClick={handleStopCalibration}
-              variant="destructive"
-              className="w-full"
-            >
-              <Square className="mr-2 h-4 w-4" />
-              {t("robotConfig.calib.cancel")}
-            </Button>
-          ) : batchAutoCal.active ? (
-            <Button
-              onClick={stopBatchAutoCalibration}
-              variant="destructive"
-              className="w-full"
-            >
-              <Square className="mr-2 h-4 w-4" />
-              {batchAutoCal.total === 1
-                ? t("robotConfig.batch.stopSingle")
-                : t("robotConfig.batch.stopAll")}
-            </Button>
-          ) : (
-            // Auto-calibrate is the default calibration mode: it's the
-            // primary action and calibrates THIS row's arm only, straight
-            // through the batch's pre-start confirmation (the multi-arm
-            // picker is the header's "Calibrate all"). Manual step-by-step
-            // calibration stays fully available as the secondary button.
-            //
-            // A CAN arm (Maker, Metal) has NEITHER of those. Auto-calibration drives the
-            // arm under torque against its stops and writes Feetech EEPROM —
-            // there is no CAN equivalent — and it needs no range sweep at all,
-            // because its joint limits are fixed constants. Its one flow is
-            // the zero pose, so it gets a single primary button.
-            <>
-              {isCanArm ? (
-                <Button
-                  onClick={() => handleStartCalibration()}
-                  disabled={!robotName || !deviceType || !portDetected}
-                  className="w-full"
-                >
-                  <Play className="mr-2 h-4 w-4" />
-                  {t("robotConfig.calib.zeroPose.start")}
-                </Button>
-              ) : (
-                <>
-                  <Button
-                    onClick={() => rowSlot && handleAutoCalibrateSlot(rowSlot)}
-                    className="w-full"
-                    disabled={!robotName || !rowSlot || !slotPort(rowSlot)}
-                    title={
-                      rowSlot && slotPort(rowSlot)
-                        ? t("robotConfig.calib.autoTitle", {
-                            arm: rowSlot.label,
-                            port: slotPort(rowSlot),
-                          })
-                        : t("robotConfig.calib.autoDisabledTitle")
-                    }
-                  >
-                    <Wand2 className="mr-2 h-4 w-4" />
-                    {t("robotConfig.calib.auto")}
-                  </Button>
-                  <Button
-                    onClick={() => handleStartCalibration()}
-                    variant="outline"
-                    disabled={!robotName || !deviceType || !portDetected}
-                    className="w-full"
-                  >
-                    <Play className="mr-2 h-4 w-4" />
-                    {t("robotConfig.calib.manual")}
-                  </Button>
-                </>
-              )}
-            </>
-          )}
+    // The auto-calibration preamble: demo clip, the pose to start from, the
+    // safety note, and the drive torque. A batch run and a single-arm run are
+    // the SAME procedure on N arms instead of one, so they show the SAME
+    // preamble — it lives here so the two can never drift apart.
+    // ONE arm list across all three phases of a batch. Before Start it is the
+    // picker: a tick box and the port each arm will be driven on. After Start
+    // the SAME rows report status where the port was. There used to be a
+    // second list underneath carrying the status, which repeated every arm's
+    // name directly below itself.
+    const picking = batchAutoCalOpen && !batchAutoCal.active;
+    const armRunStatus = (slot: ArmSlot) => {
+      const port = slotPort(slot);
+      return batchAutoCal.arms.find(
+        (a) =>
+          (!!port && a.port === port) ||
+          (a.device_type === slot.device && a.arm === slot.arm),
+      );
+    };
+    // While picking, every slot is offerable. Once a run exists, only the arms
+    // actually in it — a row's own "Auto-calibrate" drives one arm, and
+    // listing the other three idle beside it would read as a stalled batch.
+    const listedSlots = batchAutoCalOpen
+      ? armSlots
+      : armSlots.filter((s) => armRunStatus(s));
 
-          {/* Picker + live status. The checkbox list is the multi-arm path
-              only (batchAutoCalOpen); a batch started from a row's own
-              "Auto-calibrate" leaves it closed and this box shows nothing but
-              progress, per-arm rows, and logs — the stop button sits above.
-              The third term keeps a FINISHED run's results up after `active`
-              goes false: on the row path the first two terms are both false by
-              then, which used to unmount the results (and the error tooltips)
-              the instant they became worth reading. Dismiss clears it. */}
-          {(batchAutoCalOpen ||
-            batchAutoCal.active ||
-            batchAutoCalResultsOpen) && (
-            <div className="space-y-3 rounded-md border border-border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-                <Wand2 className="h-4 w-4" />
-                {!batchAutoCalOpen && batchAutoCal.total === 1
-                  ? t("robotConfig.batch.titleSingle")
-                  : t("robotConfig.batch.titleMulti")}
-              </div>
-              {batchAutoCalOpen && !batchAutoCal.active ? (
-                <>
-                  <p className="text-xs text-muted-foreground">
-                    <Trans
-                      i18nKey="robotConfig.batch.pickerIntro"
-                      components={[<strong key="0" />]}
-                    />
-                  </p>
-                  <div className="space-y-2">
-                    {armSlots.map((slot) => {
-                      const selected = !!batchSelected[slot.key];
-                      const assignedPort = slotPort(slot);
-                      const hasPort = !!assignedPort;
-                      // Distinguish "never assigned" from "assigned but
-                      // not currently detected" so the hint is actionable.
-                      const savedButUndetected =
-                        !hasPort && !!slotSavedPort(slot);
-                      return (
-                        <label
-                          key={slot.key}
-                          className={`flex items-center gap-2 rounded-md border p-2 ${
-                            selected
-                              ? "border-ring bg-accent"
-                              : "border-border bg-background"
-                          } ${
-                            hasPort
-                              ? "cursor-pointer"
-                              : "cursor-not-allowed opacity-60"
-                          }`}
-                        >
-                          <Checkbox
-                            checked={selected}
-                            disabled={!hasPort}
-                            onCheckedChange={(checked) =>
-                              setBatchSelected((prev) => ({
-                                ...prev,
-                                [slot.key]: checked === true,
-                              }))
-                            }
-                          />
-                          <span className="text-sm text-foreground">
-                            {slot.label}
-                          </span>
-                          <span
-                            className={`ml-auto font-mono text-xs ${
-                              hasPort ? "text-muted-foreground" : "text-warn/80"
-                            }`}
-                          >
-                            {hasPort
-                              ? assignedPort
-                              : savedButUndetected
-                                ? t("robotConfig.batch.portUndetected")
-                                : t("robotConfig.batch.portMissing")}
-                          </span>
-                        </label>
+    // The pose the user has to put the arm in. Shown BEFORE Start (so the arm
+    // can be posed while reading) and again while awaiting zero (so it is on
+    // screen at the moment it is matched). One photo per FAMILY: the two zero
+    // poses are opposites at the gripper, so showing one family's picture to
+    // the other would zero the gripper at the wrong end of its travel.
+    //
+    // object-cover, not contain: the sources are 4:3 on white with the arm in
+    // the middle band, so a 16:9 centre crop trims background, not hardware.
+    const zeroPoseImage = (
+      <img
+        src={isMetalArm ? metalArmPhoto : makerArmPhoto}
+        alt={
+          isMetalArm
+            ? t("robotConfig.calib.zeroPose.poseImageMetal")
+            : t("robotConfig.calib.zeroPose.poseImage")
+        }
+        loading="lazy"
+        className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
+      />
+    );
+
+    const autoPreamble = (
+      <>
+        <div
+          className="media-slot aspect-video w-full"
+          data-label={t("robotConfig.calib.videoAuto")}
+        />
+        <div
+          className="media-slot aspect-video w-full"
+          data-label={t("robotConfig.calib.poseAutoStart")}
+        />
+        <Alert className="border-info/40 bg-info/10 text-info">
+          <Activity className="h-4 w-4" />
+          <AlertDescription>
+            {t("robotConfig.calib.autoNote")}
+          </AlertDescription>
+        </Alert>
+        {robot && !isCanArm && (
+          <Collapsible className="group space-y-3">
+            <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
+              <span className="text-left">
+                <span className="block">
+                  {t("robotConfig.advanced.title")}
+                </span>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  {t("robotConfig.advanced.subtitle")}
+                </span>
+              </span>
+              <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className={SLIDE}>
+              <div className="space-y-2">
+                <Label htmlFor="motorPower" className="text-sm font-medium">
+                  {t("robotConfig.advanced.torqueLabel")}
+                </Label>
+                <div className="flex items-center gap-3">
+                  <input
+                    id="motorPower"
+                    type="range"
+                    min={TORQUE_LIMIT_MIN}
+                    max={TORQUE_LIMIT_MAX}
+                    step={TORQUE_LIMIT_PER_PERCENT}
+                    value={torqueLimitDraft}
+                    onChange={(e) => {
+                      // Slider is in raw Torque_Limit units; store as percent.
+                      setPowerDraft(
+                        Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
                       );
-                    })}
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      onClick={() => setBatchAutoCalPromptOpen(true)}
-                      disabled={selectedBatchSlots.length === 0}
-                      className="flex-1"
-                    >
-                      <Wand2 className="mr-2 h-4 w-4" />
-                      {t("robotConfig.batch.start", {
-                        count: selectedBatchSlots.length || 0,
-                      })}
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setBatchAutoCalOpen(false);
-                        // Also drop any finished run's results, or the box
-                        // would stay up in results-only mode and Cancel
-                        // would look like it did nothing.
-                        setBatchAutoCalResultsOpen(false);
-                      }}
-                      variant="outline"
-                      className="shrink-0"
-                    >
-                      {t("common.cancel")}
-                    </Button>
-                  </div>
-                </>
-              ) : batchAutoCal.active ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("robotConfig.batch.progress", {
-                    count: batchAutoCal.total,
-                    done: batchAutoCal.completed + batchAutoCal.failed,
-                    total: batchAutoCal.total,
-                  })}
-                </p>
-              ) : null}
-
-              {/* Per-arm status rows (running + terminal), shown live. */}
-              {batchAutoCal.arms.length > 0 && (
-                <div className="space-y-1">
-                  {batchAutoCal.arms.map((a) => (
-                    <div
-                      key={`${a.device_type}:${a.port}`}
-                      className="flex items-center justify-between gap-2 rounded bg-muted px-2 py-1 text-xs"
-                    >
-                      <span className="truncate font-mono text-foreground">
-                        {a.name || a.port}
-                      </span>
-                      <span
-                        className={
-                          a.status === "completed"
-                            ? "text-ok"
-                            : a.status === "failed"
-                              ? "text-destructive"
-                              : a.status === "stopped"
-                                ? "text-warn"
-                                : "text-info"
-                        }
-                        title={a.error ?? undefined}
-                      >
-                        {a.status === "completed"
-                          ? t("robotConfig.batch.armStatus.completed")
-                          : a.status === "failed"
-                            ? t("robotConfig.batch.armStatus.failed")
-                            : a.status === "stopped"
-                              ? t("robotConfig.batch.armStatus.stopped")
-                              : t("robotConfig.batch.armStatus.running")}
-                      </span>
-                    </div>
-                  ))}
-                  {!batchAutoCal.active && batchAutoCal.total > 0 && (
-                    <p className="pt-1 text-xs text-muted-foreground">
-                      {t("robotConfig.batch.summary", {
-                        completed: batchAutoCal.completed,
-                        failed: batchAutoCal.failed,
-                      })}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {batchAutoCal.logs.length > 0 && (
-                <div className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border bg-muted p-2 font-mono text-xs text-foreground">
-                  {batchAutoCal.logs.slice(-120).map((line, i) => (
-                    <div key={i}>{line}</div>
-                  ))}
-                </div>
-              )}
-
-              {/* Results-only view (run finished, picker closed — the row
-                  path): nothing else here can close the box, so this is the
-                  way out. The multi-arm finished view reopens the picker
-                  instead and uses its Cancel, which clears the same flag. */}
-              {!batchAutoCal.active && !batchAutoCalOpen && (
-                <div className="flex justify-end">
-                  <Button
-                    onClick={() => setBatchAutoCalResultsOpen(false)}
-                    variant="outline"
-                    size="sm"
-                    className="shrink-0"
-                  >
-                    {t("robotConfig.batch.dismiss")}
-                  </Button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Manual calibration only: torque is off the whole session,
-              which surprises novices (the arm is deliberately floppy).
-              Auto-cal needs no standing warning — it ends gracefully
-              (fold on completion, freeze + return-to-start on Stop) and
-              the multi-arm pre-start confirmation dialog carries the
-              safety guidance. */}
-          {calibrationStatus.calibration_active && (
-            <Alert className="border-warn/40 bg-warn/10 text-warn">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertDescription>
-                {t("robotConfig.calib.torqueOffWarning")}
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {calibrationStatus.status === "connecting" && (
-            <Alert className="border-warn/40 bg-warn/10 text-warn">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                {t("robotConfig.calib.connecting")}
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Zero-pose calibration (CAN arms). One step, no range sweep: the
-              arm's joint limits are fixed constants, so all this establishes
-              is where zero is. Torque is off for the whole wait — the user is
-              physically moving the arm — and the live readout below is a pure
-              read of where each joint currently sits. The pose text is per
-              FAMILY — the two zero poses are opposites on the gripper (Maker:
-              fully open; Metal: closed), so each renders its own key (the
-              localized twin of the server's status message). */}
-          {calibrationStatus.status === "awaiting_zero" && (
-            <div className="space-y-3">
-              <Alert className="border-info/40 bg-info/10 text-info">
-                <Activity className="h-4 w-4" />
-                <AlertDescription>
-                  {isMetalArm
-                    ? t("robotConfig.calib.zeroPose.instructionsMetal")
-                    : t("robotConfig.calib.zeroPose.instructions")}
-                </AlertDescription>
-              </Alert>
-
-              {calibrationStatus.current_positions &&
-                Object.keys(calibrationStatus.current_positions).length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <Activity className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm font-medium text-foreground">
-                        {t("robotConfig.calib.zeroPose.liveAngles")}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                      {Object.entries(calibrationStatus.current_positions).map(
-                        ([motor, angle]) => (
-                          <div
-                            key={motor}
-                            className="flex items-baseline justify-between gap-2 border-b border-border/50 py-0.5"
-                          >
-                            {/* Motor names are DATA (they key the calibration
-                                file and the dataset's feature columns), so they
-                                render verbatim in every language. */}
-                            <span className="truncate font-mono text-xs text-muted-foreground">
-                              {motor}
-                            </span>
-                            <span className="shrink-0 font-mono text-xs tabular-nums text-foreground">
-                              {angle.toFixed(1)}&deg;
-                            </span>
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  </div>
-                )}
-
-              <Button
-                onClick={handleCompleteStep}
-                disabled={!calibrationStatus.calibration_active}
-                className="w-full bg-ok text-primary-foreground hover:bg-ok/90"
-              >
-                <CheckCircle className="mr-2 h-4 w-4" />
-                {t("robotConfig.calib.zeroPose.confirm")}
-              </Button>
-            </div>
-          )}
-
-          {calibrationStatus.status === "saving" && (
-            <Alert className="border-warn/40 bg-warn/10 text-warn">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                {t("robotConfig.calib.zeroPose.saving")}
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {calibrationStatus.status === "recording" &&
-            calibrationStatus.recorded_ranges && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Activity className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm font-medium text-foreground">
-                    {t("robotConfig.calib.liveData")}
+                    }}
+                    list="motorTorqueTicks"
+                    className="h-1.5 flex-1 cursor-pointer accent-primary"
+                    aria-label={t("robotConfig.advanced.torqueSliderLabel")}
+                  />
+                  <datalist id="motorTorqueTicks">
+                    {/* The vendored script's stock torque, as a reference tick. */}
+                    <option value={DEFAULT_TORQUE_LIMIT_REF} />
+                  </datalist>
+                  <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
+                    {torqueLimitDraft}
                   </span>
                 </div>
-                <div className="rounded-md border border-border bg-muted/30 p-4">
-                  <div className="space-y-3">
-                    {Object.entries(calibrationStatus.recorded_ranges).map(
-                      ([motor, range]) => {
-                        const totalRange = range.max - range.min;
-                        const currentOffset = range.current - range.min;
-                        const progressPercent =
-                          totalRange > 0
-                            ? (currentOffset / totalRange) * 100
-                            : 50;
-                        const rangeComplete = isMotorRangeComplete(
-                          calibrationStatus.device_type,
-                          motor,
-                          totalRange,
-                        );
-
-                        return (
-                          <div key={motor} className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-foreground">
-                                  {motor}
-                                </span>
-                                {rangeComplete && (
-                                  <CheckCircle
-                                    className="h-4 w-4 text-ok"
-                                    aria-label={t(
-                                      "robotConfig.calib.rangeComplete",
-                                    )}
-                                  />
-                                )}
-                              </div>
-                              <span className="font-mono text-xs text-foreground">
-                                {range.current}
-                              </span>
-                            </div>
-                            <div className="relative">
-                              <div className="h-3 w-full rounded-full bg-secondary">
-                                <div
-                                  className="relative h-3 rounded-full bg-muted-foreground/20"
-                                  style={{ width: "100%" }}
-                                >
-                                  <div
-                                    className={`absolute top-0 h-3 w-1 rounded-full transition-all duration-100 ${
-                                      rangeComplete ? "bg-ok" : "bg-warn"
-                                    }`}
-                                    style={{
-                                      left: `${Math.max(
-                                        0,
-                                        Math.min(100, progressPercent),
-                                      )}%`,
-                                      transform: "translateX(-50%)",
-                                    }}
-                                  />
-                                </div>
-                              </div>
-                              <div className="mt-1 flex justify-between text-xs text-muted-foreground">
-                                <span>{range.min}</span>
-                                <span>{range.max}</span>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      },
-                    )}
-                  </div>
-                </div>
+                <p className="text-xs text-muted-foreground">
+                  <Trans
+                    i18nKey="robotConfig.advanced.torqueHint"
+                    values={{
+                      ref: DEFAULT_TORQUE_LIMIT_REF,
+                      min: TORQUE_LIMIT_MIN,
+                    }}
+                    components={[<code key="0" />]}
+                  />
+                </p>
               </div>
-            )}
+            </CollapsibleContent>
+          </Collapsible>
+        )}
+      </>
+    );
 
-          {calibrationStatus.status === "recording" &&
-            (() => {
-              const ranges = calibrationStatus.recorded_ranges ?? {};
-              const motors = Object.entries(ranges);
-              const allComplete =
-                motors.length > 0 &&
-                motors.every(([motor, range]) =>
-                  isMotorRangeComplete(
-                    calibrationStatus.device_type,
-                    motor,
-                    range.max - range.min,
-                  ),
-                );
-              return (
-                <div className="space-y-3">
-                  <Button
-                    onClick={handleCompleteStep}
-                    disabled={!calibrationStatus.calibration_active}
-                    className={`w-full text-primary-foreground ${
-                      allComplete
-                        ? "bg-ok hover:bg-ok/90"
-                        : "bg-warn hover:bg-warn/90"
-                    }`}
-                  >
-                    {allComplete ? (
-                      <CheckCircle className="mr-2 h-4 w-4" />
-                    ) : (
-                      <AlertCircle className="mr-2 h-4 w-4" />
-                    )}
-                    {t("robotConfig.calib.save")}
-                  </Button>
-                  <Alert className="border-info/40 bg-info/10 text-info">
-                    <Activity className="h-4 w-4" />
-                    <AlertDescription>
-                      <Trans
-                        i18nKey="robotConfig.calib.rangeHint"
-                        components={[<strong key="0" />, <strong key="1" />]}
-                      />
-                    </AlertDescription>
-                  </Alert>
-                </div>
-              );
-            })()}
-
-          {calibrationStatus.status === "completed" && (
-            <Alert className="border-ok/40 bg-ok/10 text-ok">
-              <CheckCircle className="h-4 w-4" />
-              <AlertDescription>
-                {t("robotConfig.calib.completed")}
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {calibrationStatus.status === "error" &&
-            calibrationStatus.error &&
-            (calibrationStatus.error.startsWith(DISCONTINUITY_ERROR_PREFIX) ? (
-              <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
-                <XCircle className="h-4 w-4" />
-                <AlertDescription>
-                  <div className="mb-1 text-base font-semibold">
-                    {t("robotConfig.calib.discontinuityTitle")}
-                  </div>
-                  <div>{t("robotConfig.calib.discontinuityBody")}</div>
-                </AlertDescription>
-              </Alert>
-            ) : (
-              <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
-                <XCircle className="h-4 w-4" />
-                <AlertDescription>
-                  <strong>{t("robotConfig.calib.errorLabel")}</strong>{" "}
-                  {calibrationStatus.error}
-                </AlertDescription>
-              </Alert>
-            ))}
+    return (
+      <div className="ml-6 mt-2 space-y-3 rounded-md border border-border bg-muted/20 p-3">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-foreground">
+            {t("robotConfig.calib.panelTitle", { row: rowLabel })}
+          </span>
+          <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+            <span
+              aria-hidden
+              className={`inline-block h-2 w-2 rounded-full ${statusDisplay.color}`}
+            />
+            {statusDisplay.text}
+          </span>
         </div>
 
-        {/* The demo is big, so it sits beside the main vertical instead of
-            pushing the controls down. Hidden on a CAN arm: the clip is
-            lerobot's SO-101 range sweep, which is both the wrong arm and the
-            wrong procedure for a zero pose — showing it would actively
-            mis-instruct. */}
-        {!isCanArm && (
-          <div
-            ref={demoVideoRef}
-            className="space-y-2 self-start rounded-md border border-border bg-muted/30 p-3"
+        {running ? (
+          <Button
+            onClick={handleStopCalibration}
+            variant="destructive"
+            className="w-full"
           >
-            <h3 className="eyebrow">{t("robotConfig.calib.demoTitle")}</h3>
-            <div className="overflow-hidden rounded-md bg-muted">
+            <Square className="mr-2 h-4 w-4" />
+            {t("robotConfig.calib.cancel")}
+          </Button>
+        ) : batchAutoCal.active ? (
+          <Button
+            onClick={stopBatchAutoCalibration}
+            variant="destructive"
+            className="w-full"
+          >
+            <Square className="mr-2 h-4 w-4" />
+            {batchAutoCal.total === 1
+              ? t("robotConfig.batch.stopSingle")
+              : t("robotConfig.batch.stopAll")}
+          </Button>
+        ) : null}
+
+        {/* Mode first. The two flows differ in video, pose, and what happens
+            after Start, so nothing renders until one is picked. A CAN arm has
+            exactly one flow (the zero pose) and skips the question. */}
+        {preStart && !isCanArm && (
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              type="button"
+              variant={mode === "auto" ? "default" : "outline"}
+              onClick={() => setCalibMode(calibMode === "auto" ? null : "auto")}
+            >
+              <Wand2 className="mr-2 h-4 w-4" />
+              {t("robotConfig.calib.auto")}
+            </Button>
+            <Button
+              type="button"
+              variant={mode === "manual" ? "default" : "outline"}
+              onClick={() =>
+                setCalibMode(calibMode === "manual" ? null : "manual")
+              }
+            >
+              <Play className="mr-2 h-4 w-4" />
+              {t("robotConfig.calib.manual")}
+            </Button>
+          </div>
+        )}
+
+        {/* Manual, before Start: demo video, the start pose (middle position),
+            advanced parameters, Start. One column, in that order. */}
+        {preStart && mode === "manual" && (
+          <>
+            <div
+              ref={demoVideoRef}
+              className="overflow-hidden rounded-md bg-muted"
+            >
               <video className="h-auto w-full" controls preload="auto" muted>
                 <source
                   src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
@@ -2333,78 +2193,461 @@ const RobotConfigWindow = ({
                 </p>
               </video>
             </div>
+            <div
+              className="media-slot aspect-video w-full"
+              data-label={t("robotConfig.calib.poseMiddle")}
+            />
+            {/* No Advanced parameters here on purpose. The only thing it
+                holds is the auto-calibration drive torque, and that value
+                is read exclusively by the auto-calibration subprocess:
+                manual calibration never sends it, so offering it here
+                would imply it changes something about this run. */}
+            <Button
+              onClick={() => handleStartCalibration()}
+              disabled={!robotName || !deviceType || !portDetected}
+              className="w-full"
+            >
+              <Play className="mr-2 h-4 w-4" />
+              {t("robotConfig.calib.start")}
+            </Button>
+          </>
+        )}
+
+        {/* Auto, before Start: same order as manual so the two flows read as
+            one design. The demo clip is not shot yet, so it is a slot. */}
+        {preStart && mode === "auto" && (
+          <>
+            {autoPreamble}
+            <Button
+              onClick={() => rowSlot && handleAutoCalibrateSlot(rowSlot)}
+              disabled={!robotName || !rowSlot || !slotPort(rowSlot)}
+              className="w-full"
+              title={
+                rowSlot && slotPort(rowSlot)
+                  ? t("robotConfig.calib.autoTitle", {
+                      arm: rowSlot.label,
+                      port: slotPort(rowSlot),
+                    })
+                  : t("robotConfig.calib.autoDisabledTitle")
+              }
+            >
+              <Wand2 className="mr-2 h-4 w-4" />
+              {t("robotConfig.calib.start")}
+            </Button>
+          </>
+        )}
+
+        {/* CAN zero pose, before Start: one flow, same shape. */}
+        {preStart && isCanArm && (
+          <>
+            {/* No demo clip slot here. Zero calibration is one act — pose the
+                arm by hand and press the button — so there is nothing to
+                demonstrate that the photo below does not already show. The
+                sweep flows keep their video because the MOTION is the thing
+                being taught there; a static pose is not. */}
+            {zeroPoseImage}
+            <Alert className="border-info/40 bg-info/10 text-info">
+              <Activity className="h-4 w-4" />
+              <AlertDescription>
+                {t("robotConfig.calib.zeroNote")}
+              </AlertDescription>
+            </Alert>
+            <Button
+              onClick={() => handleStartCalibration()}
+              disabled={!robotName || !deviceType || !portDetected}
+              className="w-full"
+            >
+              <Play className="mr-2 h-4 w-4" />
+              {t("robotConfig.calib.zeroPose.start")}
+            </Button>
+          </>
+        )}
+
+        {calibrationStatus.status === "connecting" && (
+          <Alert className="border-warn/40 bg-warn/10 text-warn">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {t("robotConfig.calib.connecting")}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {calibrationStatus.status === "awaiting_zero" && (
+          <div className="space-y-3">
+            {/* Reference pose. The words alone have never been enough here:
+                "folded against the base, gripper fully open" is a shape, and
+                a picture of the shape is what the user actually matches the
+                arm against. It sits ABOVE the instructions because it is the
+                thing being described, and above the confirm button because
+                the arm has to be in this position before zero is taken.
+
+                Same element the pre-start step shows, so the picture the arm
+                was posed against does not change between the two screens. */}
+            {zeroPoseImage}
+            <Alert className="border-info/40 bg-info/10 text-info">
+              <Activity className="h-4 w-4" />
+              <AlertDescription>
+                {isMetalArm
+                  ? t("robotConfig.calib.zeroPose.instructionsMetal")
+                  : t("robotConfig.calib.zeroPose.instructions")}
+              </AlertDescription>
+            </Alert>
+
+            {calibrationStatus.current_positions &&
+              Object.keys(calibrationStatus.current_positions).length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm font-medium text-foreground">
+                      {t("robotConfig.calib.zeroPose.liveAngles")}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                    {Object.entries(calibrationStatus.current_positions).map(
+                      ([motor, angle]) => (
+                        <div
+                          key={motor}
+                          className="flex items-baseline justify-between gap-2 border-b border-border/50 py-0.5"
+                        >
+                          {/* Motor names are DATA (they key the calibration
+                              file and the dataset's feature columns), so they
+                              render verbatim in every language. */}
+                          <span className="truncate font-mono text-xs text-muted-foreground">
+                            {motor}
+                          </span>
+                          <span className="shrink-0 font-mono text-xs tabular-nums text-foreground">
+                            {angle.toFixed(1)}&deg;
+                          </span>
+                        </div>
+                      ),
+                    )}
+                  </div>
+                </div>
+              )}
+
+            <Button
+              onClick={handleCompleteStep}
+              disabled={!calibrationStatus.calibration_active}
+              className="w-full bg-ok text-primary-foreground hover:bg-ok/90"
+            >
+              <CheckCircle className="mr-2 h-4 w-4" />
+              {t("robotConfig.calib.zeroPose.confirm")}
+            </Button>
+          </div>
+        )}
+
+        {calibrationStatus.status === "saving" && (
+          <Alert className="border-warn/40 bg-warn/10 text-warn">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {t("robotConfig.calib.zeroPose.saving")}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Manual sweep, after Start: one short combined note (what to do AND
+            the torque warning, one alert instead of two), the live data kept
+            compact, and Save at the end where the flow ends. */}
+        {calibrationStatus.status === "recording" &&
+          (() => {
+            const ranges = calibrationStatus.recorded_ranges ?? {};
+            const motors = Object.entries(ranges);
+            const allComplete =
+              motors.length > 0 &&
+              motors.every(([motor, range]) =>
+                isMotorRangeComplete(
+                  calibrationStatus.device_type,
+                  motor,
+                  range.max - range.min,
+                ),
+              );
+            return (
+              <div className="space-y-3">
+                <Alert className="border-warn/40 bg-warn/10 text-warn">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertDescription>
+                    {t("robotConfig.calib.sweepNote")}
+                  </AlertDescription>
+                </Alert>
+                {motors.length > 0 && (
+                  <div className="rounded-md border border-border bg-muted/30 p-3">
+                    <div className="grid grid-cols-2 gap-x-5 gap-y-2">
+                      {motors.map(([motor, range]) => {
+                        const totalRange = range.max - range.min;
+                        const currentOffset = range.current - range.min;
+                        const progressPercent =
+                          totalRange > 0
+                            ? (currentOffset / totalRange) * 100
+                            : 50;
+                        const rangeComplete = isMotorRangeComplete(
+                          calibrationStatus.device_type,
+                          motor,
+                          totalRange,
+                        );
+                        return (
+                          <div key={motor} className="space-y-1">
+                            <div className="flex items-baseline justify-between gap-2">
+                              {/* Motor names are DATA (calibration file keys),
+                                  rendered verbatim in every language. */}
+                              <span className="flex items-center gap-1 truncate font-mono text-xs text-muted-foreground">
+                                {motor}
+                                {rangeComplete && (
+                                  <CheckCircle
+                                    className="h-3 w-3 shrink-0 text-ok"
+                                    aria-label={t(
+                                      "robotConfig.calib.rangeComplete",
+                                    )}
+                                  />
+                                )}
+                              </span>
+                              <span className="shrink-0 font-mono text-xs tabular-nums text-foreground">
+                                {range.current}
+                              </span>
+                            </div>
+                            <div className="relative h-1.5 w-full rounded-full bg-secondary">
+                              <div
+                                className={`absolute top-0 h-1.5 w-1 rounded-full transition-all duration-100 ${
+                                  rangeComplete ? "bg-ok" : "bg-warn"
+                                }`}
+                                style={{
+                                  left: `${Math.max(
+                                    0,
+                                    Math.min(100, progressPercent),
+                                  )}%`,
+                                  transform: "translateX(-50%)",
+                                }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                <Button
+                  onClick={handleCompleteStep}
+                  disabled={!calibrationStatus.calibration_active}
+                  className={`w-full text-primary-foreground ${
+                    allComplete
+                      ? "bg-ok hover:bg-ok/90"
+                      : "bg-warn hover:bg-warn/90"
+                  }`}
+                >
+                  {allComplete ? (
+                    <CheckCircle className="mr-2 h-4 w-4" />
+                  ) : (
+                    <AlertCircle className="mr-2 h-4 w-4" />
+                  )}
+                  {t("robotConfig.calib.save")}
+                </Button>
+              </div>
+            );
+          })()}
+
+        {calibrationStatus.status === "error" &&
+          calibrationStatus.error &&
+          (calibrationStatus.error.startsWith(DISCONTINUITY_ERROR_PREFIX) ? (
+            <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
+              <XCircle className="h-4 w-4" />
+              <AlertDescription>
+                <div className="mb-1 text-base font-semibold">
+                  {t("robotConfig.calib.discontinuityTitle")}
+                </div>
+                <div>{t("robotConfig.calib.discontinuityBody")}</div>
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
+              <XCircle className="h-4 w-4" />
+              <AlertDescription>
+                <strong>{t("robotConfig.calib.errorLabel")}</strong>{" "}
+                {calibrationStatus.error}
+              </AlertDescription>
+            </Alert>
+          ))}
+        {/* Auto run: the batch picker, progress, per-arm rows and the log
+            terminal, at the bottom of the same single column. On success the
+            whole panel collapses; failures keep this up to be read. */}
+        {(batchAutoCalOpen ||
+          batchAutoCal.active ||
+          batchAutoCalResultsOpen) && (
+          <div className="space-y-3 rounded-md border border-border bg-muted/30 p-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <Wand2 className="h-4 w-4" />
+              {!batchAutoCalOpen && batchAutoCal.total === 1
+                ? t("robotConfig.batch.titleSingle")
+                : t("robotConfig.batch.titleMulti")}
+            </div>
+            {batchAutoCalOpen && !batchAutoCal.active ? (
+              <>
+                {/* Identical to a single-arm auto run — same clip, same start
+                    pose, same torque control. The only thing a batch adds is
+                    the list below, so that is the only thing that looks new. */}
+                {autoPreamble}
+                <p className="text-xs text-muted-foreground">
+                  {t("robotConfig.batch.pickerHint")}
+                </p>
+              </>
+            ) : batchAutoCal.active ? (
+              <p className="text-xs text-muted-foreground">
+                {t("robotConfig.batch.progress", {
+                  count: batchAutoCal.total,
+                  done: batchAutoCal.completed + batchAutoCal.failed,
+                  total: batchAutoCal.total,
+                })}
+              </p>
+            ) : null}
+
+            {/* The list, in every phase. Right-hand column is the port until
+                the run starts and the arm's status afterwards. */}
+            {listedSlots.length > 0 && (
+              <div className="space-y-2">
+                {listedSlots.map((slot) => {
+                  const run = armRunStatus(slot);
+                  // Ticked means "in this run" once one exists.
+                  const selected = picking
+                    ? !!batchSelected[slot.key]
+                    : !!run;
+                  const assignedPort = slotPort(slot);
+                  const hasPort = !!assignedPort;
+                  // Distinguish "never assigned" from "assigned but
+                  // not currently detected" so the hint is actionable.
+                  const savedButUndetected = !hasPort && !!slotSavedPort(slot);
+                  return (
+                    <label
+                      key={slot.key}
+                      className={`flex items-center gap-2 rounded-md border p-2 ${
+                        selected
+                          ? "border-ring bg-accent"
+                          : "border-border bg-background"
+                      } ${
+                        picking && hasPort
+                          ? "cursor-pointer"
+                          : picking
+                            ? "cursor-not-allowed opacity-60"
+                            : ""
+                      }`}
+                    >
+                      <Checkbox
+                        checked={selected}
+                        disabled={!picking || !hasPort}
+                        onCheckedChange={(checked) =>
+                          setBatchSelected((prev) => ({
+                            ...prev,
+                            [slot.key]: checked === true,
+                          }))
+                        }
+                      />
+                      <span className="text-sm text-foreground">
+                        {slot.label}
+                      </span>
+                      {run ? (
+                        <span
+                          className={`ml-auto text-xs ${
+                            run.status === "completed"
+                              ? "text-ok"
+                              : run.status === "failed"
+                                ? "text-destructive"
+                                : run.status === "stopped"
+                                  ? "text-warn"
+                                  : "text-info"
+                          }`}
+                          title={run.error ?? undefined}
+                        >
+                          {run.status === "completed"
+                            ? t("robotConfig.batch.armStatus.completed")
+                            : run.status === "failed"
+                              ? t("robotConfig.batch.armStatus.failed")
+                              : run.status === "stopped"
+                                ? t("robotConfig.batch.armStatus.stopped")
+                                : t("robotConfig.batch.armStatus.running")}
+                        </span>
+                      ) : (
+                        <span
+                          className={`ml-auto font-mono text-xs ${
+                            hasPort ? "text-muted-foreground" : "text-warn/80"
+                          }`}
+                        >
+                          {hasPort
+                            ? assignedPort
+                            : savedButUndetected
+                              ? t("robotConfig.batch.portUndetected")
+                              : t("robotConfig.batch.portMissing")}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
+                {!batchAutoCal.active && batchAutoCal.total > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("robotConfig.batch.summary", {
+                      completed: batchAutoCal.completed,
+                      failed: batchAutoCal.failed,
+                    })}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {picking && (
+              <>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => setBatchAutoCalPromptOpen(true)}
+                    disabled={selectedBatchSlots.length === 0}
+                    className="flex-1"
+                  >
+                    <Wand2 className="mr-2 h-4 w-4" />
+                    {t("robotConfig.batch.start", {
+                      count: selectedBatchSlots.length || 0,
+                    })}
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setBatchAutoCalOpen(false);
+                      // Also drop any finished run's results, or the box
+                      // would stay up in results-only mode and Cancel
+                      // would look like it did nothing.
+                      setBatchAutoCalResultsOpen(false);
+                    }}
+                    variant="outline"
+                    className="shrink-0"
+                  >
+                    {t("common.cancel")}
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {batchAutoCal.logs.length > 0 && (
+              <div className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border bg-muted p-2 font-mono text-xs text-foreground">
+                {batchAutoCal.logs.slice(-120).map((line, i) => (
+                  <div key={i}>{line}</div>
+                ))}
+              </div>
+            )}
+
+            {/* Results-only view (run finished, picker closed — the row
+                path): nothing else here can close the box, so this is the
+                way out. The multi-arm finished view reopens the picker
+                instead and uses its Cancel, which clears the same flag. */}
+            {!batchAutoCal.active && !batchAutoCalOpen && (
+              <div className="flex justify-end">
+                <Button
+                  onClick={() => setBatchAutoCalResultsOpen(false)}
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                >
+                  {t("robotConfig.batch.dismiss")}
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>
-
-      {/* Auto-calibration drive torque lives under Advanced parameters
-          (the studio's collapsible pattern, as in RecordingForm): sent
-          with the auto-calibrate start (current slider position),
-          persisted on Save. Manual calibration and regular sessions
-          don't use it. Full panel width, below the controls/demo grid,
-          so expanding it grows the panel evenly instead of stretching
-          only the left column. Hidden on a CAN arm — the slider's only
-          consumer is the auto-calibration subprocess, which that arm has no
-          equivalent of, and its drive effort comes from the MIT follow gains
-          set at connect() instead. */}
-      {robot && !isCanArm && (
-        <Collapsible className="group space-y-3">
-          <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
-            <span className="text-left">
-              <span className="block">{t("robotConfig.advanced.title")}</span>
-              <span className="block text-xs font-normal text-muted-foreground">
-                {t("robotConfig.advanced.subtitle")}
-              </span>
-            </span>
-            <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
-          </CollapsibleTrigger>
-          <CollapsibleContent className={SLIDE}>
-            <div className="space-y-2">
-              <Label htmlFor="motorPower" className="text-sm font-medium">
-                {t("robotConfig.advanced.torqueLabel")}
-              </Label>
-              <div className="flex items-center gap-3">
-                <input
-                  id="motorPower"
-                  type="range"
-                  min={TORQUE_LIMIT_MIN}
-                  max={TORQUE_LIMIT_MAX}
-                  step={TORQUE_LIMIT_PER_PERCENT}
-                  value={torqueLimitDraft}
-                  onChange={(e) => {
-                    // Slider is in raw Torque_Limit units; store as percent.
-                    setPowerDraft(
-                      Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
-                    );
-                  }}
-                  list="motorTorqueTicks"
-                  className="h-1.5 flex-1 cursor-pointer accent-primary"
-                  aria-label={t("robotConfig.advanced.torqueSliderLabel")}
-                />
-                <datalist id="motorTorqueTicks">
-                  {/* The vendored script's stock torque, as a reference tick. */}
-                  <option value={DEFAULT_TORQUE_LIMIT_REF} />
-                </datalist>
-                <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
-                  {torqueLimitDraft}
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                <Trans
-                  i18nKey="robotConfig.advanced.torqueHint"
-                  values={{
-                    ref: DEFAULT_TORQUE_LIMIT_REF,
-                    min: TORQUE_LIMIT_MIN,
-                  }}
-                  components={[<code key="0" />]}
-                />
-              </p>
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
-      )}
-    </div>
-  );
+    );
+  };
 
   return (
     <Dialog
@@ -2428,302 +2671,176 @@ const RobotConfigWindow = ({
         {/* Scrollable window body */}
         <div className="flex-1 divide-y divide-border overflow-y-auto px-6">
           {/* 01 · Device */}
-          <section className="space-y-4 py-5">
-            <PanelHeader step="01" title={t("robotConfig.device.step")} />
-            <div className="space-y-2">
-              <Label>{t("robotConfig.device.label")}</Label>
-              {isBimanual ? (
-                <div
-                  role="radiogroup"
-                  aria-label={t("robotConfig.device.groupBimanual")}
-                  className="grid grid-cols-2 gap-3"
-                >
-                  <div className="space-y-2">
-                    {armSlots
-                      .filter((slot) => slot.arm === "left")
-                      .map((slot) => (
-                        <ArmSlotCard
-                          key={slot.key}
-                          slot={slot}
-                          selected={
-                            deviceType === slot.device && arm === slot.arm
-                          }
-                          port={draftPort(slot.portField)}
-                          portDetected={slotPortDetected(slot)}
-                          configured={!!(robot?.[slot.cfgField] as string)}
-                          onSelect={() => {
-                            setDeviceType(slot.device);
-                            setArm(slot.arm);
-                          }}
-                        />
-                      ))}
-                  </div>
-                  <div className="space-y-2">
-                    {armSlots
-                      .filter((slot) => slot.arm === "right")
-                      .map((slot) => (
-                        <ArmSlotCard
-                          key={slot.key}
-                          slot={slot}
-                          selected={
-                            deviceType === slot.device && arm === slot.arm
-                          }
-                          port={draftPort(slot.portField)}
-                          portDetected={slotPortDetected(slot)}
-                          configured={!!(robot?.[slot.cfgField] as string)}
-                          onSelect={() => {
-                            setDeviceType(slot.device);
-                            setArm(slot.arm);
-                          }}
-                        />
-                      ))}
-                  </div>
-                </div>
-              ) : (
-                <div
-                  role="radiogroup"
-                  aria-label={t("robotConfig.device.groupSingle")}
-                  className="grid grid-cols-2 gap-3"
-                >
-                  {armSlots.map((slot) => (
-                    <ArmSlotCard
-                      key={slot.key}
-                      slot={slot}
-                      selected={deviceType === slot.device}
-                      port={draftPort(slot.portField)}
-                      portDetected={slotPortDetected(slot)}
-                      configured={!!(robot?.[slot.cfgField] as string)}
-                      onSelect={() => {
-                        setDeviceType(slot.device);
-                        setArm(slot.arm);
-                      }}
-                    />
-                  ))}
-                </div>
-              )}
+          <section className="space-y-3 py-5">
+            <div className="flex items-center gap-2">
+              <PanelHeader step="01" title={t("robotConfig.device.step")} />
+              {/* Rescan is global and always was; it just used to sit inside a
+                  per-slot row and read as though it applied to that slot. */}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={fetchPorts}
+                disabled={portsLoading || hardwareBusy}
+                aria-label={t("robotConfig.port.rescan")}
+                className="ml-auto h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <RefreshCw
+                  aria-hidden
+                  className={cn("h-3.5 w-3.5", portsLoading && "animate-spin")}
+                />
+                {t("robotConfig.port.rescan")}
+              </Button>
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="port">{t("robotConfig.port.label")}</Label>
-              <div className="flex flex-wrap gap-2">
-                <Select value={port} onValueChange={handleSelectPort}>
-                  <SelectTrigger id="port" className="min-w-[200px] flex-1">
-                    <SelectValue
-                      placeholder={
-                        availablePorts.length
-                          ? t("robotConfig.port.select")
-                          : t("robotConfig.port.none")
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availablePorts.map((p) => {
-                      // In-use ports stay selectable: picking one prompts a
-                      // swap (this slot's current port goes to the other arm)
-                      // or, if this slot is empty, a take-with-warning.
-                      const usedByOtherArm = otherArmPorts.includes(p);
-                      return (
-                        <SelectItem key={p} value={p}>
-                          <span className="flex items-center gap-2 font-mono text-xs">
-                            {p}
-                            {usedByOtherArm && (
-                              <span
-                                className={cn(
-                                  "rounded border border-warn/40 px-1 font-body text-[10px] text-warn",
-                                  isCaselessScript(language)
-                                    ? ""
-                                    : "uppercase tracking-wide",
-                                )}
-                              >
-                                {t("robotConfig.port.otherArm")}
-                              </span>
-                            )}
-                          </span>
-                        </SelectItem>
-                      );
-                    })}
-                    {/* A saved-but-undetected port is intentionally NOT offered
-                        here: an unplugged bus can't be calibrated against, so
-                        it's treated as no port. The trigger falls back to the
-                        placeholder, and the port re-selects on its own once the
-                        arm is plugged back in and ports are rescanned. */}
-                  </SelectContent>
-                </Select>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => {
-                    setPort("");
-                    persistPort("");
-                  }}
-                  // Also gated during calibration: clearing wouldn't stop the
-                  // running session (the subprocess holds the serial port),
-                  // it would just desync the UI from the arm being measured.
-                  disabled={
-                    !port ||
-                    calibrationStatus.calibration_active ||
-                    batchAutoCal.active
-                  }
-                  title={t("robotConfig.port.clearTitle")}
-                  aria-label={t("robotConfig.port.clear")}
-                  className="shrink-0 text-muted-foreground hover:text-destructive"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={fetchPorts}
-                  disabled={portsLoading}
-                  title={t("robotConfig.port.rescan")}
-                  aria-label={t("robotConfig.port.rescan")}
-                  className="shrink-0 text-muted-foreground hover:text-foreground"
-                >
-                  <RefreshCw
-                    className={`h-4 w-4 ${portsLoading ? "animate-spin" : ""}`}
-                  />
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleDetect}
-                  disabled={
-                    detecting ||
-                    wiggling ||
-                    calibrationStatus.calibration_active ||
-                    batchAutoCal.active
-                  }
-                  title={t("robotConfig.port.detectTitle")}
-                  className="w-28 shrink-0"
-                >
-                  {detecting ? (
-                    <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Hand className="mr-1 h-4 w-4" />
+            {/* One row for a single robot, one row per side when bimanual. */}
+            {(isBimanual
+              ? (["left", "right"] as const)
+              : (["left"] as const)
+            ).map((side) => {
+              const rowSlots = armSlots.filter((s) => s.arm === side);
+              if (rowSlots.length === 0) return null;
+              return (
+                <div key={side} className="space-y-1.5">
+                  {isBimanual && (
+                    <p className="eyebrow">
+                      {t(
+                        side === "left"
+                          ? "robotConfig.device.left"
+                          : "robotConfig.device.right",
+                      )}
+                    </p>
                   )}
-                  {detecting
-                    ? t("robotConfig.port.detecting")
-                    : t("robotConfig.port.detect")}
-                </Button>
-                <p className="min-w-[200px] flex-1 text-xs text-muted-foreground">
-                  {isMetalArm
-                    ? t("robotConfig.port.detectHelpMetal")
-                    : isCanArm
-                      ? t("robotConfig.port.detectHelpMaker")
-                      : t("robotConfig.port.detectHelp")}
-                </p>
-              </div>
-              {/* Wiggle drives the gripper through Feetech registers to show
-                  which arm is on a port. A CAN rig needs no such
-                  confirmation — its follower and leader answer different
-                  protocols, so Detect already identifies each unambiguously —
-                  and the CAN/UART buses have no equivalent write anyway. */}
-              {!isCanArm && (
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={handleWiggle}
-                    disabled={
-                      !port ||
-                      wiggling ||
-                      detecting ||
-                      calibrationStatus.calibration_active ||
-                      batchAutoCal.active
-                    }
-                    title={t("robotConfig.port.wiggleTitle")}
-                    className="w-28 shrink-0"
+                  <div
+                    role="group"
+                    aria-label={t(
+                      isBimanual
+                        ? "robotConfig.device.groupBimanual"
+                        : "robotConfig.device.groupSingle",
+                    )}
+                    className="grid grid-cols-2 gap-3"
                   >
-                    <Hand className="mr-1 h-4 w-4" />
-                    {wiggling
-                      ? t("robotConfig.port.wiggling")
-                      : t("robotConfig.port.wiggle")}
-                  </Button>
-                  <p className="min-w-[200px] flex-1 text-xs text-muted-foreground">
-                    {t("robotConfig.port.wiggleHelp")}
-                  </p>
+                    {rowSlots.map((slot) => (
+                      <DeviceSlotCell
+                        key={slot.key}
+                        slot={slot}
+                        port={draftPort(slot.portField)}
+                        portDetected={slotPortDetected(slot)}
+                        configured={!!(robot?.[slot.cfgField] as string)}
+                        availablePorts={availablePorts}
+                        heldByLabel={(p) => {
+                          const holder = portFields.find(
+                            (f) => f !== slot.portField && draftPort(f) === p,
+                          );
+                          return holder ? portFieldLabel(holder) : null;
+                        }}
+                        busy={hardwareBusy}
+                        detecting={detecting === slot.portField}
+                        wiggling={wiggling}
+                        showWiggle={!isCanArm}
+                        detectIsGesture={detectIsGesture}
+                        // No selection side effects: every action names its own
+                        // slot, so none of them depend on what is selected.
+                        onPortChange={(next) =>
+                          handleSelectPort(next, slot.portField)
+                        }
+                        onDetect={() => handleDetect(slot.portField)}
+                        onWiggle={() => handleWiggle(draftPort(slot.portField))}
+                      />
+                    ))}
+                  </div>
                 </div>
-              )}
-              {detecting && (
-                <p className="text-xs text-ok">
-                  {isMetalArm
-                    ? t("robotConfig.port.detectLiveMetal")
-                    : isCanArm
-                      ? t("robotConfig.port.detectLiveMaker")
-                      : t("robotConfig.port.detectLive")}
-                </p>
-              )}
-            </div>
+              );
+            })}
+
+            {/* No ports at all is a whole-section condition, not a per-slot
+                one, so it is said once rather than inside four dropdowns. */}
+            {portsScanned && availablePorts.length === 0 && (
+              <p className="text-xs text-warn">{t("robotConfig.port.none")}</p>
+            )}
+
+            {/* Instructions DURING a detect stay on screen. Both of the user's
+                hands are on the arm, so a tooltip is unreachable exactly when
+                it is needed. */}
+            {detecting && (
+              <p className="text-xs text-ok">
+                {isMetalArm
+                  ? t("robotConfig.port.detectLiveMetal")
+                  : isCanArm
+                    ? t("robotConfig.port.detectLiveMaker")
+                    : t("robotConfig.port.detectLive")}
+              </p>
+            )}
           </section>
 
-          {/* 02 · Calibration files */}
+          {/* 02 · Calibration */}
           {robot && (
             <section className="space-y-3 py-5">
               <div className="flex items-center gap-2">
                 <PanelHeader step="02" title={t("robotConfig.files.step")} />
-                {/* The multi-arm entry point: same batch flow as a row's own
+                {/* One wrapper carries the ml-auto, so the actions right-align
+                    exactly like section 01's Rescan whichever of them render.
+                    It used to sit on "Calibrate all", which a CAN arm hides —
+                    leaving the folder buttons stranded against the title. */}
+                <div className="ml-auto flex items-center gap-1.5">
+                  {/* The multi-arm entry point: same batch flow as a row's own
                     "Auto-calibrate" (which does its arm alone), but
                     pre-selecting every detected arm and opening the picker so
                     the selection can be reviewed before confirming.
                     Hidden entirely on a CAN arm, which has no automatic
                     calibration to batch — each arm's zero pose has to be set
                     by hand anyway, so there is nothing to run concurrently. */}
-                {!isCanArm && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="ml-auto h-6 gap-1.5 px-2 text-xs"
-                    onClick={handleCalibrateAll}
-                    disabled={
-                      !robotName ||
-                      !anyArmAvailable ||
-                      calibrationStatus.calibration_active ||
-                      batchAutoCal.active
-                    }
-                    title={
-                      anyArmAvailable
-                        ? t("robotConfig.files.calibrateAllTitle")
-                        : t("robotConfig.files.calibrateAllDisabledTitle")
-                    }
-                  >
-                    <Wand2 className="h-4 w-4" />
-                    {t("robotConfig.files.calibrateAll")}
-                  </Button>
-                )}
-                {/* One folder per device type — both same-side slots share a
+                  {!isCanArm && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 gap-1.5 px-2 text-xs"
+                      onClick={handleCalibrateAll}
+                      disabled={
+                        !robotName ||
+                        !anyArmAvailable ||
+                        calibrationStatus.calibration_active ||
+                        batchAutoCal.active
+                      }
+                      title={
+                        anyArmAvailable
+                          ? t("robotConfig.files.calibrateAllTitle")
+                          : t("robotConfig.files.calibrateAllDisabledTitle")
+                      }
+                    >
+                      <Wand2 className="h-4 w-4" />
+                      {t("robotConfig.files.calibrateAll")}
+                    </Button>
+                  )}
+                  {/* One folder per device type — both same-side slots share a
                     single directory (so_leader / so_follower for an SO-101;
                     maker_follower or metal_follower for the CAN followers,
                     with rebot_102_leader SHARED by both CAN leaders), so a
                     single leader + follower pair covers single AND bimanual
                     modes (no per-slot duplication). */}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
-                  onClick={() => openCalibrationFolder("teleop")}
-                  aria-label={t("robotConfig.files.openLeaderFolder")}
-                  title={t("robotConfig.files.openLeaderFolder")}
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  {t("robotConfig.files.leader")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
-                  onClick={() => openCalibrationFolder("robot")}
-                  aria-label={t("robotConfig.files.openFollowerFolder")}
-                  title={t("robotConfig.files.openFollowerFolder")}
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  {t("robotConfig.files.follower")}
-                </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => openCalibrationFolder("teleop")}
+                    aria-label={t("robotConfig.files.openLeaderFolder")}
+                    title={t("robotConfig.files.openLeaderFolder")}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    {t("robotConfig.files.leader")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => openCalibrationFolder("robot")}
+                    aria-label={t("robotConfig.files.openFollowerFolder")}
+                    title={t("robotConfig.files.openFollowerFolder")}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    {t("robotConfig.files.follower")}
+                  </Button>
+                </div>
               </div>
               {(isBimanual
                 ? // Bimanual: each of the four slots gets the same free-naming
@@ -2818,40 +2935,28 @@ const RobotConfigWindow = ({
                         {rowLabel}
                       </span>
                     </div>
-                    <div className="flex items-start gap-2">
-                      <div className="min-w-0 flex-1">
-                        <CalibrationLibrary
-                          armType={armType}
-                          device={row.device}
-                          assignedConfig={cfg}
-                          configField={row.cfgField}
-                          excludeConfig={excludeConfig}
-                          excludeConfigField={excludeConfigField}
-                          robotName={robotName}
-                          onAssigned={fetchRobot}
-                          onLibraryChanged={() =>
-                            setCalibReloadToken((t) => t + 1)
-                          }
-                          reloadToken={calibReloadToken}
-                        />
-                      </div>
-                      {/* Expands the calibration flow (auto/manual, demo,
-                          advanced torque) right below this row, targeted at
-                          this arm slot. */}
-                      <Button
-                        type="button"
-                        variant={isNewCalibOpen ? "secondary" : "outline"}
-                        className="mt-1 shrink-0"
-                        onClick={() =>
-                          toggleNewCalibration(row.cfgField, row.device, rowArm)
-                        }
-                        aria-expanded={isNewCalibOpen}
-                        title={t("robotConfig.files.newCalibrationTitle")}
-                      >
-                        <Plus className="mr-1 h-4 w-4" />
-                        {t("robotConfig.files.newCalibration")}
-                      </Button>
-                    </div>
+                    {/* Picker, Calibrate and the overflow menu are one welded
+                        control group rendered by CalibrationLibrary — the
+                        Calibrate segment used to be a separate outlined "+"
+                        button sitting outside its border. Pressing it expands
+                        the calibration flow (auto/manual, demo, advanced
+                        torque) right below this row, for this arm slot. */}
+                    <CalibrationLibrary
+                      armType={armType}
+                      device={row.device}
+                      assignedConfig={cfg}
+                      configField={row.cfgField}
+                      excludeConfig={excludeConfig}
+                      excludeConfigField={excludeConfigField}
+                      robotName={robotName}
+                      onAssigned={fetchRobot}
+                      onLibraryChanged={() => setCalibReloadToken((t) => t + 1)}
+                      reloadToken={calibReloadToken}
+                      onCalibrate={() =>
+                        toggleNewCalibration(row.cfgField, row.device, rowArm)
+                      }
+                      calibrateOpen={isNewCalibOpen}
+                    />
                     {/* Slides open in place, like the studio's entry forms. */}
                     <Collapsible open={isNewCalibOpen}>
                       <CollapsibleContent className={SLIDE}>
@@ -2885,13 +2990,16 @@ const RobotConfigWindow = ({
                 />
               </div>
             </div>
-            {camerasActive ? (
-              <CameraConfiguration
-                cameras={cameras}
-                onCamerasChange={handleCamerasChange}
-                releaseStreamsRef={releaseStreamsRef}
-              />
-            ) : (
+            {/* Mounted whether the switch is on or off: it renders nothing
+                while off, so the camera picked before switching off is still
+                picked, and still previewing, when it comes back on. */}
+            <CameraConfiguration
+              active={camerasActive}
+              cameras={cameras}
+              onCamerasChange={handleCamerasChange}
+              releaseStreamsRef={releaseStreamsRef}
+            />
+            {!camerasActive && (
               <div className="space-y-3 rounded-md border border-border bg-muted/30 p-6 text-center">
                 <Camera className="mx-auto h-10 w-10 text-muted-foreground" />
                 <div className="space-y-1">
@@ -2974,7 +3082,9 @@ const RobotConfigWindow = ({
                         selectedBatchSlots[0]?.label ??
                         t("robotConfig.batch.prompt.titleFallbackArm"),
                     })
-                  : t("robotConfig.batch.prompt.titleMulti")}
+                  : t("robotConfig.batch.prompt.titleMulti", {
+                      count: selectedBatchSlots.length,
+                    })}
               </DialogTitle>
               <DialogDescription>
                 {selectedBatchSlots.length === 1 ? (
