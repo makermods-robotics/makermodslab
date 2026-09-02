@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 TARGET_FPS = 15.0
 JPEG_QUALITY = 70
 
+# Capture resolution requested before the first read. Without a request cv2
+# takes the camera's DEFAULT format — 1920x1080 on the rig's KD-USB cameras —
+# and the UVC driver reserves isochronous bandwidth for that format's packet
+# size whether or not the (already MJPEG) frames fill it. Two 1080p
+# reservations exhaust one USB 2 hub, so a three-camera bimanual rig's third
+# preview opened but never delivered a frame (measured 2026-09-02: 25/25/0 fps
+# at default vs 30/30/30 fps at 640x480 on the same hub). A thumbnail needs no
+# more than the recorder's own 640x480; the camera's frame RATE is left alone
+# because `_frames` already paces clients to TARGET_FPS, and a camera-side cap
+# only slowed the first frame in testing.
+PREVIEW_WIDTH = 640
+PREVIEW_HEIGHT = 480
+
 # Same per-platform backend pin as recording (record._platform_backend) and the
 # /available-cameras enumeration: CAP_ANY can pick different backends across
 # calls on macOS, silently reordering indices, so a preview could show a
@@ -182,6 +195,11 @@ class CameraPreviewManager:
                             f"Camera {index} could not be opened — it may be unplugged or in use "
                             "by another application."
                         )
+                    # Request the thumbnail size BEFORE the first read (see
+                    # PREVIEW_WIDTH): the format negotiated here is what the
+                    # USB bandwidth reservation is sized for.
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, PREVIEW_WIDTH)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, PREVIEW_HEIGHT)
                     entry.cap = cap
                     # Keep entry.index describing the handle that actually
                     # exists: this open may be a re-open of an entry created
