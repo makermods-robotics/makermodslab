@@ -15,6 +15,8 @@ needed to run remote inference any more:
 | Modal wrappers for the GPU servers                        | `makermodslab/drtc/modal_policy.py`, `modal_policy_rtc.py`                                 |
 | Wire schemas / RTC core / latency estimator / offline sim | `makermodslab/drtc/_schema*.py`, `_rtc.py`, `_latency.py`, `_sync_player.py`, `_filter.py` |
 | Credential loading                                        | `makermodslab/drtc/_env.py` (re-exported by `_common.py`)                                  |
+| Parent↔child line protocol                               | `makermodslab/drtc_protocol.py`                                                            |
+| Start-pose capture / ease-in / return-to-rest             | `makermodslab/drtc/_pose.py`                                                               |
 | Local SFU scripts                                         | `tools/drtc/local_sfu.sh`, `tools/drtc/local_sfu_ts.sh`                                    |
 | Transport-only probe (no robot, no GPU)                   | `makermodslab/drtc/transport_probe.py`                                                     |
 | Design record                                             | `docs/drtc/ANALYSIS.md`, `SWEEP.md`, `SYNC_RESULTS.md` (verbatim from the source repo)     |
@@ -41,8 +43,11 @@ packets whose fingerprint differs on the two peers, so a mismatch does not
 raise — it presents as a healthy-looking session with 0 chunks and 0
 observations.
 
-Only `_env` is importable without the extra (it needs python-dotenv alone), so
-the credential-precedence tests run in ordinary CI.
+Three modules are importable **without** the extra, which is what keeps their
+tests in ordinary CI: `_env` (python-dotenv alone), `makermodslab/drtc_protocol.py`
+(stdlib alone — it is the parent's half of the line protocol, and the parent must
+never load the Portal dylib), and `_pose` (lerobot's motors, a hard dependency).
+Everything else in `makermodslab/drtc/` imports `livekit.portal` at module top.
 
 ## Credentials
 
@@ -70,6 +75,30 @@ Source 3 is the one behavioural change from the source repo, which read the
 local-SFU override from the **script's own directory**. Two live runs on
 2026-09-02 failed with "connection refused" because the robot was started from
 a different directory. `tests/test_drtc_env.py` pins the whole order down.
+
+### `read_env` vs `load_env`
+
+Two entry points, one precedence implementation:
+
+- **`load_env()`** resolves the four sources and writes them into `os.environ`.
+  For the CLI entrypoints, whose downstream code (`_common.mint_token`,
+  `policy.py`) reads credentials from the environment.
+- **`read_env() -> dict`** resolves the same four sources onto a **copy** of the
+  process environment and hands it back, mutating nothing. `load_env` is
+  implemented on top of it.
+
+Use `read_env` from anything long-lived. `load_env`'s `override=True` on
+sources 3 and 4 is a latent bug in a server process: once it has stamped a
+local-SFU URL into `os.environ`, **deleting `livekit.local.env` can never
+un-set it**, so the server keeps dialing a dead `ws://127.0.0.1:7880` until it
+restarts. `read_env` re-resolves from disk on every call, so a deleted override
+takes effect immediately. Both entry points are parametrized over the same
+precedence cases in `tests/test_drtc_env.py`.
+
+One deliberate narrowing: `${VAR}` interpolation inside these files resolves
+against the process environment only, not against a value contributed by an
+earlier source in the same chain. Nothing in `livekit.env.example` or the
+local-SFU scripts interpolates.
 
 ## GPU side, on Modal
 
@@ -120,11 +149,15 @@ modal secret create huggingface HF_TOKEN=hf_...
 modal secret create tailscale-auth TS_AUTHKEY=tskey-...
 ```
 
-**`LIVEKIT_ROOM` has no CLI flag.** On the GPU side it comes _only_ from the
-`LiveKit-cloud` secret, so it must equal the robot's `LIVEKIT_ROOM` in
-`livekit.env`. `--livekit-url` / `--livekit-api-key` / `--livekit-api-secret`
-_are_ per-run flags (that is how a run is pointed at a local SFU), but the room
-is not — two peers in different rooms simply never see each other.
+`--livekit-url` / `--livekit-api-key` / `--livekit-api-secret` / `--livekit-room`
+are all per-run flags; each unset one falls through to the `LiveKit-cloud`
+secret, so every pre-existing invocation is unchanged. `--livekit-room` was
+added on 2026-09-02 and closes a failure class that used to be silent: the room
+came _only_ from the secret, and two peers in different rooms never see each
+other — the robot reports a healthy connection with zero chunks forever. A
+launcher that already knows which room the robot joined can now pin the GPU to
+it. `modal_policy.py` records the room in its `/reset` `modal.Dict` too, so a
+respawn lands in the same room.
 
 `--fps` / `--horizon` / `--video-codec` must match the robot's flags, and for
 the RTC pair `--s-min` must match `robot_rtc`'s `--s_min` too.
@@ -166,6 +199,88 @@ python -m makermodslab.drtc.robot_sync \
     --robot.cameras='{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}' \
     --horizon=16
 ```
+
+### Safe start and stop (`robot_sync`, SO-101)
+
+`robot_sync` no longer snaps into the policy's first action, and no longer drops
+the arm at the end. Both behaviours are on by default; turning one off is for
+bench A/B only.
+
+**draccus has no `--no-<flag>` form.** Turn a boolean off with
+`--<flag> false` (or `--<flag>=False`) — `--no-adaptive`, which this repo's
+docstrings claimed since the port, has never worked. Same for `--align`,
+`--return_to_rest` and `--ease_in`.
+
+| Flag               | Default | What it does                                                                                                                                                                 |
+| ------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--ease_in`        | on      | When the FIRST action chunk lands, ramp the arm from where it is to that chunk's step-0 pose at the gentle profile speed, then start executing. Emits `EASING`.              |
+| `--return_to_rest` | on      | Capture the pose the arm starts in (right after `connect()`, **gripper excluded**) and drive it back there before torque is released, on every exit path. Emits `RETURNING`. |
+| `--livekit_url`    | (env)   | Pin the SFU URL instead of taking it from the credential files. Echoed back in `READY`.                                                                                      |
+| `--livekit_room`   | (env)   | Pin the room. Same rationale; pairs with `--livekit-room` on the Modal wrappers.                                                                                             |
+
+The gripper is excluded from the captured pose for the same reason teleoperation
+and recording exclude it: the policy may have left it holding something, and
+driving it back to its (likely open) starting width would drop the object
+mid-return. Replay includes it, because there the dataset drives the gripper.
+
+Both use `rest_pose.return_to_rest_pose` — the ease-in with `normalize=True` and
+`replay`'s normalized-unit tolerances (an arbitrary target), the return in raw
+ticks. **SO-101 only:** the CAN arms are not registered with draccus here at
+all, and Koch/OMX are Dynamixel, where those Feetech unit constants mean
+something else — `_pose.feetech_buses` gates on the bus type and the helpers
+no-op loudly otherwise. The ease-in additionally needs a SINGLE bus, so a
+bimanual BiSO robot gets the return but not the ramp.
+
+### Supervised operation: the stdin/stdout protocol
+
+`makermodslab/drtc_protocol.py` is the contract a parent process (the future
+`makermodslab/remote_inference.py`) drives `robot_sync` with. It is its own
+module, free of heavy imports, for the same reason `eval_protocol.py` is: the
+parent must never import `livekit.portal` (an FFI dylib behind the optional
+extra) and the child is exactly the process that does.
+
+Commands (parent → child stdin, one bare word per line):
+
+| Command      | Effect                                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `STOP`       | Leave the control loop, return to the captured start pose, disconnect, exit 0.                                                 |
+| `STOP` again | Set the abort event: the in-flight return is **cut short** and torque releases where the arm is — nearer rest than it started. |
+| `QUIT`       | Immediate: no return at all.                                                                                                   |
+
+**Ctrl-C takes the same path as `STOP`**, and a second Ctrl-C during the return
+cuts it short — a hand-run bench session gets the same teardown a supervised one
+does. EOF on stdin does **not** stop the run: an abandoned session is the
+server-side lease watchdog's job, and a child that died on a closed pipe would
+drop an energized arm the moment a log pump hiccuped.
+
+Events (child → stdout, prefix `MAKERMODSLAB-DRTC`, matched **anywhere** in the
+line so a log record flushed without its newline cannot swallow the event behind
+it):
+
+```
+MAKERMODSLAB-DRTC READY url=wss://x.livekit.cloud room=portal-lerobot-inference
+MAKERMODSLAB-DRTC EASING
+MAKERMODSLAB-DRTC CONNECTED
+MAKERMODSLAB-DRTC ACTIVE operator=policy
+MAKERMODSLAB-DRTC STATS {"t":1,"chunks":3,"reqs":4,...}
+MAKERMODSLAB-DRTC RETURNING
+MAKERMODSLAB-DRTC ERROR <message, whitespace collapsed to one line>
+MAKERMODSLAB-DRTC BYE
+```
+
+`READY` is emitted **before the bus is opened** and echoes the EFFECTIVE url and
+room the child resolved — not what the parent believes it passed — so a
+transport mismatch (or an SFU restarted between preflight and spawn) is caught
+before anything is energized.
+
+`STATS` goes out once a second **beside** the human `[robot]` line, which stays:
+it is the artifact that made the first live runs diagnosable, and it tees into
+the parent's log file the way `rollout.py`'s `_pump_stdout` tees lerobot's.
+Every key in `drtc_protocol.STATS_KEYS` is always present, `null` where unknown,
+so a typed status model can be exact instead of `exclude_none`. It is serialized
+with `json.dumps(..., separators=(",", ":"))` — `format_event` collapses
+whitespace in the payload, which is lossless for compact JSON only, and
+`tests/test_drtc_protocol.py` pins that.
 
 ### Two regimes — pick by policy type
 
@@ -227,17 +342,26 @@ needs only that one file plus
 ## Tests
 
 ```bash
-pytest tests/test_drtc_schedule.py tests/test_drtc_env.py
+pytest tests/test_drtc_schedule.py tests/test_drtc_env.py \
+       tests/test_drtc_protocol.py tests/test_drtc_pose.py
 ```
 
 - `tests/test_drtc_schedule.py` — the offline core: absolute-step alignment,
   last-write-wins merging, single-source prefix extraction, and the
   Jacobson-Karels estimator. It is the port of what used to be `_rtc.py`'s
   `__main__` self-test block.
-- `tests/test_drtc_env.py` — credential precedence (the four sources above).
+- `tests/test_drtc_env.py` — credential precedence (the four sources above),
+  parametrized over both `load_env` and `read_env`.
+- `tests/test_drtc_protocol.py` — the line protocol: round-trip,
+  prefix-anywhere, compact-JSON survival of the whitespace collapse, the
+  always-present STATS key set, and the two-STOP rule.
+- `tests/test_drtc_pose.py` — bus discovery, gripper exclusion, and the
+  action→bus target mapping, with fake buses.
 
-Neither needs LiveKit, hardware or a GPU, so both run in ordinary CI without the
-extra installed.
+None needs LiveKit, hardware or a GPU, so all four run in ordinary CI without
+the extra installed. The `return_to_rest_pose` poll loop itself is deliberately
+NOT re-tested here — it settles for `RETURN_SETTLE_S` and is already covered by
+the replay tests; driving it would mean sleeping.
 
 The adaptive-sync simulation that produced `SYNC_RESULTS.md` is still a
 `__main__` block, since it is a benchmark rather than a test:
@@ -246,18 +370,41 @@ The adaptive-sync simulation that produced `SYNC_RESULTS.md` is still a
 python -m makermodslab.drtc._sync_player
 ```
 
-## Not yet done (this port deliberately stops here)
+## Done since the port (S3.1, 2026-09-02)
+
+The design record is [`SLICE3.md`](SLICE3.md); this is what its S3.1 slice
+landed, `robot_sync` only.
+
+- **Return-to-rest on stop, for the SO-101** — see "Safe start and stop" above.
+  Every exit path (STOP, Ctrl-C, duration elapsed, a crash) drives the arm back
+  to its captured start pose before torque is released; a second STOP cuts the
+  return short.
+- **A first-action ease-in**, replacing the snap into the policy's first
+  commanded pose.
+- **A supervised stdin/stdout protocol** (`makermodslab/drtc_protocol.py`) with
+  a 1 Hz machine-readable `STATS` line.
+- **`--livekit_url` / `--livekit_room`** on `robot_sync`, **`--livekit-room`** on
+  both Modal wrappers, and **`_env.read_env()`** for the long-lived server.
+
+## Not yet done
 
 - **No API surface.** There is no session kind, no route, no mutex entry and no
   `session_events` emission. Nothing starts these entrypoints but a human at a
   shell. A robot-driving feature must add reciprocal checks against every
   existing feature, emit at its transitions, and join `STARTABLE_KINDS` — see
-  the state-model section of the root `CLAUDE.md`.
-- **No return-to-rest on stop.** Both entrypoints call `robot.disconnect()`
-  straight out of the control loop. That is survivable for an SO-101 and is
-  **not** safe for a CAN arm, which has no brakes and drops under gravity when
-  torque is released anywhere but near its resting pose (`maker_rest_pose.py`).
-  The registered robot types are currently SO-101/Koch/OMX only.
-- **No startup ramp or `max_relative_target`.** The first `send_action` after
-  connect goes straight to the policy's first action — the same snap-to-pose
-  family of issue analysed for teleop/record on 2026-09-01.
+  the state-model section of the root `CLAUDE.md`. That is S3.2/S3.3.
+- **No frontend.** S3.4, after the studio rework merges.
+- **`robot_rtc` is untouched.** It still calls `robot.disconnect()` straight out
+  of its control loop, with no ease-in, no stdin protocol and no
+  `--livekit_url`/`--livekit_room`. Slice 3 is adaptive-sync only; if the RTC
+  regime is ever brought under a session it needs the same treatment.
+- **No CAN-arm support here, and none planned in this slice.** `maker_follower`
+  / `metal_follower` are not registered with draccus in either entrypoint, so
+  `--robot.type=maker_follower` fails at CLI-parse time inside the child —
+  after a parent would have claimed and preflighted the arm. S3.2 must refuse
+  CAN arms synchronously and pre-claim (`supports_remote_inference` in
+  `arm_capabilities.py`). Bimanual SO-101 gets the return but not the ease-in,
+  so it should be refused for now too.
+- **No `max_relative_target`.** The ease-in covers the entry jump; per-tick
+  relative clamping during the run is still absent (as it is in
+  `lerobot-rollout`, whose `max_relative_target` also defaults to `None`).

@@ -32,8 +32,9 @@ One-time setup
 
 3. Point the robot side at the SAME `LIVEKIT_URL` / key / secret / room — write
    them to `~/.cache/huggingface/lerobot/livekit.env` (see
-   docs/drtc/livekit.env.example). `LIVEKIT_ROOM` is set ONLY by this secret on
-   the GPU side, so it must match.
+   docs/drtc/livekit.env.example). The secret's `LIVEKIT_ROOM` is the DEFAULT
+   room on the GPU side; `--livekit-room` overrides it per run, which is how a
+   launcher pins both peers to the same room without editing the secret.
 
 Run
 ---
@@ -46,6 +47,10 @@ Run
     modal run makermodslab/drtc/modal_policy.py --policy-path ${HF_USER}/my_policy \
         --tailscale --livekit-url ws://100.x.y.z:7880 \
         --livekit-api-key <key> --livekit-api-secret <secret>
+
+    # pin the room explicitly (mirrors robot_sync.py's --livekit_room):
+    modal run makermodslab/drtc/modal_policy.py --policy-path ${HF_USER}/my_policy \
+        --livekit-room portal-lerobot-inference
 
 `--horizon` MUST match the robot side's `--horizon`. DRTC knobs (`--s_min`,
 `--epsilon`, `--pacing`, ...) are flags on whichever robot script you run
@@ -457,6 +462,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     livekit_url: str = "",
     livekit_api_key: str = "",
     livekit_api_secret: str = "",
+    livekit_room: str = "",
     tailscale: bool = False,
 ) -> None:
     # Shipped via add_local_dir; imported HERE (not at module top) because this
@@ -476,6 +482,15 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         os.environ["LIVEKIT_API_KEY"] = livekit_api_key
     if livekit_api_secret:
         os.environ["LIVEKIT_API_SECRET"] = livekit_api_secret
+
+    # `LIVEKIT_ROOM` used to be settable ONLY by the `LiveKit-cloud` secret, which
+    # made "the two peers are in different rooms" a silent failure — they simply
+    # never see each other, and the robot reports a healthy connection with zero
+    # chunks forever. `--livekit-room` closes that class: a launcher that already
+    # knows which room the robot is in can pin this run to it. Unset still falls
+    # through to the secret, so every existing invocation is unchanged.
+    if livekit_room:
+        os.environ["LIVEKIT_ROOM"] = livekit_room
 
     # Tailscale hybrid: join the tailnet, stand up the loopback->SOCKS5 relay,
     # and point LIVEKIT_URL at the relay instead of the tailnet address. Media
@@ -506,6 +521,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
         "livekit_url": livekit_url,
         "livekit_api_key": livekit_api_key,
         "livekit_api_secret": livekit_api_secret,
+        "livekit_room": livekit_room,
         # Recorded so /reset replays onto the right twin (serve_ts vs serve).
         "tailscale": tailscale,
     }
@@ -612,6 +628,7 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
     livekit_url: str = "",
     livekit_api_key: str = "",
     livekit_api_secret: str = "",
+    livekit_room: str = "",
     tailscale: bool = False,
 ) -> None:
     # --tailscale routes to the twin function that carries the tailscale-auth
@@ -627,5 +644,6 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
         livekit_url=livekit_url,
         livekit_api_key=livekit_api_key,
         livekit_api_secret=livekit_api_secret,
+        livekit_room=livekit_room,
         tailscale=tailscale,
     )

@@ -59,22 +59,53 @@ Run it with the same ``--robot.*`` CLI you already use for `lerobot-record`::
 
     # baseline (fixed lead, like the lerobot_inference prototype's robot.py):
     python -m makermodslab.drtc.robot_sync --robot.type=so101_follower ... \
-        --no-adaptive --base_lead=2
+        --adaptive false --base_lead=2
+
+draccus has NO ``--no-<flag>`` form for booleans (it is not argparse's
+BooleanOptionalAction): turn one off with ``--<flag> false`` / ``--<flag>=False``.
+The pre-port docstring said ``--no-adaptive``, which has never worked here.
 
 ``--horizon`` MUST match policy.py's ``--horizon`` and should equal the
 checkpoint's ``n_action_steps`` (and be ``<=`` its ``chunk_size``) so one
-transmitted chunk is exactly one open-loop block. LiveKit creds + room come from
+transmitted chunk is exactly one open-loop block. LiveKit creds come from
 `~/.cache/huggingface/lerobot/livekit.env` (a local SFU's override comes from
 `~/.cache/huggingface/lerobot/livekit.local.env`, written by
-`tools/drtc/local_sfu*.sh`; see `_env.load_env` for the full precedence). The
-remote policy runs in this package's `policy.py`, launched on Modal by
+`tools/drtc/local_sfu*.sh`; see `_env.load_env` for the full precedence), and
+``--livekit_url`` / ``--livekit_room`` pin either one explicitly for a parent
+that has already verified the transport. The remote policy runs in this
+package's `policy.py`, launched on Modal by
 `modal run makermodslab/drtc/modal_policy.py` (see docs/drtc/README.md).
+
+Not portable back to the standalone repo
+----------------------------------------
+This file used to be a pure LiveKit/lerobot client that the `livekit-drtc` repo
+could have taken back unchanged. It no longer is: it imports
+`makermodslab.drtc_protocol` (the stdin/stdout line protocol a Lab feature
+module drives it with) and `._pose` (which imports `makermodslab.rest_pose`, so
+a stop returns the arm to where the operator left it before torque is
+released). That is the real, accepted cost of integration — the safety
+behaviour and the supervised lifecycle are the whole point of bringing it
+in-tree, and neither can be expressed without Lab modules. `_schema.py`,
+`_sync_player.py`, `_latency.py` and `policy.py` remain dependency-free and
+still are portable.
+
+Supervised operation
+--------------------
+A parent (`makermodslab.remote_inference`, S3.2) spawns this with pipes and
+speaks `makermodslab.drtc_protocol`: `STOP` on stdin leaves the loop, returns
+the arm to its captured start pose and exits 0; a SECOND `STOP` cuts that
+return short; `QUIT` skips it entirely. Ctrl-C takes the same path as `STOP` —
+a hand-run bench session gets the same safe teardown a supervised one does.
+Progress goes out on stdout as `MAKERMODSLAB-DRTC` events, including a 1 Hz
+`STATS` line beside the human `[robot]` one.
 
 NOTE: no `from __future__ import annotations` here — it would stringize the
 `main(cfg: RobotSideConfig)` signature and break draccus's config-type lookup.
 """
 
 import asyncio
+import contextlib
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -104,8 +135,23 @@ from lerobot.robots import (  # noqa: F401
 )
 from lerobot.utils.import_utils import register_third_party_plugins
 
+from ..drtc_protocol import (
+    EVENT_ACTIVE,
+    EVENT_BYE,
+    EVENT_CONNECTED,
+    EVENT_EASING,
+    EVENT_ERROR,
+    EVENT_READY,
+    EVENT_RETURNING,
+    EVENT_STATS,
+    format_event,
+    format_ready,
+    format_stats,
+    pump_commands,
+)
 from ._common import fmt_us, load_env, mint_token, required_env
 from ._latency import JKLatencyEstimator
+from ._pose import capture_start_poses, ease_to_action, ensure_uncapped, return_to_start_poses
 from ._schema import CHUNK_NAME, robot_wire_schema
 from ._sync_player import AdaptiveBlockPlayer
 
@@ -114,6 +160,25 @@ from ._sync_player import AdaptiveBlockPlayer
 register_third_party_plugins()
 
 IDENTITY = "robot"
+
+
+def _emit(event: str, payload: str = "") -> None:
+    """Write one protocol event to stdout, flushed.
+
+    stdout is a pipe under a supervising parent, so it is block-buffered by
+    default — without the flush the parent would not see CONNECTED (or a
+    per-second STATS) until 4-8 KB of unrelated lerobot log had accumulated
+    behind it, which is most of a short run."""
+    print(format_event(event, payload), flush=True)
+
+
+def _or_none(value):
+    """Portal's metrics report 0 for "no sample yet"; STATS reports that as null.
+
+    A genuine 0 µs e2e or RTT is not physically reachable, so collapsing the
+    two is safe and keeps the "null means unknown" contract honest for the
+    parent's typed status model."""
+    return value or None
 
 
 @dataclass
@@ -167,7 +232,7 @@ class RobotSideConfig:
         default=True,
         metadata={
             "help": "Adapt the prefetch lead to measured round-trip latency "
-            "(lead = estimate_steps + base_lead). --no-adaptive falls "
+            "(lead = estimate_steps + base_lead). `--adaptive false` falls "
             "back to a FIXED lead of base_lead, i.e. the "
             "lerobot_inference prototype's robot.py baseline."
         },
@@ -176,7 +241,7 @@ class RobotSideConfig:
         default=2,
         metadata={
             "help": "Margin (epsilon) added to the latency estimate to form the "
-            "prefetch lead; in --no-adaptive mode this IS the fixed lead. "
+            "prefetch lead; with `--adaptive false` this IS the fixed lead. "
             "Request the next chunk once the runway drops to `lead`."
         },
     )
@@ -194,7 +259,7 @@ class RobotSideConfig:
             "help": "Resume each incoming chunk at the step aligned to NOW "
             "(drop the stale prefix) instead of index 0. Fixes the "
             "~lead-step backward SNAP at every block boundary. "
-            "--no-align reverts to raw play-from-0 for A/B comparison."
+            "`--align false` reverts to raw play-from-0 for A/B comparison."
         },
     )
     action_delay: int = field(
@@ -208,15 +273,85 @@ class RobotSideConfig:
     latency_beta: float = field(default=0.25, metadata={"help": "JK estimator smoothing (deviation)"})
     latency_k: float = field(default=1.5, metadata={"help": "JK estimator deviation multiplier"})
 
+    # --- transport pinning -------------------------------------------------
+    livekit_url: str = field(
+        default="",
+        metadata={
+            "help": "SFU URL to dial. Unset falls back to LIVEKIT_URL from the "
+            "credential files (see _env.load_env's precedence). Pin it when "
+            "a parent has already verified the transport, so the whole "
+            "'parent probed room X, the child's .env.local said room Y' "
+            "class of failure cannot happen; the effective value is echoed "
+            "back in the READY event."
+        },
+    )
+    livekit_room: str = field(
+        default="",
+        metadata={
+            "help": "Room to join. Unset falls back to LIVEKIT_ROOM. Same "
+            "rationale as --livekit_url; note the GPU side's room comes ONLY "
+            "from its Modal secret unless it is launched with --livekit-room."
+        },
+    )
+
+    # --- graceful stop -----------------------------------------------------
+    return_to_rest: bool = field(
+        default=True,
+        metadata={
+            "help": "Capture the pose the arm starts in and drive it back there "
+            "before releasing torque, on every exit path (STOP, Ctrl-C, "
+            "duration elapsed, or a crash). ON by default: the safe "
+            "behaviour is the right default everywhere, and cutting torque "
+            "wherever the policy left the arm drops it. `--return_to_rest false` "
+            "is a bench A/B flag. The GRIPPER is excluded from the captured "
+            "pose (the policy may have left it holding something), matching "
+            "teleoperation and recording rather than replay."
+        },
+    )
+    ease_in: bool = field(
+        default=True,
+        metadata={
+            "help": "Ramp the arm from wherever it is to the first chunk's step-0 "
+            "pose before executing, instead of stepping straight to it at "
+            "full speed. ON by default for the same reason as "
+            "--return_to_rest; `--ease_in false` is the A/B baseline that "
+            "reproduces the pre-2026-09-02 snap."
+        },
+    )
+
 
 async def run(cfg: RobotSideConfig) -> None:
+    # A supervising parent drives these three over stdin (see drtc_protocol):
+    # STOP -> stop_event (leave the loop, return, exit 0); a second STOP ->
+    # abort_event (cut the return short); QUIT -> all three (no return at all).
+    stop_event = threading.Event()
+    abort_event = threading.Event()
+    quit_event = threading.Event()
+
     load_env()
-    url = required_env("LIVEKIT_URL")
-    room = required_env("LIVEKIT_ROOM")
+    # Flags win over the credential files so a parent can pin the transport it
+    # actually verified. The EFFECTIVE values — not what anyone believes they
+    # passed — are what READY reports and what we dial.
+    url = cfg.livekit_url or required_env("LIVEKIT_URL")
+    room = cfg.livekit_room or required_env("LIVEKIT_ROOM")
     token = mint_token(IDENTITY, room)
+    # Emitted BEFORE the bus is opened, so a parent that spots a transport
+    # mismatch can kill the child before anything is energized.
+    _emit(EVENT_READY, format_ready(url, room))
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
+
+    # Only now is it safe to read stdin: SOFollower.calibrate() prompts with
+    # input() during connect() on an uncalibrated arm, reading the very same
+    # stdin, and racing that prompt with this reader would let a real command be
+    # eaten by the prompt. Daemon so an EOF-blocked read never holds up exit.
+    threading.Thread(
+        target=pump_commands,
+        args=(sys.stdin, stop_event, abort_event, quit_event),
+        name="drtc-robot-stdin",
+        daemon=True,
+    ).start()
 
     schema, state_keys, action_keys = robot_wire_schema(robot)
     print(
@@ -225,103 +360,122 @@ async def run(cfg: RobotSideConfig) -> None:
     print(f"[robot]   state keys : {state_keys}")
     print(f"[robot]   action keys: {action_keys}")
 
-    codec = getattr(VideoCodec, cfg.video_codec.upper())
-
-    portal_cfg = PortalRobotConfig(room)
-    for cam in schema.cameras:
-        portal_cfg.add_video(
-            cam,
-            codec=codec,
-            quality=cfg.video_quality,
-            max_bitrate_kbps=cfg.video_bitrate_kbps,
+    # Capture where the operator left the arm, now — after connect, before
+    # anything moves — so every exit path can drive it back there while torque
+    # is still on. Empty for a non-Feetech (Koch/OMX) arm, which makes the
+    # return a logged no-op rather than a wrong-units move; see _pose.py.
+    start_poses = capture_start_poses(robot) if cfg.return_to_rest else []
+    if cfg.return_to_rest and not start_poses:
+        print(
+            "[robot] WARNING: no Feetech bus to capture a start pose from; torque will be released in place"
         )
-    portal_cfg.add_state_typed(schema.state_fields())
-    portal_cfg.add_action_chunk(CHUNK_NAME, horizon=cfg.horizon, fields=schema.action_fields())
-    portal_cfg.set_fps(cfg.fps)
-    # H264 (RTP) video and reliable state (SCTP) travel different transports; under
-    # upload pressure the reliable channel lags and misaligns state/video at the
-    # policy's sync buffer. So for H264 state stays UNRELIABLE (real-time). Byte-stream
-    # video (MJPEG/PNG/RAW) shares the SCTP transport with state, so there state SHOULD
-    # be reliable to stay in lockstep. Auto-follow the codec; --reliable_state forces on.
-    _byte_stream_video = cfg.video_codec.upper() in ("MJPEG", "PNG", "RAW")
-    portal_cfg.set_state_reliable(cfg.reliable_state or _byte_stream_video)
 
-    portal = Robot(portal_cfg)
-
-    # The player owns the JK estimator; we build it explicitly so the CLI knobs
-    # flow through and so the log line can read its state each second.
-    estimator = JKLatencyEstimator(
-        fps=cfg.fps,
-        action_chunk_size=cfg.horizon,
-        s_min=cfg.s_min,
-        alpha=cfg.latency_alpha,
-        beta=cfg.latency_beta,
-        k=cfg.latency_k,
-    )
-    player = AdaptiveBlockPlayer(
-        horizon=cfg.horizon,
-        fps=cfg.fps,
-        adaptive=cfg.adaptive,
-        margin=cfg.base_lead,
-        s_min=cfg.s_min,
-        align=cfg.align,
-        action_delay=cfg.action_delay,
-        estimator=estimator,
-    )
-
-    # push()/record_roundtrip() run on a Portal transport thread; step() /
-    # should_request() run on the control loop below. Guard the shared player
-    # (and its estimator) with a single lock.
-    lock = threading.Lock()
-    chunks_received = 0
-    uncorrelated_chunks = 0
-    # Maps an emitted observation's timestamp -> the control tick it was sent on,
-    # so a returned chunk (which carries in_reply_to_ts_us) can be aligned onto
-    # the absolute step axis. Bounded; oldest entries evicted FIFO.
-    sent_obs: OrderedDict[int, int] = OrderedDict()
-    obs_ttl = 4 * cfg.horizon
-
-    def on_chunk(chunk: ActionChunk) -> None:
-        # Correlate the returned chunk to the observation that produced it via
-        # `in_reply_to_ts_us` (the obs timestamp the policy echoes back): feed the
-        # true end-to-end round-trip to the estimator so the prefetch lead tracks
-        # real latency, and recover the control tick that observation was sent on
-        # so the player can align the swap to NOW. Then stage the chunk; step()
-        # swaps it in when the current block drains (never truncating it).
-        nonlocal chunks_received, uncorrelated_chunks
-        now_us = int(time.time() * 1_000_000)
-        reply_ts = chunk.in_reply_to_ts_us
-        with lock:
-            chunks_received += 1
-            src_step = sent_obs.get(reply_ts) if reply_ts else None
-            if reply_ts:
-                player.record_roundtrip((now_us - reply_ts) / 1_000_000.0)
-            if src_step is None:
-                # No matching obs (evicted / no reply ts): fall back to play-from-0
-                # for this chunk by leaving src_step None (align no-ops).
-                uncorrelated_chunks += 1
-            player.push(chunk, src_step)
-
-    portal.on_action_chunk(CHUNK_NAME, on_chunk)
-
-    print(f"[robot] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
-    await portal.connect(url, token)
-    print(
-        f"[robot] connected; {cfg.fps} fps, block horizon {cfg.horizon}, "
-        f"adaptive={'on' if cfg.adaptive else 'off'} (base_lead={cfg.base_lead}, "
-        f"s_min={cfg.s_min}), align={'on' if cfg.align else 'off'}"
-    )
-
-    interval = 1.0 / cfg.fps
-    start = time.monotonic()
-    next_tick = start
-    last_log = start
-    observations_emitted = 0
-    control_step = 0
-    last_action: dict[str, float] | None = None
-
+    portal = None
     try:
+        codec = getattr(VideoCodec, cfg.video_codec.upper())
+
+        portal_cfg = PortalRobotConfig(room)
+        for cam in schema.cameras:
+            portal_cfg.add_video(
+                cam,
+                codec=codec,
+                quality=cfg.video_quality,
+                max_bitrate_kbps=cfg.video_bitrate_kbps,
+            )
+        portal_cfg.add_state_typed(schema.state_fields())
+        portal_cfg.add_action_chunk(CHUNK_NAME, horizon=cfg.horizon, fields=schema.action_fields())
+        portal_cfg.set_fps(cfg.fps)
+        # H264 (RTP) video and reliable state (SCTP) travel different transports; under
+        # upload pressure the reliable channel lags and misaligns state/video at the
+        # policy's sync buffer. So for H264 state stays UNRELIABLE (real-time). Byte-stream
+        # video (MJPEG/PNG/RAW) shares the SCTP transport with state, so there state SHOULD
+        # be reliable to stay in lockstep. Auto-follow the codec; --reliable_state forces on.
+        _byte_stream_video = cfg.video_codec.upper() in ("MJPEG", "PNG", "RAW")
+        portal_cfg.set_state_reliable(cfg.reliable_state or _byte_stream_video)
+
+        portal = Robot(portal_cfg)
+
+        # The player owns the JK estimator; we build it explicitly so the CLI knobs
+        # flow through and so the log line can read its state each second.
+        estimator = JKLatencyEstimator(
+            fps=cfg.fps,
+            action_chunk_size=cfg.horizon,
+            s_min=cfg.s_min,
+            alpha=cfg.latency_alpha,
+            beta=cfg.latency_beta,
+            k=cfg.latency_k,
+        )
+        player = AdaptiveBlockPlayer(
+            horizon=cfg.horizon,
+            fps=cfg.fps,
+            adaptive=cfg.adaptive,
+            margin=cfg.base_lead,
+            s_min=cfg.s_min,
+            align=cfg.align,
+            action_delay=cfg.action_delay,
+            estimator=estimator,
+        )
+
+        # push()/record_roundtrip() run on a Portal transport thread; step() /
+        # should_request() run on the control loop below. Guard the shared player
+        # (and its estimator) with a single lock.
+        lock = threading.Lock()
+        chunks_received = 0
+        uncorrelated_chunks = 0
+        # Maps an emitted observation's timestamp -> the control tick it was sent on,
+        # so a returned chunk (which carries in_reply_to_ts_us) can be aligned onto
+        # the absolute step axis. Bounded; oldest entries evicted FIFO.
+        sent_obs: OrderedDict[int, int] = OrderedDict()
+        obs_ttl = 4 * cfg.horizon
+
+        def on_chunk(chunk: ActionChunk) -> None:
+            # Correlate the returned chunk to the observation that produced it via
+            # `in_reply_to_ts_us` (the obs timestamp the policy echoes back): feed the
+            # true end-to-end round-trip to the estimator so the prefetch lead tracks
+            # real latency, and recover the control tick that observation was sent on
+            # so the player can align the swap to NOW. Then stage the chunk; step()
+            # swaps it in when the current block drains (never truncating it).
+            nonlocal chunks_received, uncorrelated_chunks
+            now_us = int(time.time() * 1_000_000)
+            reply_ts = chunk.in_reply_to_ts_us
+            with lock:
+                chunks_received += 1
+                src_step = sent_obs.get(reply_ts) if reply_ts else None
+                if reply_ts:
+                    player.record_roundtrip((now_us - reply_ts) / 1_000_000.0)
+                if src_step is None:
+                    # No matching obs (evicted / no reply ts): fall back to play-from-0
+                    # for this chunk by leaving src_step None (align no-ops).
+                    uncorrelated_chunks += 1
+                player.push(chunk, src_step)
+
+        portal.on_action_chunk(CHUNK_NAME, on_chunk)
+
+        print(f"[robot] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
+        await portal.connect(url, token)
+        _emit(EVENT_CONNECTED)
+        print(
+            f"[robot] connected; {cfg.fps} fps, block horizon {cfg.horizon}, "
+            f"adaptive={'on' if cfg.adaptive else 'off'} (base_lead={cfg.base_lead}, "
+            f"s_min={cfg.s_min}), align={'on' if cfg.align else 'off'}"
+        )
+
+        interval = 1.0 / cfg.fps
+        start = time.monotonic()
+        next_tick = start
+        last_log = start
+        observations_emitted = 0
+        control_step = 0
+        last_action: dict[str, float] | None = None
+        eased = False
+        active_seen = False
+
         while cfg.duration_s <= 0 or (time.monotonic() - start) < cfg.duration_s:
+            if stop_event.is_set():
+                # STOP / QUIT / Ctrl-C. Leave the loop; the finally below owns
+                # the return-to-rest and the release.
+                print("[robot] stop requested")
+                break
             ts_us = int(time.time() * 1_000_000)
 
             # 1. Execute one action from the current block. On a dry schedule
@@ -336,10 +490,57 @@ async def run(cfg: RobotSideConfig) -> None:
                 lead = player.current_lead()
             if cmd is not None:
                 action = {action_keys[idx]: cmd[f"a{idx}"] for idx in range(len(action_keys))}
+                if not eased:
+                    eased = True
+                    # FIRST-ACTION EASE-IN. Until now nothing has been sent, so
+                    # the arm is still exactly where the operator left it and
+                    # this is the one send that can be an arbitrarily large
+                    # jump. Ramp into it (see _pose.ease_to_action) instead.
+                    #
+                    # The loop is deliberately BLOCKED for the duration: no
+                    # tick advances, no observation goes out, so no request is
+                    # in flight to go stale — the player's pending flag
+                    # guarantees at most one outstanding request and pushing
+                    # this chunk already cleared it. Because control_step and
+                    # the wall clock are frozen TOGETHER, the player's
+                    # step-axis alignment stays coherent; only the mapping from
+                    # step to wall time gains an offset, which we absorb below
+                    # rather than letting the pacing loop burst to catch up.
+                    if cfg.ease_in:
+                        ease_started = time.monotonic()
+                        _emit(EVENT_EASING)
+                        _arrived, reason = ease_to_action(robot, action, abort_event=stop_event)
+                        print(f"[robot] first-action ease-in: {reason}")
+                        # Unconditionally, not just on arrival: the ease stamps
+                        # a gentle RETURN_POS_SPEED profile cap into RAM
+                        # Goal_Velocity on EVERY exit path, and a survivor would
+                        # throttle the whole run (see _pose.ensure_uncapped).
+                        # An ease that settled short still proceeds — the arm is
+                        # closer to the plan than it was, and refusing to run
+                        # would leave it energized mid-air for no gain.
+                        ensure_uncapped(robot)
+                        eased_for = time.monotonic() - ease_started
+                        start += eased_for
+                        last_log += eased_for
+                        next_tick = time.monotonic()
+                        if stop_event.is_set():
+                            # A stop landed during the ease; it came back
+                            # cut-short. Skip execution entirely.
+                            print("[robot] stop requested during the ease-in")
+                            break
                 robot.send_action(action)
                 last_action = action
             elif last_action is not None:
                 robot.send_action(last_action)
+
+            if not active_seen:
+                # Poll every tick only until the first operator appears: this is
+                # the transition a supervising parent's "did the GPU ever join?"
+                # watchdog waits on, so a 1 Hz sample would cost it a second.
+                operator = portal.active_operator()
+                if operator is not None:
+                    active_seen = True
+                    _emit(EVENT_ACTIVE, f"operator={operator}")
 
             # 2. Request the NEXT block only when the runway drops to the ADAPTIVE
             #    lead — one inference per block, timed to the measured round-trip
@@ -372,13 +573,45 @@ async def run(cfg: RobotSideConfig) -> None:
                     degrade = player.in_degrade
                     holds = player.holds
                 age_str = "-" if age is None else f"{age:.0f}ms"
+                operator = portal.active_operator()
+                elapsed = int(now - start)
+                # The human line stays: it is the artifact that made the first
+                # live runs diagnosable, and it tees into the parent's log file
+                # exactly the way rollout.py's _pump_stdout tees lerobot's.
                 print(
-                    f"[robot] t={int(now - start):>3}s chunks={chunks} reqs={observations_emitted} "
+                    f"[robot] t={elapsed:>3}s chunks={chunks} reqs={observations_emitted} "
                     f"sched={runway} lead={lead} lat={est_steps}st/{est_ms:.0f}ms "
                     f"holds={holds}{' DEGRADE' if degrade else ''} chunk_age={age_str} "
-                    f"active={portal.active_operator()} "
+                    f"active={operator} "
                     f"e2e={fmt_us(m.policy.e2e_us_p50)}/{fmt_us(m.policy.e2e_us_p95)} (p50/p95) "
                     f"rtt={fmt_us(m.rtt.rtt_us_last)}" + (f" uncorr={uncorr}" if uncorr else "")
+                )
+                # ... and beside it, the machine-readable twin. Every key
+                # always present (null where unknown) so the parent's status
+                # response model can be exact — see drtc_protocol.STATS_KEYS.
+                _emit(
+                    EVENT_STATS,
+                    format_stats(
+                        {
+                            "t": elapsed,
+                            "chunks": chunks,
+                            "reqs": observations_emitted,
+                            "sched": runway,
+                            "lead": lead,
+                            "s_min": cfg.s_min,
+                            "horizon": cfg.horizon,
+                            "lat_steps": est_steps,
+                            "lat_ms": round(est_ms, 1),
+                            "holds": holds,
+                            "degrade": bool(degrade),
+                            "chunk_age_ms": None if age is None else round(age, 1),
+                            "active": operator,
+                            "e2e_p50_us": _or_none(m.policy.e2e_us_p50),
+                            "e2e_p95_us": _or_none(m.policy.e2e_us_p95),
+                            "rtt_us": _or_none(m.rtt.rtt_us_last),
+                            "uncorr": uncorr,
+                        }
+                    ),
                 )
                 last_log = now
 
@@ -387,11 +620,44 @@ async def run(cfg: RobotSideConfig) -> None:
             sleep_for = next_tick - time.monotonic()
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
+    except KeyboardInterrupt:
+        # Ctrl-C takes exactly the STOP path, not the old raw disconnect: a
+        # hand-run bench session gets the same return-before-release a
+        # supervised one does. Swallowed so the process still exits 0.
+        print("[robot] interrupted (Ctrl-C)")
+        stop_event.set()
+    except Exception as exc:
+        _emit(EVENT_ERROR, str(exc))
+        raise
     finally:
+        # Order is load-bearing: the return needs torque, and it is
+        # robot.disconnect() that releases it. QUIT is the one path that skips
+        # the return — it means "stop now", and the caller has accepted that
+        # the arm stays where it is.
+        if start_poses and not quit_event.is_set():
+            _emit(EVENT_RETURNING)
+            print("[robot] returning to the start pose ...")
+            try:
+                return_to_start_poses(start_poses, abort_event=abort_event)
+            except KeyboardInterrupt:
+                # A second Ctrl-C during the return is the second STOP press:
+                # cut it short and release where the arm is — nearer rest than
+                # it started — rather than leaving it energized indefinitely.
+                abort_event.set()
+                print("[robot] return cut short by a second Ctrl-C")
         print("[robot] disconnecting...")
-        await portal.disconnect()
-        portal.close()
+        # `portal` is None when the failure landed before it was built (a bad
+        # codec name, a camera that would not open) — the arm is connected and
+        # energized by then, so the return above and this release still have to
+        # run. Suppressed individually so a transport teardown error can never
+        # cost the arm its torque release.
+        if portal is not None:
+            with contextlib.suppress(Exception):
+                await portal.disconnect()
+            with contextlib.suppress(Exception):
+                portal.close()
         robot.disconnect()
+        _emit(EVENT_BYE)
 
 
 @draccus.wrap()

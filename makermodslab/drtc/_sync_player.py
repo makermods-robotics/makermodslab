@@ -126,7 +126,7 @@ class AdaptiveBlockPlayer:
     def current_lead(self) -> int:
         """Runway (in actions) at which we request the next block.
 
-        Adaptive: ``estimate_steps + margin``. Fixed (``--no-adaptive``): the
+        Adaptive: ``estimate_steps + margin``. Fixed (``--adaptive false``): the
         constant ``margin`` (i.e. the baseline ``prefetch_lead``). Always clamped
         to ``[1, H-1]`` — ``H-1`` is the degrade limit "request one tick after the
         boundary", ``1`` never lets it collapse to zero prefetch.
