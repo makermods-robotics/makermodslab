@@ -109,6 +109,15 @@ Not letting a wiring mistake break a servo:
 - 🛑 **Graceful stops** — teleop and auto-calibration freeze, return to the start pose, then release torque. Hit _Stop_ twice for an instant release.
 - 🔋 **Motor power limiting** — cap per-robot motor power, with a live supply-voltage readout and session power telemetry.
 
+The SO-101 split-host field trial has a separate, safety-gated runbook.
+Maintainers can start with the
+[PR review bundle](docs/architecture/remote-teleoperation-pr-summary.md), then
+follow the [two-laptop quickstart](docs/remote-teleop/two-laptop-quickstart.md).
+Live enable requires a matching secured-arm commissioning record, not merely a
+saved remote-role configuration. The
+[software validation record](docs/remote-teleop/software-validation.md) keeps
+deterministic evidence separate from physical-arm acceptance.
+
 ### Robots & calibration
 
 - 🤝 **Robots as first-class objects** — create a robot through a dialog with an immutable arm layout (single or bimanual), and reuse it across every feature.

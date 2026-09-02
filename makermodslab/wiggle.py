@@ -25,6 +25,14 @@ from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
 from .api_errors import ErrorCode
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .session_events import notify_session_changed
 
 logger = logging.getLogger(__name__)
@@ -40,6 +48,7 @@ _WIGGLE_TIMEOUT_S = 15.0
 # one-shot action — so this is the self-check half of the reciprocal mutex
 # with teleop/record/inference/calibration/auto-calibration (see CLAUDE.md).
 wiggle_active = False
+_hardware_lease_token: HardwareLeaseToken | None = None
 
 
 def plan_wiggle(
@@ -94,7 +103,10 @@ def _wiggle_gripper_sync(port: str) -> None:
         bus.write("Goal_Position", "gripper", rest, normalize=False)
         time.sleep(0.3)
     finally:
-        bus.disconnect()
+        try:
+            bus.disconnect()
+        except Exception as exc:
+            raise RuntimeError(f"Could not disconnect after gripper wiggle: {exc}") from exc
 
 
 async def wiggle_gripper(port: str) -> dict:
@@ -112,7 +124,7 @@ async def wiggle_gripper(port: str) -> dict:
     action — so the rejection messages tell the caller to wait rather than to
     stop something.
     """
-    global wiggle_active
+    global wiggle_active, _hardware_lease_token
 
     if not port or not port.strip():
         return {"success": False, "message": "No port provided."}
@@ -182,6 +194,19 @@ async def wiggle_gripper(port: str) -> dict:
             "code": ErrorCode.ROBOT_BUSY_TRAINING,
         }
 
+    try:
+        lease_token = hardware_lease_registry.claim(
+            "wiggle",
+            f"local:{port.strip()}",
+            recovery=hardware_recovery_identity(
+                "so101",
+                target_ports=(port.strip(),),
+            ),
+        )
+    except HardwareLeaseHeld as exc:
+        return held_response(exc)
+    _hardware_lease_token = lease_token
+
     wiggle_active = True
     # The claim above is the real state transition — broadcast the hint so
     # every WS client learns the robot is busy (wiggle has no status
@@ -189,7 +214,7 @@ async def wiggle_gripper(port: str) -> dict:
     notify_session_changed("wiggle", True)
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(_run_wiggle_and_clear_flag, port.strip()),
+            asyncio.to_thread(_run_wiggle_and_clear_flag, port.strip(), lease_token),
             timeout=_WIGGLE_TIMEOUT_S,
         )
         return {"success": True, "message": f"Wiggled the gripper on {port}."}
@@ -209,17 +234,39 @@ async def wiggle_gripper(port: str) -> dict:
         return {"success": False, "message": f"Failed to wiggle the gripper: {e}"}
 
 
-def _run_wiggle_and_clear_flag(port: str) -> None:
+def _run_wiggle_and_clear_flag(port: str, lease_token: HardwareLeaseToken) -> None:
     """Run the blocking wiggle, then clear ``wiggle_active`` — from inside the
     worker thread, so the flag reflects the thread's REAL exit rather than
     `wiggle_gripper`'s async wrapper giving up on a `wait_for` timeout (see the
     comment at that timeout's except clause).
     """
-    global wiggle_active
+    global wiggle_active, _hardware_lease_token
+    error: Exception | None = None
     try:
         _wiggle_gripper_sync(port)
+    except Exception as exc:
+        error = exc
+        raise
     finally:
         wiggle_active = False
+        if hardware_lease_registry.is_token_current(lease_token):
+            if error is not None and "disconnect" in str(error).lower():
+                hardware_lease_registry.mark_unresolved(
+                    lease_token,
+                    str(error),
+                    {
+                        "safe": False,
+                        "device_closed": False,
+                        "torque_off": None,
+                        "evidence": str(error),
+                    },
+                )
+            else:
+                hardware_lease_registry.release(
+                    lease_token,
+                    safe_hardware_receipt("wiggle bus closed; disconnect performed torque disable"),
+                )
+                _hardware_lease_token = None
         # Final release, tied to the thread's REAL exit (like the flag) so
         # the hint can never claim idle while the port is still held.
         notify_session_changed("wiggle", False)

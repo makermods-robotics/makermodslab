@@ -72,6 +72,14 @@ from .eval_protocol import (
     parse_episode_end_reason,
     parse_event,
 )
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .jobs import download_hub_checkpoint_ref, make_snapshot_progress_tqdm
 from .models import (
     _downloaded_model_dir,
@@ -250,6 +258,7 @@ _inference_startup_thread: threading.Thread | None = None
 # Guards mutations to the globals above (and _eval_session); held only for the
 # short critical sections in start/stop/status.
 _state_lock = threading.Lock()
+_hardware_lease_token: HardwareLeaseToken | None = None
 # Bound on how long a second stop-inference call waits for an orphaned startup
 # worker (see _inference_startup_thread) to exit before giving up and
 # reporting it's still alive. Mirrors teleoperate.py's second-stop join
@@ -546,6 +555,19 @@ def _pump_stdout(proc: subprocess.Popen, log_handle) -> None:
     finally:
         with contextlib.suppress(Exception):
             log_handle.close()
+        rc: int | None = None
+        with contextlib.suppress(Exception):
+            rc = proc.wait(timeout=_RUNNER_REAP_TIMEOUT_S)
+        with _state_lock:
+            if _inference_proc is proc:
+                _finalize_inference_lease(
+                    safe=rc == 0,
+                    evidence=(
+                        "inference child exited cleanly and closed hardware"
+                        if rc == 0
+                        else "inference child exited without a clean hardware-close receipt"
+                    ),
+                )
 
 
 # How long the runner pump waits for the process to be reaped once its stdout
@@ -682,10 +704,11 @@ def _on_episode_ended(reason: str) -> None:
         _finalise_eval_episode_locked(0, ev, keep_runner=True)
         session_finished = _eval_session is None
     if session_finished:
-        # That was the last episode — the slot is already released, so the runner
-        # has nothing left to do. Ask it to go home and disconnect. Sent, not
-        # waited on: this thread has to keep draining stdout or the runner's
-        # teardown logging could fill the pipe and wedge its own shutdown.
+        # That was the last episode. The session flag is idle, but the hardware
+        # lease remains held until the runner's EOF proves that QUIT completed
+        # its go-home and disconnect finalizer. Sent, not waited on: this thread
+        # has to keep draining stdout or teardown logging could fill the pipe
+        # and wedge the child's own shutdown.
         _send_runner_command(proc, CMD_QUIT)
 
 
@@ -705,12 +728,35 @@ def _handle_runner_exit(proc: subprocess.Popen, rc: int | None) -> None:
     """Crash containment for a dead eval runner (called from the pump's EOF)."""
     with _state_lock:
         ev = _eval_session
-        if ev is None or _inference_proc is not proc:
-            # Either the session is already over (the expected QUIT after the
-            # last episode, or an abort) or this is a stale pump whose runner we
-            # have since replaced. Nothing to score either way.
+        if ev is None:
+            # The last EPISODE_ENDED event clears the session before asking the
+            # runner to QUIT. Keep the lease until this EOF proves that the
+            # hardware-owning child actually completed its teardown.
+            _finalize_inference_lease(
+                safe=rc == 0,
+                evidence=(
+                    "evaluation runner quit cleanly and closed hardware"
+                    if rc == 0
+                    else "evaluation runner exited without a clean hardware-close receipt"
+                ),
+            )
+            return
+        if _inference_proc is not proc:
+            # This is a stale pump whose crashed runner the session replaced.
             return
         _finalise_runner_exit_locked(rc, ev)
+        if _eval_session is None:
+            # A runner that dies before its first episode becomes a terminal
+            # startup failure. It has closed the process-owned device, but a
+            # non-clean exit cannot attest torque-off, so retain fault lockout.
+            _finalize_inference_lease(
+                safe=rc == 0,
+                evidence=(
+                    "evaluation runner exited cleanly and closed hardware"
+                    if rc == 0
+                    else "evaluation runner exited without a clean hardware-close receipt"
+                ),
+            )
 
 
 def _detect_device() -> str:
@@ -1705,6 +1751,51 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
     logger.info("Inference started: pid=%s policy=%s eval=%s", proc.pid, policy_path, is_eval)
 
 
+def _run_inference_startup_owned(
+    request: InferenceRequest,
+    cancel_event: threading.Event,
+    lease_token: HardwareLeaseToken,
+) -> None:
+    """Run startup and release only when no child inherited hardware ownership."""
+    global _hardware_lease_token
+    try:
+        _run_inference_startup(request, cancel_event)
+    finally:
+        with _state_lock:
+            child_committed = _inference_proc is not None and inference_active
+        if not child_committed and hardware_lease_registry.is_token_current(lease_token):
+            hardware_lease_registry.release(
+                lease_token,
+                safe_hardware_receipt(
+                    "inference startup exited with no hardware-owning child",
+                    torque_off=None,
+                    torque_not_applicable=True,
+                ),
+            )
+            _hardware_lease_token = None
+
+
+def _finalize_inference_lease(*, safe: bool, evidence: str) -> None:
+    global _hardware_lease_token
+    token = _hardware_lease_token
+    if token is None or not hardware_lease_registry.is_token_current(token):
+        return
+    if safe:
+        hardware_lease_registry.release(token, safe_hardware_receipt(evidence))
+        _hardware_lease_token = None
+    else:
+        hardware_lease_registry.mark_unresolved(
+            token,
+            evidence,
+            {
+                "safe": False,
+                "device_closed": True,
+                "torque_off": None,
+                "evidence": evidence,
+            },
+        )
+
+
 def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     """Validate the request cheaply and hand the heavy startup (model download →
     arm preflight → subprocess spawn) to a background worker, returning
@@ -1717,6 +1808,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     the UI lands on the inference page and shows download progress there."""
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
     global _last_result, _last_log_path, _inference_startup_thread, _eval_session
+    global _hardware_lease_token
 
     # Mutex with every other feature that drives the same serial bus (see
     # CLAUDE.md's "State model & mutual exclusion").
@@ -1805,6 +1897,20 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "message": f"Training run '{training}' is using this machine. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_TRAINING,
             }
+        try:
+            lease_token = hardware_lease_registry.claim(
+                "inference",
+                f"local:{request.follower_port}",
+                recovery=hardware_recovery_identity(
+                    request.arm_type,
+                    target_ports=(request.follower_port, request.right_follower_port)
+                    if request.mode == "bimanual"
+                    else (request.follower_port,),
+                ),
+            )
+        except HardwareLeaseHeld as exc:
+            return held_response(exc, include_status=True)
+        _hardware_lease_token = lease_token
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first
         # status poll (the download runs on the inference page — the UI must be
@@ -1836,13 +1942,23 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
 
     def _release_slot() -> None:
         global inference_active, _inference_started_at, _inference_cancel, _inference_meta
-        global _eval_session
+        global _eval_session, _hardware_lease_token
         with _state_lock:
             inference_active = False
             _inference_started_at = None
             _inference_cancel = None
             _inference_meta = {}
             _eval_session = None
+            if hardware_lease_registry.is_token_current(lease_token):
+                hardware_lease_registry.release(
+                    lease_token,
+                    safe_hardware_receipt(
+                        "inference rejected before opening hardware",
+                        torque_off=None,
+                        torque_not_applicable=True,
+                    ),
+                )
+                _hardware_lease_token = None
         # The pre-spawn guards below released the just-claimed slot: undo the
         # claim's active=True hint.
         notify_session_changed("inference", False)
@@ -1902,8 +2018,8 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     # Tracked so a later start can tell whether a stopped session's worker is
     # still alive (see the is_alive() guard above) instead of racing it.
     worker = threading.Thread(
-        target=_run_inference_startup,
-        args=(request, cancel_event),
+        target=_run_inference_startup_owned,
+        args=(request, cancel_event, lease_token),
         name="inference-startup",
         daemon=True,
     )
@@ -2015,6 +2131,10 @@ def handle_stop_inference() -> dict[str, Any]:
         # preflight), where there's no process to terminate.
         if _inference_cancel is not None:
             _inference_cancel.set()
+        if _hardware_lease_token is not None and hardware_lease_registry.is_token_current(
+            _hardware_lease_token
+        ):
+            hardware_lease_registry.request_stop(_hardware_lease_token, "operator_stop")
         proc = _inference_proc
         ev = _eval_session
         # Surface the stop as its own phase so a status poll racing the
@@ -2034,6 +2154,10 @@ def handle_stop_inference() -> dict[str, Any]:
             # cancel check), or, in eval mode, while parked in a reset after the
             # runner crashed. Either way there's nothing to terminate.
             if ev is not None:
+                _finalize_inference_lease(
+                    safe=False,
+                    evidence="evaluation runner exited without a clean hardware-close receipt",
+                )
                 _abort_eval_locked(ev)
                 return {"success": True, "message": "Evaluation aborted"}
             _go_idle_locked()
@@ -2062,9 +2186,27 @@ def handle_stop_inference() -> dict[str, Any]:
         # Re-read: a status poll could have finalised the exit (and, in eval
         # mode, even finished the session) while we were outside the lock.
         ev = _eval_session
+        poll = getattr(proc, "poll", None)
+        proc_rc = poll() if callable(poll) else getattr(proc, "returncode", 0)
         if ev is not None:
+            _finalize_inference_lease(
+                safe=proc_rc == 0,
+                evidence=(
+                    "evaluation runner quit and closed hardware"
+                    if proc_rc == 0
+                    else "evaluation runner did not confirm a clean hardware close"
+                ),
+            )
             _abort_eval_locked(ev)
             return {"success": True, "message": "Evaluation aborted"}
+        _finalize_inference_lease(
+            safe=proc_rc == 0,
+            evidence=(
+                "inference child exited cleanly after stop"
+                if proc_rc == 0
+                else "inference child stop did not confirm a clean hardware close"
+            ),
+        )
         _go_idle_locked()
     return {"success": True, "message": "Inference stopped"}
 
@@ -2531,6 +2673,14 @@ def handle_inference_status() -> dict[str, Any]:
                     "elapsed_s": 0,
                     **_eval_fields(None),
                 }
+                _finalize_inference_lease(
+                    safe=rc == 0,
+                    evidence=(
+                        "inference child exited cleanly and closed hardware"
+                        if rc == 0
+                        else "inference child exited without a clean hardware-close receipt"
+                    ),
+                )
                 # Final release (lazy finalisation of a subprocess that died
                 # on its own). Under _state_lock; the notify is a lock-free
                 # droppable queue put, so this cannot deadlock.

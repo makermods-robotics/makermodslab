@@ -40,10 +40,17 @@ arm on either bus.
 """
 
 import asyncio
-import contextlib
 import logging
 import time
 
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .utils.config import find_available_ports
 
 logger = logging.getLogger(__name__)
@@ -160,8 +167,10 @@ def _release_follower_bus(bus) -> None:
     port it could drop a torqued arm that some other session is holding — the
     same hazard identify.py's ``_release_bus`` avoids.
     """
-    with contextlib.suppress(Exception):
+    try:
         bus.disconnect(disable_torque=False)
+    except Exception as exc:
+        raise RuntimeError(f"Could not disconnect Maker follower probe bus: {exc}") from exc
 
 
 def _read_follower_angle(bus) -> float:
@@ -191,8 +200,10 @@ def _open_leader_bus(port: str):
 
 
 def _release_leader_bus(bus) -> None:
-    with contextlib.suppress(Exception):
+    try:
         bus.close()
+    except Exception as exc:
+        raise RuntimeError(f"Could not disconnect Maker leader probe bus: {exc}") from exc
 
 
 def _open_metal_follower_bus(port: str):
@@ -250,7 +261,9 @@ def _release_metal_follower_bus(bus) -> None:
     """
     from .torque import de_energize_can_bus
 
-    de_energize_can_bus(bus, "port-probe pan motor")
+    problems = de_energize_can_bus(bus, "port-probe pan motor")
+    if problems:
+        raise RuntimeError("Could not release torque and disconnect Metal probe bus: " + "; ".join(problems))
 
 
 def _read_metal_follower_angle(bus) -> float:
@@ -407,8 +420,14 @@ def _identify_sync(
 
         return {"success": False, "message": _NO_MOTION_MESSAGE, "skipped": skipped}
     finally:
+        close_errors: list[str] = []
         for bus in buses.values():
-            releaser(bus)
+            try:
+                releaser(bus)
+            except Exception as exc:
+                close_errors.append(str(exc))
+        if close_errors:
+            raise RuntimeError("Could not disconnect Maker identify buses: " + "; ".join(close_errors))
 
 
 def _candidate_ports(ports: list[str] | None) -> list[str]:
@@ -416,6 +435,37 @@ def _candidate_ports(ports: list[str] | None) -> list[str]:
     if not candidates:
         candidates = find_available_ports()
     return list(dict.fromkeys(candidates))  # dedupe, keep order
+
+
+def _run_leased_diagnostic(
+    token: HardwareLeaseToken,
+    operation,
+    *args,
+    torque_not_applicable: bool,
+):
+    error: Exception | None = None
+    try:
+        return operation(*args)
+    except Exception as exc:
+        error = exc
+        raise
+    finally:
+        if hardware_lease_registry.is_token_current(token):
+            teardown_unknown = error is not None and any(
+                marker in str(error).lower()
+                for marker in ("disconnect", "release torque", "de-energ", "close")
+            )
+            if teardown_unknown:
+                hardware_lease_registry.mark_unresolved(token, str(error))
+            else:
+                hardware_lease_registry.release(
+                    token,
+                    safe_hardware_receipt(
+                        "diagnostic arm buses closed",
+                        torque_off=None if torque_not_applicable else True,
+                        torque_not_applicable=torque_not_applicable,
+                    ),
+                )
 
 
 async def probe_maker_ports(ports: list[str] | None = None, arm_type: str = "maker") -> dict:
@@ -436,8 +486,26 @@ async def probe_maker_ports(ports: list[str] | None = None, arm_type: str = "mak
             "message": "No serial ports detected — plug in the arm and try again.",
         }
     try:
+        lease_token = hardware_lease_registry.claim(
+            "diagnostic",
+            "local:maker-port-probe",
+            recovery=hardware_recovery_identity(
+                arm_type,
+                target_ports=candidates,
+            ),
+        )
+    except HardwareLeaseHeld as exc:
+        return held_response(exc)
+    try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_probe_sync, candidates, arm_type),
+            asyncio.to_thread(
+                _run_leased_diagnostic,
+                lease_token,
+                _probe_sync,
+                candidates,
+                arm_type,
+                torque_not_applicable=arm_type != "metal",
+            ),
             timeout=_PROBE_TIMEOUT_S * len(candidates) * 2 + 5.0,
         )
     except TimeoutError:
@@ -498,8 +566,27 @@ async def identify_maker_arm_by_motion(
             "skipped": [],
         }
     try:
+        lease_token = hardware_lease_registry.claim(
+            "diagnostic",
+            "local:maker-motion-identify",
+            recovery=hardware_recovery_identity(
+                arm_type,
+                target_ports=candidates,
+            ),
+        )
+    except HardwareLeaseHeld as exc:
+        return held_response(exc)
+    try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_identify_sync, candidates, device_type, arm_type),
+            asyncio.to_thread(
+                _run_leased_diagnostic,
+                lease_token,
+                _identify_sync,
+                candidates,
+                device_type,
+                arm_type,
+                torque_not_applicable=True,
+            ),
             timeout=_IDENTIFY_TIMEOUT_S + 5.0,
         )
     except TimeoutError:

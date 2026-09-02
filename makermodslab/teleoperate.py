@@ -32,6 +32,14 @@ from lerobot.utils.errors import DeviceNotConnectedError
 from .api_errors import ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .maker_rest_pose import (
     capture_maker_pose,
     maker_follower_arms,
@@ -39,6 +47,8 @@ from .maker_rest_pose import (
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
+from .servo_health.sampler import FeetechHealthSampler
+from .servo_health.service import servo_health_service
 from .session_events import notify_session_changed
 from .torque import de_energize_can_device, release_maker_torque
 from .utils.devices import _force_close_device_resources
@@ -112,6 +122,7 @@ last_session_outcome: str | None = None
 last_session_error: str | None = None
 # Guards the start path; the worker owns disconnect so stop() does not race.
 _state_lock = threading.Lock()
+_hardware_lease_token: HardwareLeaseToken | None = None
 
 # Grace period between a *user-initiated* stop and the torque release, used by
 # RECORDING only (makermodslab/record.py imports hold_torque_release_grace; recording
@@ -920,6 +931,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     """
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
     global releasing, last_session_outcome, last_session_error
+    global _hardware_lease_token
 
     from . import (
         auto_calibrate as _auto_calibrate,
@@ -997,6 +1009,23 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 "message": f"Training run '{training}' is using this machine. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_TRAINING,
             }
+        try:
+            lease_token = hardware_lease_registry.claim(
+                "teleoperation",
+                f"local:{request.follower_port}",
+                recovery=hardware_recovery_identity(
+                    request.arm_type,
+                    target_ports=(request.follower_port, request.right_follower_port)
+                    if request.mode == "bimanual"
+                    else (request.follower_port,),
+                    feetech_ports=(request.leader_port, request.right_leader_port)
+                    if request.mode == "bimanual"
+                    else (request.leader_port,),
+                ),
+            )
+        except HardwareLeaseHeld as exc:
+            return held_response(exc)
+        _hardware_lease_token = lease_token
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later grace/return short until the server
@@ -1014,6 +1043,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
     robot = None
     teleop_device = None
+    health_keys: list[str] = []
     try:
         logger.info(
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
@@ -1129,10 +1159,33 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             if uses_feetech_bus(request.arm_type)
             else []
         )
+        # Read-only MotorLab-derived health is sampled from THIS worker, which
+        # already owns each follower bus. The HTTP route reads only the cache;
+        # it cannot open or transact on the serial device.
+        if uses_feetech_bus(request.arm_type):
+            buses = _device_buses(robot)
+            arm_labels = ["left", "right"] if is_bimanual else ["left"]
+            for index, (bus, arm_label) in enumerate(zip(buses, arm_labels, strict=True)):
+                key = f"teleoperation:{index}"
+                try:
+                    sampler = FeetechHealthSampler(
+                        bus,
+                        owner="teleoperation",
+                        arm=arm_label,
+                    )
+                    servo_health_service.attach(key, sampler)
+                except Exception as exc:
+                    # Health is supplemental. A legacy/test bus without model
+                    # metadata, or a stale publisher during recovery, must not
+                    # create a new reason that local teleoperation can fail.
+                    logger.warning("Servo-health sampling unavailable on %s: %s", arm_label, exc)
+                else:
+                    health_keys.append(key)
 
         def teleoperation_worker():
             global teleoperation_active, current_robot, current_teleop, last_cleanup_error, releasing
             global last_session_outcome, last_session_error
+            global _hardware_lease_token
 
             logger.info("Starting teleoperation loop...")
             stopped_normally = False
@@ -1156,6 +1209,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                                 for bus, prefix in telemetry_targets:
                                     telemetry.sample(bus, prefix)
                                 last_current_sample_time = current_time
+                            servo_health_service.sample_owned_buses()
                             if not uses_feetech_bus(request.arm_type):
                                 # No Maker URDF ships yet, so `joints` stays
                                 # empty (the viewer has nothing to drive) and
@@ -1211,6 +1265,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 # session died on its own — a real failure, classified below.
                 loop_error = format_exception(e)
             finally:
+                for key in health_keys:
+                    servo_health_service.detach(key)
                 telemetry_summary = telemetry.summary()
                 if telemetry_summary:
                     logger.info(telemetry_summary)
@@ -1253,6 +1309,23 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 releasing = False
                 current_robot = None
                 current_teleop = None
+                if last_cleanup_error:
+                    hardware_lease_registry.mark_unresolved(
+                        lease_token,
+                        last_cleanup_error,
+                        {
+                            "safe": False,
+                            "device_closed": not any("disconnect" in problem.lower() for problem in problems),
+                            "torque_off": False,
+                            "evidence": last_cleanup_error,
+                        },
+                    )
+                else:
+                    hardware_lease_registry.release(
+                        lease_token,
+                        safe_hardware_receipt("teleoperation torque disabled and devices closed"),
+                    )
+                    _hardware_lease_token = None
                 # Final release: cleanup (including error paths) is done and
                 # the ports are free.
                 notify_session_changed("teleoperation", False)
@@ -1291,9 +1364,28 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             last_cleanup_error = e.cleanup_error
         else:
             last_cleanup_error = _cleanup_after_setup_failure(robot, teleop_device)
+        for key in health_keys:
+            servo_health_service.detach(key)
         teleoperation_active = False
         current_robot = None
         current_teleop = None
+        if last_cleanup_error:
+            hardware_lease_registry.mark_unresolved(
+                lease_token,
+                last_cleanup_error,
+                {
+                    "safe": False,
+                    "device_closed": False,
+                    "torque_off": False,
+                    "evidence": last_cleanup_error,
+                },
+            )
+        else:
+            hardware_lease_registry.release(
+                lease_token,
+                safe_hardware_receipt("partial teleoperation setup safely closed"),
+            )
+            _hardware_lease_token = None
         # The claim above already broadcast active=True; undo the hint now
         # that the setup failure released everything.
         notify_session_changed("teleoperation", False)
@@ -1320,6 +1412,9 @@ def handle_stop_teleoperation() -> dict[str, Any]:
     thread.
     """
     global teleoperation_active, teleoperation_thread
+
+    if _hardware_lease_token is not None and hardware_lease_registry.is_token_current(_hardware_lease_token):
+        hardware_lease_registry.request_stop(_hardware_lease_token, "operator_stop")
 
     worker = teleoperation_thread
     if teleoperation_active:

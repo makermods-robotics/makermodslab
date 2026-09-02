@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
+import RemoteServoStatusPanel from "@/components/control/RemoteServoStatusPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots, isCanArmType } from "@/hooks/useRobots";
@@ -133,7 +134,7 @@ const TeleoperationPage = () => {
     } catch {
       /* best-effort */
     }
-  }, [baseUrl, fetchWithHeaders, toast]);
+  }, [baseUrl, fetchWithHeaders, t, toast]);
 
   // Deliberate in-app exits stop the session: the back button awaits
   // stopTeleoperation() then navigates (below), and any other in-app
@@ -202,7 +203,14 @@ const TeleoperationPage = () => {
           className="lg:w-full"
           bimanual={bimanual}
           readoutOnly={readoutOnly}
-          rightSlot={<TeleopCameraPanel />}
+          rightSlot={
+            <div className="flex h-full min-h-0 flex-col gap-4">
+              <RemoteServoStatusPanel />
+              <div className="min-h-0 flex-1">
+                <TeleopCameraPanel />
+              </div>
+            </div>
+          }
         />
       </div>
     </div>

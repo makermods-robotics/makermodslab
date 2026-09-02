@@ -44,6 +44,14 @@ import logging
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .utils.config import clamp_motor_power
 
 logger = logging.getLogger(__name__)
@@ -236,7 +244,32 @@ def _read_voltage_sync(port: str) -> float:
         raw = bus.read(_PRESENT_VOLTAGE_REGISTER, "gripper", normalize=False)
         return voltage_from_raw(raw)
     finally:
-        bus.disconnect(disable_torque=False)
+        try:
+            bus.disconnect(disable_torque=False)
+        except Exception as exc:
+            raise RuntimeError(f"Could not disconnect voltage-read bus: {exc}") from exc
+
+
+def _read_voltage_and_release(port: str, token: HardwareLeaseToken) -> float:
+    error: Exception | None = None
+    try:
+        return _read_voltage_sync(port)
+    except Exception as exc:
+        error = exc
+        raise
+    finally:
+        if hardware_lease_registry.is_token_current(token):
+            if error is not None and "disconnect" in str(error).lower():
+                hardware_lease_registry.mark_unresolved(token, str(error))
+            else:
+                hardware_lease_registry.release(
+                    token,
+                    safe_hardware_receipt(
+                        "read-only voltage bus closed",
+                        torque_off=None,
+                        torque_not_applicable=True,
+                    ),
+                )
 
 
 async def read_supply_voltage(port: str) -> dict:
@@ -247,8 +280,19 @@ async def read_supply_voltage(port: str) -> dict:
     if not port or not port.strip():
         return {"success": False, "message": "No port provided."}
     try:
+        lease_token = hardware_lease_registry.claim(
+            "diagnostic",
+            "local:supply-voltage",
+            recovery=hardware_recovery_identity(
+                "so101",
+                target_ports=(port.strip(),),
+            ),
+        )
+    except HardwareLeaseHeld as exc:
+        return held_response(exc)
+    try:
         voltage = await asyncio.wait_for(
-            asyncio.to_thread(_read_voltage_sync, port.strip()),
+            asyncio.to_thread(_read_voltage_and_release, port.strip(), lease_token),
             timeout=_VOLTAGE_TIMEOUT_S,
         )
         return {"success": True, "voltage": voltage}

@@ -14,6 +14,7 @@ import inference from "./inference";
 import training from "./training";
 import pages from "./pages";
 import shared from "./shared";
+import remoteTeleop from "./remoteTeleop";
 
 /**
  * The English catalog — the source of truth for the key tree. `types.d.ts`
@@ -40,4 +41,5 @@ export default {
   training,
   pages,
   shared,
+  remoteTeleop,
 } as const;

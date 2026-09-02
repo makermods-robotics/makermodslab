@@ -14,6 +14,7 @@ import inference from "./inference";
 import training from "./training";
 import pages from "./pages";
 import shared from "./shared";
+import remoteTeleop from "./remoteTeleop";
 
 /** Simplified Chinese catalog. Key tree must match `locales/en` exactly —
  * enforced by `src/i18n/catalogs.test.ts`. */
@@ -34,4 +35,5 @@ export default {
   training,
   pages,
   shared,
+  remoteTeleop,
 } as const;

@@ -144,6 +144,10 @@ extend-ignore-re = [
     'lambda le, fo:',
 ]
 
+[tool.typos.default.extend-words]
+# pyserial handle field exposed by the pinned Feetech SDK, not a misspelling.
+ser = "ser"
+
 [tool.bandit]
 exclude_dirs = ["tests"]
 skips = ["B101", "B110", "B112", "B311", "B404", "B603", "B607", "B615"]

@@ -75,6 +75,11 @@ docs/*
 !docs/upstream/
 # ... and the committed OpenAPI snapshot (see makermodslab/scripts/export_openapi.py)
 !docs/api/
+# Accepted, implementation-bound architecture for shipped multi-host features.
+!docs/architecture/
+!docs/remote-teleoperation-plan.md
+!docs/remote-teleop/
+!docs/remote-teleop/**
 PHONE_CAMERA_SETUP.md
 HTTPS_SETUP.md
 JETSON_SETUP.md

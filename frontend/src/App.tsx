@@ -11,6 +11,7 @@ import { OnboardingProvider } from "@/contexts/OnboardingContext";
 import Spotlight from "@/components/onboarding/Spotlight";
 import Launchpad from "@/pages/Launchpad";
 import Teleoperation from "@/pages/Teleoperation";
+import RemoteTeleoperation from "@/pages/RemoteTeleoperation";
 import Training from "@/pages/Training";
 import NotFound from "@/pages/NotFound";
 import UpdateNotice from "@/components/UpdateNotice";
@@ -49,6 +50,10 @@ function App() {
                         <Routes>
                           <Route path="/" element={<Launchpad />} />
                           <Route path="/teleoperation" element={<Teleoperation />} />
+                          <Route
+                            path="/remote-teleoperation"
+                            element={<RemoteTeleoperation />}
+                          />
                           {/* /training (no id) hosts the shared configurator.
                               Nothing in the app navigates here any more —
                               Continue / Resume and Fine-tune all seed the

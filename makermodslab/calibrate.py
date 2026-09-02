@@ -40,6 +40,14 @@ from lerobot.teleoperators import (
 from lerobot.utils.utils import init_logging
 
 from .api_errors import ErrorCode
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .session_events import notify_session_changed
 from .utils.config import calibration_dir_for_device, save_robot_record
 
@@ -191,6 +199,7 @@ class CalibrationManager:
         # cannot, stop the worker's un-locked bus I/O from overlapping the
         # forced restore+disconnect.
         self._cleanup_lock = threading.Lock()
+        self._hardware_lease_token: HardwareLeaseToken | None = None
 
         # Initialize logging
         init_logging()
@@ -354,6 +363,19 @@ class CalibrationManager:
                             "message": f"A calibration named '{stem}' already exists. Overwrite it or choose a different name.",
                         }
 
+                try:
+                    lease_token = hardware_lease_registry.claim(
+                        "calibration",
+                        f"local:{request.device_type}:{request.port}",
+                        recovery=hardware_recovery_identity(
+                            "so101",
+                            target_ports=(request.port,),
+                        ),
+                    )
+                except HardwareLeaseHeld as exc:
+                    return held_response(exc)
+                self._hardware_lease_token = lease_token
+
                 # Reset status and clear any previous calibration data
                 self._start_positions = {}
                 self._mins = {}
@@ -399,6 +421,25 @@ class CalibrationManager:
             # leave clients believing a session is live. (Harmless when the
             # failure predates the claim — clients refetch and see idle.)
             notify_session_changed("calibration", False, phase="error")
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                worker_alive = self.calibration_thread is not None and self.calibration_thread.is_alive()
+                snapshot = hardware_lease_registry.snapshot()
+                if not worker_alive and self.device is None and snapshot.state == "active":
+                    hardware_lease_registry.release(
+                        token,
+                        safe_hardware_receipt(
+                            "calibration request thread failed before opening hardware",
+                            torque_off=None,
+                            torque_not_applicable=True,
+                        ),
+                    )
+                    self._hardware_lease_token = None
+                else:
+                    hardware_lease_registry.mark_unresolved(
+                        token,
+                        f"calibration startup failed before its worker finalized: {e}",
+                    )
             return {"success": False, "message": str(e)}
 
     def complete_step(self) -> dict[str, Any]:
@@ -427,6 +468,9 @@ class CalibrationManager:
                 return {"success": False, "message": "No calibration active"}
 
             logger.info("Stopping calibration process...")
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                hardware_lease_registry.request_stop(token, "operator_stop")
             self.stop_calibration = True
             self._recording_active = False
             self._step_complete.set()  # Unblock any waiting step
@@ -439,18 +483,25 @@ class CalibrationManager:
 
             # Ensure cleanup is called if thread didn't finish properly
             if self.calibration_thread and self.calibration_thread.is_alive():
-                logger.warning("Calibration thread did not finish within timeout, forcing cleanup")
-
-            # Force cleanup and finish
-            self._cleanup_and_finish("Calibration stopped", status="idle")
+                reason = "Calibration worker did not finish within 5 seconds; hardware state is unknown"
+                logger.warning(reason)
+                if token is not None and hardware_lease_registry.is_token_current(token):
+                    hardware_lease_registry.mark_unresolved(token, reason)
+                return {
+                    "success": True,
+                    "shutting_down": True,
+                    "warning": reason,
+                    "message": "Calibration stop requested; safe release is not yet confirmed",
+                }
 
             logger.info("Calibration stop completed")
             return {"success": True, "message": "Calibration stopped"}
 
         except Exception as e:
             logger.error(f"Error stopping calibration: {e}")
-            # Force cleanup on error too
-            self._cleanup_and_finish("Calibration stopped with error", status="error")
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                hardware_lease_registry.mark_unresolved(token, f"calibration stop failed: {e}")
             return {"success": False, "message": str(e)}
 
     def _calibration_worker(self, request: CalibrationRequest):
@@ -806,15 +857,37 @@ class CalibrationManager:
 
     def _cleanup_and_finish(self, message: str, status: str = "completed"):
         """Clean up and finish calibration"""
-        self._cleanup_device()
+        problems = self._cleanup_device()
         self._recording_active = False
         self._update_status(calibration_active=False, status=status, message=message)
+        token = self._hardware_lease_token
+        if token is not None and hardware_lease_registry.is_token_current(token):
+            if problems:
+                hardware_lease_registry.mark_unresolved(
+                    token,
+                    " ".join(problems),
+                    {
+                        "safe": False,
+                        "device_closed": not any("disconnect" in problem.lower() for problem in problems),
+                        "torque_off": None,
+                        "evidence": " ".join(problems),
+                    },
+                )
+            else:
+                hardware_lease_registry.release(
+                    token,
+                    safe_hardware_receipt(
+                        "calibration device closed; torque was disabled for the manual procedure"
+                    ),
+                )
+                self._hardware_lease_token = None
         # Final release: every terminal path (completed / cancelled / error /
         # forced stop) funnels through here, after the device cleanup ran.
         notify_session_changed("calibration", False, phase=status)
 
-    def _cleanup_device(self):
+    def _cleanup_device(self) -> list[str]:
         """Clean up device connection"""
+        problems: list[str] = []
         # Serializes against a concurrent forced cleanup from
         # stop_calibration_process (see its comment, and _cleanup_lock's
         # docstring in __init__): only the first caller does real work, a
@@ -855,6 +928,7 @@ class CalibrationManager:
                                 try:
                                     self.device.bus.write(register, motor, value)
                                 except Exception as e:
+                                    problems.append(f"Failed to restore {register} for {motor}: {e}")
                                     logger.error(
                                         f"Failed to restore {register}={value} for {motor} "
                                         f"after cancelled calibration: {e}"
@@ -864,7 +938,9 @@ class CalibrationManager:
                     self.device.disconnect()
                     self.device = None
             except Exception as e:
+                problems.append(f"Failed to disconnect calibration device: {e}")
                 logger.error(f"Error disconnecting device: {e}")
+            return problems
 
 
 # Global calibration manager instance

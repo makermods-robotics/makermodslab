@@ -32,6 +32,8 @@ export default {
     renameItem: "Rename robot…",
     deleteItem: "Delete robot…",
     teleop: "Teleop",
+    remoteTeleop: "Remote",
+    remoteTeleopTooltip: "Open two-laptop remote teleoperation",
   },
   rename: {
     title: "Rename robot",
