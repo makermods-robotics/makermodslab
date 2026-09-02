@@ -5347,3 +5347,206 @@ def test_single_arm_coaching_is_not_caught_by_that_guard(monkeypatch) -> None:
 
     req = _coaching_request()
     assert req.mode != "bimanual"
+
+
+# --- MolmoAct2: the flags the lerobot pin requires --------------------------
+#
+# `_rollout_cli_args` reads the checkpoint's own config.json to decide these,
+# so the tests below write a real (tiny) one into tmp_path. Every other test in
+# this file passes a path that does not exist, which is the "{} → add nothing"
+# fallback and is why none of them changed.
+
+
+def _checkpoint_dir(tmp_path, config: dict) -> str:
+    """A pretrained_model dir holding just the config.json the builder reads."""
+    d = tmp_path / "pretrained_model"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text(json.dumps(config))
+    return str(d)
+
+
+def test_rollout_cli_args_add_nothing_for_act_and_smolvla(tmp_path) -> None:
+    """The required-flag machinery must be invisible to every policy that
+    doesn't need it — including on the eval and coaching front-ends."""
+    from makermodslab.rollout import _rollout_cli_args
+
+    for policy_type in ("act", "smolvla"):
+        path = _checkpoint_dir(tmp_path / policy_type, {"type": policy_type})
+        args = _rollout_cli_args(_stub_request(), path, [])
+        assert not any(a.startswith("--policy.inference_action_mode") for a in args)
+
+
+def test_rollout_cli_args_set_molmoact2_inference_action_mode(tmp_path) -> None:
+    """MolmoAct2Config.inference_action_mode has no usable default — the policy
+    raises "requires `inference_action_mode` to be set explicitly" on None — so
+    a checkpoint that saved none is unrunnable without this override."""
+    from makermodslab.rollout import _rollout_cli_args
+
+    path = _checkpoint_dir(tmp_path, {"type": "molmoact2", "action_mode": "both"})
+    args = _rollout_cli_args(_stub_request(), path, [])
+    assert "--policy.inference_action_mode=continuous" in args
+
+
+def test_rollout_cli_args_respect_a_checkpoints_own_action_mode(tmp_path) -> None:
+    """The released lerobot/MolmoAct2-*-LeRobot config already saves
+    inference_action_mode=continuous. Overriding a saved choice would be how a
+    discrete checkpoint silently gets run through the wrong head."""
+    from makermodslab.rollout import _rollout_cli_args
+
+    path = _checkpoint_dir(
+        tmp_path,
+        {"type": "molmoact2", "action_mode": "continuous", "inference_action_mode": "continuous"},
+    )
+    args = _rollout_cli_args(_stub_request(), path, [])
+    assert not any(a.startswith("--policy.inference_action_mode") for a in args)
+
+
+def test_eval_runner_cmd_carries_the_molmoact2_flag(tmp_path) -> None:
+    """Same reason the temporal-ensemble flags are tested on both front-ends:
+    an eval must drive the policy exactly the way a single rollout would."""
+    from makermodslab.rollout import InferenceRequest, _build_eval_runner_cmd
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        eval_episodes=5,
+    )
+    path = _checkpoint_dir(tmp_path, {"type": "molmoact2", "action_mode": "both"})
+    cmd = _build_eval_runner_cmd(req, path, [])
+    assert "makermodslab.eval_runner" in cmd
+    assert "--policy.inference_action_mode=continuous" in cmd
+
+
+def test_rtc_is_refused_for_a_discrete_molmoact2_checkpoint(tmp_path) -> None:
+    """MolmoAct2Policy.supports_rtc() is `inference_action_mode ==
+    "continuous"`, and build_rollout_context raises on a False — but only after
+    loading a multi-GB VLM onto the accelerator and with a message naming
+    `--inference.type`, a flag no UI user can reach."""
+    from makermodslab.rollout import InferenceRequest, _rollout_cli_args
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        inference_engine="rtc",
+    )
+    path = _checkpoint_dir(tmp_path, {"type": "molmoact2", "inference_action_mode": "discrete"})
+    with pytest.raises(ValueError, match="Real-Time Chunking"):
+        _rollout_cli_args(req, path, [])
+
+
+def test_rtc_is_allowed_for_a_continuous_molmoact2_checkpoint(tmp_path) -> None:
+    from makermodslab.rollout import InferenceRequest, _rollout_cli_args
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        inference_engine="rtc",
+    )
+    path = _checkpoint_dir(tmp_path, {"type": "molmoact2", "inference_action_mode": "continuous"})
+    args = _rollout_cli_args(req, path, [])
+    assert "--inference.type=rtc" in args
+
+
+def test_molmoact2_hints_name_the_extra_and_the_action_head() -> None:
+    """Both failures are otherwise opaque: lerobot's require_package message
+    names a pip extra, and the action-mode refusal names a config field."""
+    from makermodslab.utils.errors import friendly_hint
+
+    extra = friendly_hint(
+        "ImportError: 'scipy' is required but not installed. "
+        "Install it with: pip install 'lerobot[molmoact2]'"
+    )
+    assert extra is not None and "lerobot[molmoact2]" in extra
+
+    head = friendly_hint(
+        "ValueError: MolmoAct2 checkpoint was trained with action_mode='discrete' "
+        "and cannot run continuous inference."
+    )
+    assert head is not None and "action_mode" in head
+
+    # The bare field name is NOT a trigger: lerobot logs the effective policy
+    # config, so it appears in the log tail of unrelated failures too.
+    assert friendly_hint("inference_action_mode: continuous") is None
+
+
+def test_molmoact2_on_a_non_cuda_host_warns_but_still_starts(monkeypatch, tmp_path) -> None:
+    """Warn-but-allow, on the same `meta["warning"]` channel the arm-identity
+    findings use. Nothing in this lerobot pin REQUIRES CUDA — the action-flow
+    CUDA graph falls back off-CUDA — so a refusal would be MakerMods Lab
+    inventing a hardware requirement lerobot does not state. The device is
+    injected; nothing here touches a real accelerator.
+
+    Same harness as the return-to-initial-position test: every hardware-touching
+    preflight and the subprocess itself are stubbed, the startup worker runs
+    inline, and HOME is redirected so the log lands in tmp."""
+    from makermodslab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg, arm_type="so101": cfg)
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "mps")
+    # Restored by monkeypatch at teardown, so this test can't leak a claimed
+    # session into the next one.
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    checkpoint = _checkpoint_dir(tmp_path, {"type": "molmoact2", "inference_action_mode": "continuous"})
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: checkpoint)
+
+    class _FakeProc:
+        pid = 4321
+
+        def __init__(self, cmd, **kwargs):
+            self.stdin = io.BytesIO()
+            self.stdout = _EmptyStdout()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    result = rollout.handle_start_inference(_stub_request())
+    # Started, not refused — that is the whole point of a warning.
+    assert result["success"] is True, result
+    warning = rollout._inference_meta.get("warning")
+    assert warning is not None
+    assert "mps" in warning
+    assert "CUDA" in warning
+
+
+def test_an_act_checkpoint_on_the_same_host_gets_no_device_warning(monkeypatch, tmp_path) -> None:
+    """The guard keys on the checkpoint's policy type, so it is one `!=` away
+    from warning about every ACT run on every Mac in the building."""
+    from makermodslab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg, arm_type="so101": cfg)
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "mps")
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+
+    checkpoint = _checkpoint_dir(tmp_path, {"type": "act"})
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: checkpoint)
+
+    class _FakeProc:
+        pid = 4322
+
+        def __init__(self, cmd, **kwargs):
+            self.stdin = io.BytesIO()
+            self.stdout = _EmptyStdout()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    assert rollout.handle_start_inference(_stub_request())["success"] is True
+    assert rollout._inference_meta.get("warning") is None

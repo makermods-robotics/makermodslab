@@ -126,6 +126,36 @@ def friendly_hint(error_text: str | None) -> str | None:
             "The GPU ran out of memory. Turn on mixed precision (AMP), lower the batch size, "
             "or run on a larger GPU."
         )
+    # lerobot's own `require_package(pkg, extra=...)` message, which names the
+    # extra in a form no other error uses: "'scipy' is required but not
+    # installed. Install it with: pip install 'lerobot[molmoact2]'". Matched on
+    # the bracketed extra so the hint keeps working whichever of the extra's
+    # three packages is the missing one.
+    if "lerobot[molmoact2]" in low:
+        return (
+            "This MolmoAct2 checkpoint needs an optional package that isn't installed here. "
+            "Install it with `pip install 'lerobot[molmoact2]'` (transformers + peft + scipy), "
+            "then start the run again."
+        )
+    # MolmoAct2 is the one policy whose checkpoint can be internally unrunnable:
+    # `inference_action_mode` has no default (the policy raises on None), and a
+    # checkpoint trained for one head cannot be run with the other. MakerMods
+    # Lab fills a MISSING mode in from the checkpoint's own training mode
+    # (rollout._rollout_cli_args), so what reaches here is a real head mismatch.
+    #
+    # Keyed on the raised sentences, NOT on the bare field name: lerobot logs
+    # the effective policy config, so `inference_action_mode` alone appears in
+    # the log tail of runs that failed for entirely unrelated reasons.
+    if (
+        "cannot run continuous inference" in low
+        or "cannot run discrete inference" in low
+        or "requires `inference_action_mode` to be set explicitly" in low
+    ):
+        return (
+            "This MolmoAct2 checkpoint can't run the action head it was asked for. It was "
+            "trained for discrete or continuous actions, not both — pick a checkpoint whose "
+            "action_mode matches, or re-export it with action_mode='both'."
+        )
     if "libtorchcodec" in low or "library not loaded: @rpath/libavutil" in low:
         return (
             "The trainer's video decoder (torchcodec) couldn't load its FFmpeg libraries on this "
