@@ -41,11 +41,21 @@ measured 3-5 deg on ``wrist_flex`` across runs on a real arm — so waiting for
 the error to reach zero waits forever and would burn the whole ceiling on every
 healthy stop. Once the worst joint stops improving, being within
 ``MAKER_RETURN_SETTLE_DEG`` counts as arrived.
+
+Two destinations, two shapes. A teardown return goes to a pose that was
+captured once and cannot move, so the whole ramp is planned up front. The
+mid-session re-alignment (``record._realign_follower_to_leader``) goes to the
+LEADER, which the operator's hand is still on while the move runs — the UI says
+"resumed" the moment Resume is pressed, but the walk takes seconds. Passing
+``target_fn`` switches the interpolation to chasing: the destination is
+re-read every tick and the setpoint steps toward wherever it is now, still
+rate-bounded. See ``_chase_to_pose``.
 """
 
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +156,14 @@ def maker_targets_from_action(
     The gripper is excluded by default, matching ``capture_maker_pose``: a
     rate-bounded walk of the jaws would squeeze or drop whatever they hold,
     and the gripper is the one joint a snap does not endanger.
+
+    The mid-session re-alignment passes ``include_gripper=True``, and the
+    difference is deliberate. The default belongs to STOP time, where the
+    session is over and the jaws may be holding something the operator wants
+    left held. At a resume the session continues and the jaws are the
+    operator's to command: they span ~118 deg, so leaving them out means the
+    first passthrough tick snaps them across that whole range — the exact
+    lurch this machinery exists to prevent.
     """
     left = getattr(robot, "left_arm", None)
     right = getattr(robot, "right_arm", None)
@@ -181,6 +199,7 @@ def return_maker_to_pose(
     speed_deg_s: float = MAKER_RETURN_SPEED_DEG_S,
     ceiling_s: float = MAKER_RETURN_CEILING_S,
     target_label: str = "its start pose",
+    target_fn: Callable[[], dict[str, float] | None] | None = None,
 ) -> tuple[bool, str]:
     """Walk a Maker arm back to ``pose`` at a bounded rate, then confirm it landed.
 
@@ -192,6 +211,13 @@ def return_maker_to_pose(
     the teardown wording because that is this function's original caller; the
     mid-session re-alignment (``record._realign_follower_to_leader``) walks the
     arm to the LEADER's current pose, which is not a start pose at all.
+
+    ``target_fn`` makes the destination live: when given, it is called once per
+    control tick for a fresh ``pose``-shaped dict (bare motor names in degrees,
+    for THIS device) and the setpoint chases it instead of following a plan
+    fixed at the first tick. ``pose`` is then only the first target. Without it
+    the motion is the original up-front interpolation, unchanged — every
+    teardown caller stays on that path.
 
     Never raises: this runs on teardown paths where the caller's next move is
     to release torque regardless, and an exception here would skip that. A
@@ -216,7 +242,24 @@ def return_maker_to_pose(
 
     max_delta = max(abs(start[m] - v) for m, v in targets.items())
     if max_delta <= MAKER_RETURN_TOLERANCE_DEG:
+        # Already there. A live ``target_fn`` changes nothing here: this move
+        # exists to close an accumulated GAP, and with no gap to close the
+        # caller's ordinary passthrough tracks the leader from the next tick
+        # anyway — chasing it here would just be passthrough with extra steps.
         return True, ""
+
+    if target_fn is not None:
+        return _chase_to_pose(
+            device,
+            targets,
+            start,
+            target_fn,
+            abort_event=abort_event,
+            label=label,
+            speed_deg_s=speed_deg_s,
+            ceiling_s=ceiling_s,
+            target_label=target_label,
+        )
 
     # Distance sets duration, so the RATE is what stays bounded. A fixed
     # duration (lerobot's 3s) would make a long return fast and a short one
@@ -293,10 +336,139 @@ def return_maker_to_pose(
         return False, str(e)
 
 
+def _chase_to_pose(
+    device,
+    targets: dict[str, float],
+    start: dict[str, float],
+    target_fn: Callable[[], dict[str, float] | None],
+    abort_event: threading.Event | None,
+    label: str,
+    speed_deg_s: float,
+    ceiling_s: float,
+    target_label: str,
+) -> tuple[bool, str]:
+    """``return_maker_to_pose`` with a destination that is allowed to move.
+
+    Called only from there, and only when a ``target_fn`` was given; the
+    fixed-plan path above is left exactly as it was so every teardown caller
+    keeps byte-for-byte its old motion.
+
+    Three things differ from the fixed plan, each forced by the moving target:
+
+    - **The rate cap is per joint per tick, not a shared timeline.** The plan
+      version divides one duration across all joints, so they set off together
+      and land together; that timeline can only be computed against a target
+      that holds still. Here each joint steps at most ``speed_deg_s * dt``
+      toward wherever its target is now. Joints therefore land at different
+      times — acceptable for a catch-up over tens of degrees, and it stops one
+      far-from-target joint (the gripper, which spans ~118 deg) from slowing
+      the whole arm.
+    - **Arrival is judged against the FRESH target**, so "close enough to
+      resume passthrough without a snap" means close to where the leader is
+      now, not to where it was when the move began.
+    - **A target that moves resets the convergence tracker.** The stall check
+      declares arrival when the worst joint stops improving; a leader that
+      walks away makes the error grow, which reads as "not improving" and
+      would report a healthy chase as a stalled one. Moving the destination
+      means convergence has to be earned again against the new destination.
+
+    The ceiling still bounds the whole thing: an operator who keeps moving the
+    leader is chased until the budget runs out and then the caller drops into
+    ordinary passthrough — from a far smaller residual than it started with.
+    """
+    period = 1.0 / MAKER_RETURN_FPS
+    max_step = max(speed_deg_s, 1e-6) * period
+    deadline = time.monotonic() + ceiling_s
+
+    # The setpoint starts where the arm actually is, exactly as the ramp does.
+    setpoint = {m: start[m] for m in targets}
+    target = dict(targets)
+    warned = False
+
+    logger.info(
+        "Chasing the %s to %s: %.1f deg worst-case at %.0f deg/s",
+        label,
+        target_label,
+        max(abs(start[m] - v) for m, v in target.items()),
+        speed_deg_s,
+    )
+
+    try:
+        best = float("inf")
+        stalled = 0
+        described = ""
+        while time.monotonic() < deadline:
+            if abort_event is not None and abort_event.is_set():
+                return False, "cut-short"
+
+            fresh: dict[str, float] | None = None
+            try:
+                fresh = target_fn()
+            except Exception as e:
+                # Documented contract: a failing refresh must not raise out of
+                # a courtesy move. Log once — at 30 Hz a broken leader would
+                # otherwise fill the log with the same line for the whole
+                # ceiling — and keep driving to the last good target.
+                if not warned:
+                    logger.warning(f"Could not refresh the {label}'s target ({e}); holding the last one")
+                    warned = True
+            if fresh:
+                # Only the joints this move already owns: a refresh must not
+                # widen the set of joints being driven half-way through.
+                updated = {
+                    m: float(v)
+                    for m, v in fresh.items()
+                    if m in target and isinstance(v, (int, float)) and not isinstance(v, bool)
+                }
+                if updated:
+                    moved = max(abs(updated[m] - target[m]) for m in updated)
+                    target.update(updated)
+                    if moved >= MAKER_RETURN_STALL_PROGRESS_DEG:
+                        best = float("inf")
+                        stalled = 0
+
+            for motor, goal in target.items():
+                gap = goal - setpoint[motor]
+                setpoint[motor] += max(-max_step, min(max_step, gap))
+            device.send_action({f"{m}.pos": v for m, v in setpoint.items()})
+            time.sleep(period)
+
+            try:
+                current = _read_pose(device)
+            except Exception:
+                continue  # transient CAN read miss; keep chasing and re-read
+            deltas = {m: abs(current[m] - v) for m, v in target.items() if m in current}
+            if not deltas:
+                return False, "no-pose"
+            motor, delta = max(deltas.items(), key=lambda kv: kv[1])
+            described = f"{motor} still {delta:.1f} deg away"
+            if delta <= MAKER_RETURN_TOLERANCE_DEG:
+                return True, ""
+            if best - delta >= MAKER_RETURN_STALL_PROGRESS_DEG:
+                best = delta
+                stalled = 0
+                continue
+            best = min(best, delta)
+            stalled += 1
+            if stalled < MAKER_RETURN_STALL_POLLS:
+                continue
+            if delta <= MAKER_RETURN_SETTLE_DEG:
+                logger.info("The %s settled at %s (%s)", label, target_label, described)
+                return True, "settled"
+            logger.warning("The %s stopped short of %s: %s", label, target_label, described)
+            return False, described
+
+        return False, described or "timed out"
+    except Exception as e:
+        logger.error(f"Error chasing the {label} to {target_label}: {e}")
+        return False, str(e)
+
+
 def return_maker_arms_to_rest(
     rest_poses: list[tuple[object, dict[str, float]]],
     abort_event: threading.Event | None = None,
     target_label: str = "its start pose",
+    target_fns: list[Callable[[], dict[str, float] | None] | None] | None = None,
 ) -> list[tuple[bool, str]]:
     """Return every captured Maker arm concurrently, then wait for all of them.
 
@@ -310,12 +482,36 @@ def return_maker_arms_to_rest(
     been logged by then — but the mid-session re-alignment reports its own
     outcome, and a thread whose join timed out must not be mistaken for a
     success, so the verdicts are collected rather than discarded.
+
+    ``target_fns`` is index-aligned with ``rest_poses`` (entries may be None)
+    and turns each arm's move into a chase — see ``return_maker_to_pose``. One
+    fn PER ARM rather than one fn returning the whole split, because the arms
+    run on separate threads: a single shared fn would be called concurrently by
+    both and would read one UART leader from two threads at once. Each arm's fn
+    asks the caller only for its own device's pose, which keeps
+    ``maker_targets_from_action`` the one place that knows how a robot-level
+    action splits (the caller builds the fns from it — see
+    ``record._LeaderTargetSource``).
     """
     if not rest_poses:
         return []
+
+    def _fn_for(index: int) -> Callable[[], dict[str, float] | None] | None:
+        if target_fns is None or index >= len(target_fns):
+            return None
+        return target_fns[index]
+
     if len(rest_poses) == 1:
         device, pose = rest_poses[0]
-        return [return_maker_to_pose(device, pose, abort_event=abort_event, target_label=target_label)]
+        return [
+            return_maker_to_pose(
+                device,
+                pose,
+                abort_event=abort_event,
+                target_label=target_label,
+                target_fn=_fn_for(0),
+            )
+        ]
 
     results: list[tuple[bool, str]] = [(False, "did not finish")] * len(rest_poses)
 
@@ -326,6 +522,7 @@ def return_maker_arms_to_rest(
             abort_event=abort_event,
             label=f"Maker follower arm {index + 1}",
             target_label=target_label,
+            target_fn=_fn_for(index),
         )
 
     threads = [

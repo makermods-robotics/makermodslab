@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import threading
 import time
 
@@ -1387,6 +1388,10 @@ class _RealignTeleop:
         self.calls += 1
         return dict(self.action)
 
+    def move_to(self, action: dict) -> None:
+        """The operator's hand, mid-move: the leader is not where it was."""
+        self.action = dict(action)
+
 
 class _RealignRobot:
     def __init__(self) -> None:
@@ -1403,21 +1408,32 @@ def _capture_realign(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     captured: list[dict] = []
 
-    def _fake_return(targets, abort_event=None, target_label="its start pose"):
-        captured.append({"targets": targets, "abort_event": abort_event, "label": target_label})
+    def _fake_return(targets, abort_event=None, target_label="its start pose", target_fns=None):
+        captured.append(
+            {
+                "targets": targets,
+                "abort_event": abort_event,
+                "label": target_label,
+                "target_fns": target_fns,
+            }
+        )
         return [(True, "") for _ in targets]
 
     monkeypatch.setattr(record, "return_maker_arms_to_rest", _fake_return)
     return captured
 
 
-def test_realign_targets_the_leaders_pose_and_leaves_the_gripper_alone(
+def test_realign_targets_the_leaders_pose_including_the_gripper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The target is what passthrough would have sent next — the leader's
-    action through the SAME processors — minus the gripper, which teleop and
-    record already exclude from a driven pose because it may be holding
-    something."""
+    action through the SAME processors — and here that INCLUDES the gripper.
+
+    A teardown capture drops it because a stopped session may be holding
+    something. A resume is not a teardown: the session continues, the jaws are
+    the operator's to command, and they span ~118 deg — so dropping them just
+    moves the snap to the first passthrough tick.
+    """
     from makermodslab import record
 
     captured = _capture_realign(monkeypatch)
@@ -1431,8 +1447,92 @@ def test_realign_targets_the_leaders_pose_and_leaves_the_gripper_alone(
     assert len(targets) == 1
     device, pose = targets[0]
     assert device is robot
-    assert pose == {"shoulder_pan": 12.0, "wrist_flex": -30.0}
-    assert "gripper" not in pose
+    assert pose == {"shoulder_pan": 12.0, "wrist_flex": -30.0, "gripper": -40.0}
+
+
+def test_realign_hands_the_move_a_live_target_that_follows_the_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The move takes seconds while the UI already says "resumed", so the
+    operator's hand is back on the leader before the follower has finished
+    walking. The target must therefore be a FUNCTION the move re-samples, not
+    a pose fixed when it started — otherwise whatever the leader moved during
+    the walk is delivered in one unramped step at the end."""
+    from makermodslab import record
+
+    captured = _capture_realign(monkeypatch)
+    robot = _RealignRobot()
+    teleop = _RealignTeleop({"shoulder_pan.pos": 12.0})
+
+    record._realign_follower_to_leader(robot, teleop, "maker", _identity, _identity)
+
+    fns = captured[0]["target_fns"]
+    assert fns is not None and len(fns) == len(captured[0]["targets"])
+    # One fn per arm, each answering for ITS device (a bimanual return drives
+    # the two sub-arms on separate threads and each asks only for its own).
+    assert fns[0]() == {"shoulder_pan": 12.0}
+
+
+def test_realign_target_follows_the_leader_between_ticks() -> None:
+    """What the fn is FOR: sampled again on the next tick it reports where the
+    leader is now, so the walk ends at the leader rather than at a stale pose
+    it has to jump from."""
+    from makermodslab import record
+
+    robot = _RealignRobot()
+    teleop = _RealignTeleop({"shoulder_pan.pos": 12.0})
+    source = record._LeaderTargetSource(robot, teleop, _identity, _identity, ttl_s=0.0)
+
+    assert source.for_device(robot) == {"shoulder_pan": 12.0}
+    teleop.move_to({"shoulder_pan.pos": 40.0})
+    assert source.for_device(robot) == {"shoulder_pan": 40.0}
+
+
+def test_realign_target_source_reads_one_leader_sample_per_tick() -> None:
+    """A bimanual return runs the two arms on separate threads, each asking
+    for a fresh target at ~30 Hz. Left alone that is two concurrent reads per
+    tick of one UART leader; the source serialises them behind a short cache so
+    both arms share one read."""
+    from makermodslab import record
+
+    robot = _RealignRobot()
+    teleop = _RealignTeleop({"shoulder_pan.pos": 5.0})
+    source = record._LeaderTargetSource(robot, teleop, _identity, _identity, ttl_s=60.0)
+
+    assert source.for_device(robot) == {"shoulder_pan": 5.0}
+    teleop.move_to({"shoulder_pan.pos": 99.0})
+    assert source.for_device(robot) == {"shoulder_pan": 5.0}  # inside the TTL
+    assert teleop.calls == 1
+
+
+def test_realign_target_source_keeps_the_last_good_target_and_warns_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A leader read that fails mid-chase must not raise and must not stop the
+    move: the arm keeps walking to where the leader last was. At 30 Hz for a
+    whole ceiling, the warning has to be once, not once per tick."""
+    from makermodslab import record
+
+    class _FlakyLeader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_action(self) -> dict:
+            self.calls += 1
+            if self.calls == 1:
+                return {"shoulder_pan.pos": 7.0}
+            raise RuntimeError("UART leader went away")
+
+    robot = _RealignRobot()
+    leader = _FlakyLeader()
+    source = record._LeaderTargetSource(robot, leader, _identity, _identity, ttl_s=0.0)
+
+    with caplog.at_level(logging.WARNING, logger="makermodslab.record"):
+        assert source.for_device(robot) == {"shoulder_pan": 7.0}
+        for _ in range(5):
+            assert source.for_device(robot) == {"shoulder_pan": 7.0}
+
+    assert len([r for r in caplog.records if "Could not read the leader" in r.getMessage()]) == 1
 
 
 def test_realign_forwards_its_abort_event_so_a_stop_can_cut_the_move_short(
@@ -1469,9 +1569,13 @@ def test_realign_is_a_no_op_on_an_so101(monkeypatch: pytest.MonkeyPatch) -> None
     assert robot.observation_calls == 0
 
 
-def test_realign_survives_a_leader_that_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_realign_survives_a_leader_that_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """A failed read must drop back into passthrough, not kill the session —
-    the reset phase is a gap, not a safety-critical move."""
+    the reset phase is a gap, not a safety-critical move. But it must SAY so:
+    "the re-alignment did not run" cannot be something you infer from a
+    missing log line."""
     from makermodslab import record
 
     captured = _capture_realign(monkeypatch)
@@ -1480,9 +1584,116 @@ def test_realign_survives_a_leader_that_cannot_be_read(monkeypatch: pytest.Monke
         def get_action(self):
             raise RuntimeError("UART leader went away")
 
-    record._realign_follower_to_leader(_RealignRobot(), _DeadLeader(), "maker", _identity, _identity)
+    with caplog.at_level(logging.INFO, logger="makermodslab.record"):
+        assert (
+            record._realign_follower_to_leader(_RealignRobot(), _DeadLeader(), "maker", _identity, _identity)
+            is True
+        )
 
     assert captured == []
+    messages = [r.getMessage() for r in caplog.records]
+    # Announced first, so the intent is on record even when the move can't run.
+    assert any("Re-aligning the follower" in m for m in messages)
+    assert any(
+        r.levelno >= logging.WARNING and "resuming passthrough unaligned" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_realign_warns_rather_than_skipping_silently_without_a_leader(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No leader at all is the other silent-skip branch. Same rule: it is
+    visible in the log or it did not happen."""
+    from makermodslab import record
+
+    captured = _capture_realign(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="makermodslab.record"):
+        assert record._realign_follower_to_leader(_RealignRobot(), None, "maker", _identity, _identity)
+
+    assert captured == []
+    assert any("No leader to re-align" in r.getMessage() for r in caplog.records)
+
+
+def test_realign_reports_a_move_the_abort_cut_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cut-short move leaves the arm PART-WAY between where it was and the
+    leader — still snap-worthy. The verdict has to travel back to the reset
+    loop so the next resume runs it again."""
+    from makermodslab import record
+
+    def _cut_short(targets, abort_event=None, target_label="", target_fns=None):
+        return [(False, "cut-short") for _ in targets]
+
+    monkeypatch.setattr(record, "return_maker_arms_to_rest", _cut_short)
+
+    assert (
+        record._realign_follower_to_leader(
+            _RealignRobot(), _RealignTeleop({"shoulder_pan.pos": 9.0}), "maker", _identity, _identity
+        )
+        is False
+    )
+
+
+def test_realign_reports_done_when_the_move_merely_stopped_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An obstructed joint is not a reason to re-run on the next resume —
+    re-running would just obstruct again. Only an ABORTED move stays pending.
+    """
+    from makermodslab import record
+
+    def _blocked(targets, abort_event=None, target_label="", target_fns=None):
+        return [(False, "elbow_flex still 20.0 deg away") for _ in targets]
+
+    monkeypatch.setattr(record, "return_maker_arms_to_rest", _blocked)
+
+    assert (
+        record._realign_follower_to_leader(
+            _RealignRobot(), _RealignTeleop({"shoulder_pan.pos": 9.0}), "maker", _identity, _identity
+        )
+        is True
+    )
+
+
+def test_reset_loop_keeps_a_cut_short_realign_pending_for_the_next_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pause branch re-arms the re-alignment, but only while `paused` is
+    still set when control reaches the loop head — a pause and a resume that
+    both land inside the move would slip through into a raw send. The verdict
+    closes that: cut short means still pending, whatever the flags say now."""
+    from makermodslab import record
+
+    log: list[str] = []
+    robot = _ScriptedRobot(log)
+    events = {"exit_early": False, "stop_recording": False, "paused": False}
+
+    def _cut_short_once() -> bool:
+        log.append("realign")
+        # Second call succeeds; a third would mean the flag never cleared.
+        return log.count("realign") > 1
+
+    def _fake_sleep(seconds: float) -> None:
+        if log.count("send") >= 2:
+            events["exit_early"] = True
+
+    monkeypatch.setattr("lerobot.utils.robot_utils.precise_sleep", _fake_sleep, raising=False)
+
+    record._reset_loop_with_pause(
+        robot=robot,
+        teleop=_FakePauseTeleop(),
+        events=events,
+        fps=30,
+        teleop_action_processor=_identity,
+        robot_action_processor=_identity,
+        control_time_s=10.0,
+        realign=_cut_short_once,
+    )
+
+    # Re-run immediately, and no raw passthrough send in between.
+    assert log[:2] == ["realign", "realign"]
+    assert log[2:] == ["send", "send"]
 
 
 def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
