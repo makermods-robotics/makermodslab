@@ -657,3 +657,36 @@ def test_real_script_trusts_one_answering_query(run_real_enum_script) -> None:
         FAKE_DEVICES_vide='[{"name": "Front", "unique_id": "uid-A"}]',
         FAKE_DEVICES_muxx="null",
     ) == [{"index": 0, "name": "Front", "unique_id": "uid-A"}]
+
+
+# ---------------------------------------------------------------------------
+# The two enumerations must ask for the SAME device types
+#
+# The parent's in-process list and the child's fresh list are only comparable
+# while they enumerate the same universe of devices. A device type present in
+# one and not the other shifts every index after it in exactly one of the two
+# index spaces — which is the silent renumbering this whole module exists to
+# catch, reintroduced inside the detector. The script therefore interpolates
+# _AVF_DEVICE_TYPE_NAMES rather than repeating it, and these pin that.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("type_name", camera_identity._AVF_DEVICE_TYPE_NAMES)
+def test_real_script_asks_for_every_shared_device_type_constant(run_real_enum_script, type_name: str) -> None:
+    """Driven through the real script: the fake only resolves a constant the
+    script actually asks for, so a name missing from the child's list leaves it
+    with an empty type list, which `fail()` turns into None."""
+    assert run_real_enum_script(
+        FAKE_TYPES=type_name,
+        FAKE_DEVICES_vide='[{"name": "Front", "unique_id": "uid-A"}]',
+    ) == [{"index": 0, "name": "Front", "unique_id": "uid-A"}]
+
+
+def test_enum_script_names_no_device_type_the_shared_constant_lacks() -> None:
+    """The other direction: an extra type in the CHILD only would renumber the
+    child's indices, so the record would verify against an ordering the parent
+    never sees."""
+    import re
+
+    named = set(re.findall(r"AVCaptureDeviceType\w+", camera_identity._AVF_ENUM_SCRIPT))
+    assert named == set(camera_identity._AVF_DEVICE_TYPE_NAMES)

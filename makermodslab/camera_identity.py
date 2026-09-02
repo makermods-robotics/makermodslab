@@ -176,7 +176,13 @@ def list_cameras_in_process() -> list[dict] | None:
 # Mirrors OpenCV's macOS enumeration: video + muxed devices sorted by
 # uniqueID (cap_avfoundation_mac.mm), so the returned index matches what
 # cv2.VideoCapture will open.
-_AVF_ENUM_SCRIPT = """
+#
+# `__DEVICE_TYPE_NAMES__` is substituted (not f-formatted — the script is full
+# of braces) with a repr of _AVF_DEVICE_TYPE_NAMES, so the two enumerations
+# cannot drift: a device type added to only one of them would put the parent's
+# index space and the child's out of step, which is the exact desynchronisation
+# this module exists to prevent.
+_AVF_ENUM_SCRIPT_TEMPLATE = """
 import json, sys, objc
 from Foundation import NSBundle
 
@@ -202,13 +208,7 @@ if not bundle.load():
     # constant resolves and the discovery session reports an empty device set.
     fail("AVFoundation framework did not load")
 types = []
-for name in (
-    "AVCaptureDeviceTypeBuiltInWideAngleCamera",
-    "AVCaptureDeviceTypeExternalUnknown",   # macOS < 14
-    "AVCaptureDeviceTypeExternal",          # macOS >= 14
-    "AVCaptureDeviceTypeContinuityCamera",  # macOS >= 14
-    "AVCaptureDeviceTypeDeskViewCamera",    # macOS >= 13
-):
+for name in __DEVICE_TYPE_NAMES__:
     loaded = {}
     try:
         objc.loadBundleVariables(bundle, loaded, [(name, b"@")])
@@ -243,6 +243,8 @@ print(json.dumps([
     for i, d in enumerate(devs)
 ]))
 """
+
+_AVF_ENUM_SCRIPT = _AVF_ENUM_SCRIPT_TEMPLATE.replace("__DEVICE_TYPE_NAMES__", repr(_AVF_DEVICE_TYPE_NAMES))
 
 
 def list_cameras_in_subprocess() -> list[dict] | None:

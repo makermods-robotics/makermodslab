@@ -1218,13 +1218,18 @@ def _verify_camera_identities(cameras: dict[str, dict[str, Any]], bindings: dict
 
     A disagreement RAISES rather than re-anchoring to wherever the uniqueID now
     sits. Silently correcting would open a device the user never chose, in a
-    flow that then drives a robot arm; refusing sends them back to the camera
-    picker, which is one click and unambiguous. Verification is skipped — the
-    run proceeds exactly as it did before — whenever there is nothing to check
-    against: no `unique_id` in the record (records written before identity
-    existed, and every record on a non-macOS host), a non-int index (a device
-    path, which is not a position in this enumeration), or an enumeration that
-    could not be performed.
+    flow that then drives a robot arm; refusing hands the choice back to the
+    person who made it. The two ways a binding can break need DIFFERENT
+    instructions, so the refusal separates them: a camera whose uniqueID is not
+    in the enumeration at all is unplugged and cannot be picked in a UI that
+    only lists attached devices (reconnect it, or drop it from the record),
+    while one sitting at another index is present and merely renumbered (the
+    message says where it is now, and to re-save this robot's cameras).
+    Verification is skipped — the run proceeds exactly as it did before —
+    whenever there is nothing to check against: no `unique_id` in the record
+    (records written before identity existed, and every record on a non-macOS
+    host), a non-int index (a device path, which is not a position in this
+    enumeration), or an enumeration that could not be performed.
     """
     # Only macOS records carry a uniqueID, so a fully unverifiable camera set
     # must not pay for a subprocess spawn on every start.
@@ -1247,37 +1252,70 @@ def _verify_camera_identities(cameras: dict[str, dict[str, Any]], bindings: dict
         logger.info("Camera enumeration unavailable — starting without verifying camera identities")
         return
     by_index = {cam.get("index"): cam.get("unique_id") for cam in attached}
-    mismatched = []
+    by_unique_id = {cam.get("unique_id"): cam.get("index") for cam in attached}
+    # Two genuinely different failures, and they need different instructions:
+    # a camera that is NOT ATTACHED cannot be re-selected (it is not in the
+    # picker), and a camera that merely RENUMBERED is still there — the
+    # enumeration says exactly where. Telling a user to re-select a device that
+    # is not connected is a dead end, so they are split here rather than in the
+    # message.
+    absent: list[tuple[str, str, Any]] = []
+    moved: list[tuple[str, str, Any, Any]] = []
     for slot, camera in verifiable.items():
         index = camera["camera_index"]
-        if by_index.get(index) == camera["unique_id"]:
+        unique_id = camera["unique_id"]
+        if by_index.get(index) == unique_id:
             continue
         # The record's own label is what the user chose in the camera picker;
         # the policy slot ("observation.images.front") is checkpoint jargon they
         # never typed. Name the label, fall back to the slot only if the request
         # somehow carries no binding for it.
         label = bindings.get(slot) or slot
-        mismatched.append((label, camera["unique_id"], index))
-    if not mismatched:
+        if unique_id in by_unique_id:
+            moved.append((label, unique_id, index, by_unique_id[unique_id]))
+        else:
+            absent.append((label, unique_id, index))
+    if not absent and not moved:
         return
     logger.warning(
-        "Refusing inference: camera indices no longer match the robot record (%s); attached: %s",
-        ", ".join(f"{label} {uid} expected at index {index}" for label, uid, index in mismatched),
+        "Refusing inference: camera indices no longer match the robot record "
+        "(not connected: %s; moved: %s); attached: %s",
+        ", ".join(f"{label} {uid} expected at index {index}" for label, uid, index in absent) or "none",
+        ", ".join(
+            f"{label} {uid} expected at index {index}, now at index {now}" for label, uid, index, now in moved
+        )
+        or "none",
         attached,
     )
-    named = "; ".join(f"'{label}' (device {uid})" for label, uid, _ in mismatched)
     # Deliberately never says "restart": the index is stale on disk, so a
-    # restart changes nothing and sends the user round a loop. Re-selecting the
-    # camera is the only thing that rewrites the record — and it must be the
-    # USER doing it, since only they know which physical camera they meant.
-    raise CameraResolutionError(
-        f"{'These cameras are' if len(mismatched) > 1 else 'This camera is'} no longer at the "
-        f"position saved for this robot, so inference would open the wrong device: {named}. "
-        "USB camera numbering shifts whenever cameras are plugged in or removed. "
-        "Open Robot settings and re-select "
-        f"{'these cameras' if len(mismatched) > 1 else 'this camera'} in this robot's camera "
-        "configuration, then start again."
-    )
+    # restart changes nothing and sends the user round a loop. Only the record
+    # changing fixes this, and it must be the USER doing it — they are the
+    # only one who knows which physical camera they meant.
+    parts = []
+    if absent:
+        named = "; ".join(f"'{label}' (device {uid})" for label, uid, _ in absent)
+        parts.append(
+            f"{'These cameras are' if len(absent) > 1 else 'This camera is'} not connected, so "
+            f"inference cannot open {'them' if len(absent) > 1 else 'it'}: {named}. Reconnect "
+            f"{'them' if len(absent) > 1 else 'it'}, or remove "
+            f"{'them' if len(absent) > 1 else 'it'} from this robot's cameras, then start again."
+        )
+    if moved:
+        # Say where the camera actually IS. Without it the user is told their
+        # camera moved and left to guess where to, which is the one fact the
+        # enumeration already handed us.
+        named = "; ".join(
+            f"'{label}' (device {uid}) was saved at position {index} but is now at position {now}"
+            for label, uid, index, now in moved
+        )
+        parts.append(
+            f"{'These cameras have' if len(moved) > 1 else 'This camera has'} moved since this "
+            f"robot's cameras were saved, so inference would open the wrong device: {named}. "
+            "USB camera numbering shifts whenever cameras are plugged in or removed. "
+            "Open this robot's settings and save its camera configuration to update the saved "
+            f"position{'s' if len(moved) > 1 else ''}, then start again."
+        )
+    raise CameraResolutionError(" ".join(parts))
 
 
 def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
@@ -2329,6 +2367,12 @@ def handle_next_episode() -> dict[str, Any]:
         # and the frontend's past-duration safety net both measure the EPISODE,
         # not the (much longer) session. On the live-runner path the setup time
         # is now ~0, which is the win.
+        # Everything cleared or restamped below has to be restorable: the
+        # respawn path can still refuse (a camera moved during the reset), and
+        # that refusal leaves the session parked exactly where it was.
+        prev_started_at = _inference_started_at
+        prev_rollout_started_at = _inference_rollout_started_at
+        prev_error, prev_hint, prev_runner_error = ev.error, ev.hint, ev.runner_error
         _inference_started_at = time.time()
         _inference_rollout_started_at = None
         # Clear the previous episode's crash banner — the user chose to continue.
@@ -2379,6 +2423,18 @@ def handle_next_episode() -> dict[str, Any]:
             if _eval_session is ev and inference_active:
                 ev.episode_pending = False
                 _inference_meta["phase"] = PHASE_RESETTING
+                # The clocks were restamped to "now" for an episode that never
+                # began; left that way the reset dialog's elapsed time restarts
+                # from zero and lies about how long the user has been parked.
+                _inference_started_at = prev_started_at
+                _inference_rollout_started_at = prev_rollout_started_at
+                # This path is only reached because the runner CRASHED, so the
+                # banner cleared a moment ago is the only explanation of why the
+                # user is being asked to continue at all. Wiping it leaves a
+                # transient toast as the sole account of the crash.
+                ev.error = prev_error
+                ev.hint = prev_hint
+                ev.runner_error = prev_runner_error
         return {"success": False, "status_code": 400, "message": str(exc)}
 
     try:

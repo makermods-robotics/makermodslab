@@ -3291,6 +3291,22 @@ def _fake_enumeration(monkeypatch: pytest.MonkeyPatch, cameras: list[dict] | Non
     monkeypatch.setattr(rollout, "list_cameras_in_subprocess", lambda: cameras)
 
 
+def _forbid_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the enumeration EXPLODE if it is spawned at all.
+
+    Patching it to return a list cannot tell "skipped verification" from
+    "verified and happened to agree", so every skip case traps the spawn
+    instead. The skip is the feature's cost guarantee: a record with nothing to
+    verify (no uniqueID, a non-int index) must not pay for a PyObjC subprocess
+    on every single start."""
+    from makermodslab import rollout
+
+    def _boom():
+        raise AssertionError("spawned a camera enumeration for an unverifiable camera set")
+
+    monkeypatch.setattr(rollout, "list_cameras_in_subprocess", _boom)
+
+
 def _cam_request(robot: str, bindings: dict[str, str]):
     from makermodslab.rollout import InferenceRequest
 
@@ -3401,6 +3417,159 @@ def test_session_cameras_names_every_mismatched_camera(
     assert "uid-O" in message
 
 
+def test_session_cameras_refuses_when_the_enumeration_found_no_cameras(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An enumeration that RAN and returned [] is a fact about the machine, not
+    a failure to ask — everything got unplugged. Collapsing it into the
+    "could not enumerate" skip (`if not attached`) would sail past the guard and
+    hand lerobot an index with nothing behind it. Keeping None and [] apart is
+    the entire reason camera_identity maintains the split."""
+    from makermodslab.rollout import _session_cameras
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(monkeypatch, [])
+    with pytest.raises(CameraResolutionError) as exc:
+        _session_cameras(_cam_request("solo", {"front": "wrist"}))
+
+    assert "not connected" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# WHAT the refusal tells the user to do
+#
+# Two different failures hide behind "the index no longer matches", and they
+# need opposite instructions. A camera that is UNPLUGGED cannot be re-selected:
+# the picker only lists attached devices, so "re-select it" is a dead end. A
+# camera that merely RENUMBERED is still attached, and the enumeration already
+# knows where it went — so say where, and point at the record that needs
+# re-saving. Neither may say "restart".
+# ---------------------------------------------------------------------------
+
+
+def _refusal(tmp_lerobot_home, monkeypatch, cams, attached, bindings) -> str:
+    from makermodslab.rollout import _session_cameras
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_identified_cams(tmp_lerobot_home, monkeypatch, "solo", cams)
+    _fake_enumeration(monkeypatch, attached)
+    with pytest.raises(CameraResolutionError) as exc:
+        _session_cameras(_cam_request("solo", bindings))
+    return str(exc.value)
+
+
+def test_refusal_for_an_unplugged_camera_says_reconnect_not_re_select(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = _refusal(
+        tmp_lerobot_home,
+        monkeypatch,
+        [_identified_cam("wrist", 1, "uid-W")],
+        [{"index": 0, "name": "Front", "unique_id": "uid-F"}],
+        {"front": "wrist"},
+    )
+    assert "This camera is not connected" in message
+    assert "These cameras are" not in message
+    assert "Reconnect it" in message
+    assert "remove it from this robot's cameras" in message
+    # The camera is absent from the picker, so any instruction that starts in
+    # the picker sends the user somewhere that cannot help them.
+    assert "re-select" not in message.lower()
+    assert "restart" not in message.lower()
+
+
+def test_refusal_for_a_moved_camera_says_where_it_actually_is_now(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enumeration is in hand, so the new position is knowable — without it
+    the user is told their camera moved and left to guess where to."""
+    message = _refusal(
+        tmp_lerobot_home,
+        monkeypatch,
+        [_identified_cam("wrist", 1, "uid-W")],
+        [
+            {"index": 0, "name": "Front", "unique_id": "uid-F"},
+            {"index": 1, "name": "Other", "unique_id": "uid-X"},
+            {"index": 3, "name": "Wrist", "unique_id": "uid-W"},
+        ],
+        {"front": "wrist"},
+    )
+    assert "This camera has moved" in message
+    assert "These cameras have" not in message
+    assert "was saved at position 1 but is now at position 3" in message
+    assert "save its camera configuration" in message
+    # Still attached, so it is emphatically NOT the unplugged wording.
+    assert "not connected" not in message
+    assert "restart" not in message.lower()
+
+
+def test_refusal_pluralises_when_several_cameras_moved(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = _refusal(
+        tmp_lerobot_home,
+        monkeypatch,
+        [_identified_cam("wrist", 1, "uid-W"), _identified_cam("overhead", 2, "uid-O")],
+        [
+            {"index": 1, "name": "Other", "unique_id": "uid-X"},
+            {"index": 3, "name": "Wrist", "unique_id": "uid-W"},
+            {"index": 4, "name": "Over", "unique_id": "uid-O"},
+        ],
+        {"cam_a": "wrist", "cam_b": "overhead"},
+    )
+    assert "These cameras have moved" in message
+    assert "This camera has" not in message
+    assert "update the saved positions" in message
+    assert "'wrist' (device uid-W) was saved at position 1 but is now at position 3" in message
+    assert "'overhead' (device uid-O) was saved at position 2 but is now at position 4" in message
+
+
+def test_refusal_pluralises_when_several_cameras_are_unplugged(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = _refusal(
+        tmp_lerobot_home,
+        monkeypatch,
+        [_identified_cam("wrist", 1, "uid-W"), _identified_cam("overhead", 2, "uid-O")],
+        [{"index": 0, "name": "Front", "unique_id": "uid-F"}],
+        {"cam_a": "wrist", "cam_b": "overhead"},
+    )
+    assert "These cameras are not connected" in message
+    assert "This camera is" not in message
+    assert "Reconnect them" in message
+    assert "'wrist' (device uid-W)" in message
+    assert "'overhead' (device uid-O)" in message
+
+
+def test_refusal_keeps_the_two_cases_apart_when_both_happen(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bench rearrangement typically does both at once: unplugging one camera
+    renumbers the rest. Lumping them under either instruction leaves one of the
+    two cameras with advice that cannot work."""
+    message = _refusal(
+        tmp_lerobot_home,
+        monkeypatch,
+        [_identified_cam("wrist", 1, "uid-W"), _identified_cam("overhead", 2, "uid-O")],
+        [
+            {"index": 0, "name": "Front", "unique_id": "uid-F"},
+            {"index": 1, "name": "Other", "unique_id": "uid-X"},
+            {"index": 3, "name": "Over", "unique_id": "uid-O"},
+        ],
+        {"cam_a": "wrist", "cam_b": "overhead"},
+    )
+    # The absent one gets "reconnect", the present one gets its new position —
+    # each named exactly once, in the sentence that applies to it.
+    assert "This camera is not connected, so inference cannot open it: 'wrist' (device uid-W)." in message
+    assert "'overhead' (device uid-O) was saved at position 2 but is now at position 3" in message
+    assert "This camera has moved" in message
+    assert "'wrist'" not in message.split("This camera has moved")[1]
+    assert "restart" not in message.lower()
+
+
 def test_session_cameras_skips_verification_without_a_unique_id(
     tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3411,7 +3580,7 @@ def test_session_cameras_skips_verification_without_a_unique_id(
     _robot_record_with_identified_cams(
         tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, None)]
     )
-    _fake_enumeration(monkeypatch, [{"index": 0, "name": "Front", "unique_id": "uid-F"}])
+    _forbid_enumeration(monkeypatch)
     assert _session_cameras(_cam_request("solo", {"front": "wrist"}))["front"]["camera_index"] == 1
 
 
@@ -3439,10 +3608,26 @@ def test_session_cameras_skips_verification_for_a_non_int_index(
     cam = _identified_cam("wrist", 1, "uid-W")
     cam["camera_index"] = "/dev/video0"
     _robot_record_with_identified_cams(tmp_lerobot_home, monkeypatch, "solo", [cam])
-    _fake_enumeration(monkeypatch, [{"index": 0, "name": "Front", "unique_id": "uid-F"}])
+    _forbid_enumeration(monkeypatch)
     assert (
         _session_cameras(_cam_request("solo", {"front": "wrist"}))["front"]["camera_index"] == "/dev/video0"
     )
+
+
+def test_session_cameras_skips_verification_for_a_bool_index(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`True` passes `isinstance(x, int)` in Python, and would then be compared
+    against enumerated index 1 — a record with a junk boolean index would be
+    "verified" against an unrelated camera and refuse a start that has nothing
+    wrong with it. A bool is not a position, so there is nothing to check."""
+    from makermodslab.rollout import _session_cameras
+
+    cam = _identified_cam("wrist", 1, "uid-W")
+    cam["camera_index"] = True
+    _robot_record_with_identified_cams(tmp_lerobot_home, monkeypatch, "solo", [cam])
+    _forbid_enumeration(monkeypatch)
+    assert _session_cameras(_cam_request("solo", {"front": "wrist"}))["front"]["camera_index"] is True
 
 
 def test_session_cameras_does_not_enumerate_without_bindings(
@@ -3625,6 +3810,14 @@ def test_next_episode_respawn_refuses_when_a_camera_moved(
     session.request = _cam_request("solo", {"front": "wrist"})
     # Two episodes already scored — the thing the rollback is protecting.
     session.results = ["success", "failure"]
+    # This path is ONLY reached with a dead runner, so there is always a crash
+    # banner sitting on the dialog explaining why Continue is being offered.
+    session.error = "The rollout process exited with code 1"
+    session.hint = "The policy could not be loaded"
+    session.runner_error = "RuntimeError: boom"
+    # The previous episode's rollout stamp is still standing; nothing has
+    # started, so nothing should restamp it.
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", 1005.0)
     monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
     monkeypatch.setattr(
         rollout,
@@ -3649,6 +3842,18 @@ def test_next_episode_respawn_refuses_when_a_camera_moved(
     assert rollout._inference_meta["phase"] == rollout.PHASE_RESETTING
     assert session.results == results_before
     assert session.episodes_total == 3
+    # The clocks were restamped to "now" for an episode that never began. Left
+    # that way the reset dialog's elapsed time restarts from zero, so it reports
+    # the age of a refusal instead of how long the user has been parked.
+    assert rollout._inference_started_at == 1000.0
+    assert rollout._inference_rollout_started_at == 1005.0
+    # And the crash banner was cleared a moment earlier on the assumption the
+    # episode was about to run. Wiping it leaves a transient toast as the only
+    # account of why the runner is gone — on the one path that is guaranteed to
+    # have crashed.
+    assert session.error == "The rollout process exited with code 1"
+    assert session.hint == "The policy could not be loaded"
+    assert session.runner_error == "RuntimeError: boom"
 
 
 def test_next_episode_respawn_proceeds_when_the_cameras_still_match(
