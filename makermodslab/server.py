@@ -22,8 +22,6 @@ import logging
 import os
 import queue
 import re
-import subprocess
-import sys
 import threading
 import time
 import zipfile
@@ -67,7 +65,11 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_identity import identify_cv2_index, pump_avfoundation_runloop
+from .camera_identity import (
+    identify_cv2_index,
+    list_cameras_in_subprocess,
+    pump_avfoundation_runloop,
+)
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .can_recovery import ReleaseCanTorqueRequest, handle_release_can_torque
 from .identify import identify_arm_by_motion
@@ -3564,72 +3566,6 @@ async def supply_voltage(port: str = ""):
     return await read_supply_voltage(port)
 
 
-# Runs in a fresh Python — see _avfoundation_cameras_in_cv2_order for why.
-# Mirrors OpenCV's macOS enumeration: video + muxed devices sorted by
-# uniqueID (cap_avfoundation_mac.mm), so the returned index matches what
-# cv2.VideoCapture will open.
-_AVF_ENUM_SCRIPT = """
-import json, objc
-from Foundation import NSBundle
-bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework")
-bundle.load()
-types = []
-for name in (
-    "AVCaptureDeviceTypeBuiltInWideAngleCamera",
-    "AVCaptureDeviceTypeExternalUnknown",   # macOS < 14
-    "AVCaptureDeviceTypeExternal",          # macOS >= 14
-    "AVCaptureDeviceTypeContinuityCamera",  # macOS >= 14
-    "AVCaptureDeviceTypeDeskViewCamera",    # macOS >= 13
-):
-    loaded = {}
-    try:
-        objc.loadBundleVariables(bundle, loaded, [(name, b"@")])
-    except objc.error:
-        continue
-    if loaded.get(name) is not None:
-        types.append(loaded[name])
-cls = objc.lookUpClass("AVCaptureDeviceDiscoverySession")
-devs = []
-for mt in ("vide", "muxx"):
-    devs.extend(cls.discoverySessionWithDeviceTypes_mediaType_position_(types, mt, 0).devices() or [])
-devs.sort(key=lambda d: d.uniqueID())
-print(json.dumps([
-    {"index": i, "name": str(d.localizedName()), "unique_id": str(d.uniqueID())}
-    for i, d in enumerate(devs)
-]))
-"""
-
-
-def _avfoundation_cameras_in_cv2_order() -> list[dict[str, Any]]:
-    """Enumerate macOS cameras in a fresh Python subprocess.
-
-    AVFoundation's in-process device cache doesn't refresh on USB
-    hotplug. Both the deprecated ``+devicesWithMediaType:`` and a
-    long-lived ``AVCaptureDeviceDiscoverySession`` go stale, because
-    device-connection notifications are delivered via
-    ``NSNotificationCenter`` on a thread that needs an active
-    ``NSRunLoop`` — uvicorn workers don't run one. A fresh subprocess
-    re-initializes AVFoundation, which reads IOKit's live device state
-    at startup.
-    """
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", _AVF_ENUM_SCRIPT],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-        )
-    except (subprocess.SubprocessError, OSError) as e:
-        logger.warning("AVFoundation enumeration subprocess failed: %s", e)
-        return []
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        logger.warning("AVFoundation enumeration returned invalid JSON: %s", e)
-        return []
-
-
 def _generic_cv2_cameras(backend) -> list[dict[str, Any]]:
     """Last-resort enumeration: probe cv2 indices with placeholder names."""
     import cv2
@@ -3755,7 +3691,10 @@ def get_available_cameras():
         system = platform.system()
 
         if system == "Darwin":
-            cameras = _avfoundation_cameras_in_cv2_order()
+            # None (enumeration unavailable) and [] (no cameras) are the same
+            # answer to this endpoint: an empty list. Only the callers that
+            # REFUSE on an empty enumeration need to tell them apart.
+            cameras = list_cameras_in_subprocess() or []
             for cam in cameras:
                 cam["available"] = True
             return {"status": "success", "cameras": cameras}

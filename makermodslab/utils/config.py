@@ -817,6 +817,20 @@ def bind_robot_cameras(
     name pairing; the camera's IDENTITY and transport settings (index,
     unique_id, fps, fourcc, backend) come from the record.
 
+    Neither of those identity fields is an address the OS honours. `camera_index`
+    is a POSITION in a USB/AVFoundation enumeration that renumbers whenever the
+    device set changes, so it can end up addressing a different physical camera
+    than the label beside it names — and the session would open it without a
+    murmur. `unique_id` (AVFoundation's uniqueID) is the better of the two but
+    is still only a (model, port) pair — it is derived from the USB locationID,
+    so it changes when a camera moves ports and is inherited by an identical
+    model plugged into the same one; it is not a serial. What it IS good for is
+    detecting the renumbering: `rollout._verify_camera_identities` checks the
+    stored index still holds the stored uniqueID before a run and refuses
+    otherwise. This function itself does no such check — it reads the record as
+    written, and every caller that opens a camera on the strength of it should
+    consider whether it needs that verification too.
+
     CAPTURE RESOLUTION is the one exception, supplied by `dims`
     ({policy camera name: {"width": w, "height": h}}, from the checkpoint's
     image_features). lerobot's standard rollout pipeline does NOT resize frames

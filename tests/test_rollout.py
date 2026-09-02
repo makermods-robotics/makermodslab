@@ -3238,3 +3238,238 @@ def test_sharded_weights_are_not_accepted(tmp_path) -> None:
     (d / "model.safetensors.index.json").write_text("{}")
 
     assert models._has_loadable_weights(d) is False
+
+
+# ---------------------------------------------------------------------------
+# Camera-identity verification before a rollout
+#
+# `camera_index` is a POSITION in a USB enumeration that renumbers whenever the
+# device set changes, so the record's index can point at a different physical
+# camera than the record names — and the policy then silently gets the wrong
+# view. Before spawning, the stored index is checked against a fresh-subprocess
+# enumeration (the ordering the `lerobot-rollout` CHILD will index against, not
+# this process's stale one) and a disagreement refuses the start.
+# ---------------------------------------------------------------------------
+
+
+def _robot_record_with_identified_cams(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch, name: str, cameras: list[dict]
+) -> None:
+    """Write a robot record whose cameras carry uniqueIDs (macOS records)."""
+    from makermodslab.utils import config as cfg
+
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(name, {"cameras": cameras}, allow_create=True)
+
+
+def _identified_cam(name: str, index: int, unique_id: str | None) -> dict:
+    cam = {
+        "id": f"camera_{name}",
+        "name": name,
+        "type": "opencv",
+        "camera_index": index,
+        "width": 640,
+        "height": 480,
+        "fps": 30,
+    }
+    if unique_id is not None:
+        cam["unique_id"] = unique_id
+    return cam
+
+
+def _fake_enumeration(monkeypatch: pytest.MonkeyPatch, cameras: list[dict] | None) -> None:
+    """Patch the fresh-subprocess enumeration rollout verifies against.
+
+    None means "could not enumerate" — deliberately different from []."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "list_cameras_in_subprocess", lambda: cameras)
+
+
+def _cam_request(robot: str, bindings: dict[str, str]):
+    from makermodslab.rollout import InferenceRequest
+
+    return InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        robot_name=robot,
+        camera_bindings=bindings,
+    )
+
+
+def test_session_cameras_passes_when_the_index_still_holds_the_named_camera(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from makermodslab.rollout import _session_cameras
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(
+        monkeypatch,
+        [
+            {"index": 0, "name": "Front", "unique_id": "uid-F"},
+            {"index": 1, "name": "Wrist", "unique_id": "uid-W"},
+        ],
+    )
+    cameras = _session_cameras(_cam_request("solo", {"front": "wrist"}))
+    # Verification never rewrites: the index the user chose is what is opened.
+    assert cameras["front"]["camera_index"] == 1
+
+
+def test_session_cameras_refuses_when_the_index_holds_a_different_camera(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: index 1 now holds some other device, so the policy would
+    get a view it was never trained on, with no error anywhere."""
+    from makermodslab.rollout import _session_cameras
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(
+        monkeypatch,
+        [
+            {"index": 0, "name": "Front", "unique_id": "uid-F"},
+            {"index": 1, "name": "Some Other Cam", "unique_id": "uid-X"},
+        ],
+    )
+    with pytest.raises(CameraResolutionError) as exc:
+        _session_cameras(_cam_request("solo", {"front": "wrist"}))
+
+    message = str(exc.value)
+    # Names the RECORD label the user recognises, plus the identity it wanted.
+    assert "wrist" in message
+    assert "uid-W" in message
+    # Actionable, and never "restart": a restart cannot fix a renumbered index.
+    assert "restart" not in message.lower()
+    assert "camera" in message.lower()
+
+
+def test_session_cameras_refuses_when_the_camera_is_not_attached_at_all(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An enumeration that ran and found fewer cameras is a fact, not a failure:
+    nothing sits at the stored index, so opening it would hit the wrong device
+    (or nothing)."""
+    from makermodslab.rollout import _session_cameras
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(monkeypatch, [{"index": 0, "name": "Front", "unique_id": "uid-F"}])
+    with pytest.raises(CameraResolutionError):
+        _session_cameras(_cam_request("solo", {"front": "wrist"}))
+
+
+def test_session_cameras_names_every_mismatched_camera(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixing one and being refused again for the next is a miserable loop."""
+    from makermodslab.rollout import _session_cameras
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home,
+        monkeypatch,
+        "solo",
+        [_identified_cam("wrist", 1, "uid-W"), _identified_cam("overhead", 2, "uid-O")],
+    )
+    _fake_enumeration(
+        monkeypatch,
+        [
+            {"index": 0, "name": "Front", "unique_id": "uid-F"},
+            {"index": 1, "name": "Other", "unique_id": "uid-X"},
+            {"index": 2, "name": "Another", "unique_id": "uid-Y"},
+        ],
+    )
+    with pytest.raises(CameraResolutionError) as exc:
+        _session_cameras(_cam_request("solo", {"cam_a": "wrist", "cam_b": "overhead"}))
+
+    message = str(exc.value)
+    assert "wrist" in message
+    assert "overhead" in message
+    assert "uid-W" in message
+    assert "uid-O" in message
+
+
+def test_session_cameras_skips_verification_without_a_unique_id(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Older records, and every record on non-macOS, carry no identity. There is
+    nothing to verify against, so behave exactly as before."""
+    from makermodslab.rollout import _session_cameras
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, None)]
+    )
+    _fake_enumeration(monkeypatch, [{"index": 0, "name": "Front", "unique_id": "uid-F"}])
+    assert _session_cameras(_cam_request("solo", {"front": "wrist"}))["front"]["camera_index"] == 1
+
+
+def test_session_cameras_skips_verification_when_enumeration_unavailable(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Could not enumerate" must not read as "no cameras attached" — that would
+    refuse every start on non-macOS and on any PyObjC/subprocess hiccup."""
+    from makermodslab.rollout import _session_cameras
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(monkeypatch, None)
+    assert _session_cameras(_cam_request("solo", {"front": "wrist"}))["front"]["camera_index"] == 1
+
+
+def test_session_cameras_skips_verification_for_a_non_int_index(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path-valued index (or any non-int) is not a position in this
+    enumeration, so there is nothing to compare it against."""
+    from makermodslab.rollout import _session_cameras
+
+    cam = _identified_cam("wrist", 1, "uid-W")
+    cam["camera_index"] = "/dev/video0"
+    _robot_record_with_identified_cams(tmp_lerobot_home, monkeypatch, "solo", [cam])
+    _fake_enumeration(monkeypatch, [{"index": 0, "name": "Front", "unique_id": "uid-F"}])
+    assert (
+        _session_cameras(_cam_request("solo", {"front": "wrist"}))["front"]["camera_index"] == "/dev/video0"
+    )
+
+
+def test_session_cameras_does_not_enumerate_without_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A camera-less policy must not pay for (or be refused by) an enumeration."""
+    from makermodslab import rollout
+
+    def _boom():
+        raise AssertionError("enumerated for a camera-less session")
+
+    monkeypatch.setattr(rollout, "list_cameras_in_subprocess", _boom)
+    assert rollout._session_cameras(_stub_request()) == {}
+
+
+def test_handle_start_inference_refuses_a_camera_that_moved(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal must land as a 400 BEFORE the session starts, so nothing
+    energises, and it must not wedge the inference slot."""
+    from makermodslab import rollout
+
+    _robot_record_with_identified_cams(
+        tmp_lerobot_home, monkeypatch, "solo", [_identified_cam("wrist", 1, "uid-W")]
+    )
+    _fake_enumeration(monkeypatch, [{"index": 1, "name": "Other", "unique_id": "uid-X"}])
+    result = rollout.handle_start_inference(_cam_request("solo", {"front": "wrist"}))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "wrist" in result["message"]
+    assert "restart" not in result["message"].lower()
+    assert rollout.inference_active is False

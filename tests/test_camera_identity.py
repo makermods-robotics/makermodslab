@@ -333,3 +333,92 @@ def test_a_missing_version_gated_constant_is_not_a_failure(fake_avfoundation) ->
 def test_non_macos_has_no_in_process_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(camera_identity.platform, "system", lambda: "Linux")
     assert list_cameras_in_process() is None
+
+
+# ---------------------------------------------------------------------------
+# list_cameras_in_subprocess — the OTHER index space
+#
+# A fresh subprocess re-reads IOKit's live device state, so this is the
+# ordering a newly spawned child (a preview probe, `lerobot-rollout`) will
+# index against. It is NOT this process's ordering, which went stale at the
+# first AVFoundation touch. The subprocess is always faked here: really
+# spawning one would depend on the host's cameras and on camera permission.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompleted:
+    def __init__(self, stdout: str) -> None:
+        self.stdout = stdout
+
+
+@pytest.fixture
+def fake_enum_subprocess(monkeypatch: pytest.MonkeyPatch):
+    """Patch the enumeration subprocess; returns a setter taking either the
+    stdout string to hand back or an exception instance to raise."""
+
+    def _set(outcome) -> None:
+        def _run(*args, **kwargs):
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return _FakeCompleted(outcome)
+
+        monkeypatch.setattr(camera_identity.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(camera_identity.subprocess, "run", _run)
+
+    return _set
+
+
+def test_subprocess_enumeration_returns_the_parsed_device_list(fake_enum_subprocess) -> None:
+    from makermodslab.camera_identity import list_cameras_in_subprocess
+
+    fake_enum_subprocess(
+        '[{"index": 0, "name": "Cam A", "unique_id": "uid-A"},'
+        ' {"index": 1, "name": "Cam B", "unique_id": "uid-B"}]'
+    )
+    assert list_cameras_in_subprocess() == [
+        {"index": 0, "name": "Cam A", "unique_id": "uid-A"},
+        {"index": 1, "name": "Cam B", "unique_id": "uid-B"},
+    ]
+
+
+def test_subprocess_enumeration_reports_an_empty_machine_as_an_empty_list(
+    fake_enum_subprocess,
+) -> None:
+    """An answered enumeration finding nothing is a fact about the machine, and
+    callers act on it (refusing a start). It must not read as a failure."""
+    from makermodslab.camera_identity import list_cameras_in_subprocess
+
+    fake_enum_subprocess("[]")
+    assert list_cameras_in_subprocess() == []
+
+
+def test_subprocess_enumeration_failure_is_none_not_empty(fake_enum_subprocess) -> None:
+    """A subprocess that never ran knows nothing about the device set. Reporting
+    [] would make every caller conclude "no cameras attached"."""
+    import subprocess as _subprocess
+
+    from makermodslab.camera_identity import list_cameras_in_subprocess
+
+    fake_enum_subprocess(_subprocess.SubprocessError("boom"))
+    assert list_cameras_in_subprocess() is None
+
+
+def test_subprocess_enumeration_invalid_json_is_none(fake_enum_subprocess) -> None:
+    from makermodslab.camera_identity import list_cameras_in_subprocess
+
+    fake_enum_subprocess("not json at all")
+    assert list_cameras_in_subprocess() is None
+
+
+def test_subprocess_enumeration_is_none_off_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The script is PyObjC/AVFoundation-only. Elsewhere there is no answer to
+    give — and, again, "no answer" is not "no cameras"."""
+    from makermodslab.camera_identity import list_cameras_in_subprocess
+
+    monkeypatch.setattr(camera_identity.platform, "system", lambda: "Linux")
+    called = []
+    monkeypatch.setattr(
+        camera_identity.subprocess, "run", lambda *a, **k: called.append(a) or _FakeCompleted("[]")
+    )
+    assert list_cameras_in_subprocess() is None
+    assert called == []

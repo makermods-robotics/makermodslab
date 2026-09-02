@@ -59,6 +59,7 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from .api_errors import ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .camera_identity import list_cameras_in_subprocess
 from .camera_preview import camera_preview_manager
 from .eval_protocol import (
     CMD_EPISODE,
@@ -1196,6 +1197,89 @@ def _build_eval_runner_cmd(request: InferenceRequest, policy_path: str, robot_ar
     ]
 
 
+def _verify_camera_identities(cameras: dict[str, dict[str, Any]], bindings: dict[str, str]) -> None:
+    """Refuse the run if a record's stored index no longer holds its camera.
+
+    `camera_index` is a POSITION in an enumeration, not a device address: cv2's
+    macOS indices are the AVFoundation device list sorted by uniqueID, so
+    attaching, removing or replugging ANY camera renumbers the others. The
+    record keeps the index the user picked, so after a device-set change it can
+    address a different physical camera than the label next to it says — and
+    nothing downstream notices. lerobot opens the index it is handed, the frames
+    arrive, the episode runs; the policy simply gets a view it was never trained
+    on and performs worse for no visible reason. That silence is the bug.
+
+    Verified against a FRESH-SUBPROCESS enumeration, which is the index space
+    that matters here: `lerobot-rollout` is itself a fresh subprocess, so it
+    indexes against live IOKit state. This process's own AVFoundation list
+    (camera_identity.identify_cv2_index) is the right answer for previews the
+    SERVER opens and the wrong one for the child — mixing the two would confirm
+    the binding against an ordering nobody is going to use.
+
+    A disagreement RAISES rather than re-anchoring to wherever the uniqueID now
+    sits. Silently correcting would open a device the user never chose, in a
+    flow that then drives a robot arm; refusing sends them back to the camera
+    picker, which is one click and unambiguous. Verification is skipped — the
+    run proceeds exactly as it did before — whenever there is nothing to check
+    against: no `unique_id` in the record (records written before identity
+    existed, and every record on a non-macOS host), a non-int index (a device
+    path, which is not a position in this enumeration), or an enumeration that
+    could not be performed.
+    """
+    # Only macOS records carry a uniqueID, so a fully unverifiable camera set
+    # must not pay for a subprocess spawn on every start.
+    verifiable = {
+        slot: camera
+        for slot, camera in cameras.items()
+        if camera.get("unique_id")
+        and isinstance(camera.get("camera_index"), int)
+        and not isinstance(camera.get("camera_index"), bool)
+    }
+    if not verifiable:
+        return
+    attached = list_cameras_in_subprocess()
+    if attached is None:
+        # "Could not ask" is NOT "nothing is attached". Treating a PyObjC or
+        # subprocess failure as an empty device set would refuse every start on
+        # this machine, so an unavailable enumeration falls back to trusting the
+        # record — the pre-existing behaviour. An enumeration that DID run and
+        # returned [] is a fact about the machine and does refuse below.
+        logger.info("Camera enumeration unavailable — starting without verifying camera identities")
+        return
+    by_index = {cam.get("index"): cam.get("unique_id") for cam in attached}
+    mismatched = []
+    for slot, camera in verifiable.items():
+        index = camera["camera_index"]
+        if by_index.get(index) == camera["unique_id"]:
+            continue
+        # The record's own label is what the user chose in the camera picker;
+        # the policy slot ("observation.images.front") is checkpoint jargon they
+        # never typed. Name the label, fall back to the slot only if the request
+        # somehow carries no binding for it.
+        label = bindings.get(slot) or slot
+        mismatched.append((label, camera["unique_id"], index))
+    if not mismatched:
+        return
+    logger.warning(
+        "Refusing inference: camera indices no longer match the robot record (%s); attached: %s",
+        ", ".join(f"{label} {uid} expected at index {index}" for label, uid, index in mismatched),
+        attached,
+    )
+    named = "; ".join(f"'{label}' (device {uid})" for label, uid, _ in mismatched)
+    # Deliberately never says "restart": the index is stale on disk, so a
+    # restart changes nothing and sends the user round a loop. Re-selecting the
+    # camera is the only thing that rewrites the record — and it must be the
+    # USER doing it, since only they know which physical camera they meant.
+    raise CameraResolutionError(
+        f"{'These cameras are' if len(mismatched) > 1 else 'This camera is'} no longer at the "
+        f"position saved for this robot, so inference would open the wrong device: {named}. "
+        "USB camera numbering shifts whenever cameras are plugged in or removed. "
+        "Open Robot settings and re-select "
+        f"{'these cameras' if len(mismatched) > 1 else 'this camera'} in this robot's camera "
+        "configuration, then start again."
+    )
+
+
 def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
     """This run's cameras, keyed by the policy-expected name.
 
@@ -1203,13 +1287,18 @@ def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
     every time they're needed rather than carried on the request: the record is
     the only place they live, and the lookup is one small JSON read. Capture
     resolution is overlaid from the checkpoint (see PolicyCameraDims /
-    bind_robot_cameras). Raises CameraResolutionError, which
-    handle_start_inference turns into a 400 before the session starts."""
-    return bind_robot_cameras(
+    bind_robot_cameras). The bound cameras are then verified to still BE the
+    cameras the record names (see _verify_camera_identities) — a stored index
+    can silently address a different device after any USB change. Raises
+    CameraResolutionError, which handle_start_inference turns into a 400 before
+    the session starts, so a wrong-camera run never energises an arm."""
+    cameras = bind_robot_cameras(
         request.robot_name,
         request.camera_bindings,
         dims={name: dims.model_dump() for name, dims in request.camera_dims.items()},
     )
+    _verify_camera_identities(cameras, request.camera_bindings)
+    return cameras
 
 
 # lerobot `--robot.type` per arm type, single and bimanual. These are draccus

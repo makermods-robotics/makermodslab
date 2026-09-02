@@ -11,27 +11,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Camera identity → cv2 index translation for THIS process (macOS).
+"""Camera identity → cv2 index translation, in both of macOS's index spaces.
 
 ``cv2.VideoCapture(index)`` resolves the index against AVFoundation's
 *in-process* device list, which is snapshotted the first time this process
 touches AVFoundation and never refreshes — device-connection notifications
 are delivered on a thread that needs an active NSRunLoop, which uvicorn
 doesn't run. ``/available-cameras`` therefore enumerates in a *fresh
-subprocess* (see server._avfoundation_cameras_in_cv2_order), but that yields
-indices in the fresh device order, which diverges from this process's order
-whenever cameras were plugged/unplugged after startup. Opening by such an
-index then silently hits the wrong physical device — e.g. the built-in
-webcam instead of a robot camera, poisoning previews AND recordings.
+subprocess* (:func:`list_cameras_in_subprocess`), but that yields indices in
+the fresh device order, which diverges from this process's order whenever
+cameras were plugged/unplugged after startup. Opening by such an index then
+silently hits the wrong physical device — e.g. the built-in webcam instead of
+a robot camera, poisoning previews AND recordings. Which enumeration is
+correct depends on WHO opens the camera: this process (previews →
+:func:`identify_cv2_index`) or a freshly spawned child (`lerobot-rollout` →
+:func:`list_cameras_in_subprocess`).
 
-The stable link between the two index spaces is AVFoundation's ``uniqueID``.
+What links the two index spaces is AVFoundation's ``uniqueID`` — a better
+handle than a bare index, but read what it actually is before trusting it.
+Measured on this rig it is the USB **locationID** plus a per-model constant,
+so it names a **(model, port) pair, not a physical unit**: move a camera to
+another port and its uniqueID changes; plug a different camera of the same
+model into that port and it inherits the old one. It is not a serial number,
+and it does not follow the hardware. So it is exactly strong enough to catch
+"the indices renumbered underneath us" and NOT strong enough to prove the
+device in front of the lens is the one the user chose.
+
 :func:`resolve_cv2_index` maps a camera's uniqueID to the index cv2 will
 actually open *in this process*, by walking the same in-process device list
 cv2 walks (video + muxed devices, uniqueID-sorted — mirrors OpenCV's
 cap_avfoundation_mac.mm). A device attached after startup is invisible to
 in-process AVFoundation entirely — and, worse, a camera replugged into the
-SAME port keeps its uniqueID, so it stays *present* in the stale list as a
-dead device object that opens "successfully" and then never produces a frame
+SAME port comes back with the same uniqueID (it is derived from the port), so
+it stays *present* in the stale list as a dead device object that opens "successfully" and then never produces a frame
 (silently blank previews, reads that can block forever). Resolution returns
 None only for the verifiably-absent case; callers must fail loudly (telling
 the user to restart MakerMods Lab) rather than open whatever now sits at the
@@ -54,8 +66,11 @@ therefore use :func:`identify_cv2_index`, which returns the index to open
 """
 
 import asyncio
+import json
 import logging
 import platform
+import subprocess
+import sys
 import threading
 
 logger = logging.getLogger(__name__)
@@ -154,6 +169,94 @@ def list_cameras_in_process() -> list[dict] | None:
         ]
     except Exception as e:
         logger.warning("In-process AVFoundation enumeration failed: %s", e)
+        return None
+
+
+# Runs in a fresh Python — see list_cameras_in_subprocess for why.
+# Mirrors OpenCV's macOS enumeration: video + muxed devices sorted by
+# uniqueID (cap_avfoundation_mac.mm), so the returned index matches what
+# cv2.VideoCapture will open.
+_AVF_ENUM_SCRIPT = """
+import json, objc
+from Foundation import NSBundle
+bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework")
+bundle.load()
+types = []
+for name in (
+    "AVCaptureDeviceTypeBuiltInWideAngleCamera",
+    "AVCaptureDeviceTypeExternalUnknown",   # macOS < 14
+    "AVCaptureDeviceTypeExternal",          # macOS >= 14
+    "AVCaptureDeviceTypeContinuityCamera",  # macOS >= 14
+    "AVCaptureDeviceTypeDeskViewCamera",    # macOS >= 13
+):
+    loaded = {}
+    try:
+        objc.loadBundleVariables(bundle, loaded, [(name, b"@")])
+    except objc.error:
+        continue
+    if loaded.get(name) is not None:
+        types.append(loaded[name])
+cls = objc.lookUpClass("AVCaptureDeviceDiscoverySession")
+devs = []
+for mt in ("vide", "muxx"):
+    devs.extend(cls.discoverySessionWithDeviceTypes_mediaType_position_(types, mt, 0).devices() or [])
+devs.sort(key=lambda d: d.uniqueID())
+print(json.dumps([
+    {"index": i, "name": str(d.localizedName()), "unique_id": str(d.uniqueID())}
+    for i, d in enumerate(devs)
+]))
+"""
+
+
+def list_cameras_in_subprocess() -> list[dict] | None:
+    """A FRESHLY spawned process's camera list, in cv2 open order (macOS).
+
+    The other index space from :func:`list_cameras_in_process`, and the two
+    diverge the moment a camera is plugged or unplugged. AVFoundation's
+    in-process device cache doesn't refresh on USB hotplug — both the
+    deprecated ``+devicesWithMediaType:`` and a long-lived
+    ``AVCaptureDeviceDiscoverySession`` go stale, because device-connection
+    notifications are delivered via ``NSNotificationCenter`` on a thread that
+    needs an active ``NSRunLoop``, which uvicorn workers don't run. A fresh
+    subprocess re-initializes AVFoundation, which reads IOKit's live device
+    state at startup.
+
+    This is therefore the ordering a NEWLY SPAWNED CHILD will index against:
+    ``/available-cameras`` (so the list the user picks from is live), and any
+    camera a child process opens — notably the ``lerobot-rollout`` subprocess
+    inference spawns. Anything opened *inside the server process* must use
+    :func:`identify_cv2_index` instead; mixing the two silently opens the
+    wrong physical device.
+
+    None and ``[]`` are **different answers**, exactly as in
+    :func:`list_cameras_in_process`:
+
+    - None — the enumeration could not be performed (non-macOS, the subprocess
+      failing to run, unparseable output). Nothing is known about the device
+      set, so callers must fall back to trusting the index they were given.
+    - ``[]`` — the enumeration ran and found zero cameras; a requested device
+      is then definitively absent.
+
+    Collapsing the two would turn a PyObjC hiccup into "no cameras attached",
+    which for the verification caller means refusing every start.
+    """
+    if platform.system() != "Darwin":
+        return None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _AVF_ENUM_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.warning("AVFoundation enumeration subprocess failed: %s", e)
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        logger.warning("AVFoundation enumeration returned invalid JSON: %s", e)
         return None
 
 
