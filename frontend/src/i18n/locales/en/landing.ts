@@ -31,12 +31,29 @@ export default {
     empty:
       "No datasets yet. Use “Add dataset” to record, download, or import one.",
     deleteAria: "Delete {{repoId}}",
+    // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
+    useHub: "Use <0>{{repoId}}</0> from the Hub",
+    useHubHint: "Public dataset — training fetches it on demand.",
+    row: {
+      // Abbreviated episode count on a picker row. {{episodes}} rather than
+      // {{count}}: this is a compact badge with no plural form.
+      episodes: "{{episodes}} ep",
+      // Source marker for a Hub-only row. Product name — same in every
+      // language, keyed so the two markers have one uniform shape.
+      hub: "Hub",
+      // Compact badge: this dataset carries per-episode sampling weights.
+      weighted: "weighted",
+      weightedTitle:
+        "Carries per-episode sampling weights — some episodes are sampled more often during training",
+    },
   },
   modelPicker: {
     searchPlaceholder: "Search models…",
     loading: "Loading models…",
     empty: "No models yet. Use “Add model” to train, download, or import one.",
     deleteAria: "Delete {{name}}",
+    // Badge on a run that exited non-zero but left usable weights.
+    failedBadge: "failed run",
   },
   addDatasetFromHub: {
     title: "Add a dataset from Hugging Face",
