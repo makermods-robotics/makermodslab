@@ -176,18 +176,8 @@ export default {
       noMatches:
         "No matching datasets. Type a full <0>org/name</0> id to use any public Hugging Face dataset.",
       hint: "Yours, or any public Hugging Face dataset.",
-      row: {
-        // Abbreviated episode count on a search result. {{episodes}} rather
-        // than {{count}}: this is a compact badge with no plural form.
-        episodes: "{{episodes}} ep",
-        // Source marker for a Hub-only row. Product name — same in every
-        // language, keyed so the two markers have one uniform shape.
-        hub: "Hub",
-        // Compact badge: this dataset carries per-episode sampling weights.
-        weighted: "weighted",
-        weightedTitle:
-          "Carries per-episode sampling weights — some episodes are sampled more often during training",
-      },
+      // The per-row markers (episode count / weighted / Hub) live with the
+      // picker that renders them now: `landing.datasetPicker.row.*`.
     },
     startingPoint: {
       label: "Starting point",
@@ -245,8 +235,8 @@ export default {
       // Shown INSTEAD of `empty` when the listing could not be fetched —
       // an outage must not read as "you have no skills".
       error: "Couldn’t load skills. Check the server and try again.",
-      // Badge on a run that exited non-zero but left usable weights.
-      failedBadge: "failed run",
+      // The "failed run" row badge lives with the picker that renders it now:
+      // `landing.modelPicker.failedBadge`.
       hubDegraded: "Hub unreachable — showing your local skills and the last Hub listing.",
       // aria-label and title on the same button.
       import: "Import skill",

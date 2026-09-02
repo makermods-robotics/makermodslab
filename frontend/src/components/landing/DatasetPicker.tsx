@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Plus, Trash2 } from "lucide-react";
 import {
@@ -14,9 +14,10 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
-import { DatasetItem } from "@/lib/replayApi";
+import { DatasetItem, getDatasetInfo } from "@/lib/replayApi";
 import { sortDatasets } from "@/lib/sortDatasets";
 import { HUB_REPO_ID_RE } from "@/lib/repoId";
+import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 
 interface DatasetPickerProps {
@@ -43,6 +44,127 @@ interface DatasetPickerProps {
   onPickHubId?: (repoId: string) => void;
   children: React.ReactNode;
 }
+
+/**
+ * One picker row: the repo id plus the markers the Train panel's retired
+ * results list carried — an abbreviated episode count, a "weighted" marker for
+ * a weighted merge, and a source marker — then the Hub-status chips and the
+ * per-row trash affordance the popover already had.
+ *
+ * Its own component because the episode count is fetched per row (the
+ * `/datasets` listing has no count) and hooks cannot live in a `.map`
+ * callback. Skips the network for Hub-only rows — that would be a remote
+ * meta.json read purely for a badge — so counts are shown "where available",
+ * exactly as the retired row did it. The `weighted` and source markers cost
+ * nothing (both are on the listing) and are always shown.
+ */
+const DatasetPickerRow: React.FC<{
+  item: DatasetItem;
+  /** Whether to fetch the episode count for this row — see the fetch site. */
+  shouldFetchDetails: boolean;
+  onPick: (item: DatasetItem) => void;
+  onDelete?: (item: DatasetItem) => void;
+}> = ({ item, shouldFetchDetails, onPick, onDelete }) => {
+  const { t } = useTranslation();
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const [episodes, setEpisodes] = useState<number | null>(null);
+
+  useEffect(() => {
+    // Only while a query narrows the list — the retired results row mounted
+    // ONLY for typed matches, and this reproduces that fetch profile: a
+    // per-row /datasets/info walks the whole dataset directory for size_bytes,
+    // so fetching one per row on the browse-everything open would be a full
+    // tree walk per local dataset. A `total_episodes` field on the /datasets
+    // listing is the proper fix and would retire this fetch entirely.
+    if (!shouldFetchDetails) return;
+    if (item.source === "hub") return; // avoid a remote fetch just for a count
+    let cancelled = false;
+    getDatasetInfo(baseUrl, fetchWithHeaders, item.repo_id)
+      .then((info) => {
+        if (!cancelled) setEpisodes(info.total_episodes);
+      })
+      .catch(() => {
+        /* count is optional — leave it blank */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    shouldFetchDetails,
+    item.repo_id,
+    item.source,
+    baseUrl,
+    fetchWithHeaders,
+  ]);
+
+  return (
+    <CommandItem
+      value={item.repo_id}
+      onSelect={() => onPick(item)}
+      className="group items-start aria-selected:bg-accent"
+    >
+      <span className="min-w-0 flex-1 break-all">{item.repo_id}</span>
+      {episodes != null && (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {t("landing.datasetPicker.row.episodes", { episodes })}
+        </span>
+      )}
+      {/* A weighted merge and its unweighted sibling are otherwise
+          indistinguishable here, and picking the wrong one silently trains the
+          wrong mix. `=== true` on purpose: the flag is absent (unknown), not
+          false, for Hub-only rows. */}
+      {item.weighted === true && (
+        <span
+          className="shrink-0 font-mono text-xs text-info"
+          title={t("landing.datasetPicker.row.weightedTitle")}
+        >
+          {t("landing.datasetPicker.row.weighted")}
+        </span>
+      )}
+      {item.source === "both" && (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {t("landing.picker.localAndHub")}
+        </span>
+      )}
+      {item.source === "hub" && (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {t("landing.datasetPicker.row.hub")}
+        </span>
+      )}
+      {item.private && (
+        <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
+          {t("landing.picker.private")}
+        </span>
+      )}
+      {onDelete && (
+        <button
+          type="button"
+          aria-label={t("landing.datasetPicker.deleteAria", {
+            repoId: item.repo_id,
+          })}
+          title={t("landing.picker.deleteTitle")}
+          // cmdk/Radix act on pointerdown AND the click would bubble to the
+          // CommandItem's onSelect — guard both so the trash never also
+          // selects the row or closes the popover on its own.
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onDelete(item);
+          }}
+          // Hover-revealed on pointer devices (with keyboard-focus fallback),
+          // always visible on touch (no hover to reveal it with).
+          className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </CommandItem>
+  );
+};
 
 /**
  * Search-only dataset selector. The input filters the existing Local /
@@ -113,52 +235,22 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   };
 
   const renderItem = (d: DatasetItem) => (
-    <CommandItem
+    <DatasetPickerRow
       key={d.repo_id}
-      value={d.repo_id}
-      onSelect={() => handlePick(d)}
-      className="group items-start aria-selected:bg-accent"
-    >
-      <span className="min-w-0 flex-1 break-all">{d.repo_id}</span>
-      {d.source === "both" && (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {t("landing.picker.localAndHub")}
-        </span>
-      )}
-      {d.private && (
-        <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
-          {t("landing.picker.private")}
-        </span>
-      )}
-      {onDeleteItem && (
-        <button
-          type="button"
-          aria-label={t("landing.datasetPicker.deleteAria", {
-            repoId: d.repo_id,
-          })}
-          title={t("landing.picker.deleteTitle")}
-          // cmdk/Radix act on pointerdown AND the click would bubble to the
-          // CommandItem's onSelect — guard both so the trash never also
-          // selects the row or closes the popover on its own.
-          onPointerDown={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-          }}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onDeleteItem(d);
-            // Close the picker so the Landing-scoped confirm dialog is visible.
-            reset();
-          }}
-          // Hover-revealed on pointer devices (with keyboard-focus fallback),
-          // always visible on touch (no hover to reveal it with).
-          className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
-      )}
-    </CommandItem>
+      item={d}
+      shouldFetchDetails={trimmedQuery.length > 0}
+      onPick={handlePick}
+      onDelete={
+        onDeleteItem
+          ? (item) => {
+              onDeleteItem(item);
+              // Close the picker so the Landing-scoped confirm dialog is
+              // visible.
+              reset();
+            }
+          : undefined
+      }
+    />
   );
 
   return (

@@ -21,12 +21,19 @@ export default {
     deleteAria: "删除 {{repoId}}",
     useHub: "使用 Hub 上的 <0>{{repoId}}</0>",
     useHubHint: "公开数据集 — 训练时按需拉取。",
+    row: {
+      episodes: "{{episodes}} 片段",
+      hub: "Hub",
+      weighted: "带权重",
+      weightedTitle: "该数据集带有按回合的采样权重，训练时部分回合会被更频繁地采样",
+    },
   },
   modelPicker: {
     searchPlaceholder: "搜索模型…",
     loading: "正在加载模型…",
     empty: "还没有模型。使用“添加模型”来训练、下载或导入。",
     deleteAria: "删除 {{name}}",
+    failedBadge: "运行失败",
   },
   addDatasetFromHub: {
     title: "从 Hugging Face 添加数据集",

@@ -128,12 +128,6 @@ export default {
       noMatches:
         "没有匹配的数据集。输入完整的 <0>org/name</0> id 即可使用任意公开的 Hugging Face 数据集。",
       hint: "你自己的数据集，或任意公开的 Hugging Face 数据集。",
-      row: {
-        episodes: "{{episodes}} 片段",
-        hub: "Hub",
-        weighted: "带权重",
-        weightedTitle: "该数据集带有按回合的采样权重，训练时部分回合会被更频繁地采样",
-      },
     },
     startingPoint: {
       label: "起点",
@@ -177,7 +171,6 @@ export default {
       loading: "正在加载技能…",
       empty: "还没有已训练或已导入的技能",
       error: "无法加载技能。请检查服务器后重试。",
-      failedBadge: "运行失败",
       hubDegraded: "无法连接 Hub — 正在显示本地技能和上次的 Hub 列表。",
       import: "导入技能",
       hint: "选择一个已训练的检查点，或已从 Hub 导入的技能，在机器人上运行。",
