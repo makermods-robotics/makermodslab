@@ -344,6 +344,21 @@ class ActiveSession:
         return f"<ActiveSession {self.kind} {self.id} {state}>"
 
 
+# Startable kind -> the sugar method covering it. The client half of the
+# sessions parity tripwire: tests/test_sessions_parity.py equality-asserts
+# this against the server's STARTABLE_KINDS and each method's kwargs against
+# the kind's options model, so a new server kind (or option field) fails the
+# build here, named, until the SDK grows the matching sugar.
+SUGAR_BY_KIND: dict[str, str] = {
+    "teleoperation": "teleoperate",
+    "recording": "record",
+    "inference": "infer",
+    "replay": "replay",
+    "calibration": "calibrate",
+    "auto_calibration": "auto_calibrate",
+}
+
+
 class SessionsResource(Resource):
     """``client.sessions`` — start, watch, heartbeat and stop robot flows.
 
