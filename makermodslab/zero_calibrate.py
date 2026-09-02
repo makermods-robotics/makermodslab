@@ -68,6 +68,14 @@ from lerobot.teleoperators import make_teleoperator_from_config
 from lerobot.utils.utils import init_logging
 
 from .api_errors import ErrorCode
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .session_events import notify_session_changed
 from .utils.config import calibration_dir_for_device, save_robot_record
 
@@ -166,6 +174,7 @@ class ZeroCalibrationManager:
         self._pose_confirmed = threading.Event()
         self._current_request: ZeroCalibrationRequest | None = None
         self._cleanup_lock = threading.Lock()
+        self._hardware_lease_token: HardwareLeaseToken | None = None
         init_logging()
 
     # -- status ------------------------------------------------------------
@@ -319,6 +328,19 @@ class ZeroCalibrationManager:
                             ),
                         }
 
+                try:
+                    token = hardware_lease_registry.claim(
+                        "calibration",
+                        f"local:{request.device_type}:{request.port}",
+                        recovery=hardware_recovery_identity(
+                            request.arm_type,
+                            target_ports=(request.port,),
+                        ),
+                    )
+                except HardwareLeaseHeld as exc:
+                    return held_response(exc)
+                self._hardware_lease_token = token
+
                 self._update_status(
                     calibration_active=True,
                     status="connecting",
@@ -348,6 +370,25 @@ class ZeroCalibrationManager:
                 message="Failed to start calibration",
             )
             notify_session_changed("calibration", False, phase="error")
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                worker_alive = self.thread is not None and self.thread.is_alive()
+                snapshot = hardware_lease_registry.snapshot()
+                if not worker_alive and self.device is None and snapshot.state == "active":
+                    hardware_lease_registry.release(
+                        token,
+                        safe_hardware_receipt(
+                            "zero-calibration request thread failed before opening hardware",
+                            torque_off=None,
+                            torque_not_applicable=True,
+                        ),
+                    )
+                    self._hardware_lease_token = None
+                else:
+                    hardware_lease_registry.mark_unresolved(
+                        token,
+                        f"zero-calibration startup failed before its worker finalized: {e}",
+                    )
             return {"success": False, "message": str(e)}
 
     def complete_step(self) -> dict[str, Any]:
@@ -369,6 +410,9 @@ class ZeroCalibrationManager:
                 return {"success": False, "message": "No calibration active"}
 
             logger.info("Stopping zero calibration...")
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                hardware_lease_registry.request_stop(token, "operator_stop")
             self.stop_requested = True
             # Unblock the worker's wait so it can notice stop_requested and
             # exit through its own cleanup rather than sitting out the timeout.
@@ -378,13 +422,22 @@ class ZeroCalibrationManager:
             if self.thread and self.thread.is_alive():
                 self.thread.join(timeout=5.0)
             if self.thread and self.thread.is_alive():
-                logger.warning("Zero calibration thread did not finish within timeout, forcing cleanup")
-
-            self._finish("Calibration stopped", status="idle")
+                reason = "Zero-calibration worker did not finish within 5 seconds; hardware state is unknown"
+                logger.warning(reason)
+                if token is not None and hardware_lease_registry.is_token_current(token):
+                    hardware_lease_registry.mark_unresolved(token, reason)
+                return {
+                    "success": True,
+                    "shutting_down": True,
+                    "warning": reason,
+                    "message": "Calibration stop requested; safe release is not yet confirmed",
+                }
             return {"success": True, "message": "Calibration stopped"}
         except Exception as e:
             logger.error(f"Error stopping zero calibration: {e}")
-            self._finish("Calibration stopped with error", status="error")
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                hardware_lease_registry.mark_unresolved(token, f"zero-calibration stop failed: {e}")
             return {"success": False, "message": str(e)}
 
     # -- worker ------------------------------------------------------------
@@ -527,7 +580,7 @@ class ZeroCalibrationManager:
     # -- teardown ----------------------------------------------------------
 
     def _finish(self, message: str, status: str = "completed"):
-        self._release_device()
+        problems = self._release_device()
         with self._status_lock:
             was_active = self.status.calibration_active
             self._update_status(
@@ -538,10 +591,29 @@ class ZeroCalibrationManager:
                 current_positions=None,
             )
             self._current_request = None
+        token = self._hardware_lease_token
+        if token is not None and hardware_lease_registry.is_token_current(token):
+            if problems:
+                hardware_lease_registry.mark_unresolved(
+                    token,
+                    " ".join(problems),
+                    {
+                        "safe": False,
+                        "device_closed": False,
+                        "torque_off": True,
+                        "evidence": " ".join(problems),
+                    },
+                )
+            else:
+                hardware_lease_registry.release(
+                    token,
+                    safe_hardware_receipt("zero-calibration device closed with torque disabled"),
+                )
+                self._hardware_lease_token = None
         if was_active:
             notify_session_changed("calibration", False, phase=status)
 
-    def _release_device(self):
+    def _release_device(self) -> list[str]:
         """Disconnect the arm, never raising.
 
         Guarded by ``_cleanup_lock`` for the same reason the SO-101 manager
@@ -552,11 +624,13 @@ class ZeroCalibrationManager:
         with self._cleanup_lock:
             device, self.device = self.device, None
             if device is None:
-                return
+                return []
             try:
                 device.disconnect()
             except Exception as e:
                 logger.warning(f"Error disconnecting after zero calibration: {e}")
+                return [f"Failed to disconnect zero-calibration device: {e}"]
+            return []
 
 
 def _other_feature_busy() -> dict[str, Any] | None:

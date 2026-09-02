@@ -411,11 +411,20 @@ class _FakeCanBus:
     disable_torque(), disconnect(disable_torque=)."""
 
     def __init__(self, connected: bool, port: str = "/dev/can0"):
+        self.motors = {"joint_1": object()}
         self.port = port
         self.is_connected = connected
         self.calls: list = []
         self.fail_disable = False
         self.fail_connect = False
+        self.acknowledge_disable = True
+
+    def _get_motor_recv_id(self, motor: str) -> int:
+        assert motor in self.motors
+        return 0x11
+
+    def _recv_motor_response(self, expected_recv_id=None, timeout=0.001):
+        return object() if self.acknowledge_disable and expected_recv_id == 0x11 else None
 
     def connect(self, handshake: bool = True):
         self.calls.append(("connect", handshake))
@@ -427,6 +436,7 @@ class _FakeCanBus:
         self.calls.append(("disable_torque",))
         if self.fail_disable:
             raise RuntimeError("bus gone")
+        self._recv_motor_response(expected_recv_id=0x11)
 
     def disconnect(self, disable_torque: bool = True):
         self.calls.append(("disconnect", disable_torque))
@@ -665,6 +675,11 @@ def test_release_torque_de_energizes_the_named_bus(monkeypatch: pytest.MonkeyPat
         def __init__(self):
             self.bus = bus
 
+    monkeypatch.setattr(
+        can_recovery,
+        "resolve_can_port_bindings",
+        lambda ports: dict.fromkeys(ports, "stable-test-can-adapter"),
+    )
     monkeypatch.setattr(can_recovery, "_build_follower_device", lambda arm_type, port: _FakeRobot())
 
     result = can_recovery.handle_release_can_torque(
@@ -688,6 +703,11 @@ def test_release_torque_reports_a_failed_disable_loudly(monkeypatch: pytest.Monk
         def __init__(self):
             self.bus = bus
 
+    monkeypatch.setattr(
+        can_recovery,
+        "resolve_can_port_bindings",
+        lambda ports: dict.fromkeys(ports, "stable-test-can-adapter"),
+    )
     monkeypatch.setattr(can_recovery, "_build_follower_device", lambda arm_type, port: _FakeRobot())
 
     result = can_recovery.handle_release_can_torque(
@@ -698,11 +718,38 @@ def test_release_torque_reports_a_failed_disable_loudly(monkeypatch: pytest.Monk
     assert any("TORQUE MAY STILL BE ENABLED" in p for p in result["problems"])
 
 
+def test_release_torque_retains_lockout_when_disable_has_no_motor_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from makermodslab import can_recovery
+
+    bus = _FakeCanBus(connected=True)
+    bus.acknowledge_disable = False
+
+    class _FakeRobot:
+        def __init__(self):
+            self.bus = bus
+
+    monkeypatch.setattr(
+        can_recovery,
+        "resolve_can_port_bindings",
+        lambda ports: dict.fromkeys(ports, "stable-test-can-adapter"),
+    )
+    monkeypatch.setattr(can_recovery, "_build_follower_device", lambda *_args: _FakeRobot())
+
+    result = can_recovery.handle_release_can_torque(
+        can_recovery.ReleaseCanTorqueRequest(arm_type="metal", port="/dev/can0")
+    )
+
+    assert result["success"] is False
+    assert any("acknowledged" in problem for problem in result["problems"])
+    from makermodslab.hardware_lease import hardware_lease_registry
+
+    assert hardware_lease_registry.snapshot().state == "unresolved"
+
+
 def test_release_torque_request_rejects_an_so101_arm() -> None:
-    """An SO-101 arm goes limp on its own when the process dies — there is
-    nothing for this endpoint to recover, and pointing a CAN de-energize at a
-    Feetech serial port would be nonsense. The request model refuses it at
-    the schema level."""
+    """SO-101 recovery uses its verified Feetech route, never the CAN route."""
     import pydantic
 
     from makermodslab.can_recovery import ReleaseCanTorqueRequest

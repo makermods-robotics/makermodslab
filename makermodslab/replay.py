@@ -42,6 +42,14 @@ from .api_errors import ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
 from .datasets import get_episode_action_series
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .maker_rest_pose import capture_maker_pose, return_maker_to_pose
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
@@ -121,6 +129,7 @@ class ReplayRequest(BaseModel):
 
 replay_active: bool = False
 replay_thread: threading.Thread | None = None
+_hardware_lease_token: HardwareLeaseToken | None = None
 _state_lock = threading.Lock()
 _replay_started_at: float | None = None
 # Module-scoped (not local to _replay_worker) so handle_stop_replay can
@@ -145,7 +154,7 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
     ease-in + playback worker. Returns a dict the route layer turns into a
     JSON response or HTTPException (status_code key present on every
     failure), mirroring rollout.py's InferenceRequest response shape."""
-    global replay_active, replay_thread, _replay_started_at, _replay_meta
+    global replay_active, replay_thread, _replay_started_at, _replay_meta, _hardware_lease_token
 
     from . import (
         auto_calibrate as _auto_calibrate,
@@ -243,12 +252,41 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
             }
 
         try:
+            lease_token = hardware_lease_registry.claim(
+                "replay",
+                f"local:{request.follower_port}",
+                recovery=hardware_recovery_identity(
+                    request.arm_type,
+                    target_ports=(request.follower_port,),
+                ),
+            )
+        except HardwareLeaseHeld as exc:
+            return held_response(exc, include_status=True)
+        _hardware_lease_token = lease_token
+
+        try:
             robot, identity_warnings = _connect_follower(request)
         except Exception as e:
+            cleanup_error = getattr(e, "cleanup_error", None)
+            if cleanup_error:
+                hardware_lease_registry.mark_unresolved(lease_token, cleanup_error)
+            else:
+                hardware_lease_registry.release(
+                    lease_token,
+                    safe_hardware_receipt("replay connection attempt closed without an owned device"),
+                )
+                _hardware_lease_token = None
             return {"success": False, "status_code": 500, "message": str(e)}
 
         if set(action_series["action_names"]) != set(robot.action_features.keys()):
-            _cleanup_after_setup_failure(robot, None, "follower arm", "leader arm")
+            cleanup_error = _cleanup_after_setup_failure(robot, None, "follower arm", "leader arm")
+            if cleanup_error:
+                hardware_lease_registry.mark_unresolved(lease_token, cleanup_error)
+            else:
+                hardware_lease_registry.release(
+                    lease_token, safe_hardware_receipt("replay validation failure safely closed")
+                )
+                _hardware_lease_token = None
             return {
                 "success": False,
                 "status_code": 400,
@@ -265,7 +303,14 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
             frame0 = dict(zip(action_series["action_names"], action_series["values"][0], strict=True))
             missing = set(robot.bus.motors) - set(_bus_keyed(frame0, robot.bus))
             if missing:
-                _cleanup_after_setup_failure(robot, None, "follower arm", "leader arm")
+                cleanup_error = _cleanup_after_setup_failure(robot, None, "follower arm", "leader arm")
+                if cleanup_error:
+                    hardware_lease_registry.mark_unresolved(lease_token, cleanup_error)
+                else:
+                    hardware_lease_registry.release(
+                        lease_token, safe_hardware_receipt("replay target validation safely closed")
+                    )
+                    _hardware_lease_token = None
                 return {
                     "success": False,
                     "status_code": 400,
@@ -292,7 +337,7 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
 
     worker = threading.Thread(
         target=_replay_worker,
-        args=(robot, action_series, websocket_manager, request.arm_type),
+        args=(robot, action_series, websocket_manager, request.arm_type, lease_token),
         name="replay-worker",
         daemon=True,
     )
@@ -452,6 +497,7 @@ def _replay_worker(
     action_series: dict[str, Any],
     websocket_manager,
     arm_type: str = "so101",
+    lease_token: HardwareLeaseToken | None = None,
 ) -> None:
     """Ease the arm to the episode's first frame, then stream send_action()
     calls at the episode's recorded pace, broadcasting live joint feedback
@@ -465,7 +511,7 @@ def _replay_worker(
     The PLAYBACK loop between them is identical for both — it is plain
     `send_action` on the dataset's action column, exactly as lerobot's own
     arm-agnostic `lerobot-replay` does it."""
-    global replay_active
+    global replay_active, _hardware_lease_token
 
     action_names = action_series["action_names"]
     timestamps = action_series["timestamps"]
@@ -640,26 +686,48 @@ def _replay_worker(
             _replay_meta["phase"] = "error"
             _replay_meta["error"] = str(e)
     finally:
+        problems: list[str] = []
         if feetech:
-            force_disable_torque(robot, "follower arm")
+            problems.extend(force_disable_torque(robot, "follower arm") or [])
             try:
                 robot.bus.disconnect(disable_torque=False)
             except Exception as e:
+                problems.append(f"Could not disconnect the follower after replay: {e}")
                 logger.warning(f"Could not disconnect the follower after replay: {e}")
         else:
-            release_maker_torque(robot, "CAN follower arm")
+            problems.extend(release_maker_torque(robot, "CAN follower arm") or [])
             try:
                 # disconnect() (not bus.disconnect(disable_torque=False)):
                 # MakerFollower.disconnect honours disable_torque_on_disconnect,
                 # and a torque-off settle is this arm's documented safe state.
                 robot.disconnect()
             except Exception as e:
+                problems.append(f"Could not disconnect the CAN follower after replay: {e}")
                 logger.warning(f"Could not disconnect the CAN follower after replay: {e}")
         with _state_lock:
             replay_active = False
             if _replay_meta.get("phase") not in ("error",):
                 _replay_meta["phase"] = "done"
             final_phase = _replay_meta.get("phase")
+        if lease_token is not None and hardware_lease_registry.is_token_current(lease_token):
+            if problems:
+                reason = " ".join(problems)
+                hardware_lease_registry.mark_unresolved(
+                    lease_token,
+                    reason,
+                    {
+                        "safe": False,
+                        "device_closed": not any("disconnect" in problem.lower() for problem in problems),
+                        "torque_off": False,
+                        "evidence": reason,
+                    },
+                )
+            else:
+                hardware_lease_registry.release(
+                    lease_token,
+                    safe_hardware_receipt("replay torque disabled and follower closed"),
+                )
+                _hardware_lease_token = None
         # Final release: torque released and port freed, including error paths.
         notify_session_changed("replay", False, phase=final_phase)
 
@@ -693,6 +761,10 @@ def handle_stop_replay() -> dict[str, Any]:
     with _state_lock:
         if not replay_active:
             return {"success": False, "status_code": 409, "message": "No replay is active"}
+        if _hardware_lease_token is not None and hardware_lease_registry.is_token_current(
+            _hardware_lease_token
+        ):
+            hardware_lease_registry.request_stop(_hardware_lease_token, "operator_stop")
         replay_active = False
         _stop_event.set()
         _replay_meta["phase"] = "stopping"

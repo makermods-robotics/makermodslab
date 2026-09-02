@@ -108,7 +108,12 @@ def _maker_device_buses(device) -> list:
     return [target.bus for target in targets if getattr(target, "bus", None) is not None]
 
 
-def de_energize_can_bus(bus, label: str = "device") -> list[str]:
+def de_energize_can_bus(
+    bus,
+    label: str = "device",
+    *,
+    require_disable_ack: bool = False,
+) -> list[str]:
     """Free a CAN arm that may be energized behind a dead-looking bus object.
 
     Two situations land here that ``release_maker_torque`` cannot reach,
@@ -143,6 +148,44 @@ def de_energize_can_bus(bus, label: str = "device") -> list[str]:
             )
             logger.warning(message)
             return [message]
+    expected_acks: set[object] = set()
+    received_acks: set[object] = set()
+    original_receiver = None
+    receiver_was_instance_attribute = False
+    if require_disable_ack:
+        motors = tuple((getattr(bus, "motors", None) or {}).keys())
+        receiver = getattr(bus, "_recv_motor_response", None)
+        receiver_id = getattr(bus, "_get_motor_recv_id", None)
+        if not motors or not callable(receiver) or not callable(receiver_id):
+            problems.append(
+                f"The {label} CAN driver exposes no per-motor disable acknowledgement; "
+                "torque-off remains unconfirmed."
+            )
+        else:
+            try:
+                expected_acks = {receiver_id(motor) for motor in motors}
+            except Exception:
+                expected_acks = set()
+            if None in expected_acks or len(expected_acks) != len(motors):
+                problems.append(
+                    f"The {label} CAN motor acknowledgement identities are incomplete; "
+                    "torque-off remains unconfirmed."
+                )
+                expected_acks = set()
+            else:
+                original_receiver = receiver
+                receiver_was_instance_attribute = "_recv_motor_response" in vars(bus)
+
+                def tracked_receiver(*args, **kwargs):
+                    response = original_receiver(*args, **kwargs)
+                    expected = kwargs.get("expected_recv_id")
+                    if expected is None and args:
+                        expected = args[0]
+                    if response is not None and expected in expected_acks:
+                        received_acks.add(expected)
+                    return response
+
+                bus._recv_motor_response = tracked_receiver
     try:
         bus.disable_torque()
     except Exception as e:
@@ -152,6 +195,16 @@ def de_energize_can_bus(bus, label: str = "device") -> list[str]:
         )
         logger.error(message)
         problems.append(message)
+    finally:
+        if original_receiver is not None:
+            if receiver_was_instance_attribute:
+                bus._recv_motor_response = original_receiver
+            else:
+                del bus._recv_motor_response
+    if expected_acks and received_acks != expected_acks:
+        problems.append(
+            f"Not every {label} CAN motor acknowledged the disable command; torque-off remains unconfirmed."
+        )
     try:
         bus.disconnect(disable_torque=False)
     except Exception as e:
@@ -161,7 +214,12 @@ def de_energize_can_bus(bus, label: str = "device") -> list[str]:
     return problems
 
 
-def de_energize_can_device(device, label: str = "device") -> list[str]:
+def de_energize_can_device(
+    device,
+    label: str = "device",
+    *,
+    require_disable_ack: bool = False,
+) -> list[str]:
     """``de_energize_can_bus`` over every CAN bus of a device.
 
     Walks single and bimanual devices alike (same shape as
@@ -170,8 +228,16 @@ def de_energize_can_device(device, label: str = "device") -> list[str]:
     motors.
     """
     problems: list[str] = []
+    eligible = 0
     for bus in _maker_device_buses(device):
         if getattr(bus, "disable_torque", None) is None:
             continue
-        problems += de_energize_can_bus(bus, label)
+        eligible += 1
+        problems += de_energize_can_bus(
+            bus,
+            label,
+            require_disable_ack=require_disable_ack,
+        )
+    if require_disable_ack and eligible == 0:
+        problems.append(f"The {label} exposes no torque-capable CAN bus; torque-off is unconfirmed.")
     return problems

@@ -50,6 +50,7 @@ __all__ = [
     "MakerIdentifyArmResponse",
     "MakerProbePortsResponse",
     "ReleaseCanTorqueResponse",
+    "ReleaseSo101TorqueResponse",
     "PolicyExtraStatus",
     "PolicyOptimizerDefaultsResponse",
     "PolicyOptimizerPreset",
@@ -210,6 +211,15 @@ class ReleaseCanTorqueResponse(BaseModel):
 
     success: bool
     message: str
+    problems: list[str]
+
+
+class ReleaseSo101TorqueResponse(BaseModel):
+    """so101_recovery.handle_release_so101_torque crash recovery result."""
+
+    success: bool
+    message: str
+    confirmed_ports: int
     problems: list[str]
 
 

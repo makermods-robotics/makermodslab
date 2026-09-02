@@ -21,13 +21,20 @@ EEPROM dependence — reading position does not energize an idle (torque-off) ar
 """
 
 import asyncio
-import contextlib
 import logging
 import time
 
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .utils.config import find_available_ports
 
 logger = logging.getLogger(__name__)
@@ -75,7 +82,7 @@ def _open_shoulder_pan_bus(port: str) -> tuple[FeetechMotorsBus, int]:
     return bus, baseline
 
 
-def _release_bus(bus: FeetechMotorsBus) -> None:
+def _release_bus(bus: FeetechMotorsBus) -> str | None:
     """Close a bus without ever writing to the servos.
 
     `disconnect()` defaults to disable_torque=True, which WRITES Torque_Enable —
@@ -83,8 +90,11 @@ def _release_bus(bus: FeetechMotorsBus) -> None:
     port was misidentified). Never raises: called on every exit path, including
     after a failed connect where the port was never opened.
     """
-    with contextlib.suppress(Exception):
+    try:
         bus.disconnect(disable_torque=False)
+    except Exception as exc:
+        return str(exc)
+    return None
 
 
 def _identify_arm_sync(ports: list[str], timeout_s: float = _IDENTIFY_TIMEOUT_S) -> dict:
@@ -140,8 +150,31 @@ def _identify_arm_sync(ports: list[str], timeout_s: float = _IDENTIFY_TIMEOUT_S)
 
         return {"success": False, "message": _NO_MOTION_MESSAGE, "skipped": skipped}
     finally:
-        for bus in buses.values():
-            _release_bus(bus)
+        close_errors = [error for bus in buses.values() if (error := _release_bus(bus))]
+        if close_errors:
+            raise RuntimeError("Could not disconnect identify-arm bus: " + "; ".join(close_errors))
+
+
+def _identify_and_release(candidates: list[str], lease_token: HardwareLeaseToken) -> dict:
+    error: Exception | None = None
+    try:
+        return _identify_arm_sync(candidates)
+    except Exception as exc:
+        error = exc
+        raise
+    finally:
+        if hardware_lease_registry.is_token_current(lease_token):
+            if error is not None and "disconnect" in str(error).lower():
+                hardware_lease_registry.mark_unresolved(lease_token, str(error))
+            else:
+                hardware_lease_registry.release(
+                    lease_token,
+                    safe_hardware_receipt(
+                        "read-only identify buses closed",
+                        torque_off=None,
+                        torque_not_applicable=True,
+                    ),
+                )
 
 
 async def identify_arm_by_motion(ports: list[str] | None = None) -> dict:
@@ -163,11 +196,22 @@ async def identify_arm_by_motion(ports: list[str] | None = None) -> dict:
             "skipped": [],
         }
     try:
+        lease_token = hardware_lease_registry.claim(
+            "identify",
+            "local:feetech-identify",
+            recovery=hardware_recovery_identity(
+                "so101",
+                target_ports=candidates,
+            ),
+        )
+    except HardwareLeaseHeld as exc:
+        return held_response(exc)
+    try:
         # The sync loop enforces its own deadline and returns a friendly
         # message; wait_for is a backstop (slightly longer, so the graceful
         # path wins) in case a serial read wedges.
         return await asyncio.wait_for(
-            asyncio.to_thread(_identify_arm_sync, candidates),
+            asyncio.to_thread(_identify_and_release, candidates, lease_token),
             timeout=_IDENTIFY_TIMEOUT_S + 5.0,
         )
     except TimeoutError:

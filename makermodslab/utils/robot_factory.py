@@ -89,6 +89,8 @@ from .config import (
     bimanual_base_id,
     normalize_arm_type,
     setup_calibration_files,
+    setup_follower_calibration_file,
+    setup_leader_calibration_file,
     stage_bimanual_calibrations,
 )
 
@@ -180,6 +182,46 @@ def build_single_configs(request, cameras=None):
     )
 
     return robot_config, teleop_config
+
+
+def build_follower_config(request, *, cameras=None):
+    """Build only one single-arm follower config for a split-host process.
+
+    Unlike :func:`build_single_configs`, this never resolves, stages, or even
+    reads a leader calibration.  That is a security and deployment boundary:
+    the robot host owns only its follower.  The helper supports every current
+    single-arm family so ownership stays centralized, while the first live
+    remote adapter deliberately accepts only ``so101``.
+    """
+    arm_type = request_arm_type(request)
+    follower_id = setup_follower_calibration_file(request.follower_config, arm_type)
+
+    kwargs = {"port": request.follower_port, "id": follower_id}
+    if cameras is not None:
+        kwargs["cameras"] = cameras
+
+    if arm_type == "maker":
+        return MakerFollowerConfig(**kwargs)
+    if arm_type == "metal":
+        return MetalFollowerConfig(**kwargs)
+    return SO101FollowerConfig(**kwargs)
+
+
+def build_leader_config(request):
+    """Build only one single-arm leader config for a split-host process.
+
+    No follower field is accessed.  The selected calibration must already be
+    present in the leader's normal LeRobot library, exactly as it is after the
+    existing MakerMods calibration/import flow.
+    """
+    arm_type = request_arm_type(request)
+    leader_id = setup_leader_calibration_file(request.leader_config, arm_type)
+
+    if arm_type == "maker":
+        return RebotArm102LeaderMakerTeleopConfig(port=request.leader_port, id=leader_id)
+    if arm_type == "metal":
+        return RebotArm102LeaderMetalTeleopConfig(port=request.leader_port, id=leader_id)
+    return SO101LeaderConfig(port=request.leader_port, id=leader_id)
 
 
 def build_bimanual_configs(request, cameras=None):

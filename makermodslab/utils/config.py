@@ -393,6 +393,28 @@ def setup_follower_calibration_file(follower_config: str, arm_type: object = DEF
     return follower_config_name
 
 
+def setup_leader_calibration_file(leader_config: str, arm_type: object = DEFAULT_ARM_TYPE):
+    """Validate one leader calibration without touching a follower library.
+
+    A split-host operator has no follower calibration (and may have no follower
+    device at all), so it cannot use :func:`setup_calibration_files`.  Single
+    device libraries already are LeRobot's runtime directories; the historical
+    "setup" operation is therefore a validation plus normalized id extraction.
+    Keeping it separate also gives tests a hard guarantee that preparing an
+    operator never creates, copies, or reads a follower artifact.
+    """
+    _require_assigned_config(leader_config, "leader")
+    leader_config_name = os.path.splitext(leader_config)[0]
+    leader_library = leader_config_path_for(arm_type)
+    leader_config_full_path = os.path.join(leader_library, f"{leader_config_name}.json")
+
+    logger.info("Checking leader calibration file: %s", leader_config_full_path)
+    if not os.path.isfile(leader_config_full_path):
+        raise FileNotFoundError(f"Leader calibration file not found: {leader_config_full_path}")
+
+    return leader_config_name
+
+
 def find_available_ports():
     """Find all available serial ports on the system"""
     try:

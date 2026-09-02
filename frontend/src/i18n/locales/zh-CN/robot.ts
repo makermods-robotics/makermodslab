@@ -27,6 +27,8 @@ export default {
     renameItem: "重命名机器人…",
     deleteItem: "删除机器人…",
     teleop: "遥操作",
+    remoteTeleop: "远程",
+    remoteTeleopTooltip: "打开双笔记本远程遥操作",
   },
   rename: {
     title: "重命名机器人",

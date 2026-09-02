@@ -1,0 +1,23 @@
+{
+  "role": "robot",
+  "robot": {
+    "node_id": "robot-station-1",
+    "robot_name": "commissioned-so101-follower",
+    "bind_address": "100.64.0.20",
+    "control_port": 7443,
+    "udp_port": 7444,
+    "tls_certificate_path": "/absolute/private/path/robot-control-cert.pem",
+    "tls_private_key_path": "/absolute/private/path/robot-control-key.pem",
+    "leader_calibration_id": "expected-leader-calibration",
+    "leader_calibration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "action_rate_hz": 50,
+    "action_watchdog_ms": 200,
+    "first_action_deadline_ms": 1000,
+    "control_deadline_ms": 1000,
+    "browser_deadline_ms": 2000,
+    "max_velocity_per_s": 10.0,
+    "max_acceleration_per_s2": 50.0,
+    "recording_enabled": true
+  },
+  "operator": null
+}

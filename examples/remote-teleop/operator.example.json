@@ -1,0 +1,12 @@
+{
+  "role": "operator",
+  "robot": null,
+  "operator": {
+    "node_id": "operator-station-1",
+    "robot_id": "robot-station-1",
+    "leader_robot_name": "commissioned-so101-leader",
+    "control_uri": "wss://100.64.0.20:7443",
+    "certificate_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "action_rate_hz": 50
+  }
+}

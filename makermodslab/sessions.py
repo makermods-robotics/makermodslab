@@ -421,12 +421,19 @@ def _watchdog_loop() -> None:
 
 
 def _held_by() -> str | None:
-    """Which feature's active flag currently holds the hardware, if any.
+    """Which feature the process-wide registry says holds the hardware.
 
-    The same reciprocal flags every ``handle_start_*`` checks — read here
-    BEFORE robot resolution because exclusivity is a property of the node's
-    one set of hardware, not of the robot named in the request (pinned by
-    tests/test_api_errors.py::test_sessions_surface_uses_reserved_codes)."""
+    Legacy flags remain a compatibility fallback for an in-flight pre-registry
+    test fixture, but they are no longer authority.  In particular an
+    unresolved finalizer remains visible here even after its feature flag has
+    gone false.
+    """
+    from .hardware_lease import hardware_lease_registry
+
+    snapshot = hardware_lease_registry.snapshot()
+    if snapshot.held:
+        return snapshot.kind
+
     from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, wiggle
 
     if teleoperate.teleoperation_active:

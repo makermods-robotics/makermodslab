@@ -44,6 +44,14 @@ if os.environ.setdefault("MAKERMODSLAB_OUTPUT_ROOT", _TEST_OUTPUT_ROOT) == _TEST
 else:  # pragma: no cover - only when the caller pinned a root themselves
     shutil.rmtree(_TEST_OUTPUT_ROOT, ignore_errors=True)
 
+# The process-wide hardware lease journal must be durable in production, but a
+# test crash-intent must never appear in the developer's real application data.
+# This is set before any MakerMods module imports the global registry.
+os.environ.setdefault(
+    "MAKERMODSLAB_HARDWARE_LEASE_ROOT",
+    str(Path(_TEST_OUTPUT_ROOT) / "hardware-safety"),
+)
+
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
@@ -178,6 +186,21 @@ def _reset_hub_listing_caches() -> Iterator[None]:
     _reset_module_caches()
     yield
     _reset_module_caches()
+
+
+@pytest.fixture(autouse=True)
+def _reset_hardware_lease_registry() -> Iterator[None]:
+    """Keep process-wide lease/fault state from leaking between unit tests.
+
+    Production intentionally retains unresolved leases. Tests routinely mock
+    hardware workers and reset legacy flags directly, so their isolation must
+    reset the new authority singleton explicitly at the test boundary.
+    """
+    from makermodslab.hardware_lease import hardware_lease_registry
+
+    hardware_lease_registry._reset_for_tests()
+    yield
+    hardware_lease_registry._reset_for_tests()
 
 
 @pytest.fixture(autouse=True)

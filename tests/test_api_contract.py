@@ -238,6 +238,25 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # process died holding torque. Not a session (see the module
         # docstring), and no flat mirror for the same only-shrinks reason.
         "POST /api/v1/arms/release-torque",
+        "POST /api/v1/arms/so101/recover-torque",
+        # Split-host SO-101 teleoperation. Role configuration remains dormant
+        # until enable; simulation remains a hardware-free contract harness.
+        "GET /api/v1/arms/remote-teleoperation",
+        "GET /api/v1/arms/servo-health",
+        "PUT /api/v1/arms/remote-teleoperation/configuration",
+        "DELETE /api/v1/arms/remote-teleoperation/configuration",
+        "POST /api/v1/arms/remote-teleoperation/commission",
+        "POST /api/v1/arms/remote-teleoperation/recover-hardware",
+        "POST /api/v1/arms/remote-teleoperation/enable",
+        "POST /api/v1/arms/remote-teleoperation/disable",
+        "POST /api/v1/arms/remote-teleoperation/pairing-window",
+        "POST /api/v1/arms/remote-teleoperation/pair",
+        "POST /api/v1/arms/remote-teleoperation/browser-heartbeat",
+        "POST /api/v1/arms/remote-teleoperation/stop",
+        "POST /api/v1/arms/remote-teleoperation/credentials/{credential_id}/revoke",
+        "POST /api/v1/arms/remote-teleoperation/simulations",
+        "POST /api/v1/arms/remote-teleoperation/simulations/{session_id}/actions",
+        "POST /api/v1/arms/remote-teleoperation/simulations/{session_id}/stop",
         # Peer-job drill-in proxies: record + incremental log tail (GET, any
         # HTTP failure = node.unreachable) and forwarded stop/delete (the
         # peer's own coded refusals pass through with THEIR status and body).

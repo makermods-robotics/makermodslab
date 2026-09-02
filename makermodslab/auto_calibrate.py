@@ -36,6 +36,14 @@ from pydantic import BaseModel
 from lerobot.motors.feetech import FeetechMotorsBus
 
 from .api_errors import ErrorCode
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .motor_power import torque_limit_from_percent
 from .session_events import notify_session_changed
 from .torque import force_disable_bus_torque
@@ -209,9 +217,18 @@ class _AutoCalArmRunner:
         self._lock = threading.Lock()
         self._logs: deque[str] = deque(maxlen=_MAX_LOG_LINES)
         self._request: AutoCalibrationRequest | None = None
+        self._hardware_lease_token: HardwareLeaseToken | None = None
+        self._owns_hardware_lease = False
+        self._release_problems: list[str] = []
+        self._on_terminal = None
         self.status = AutoCalibrationStatus()
 
-    def start(self, request: AutoCalibrationRequest) -> dict:
+    def start(
+        self,
+        request: AutoCalibrationRequest,
+        *,
+        lease_token: HardwareLeaseToken | None = None,
+    ) -> dict:
         with self._lock:
             if self.status.active:
                 return {
@@ -285,6 +302,24 @@ class _AutoCalArmRunner:
             if not request.port:
                 return {"success": False, "message": "No port provided"}
 
+            if lease_token is None:
+                try:
+                    lease_token = hardware_lease_registry.claim(
+                        "auto_calibration",
+                        f"local:{request.port}",
+                        recovery=hardware_recovery_identity(
+                            "so101",
+                            target_ports=(request.port,),
+                        ),
+                    )
+                except HardwareLeaseHeld as exc:
+                    return held_response(exc)
+                self._owns_hardware_lease = True
+            else:
+                self._owns_hardware_lease = False
+            self._hardware_lease_token = lease_token
+            self._release_problems = []
+
             config_stem = _stem(request.config_file)
             robot_type = "so_follower" if request.device_type == "robot" else "so_leader"
             command = [
@@ -323,6 +358,16 @@ class _AutoCalArmRunner:
             except Exception as e:
                 logger.error(f"Failed to launch auto-calibration: {e}")
                 self.status = AutoCalibrationStatus(active=False, status="failed", error=str(e))
+                if self._owns_hardware_lease and hardware_lease_registry.is_token_current(lease_token):
+                    hardware_lease_registry.release(
+                        lease_token,
+                        safe_hardware_receipt(
+                            "auto-calibration child failed before opening hardware",
+                            torque_off=None,
+                            torque_not_applicable=True,
+                        ),
+                    )
+                    self._hardware_lease_token = None
                 return {"success": False, "message": str(e)}
 
             self.status = AutoCalibrationStatus(
@@ -351,7 +396,21 @@ class _AutoCalArmRunner:
 
         request = self._request
         with self._lock:
-            if code == 0:
+            stop_path = self.status.status in ("stopping", "stopped")
+        # A natural child exit runs the vendored script's own hardware
+        # finalizer. Do not reopen the serial bus here: doing so turns a clean
+        # completion into a second, unrelated connect attempt. Non-zero exits
+        # retain the registry as unresolved because that finalizer did not
+        # produce a success receipt; the explicit stop path below performs its
+        # own direct fallback torque release.
+        release_problems = (
+            []
+            if stop_path or code == 0
+            else [f"Auto-calibration exited with code {code}; safe torque-off was not confirmed"]
+        )
+        self._release_problems = release_problems
+        with self._lock:
+            if code == 0 and not release_problems:
                 try:
                     self._finalize_success()
                     self.status = AutoCalibrationStatus(
@@ -382,14 +441,24 @@ class _AutoCalArmRunner:
                 if request is not None:
                     _remove_stray_calibration_file(request.device_type, _stem(request.config_file))
                 self.status = AutoCalibrationStatus(
-                    active=False, status="failed", error=f"Auto-calibration exited with code {code}"
+                    active=False,
+                    status="failed",
+                    error=(
+                        " ".join(release_problems)
+                        if release_problems
+                        else f"Auto-calibration exited with code {code}"
+                    ),
                 )
             self._proc = None
+        if not stop_path:
+            self._finalize_owned_lease(release_problems)
         # This arm's subprocess is gone: completed/failed here (a release),
         # or still "stopping" while _stop_worker owns the terminal status (in
         # which case the aggregate keeps active=True and _stop_worker emits
         # the final release itself).
         _notify_autocal_transition(phase=self.status.status)
+        if self._on_terminal is not None:
+            self._on_terminal()
 
     def _finalize_success(self) -> None:
         """Copy the leader file to MakerMods Lab's path (if needed) and write the config
@@ -438,6 +507,9 @@ class _AutoCalArmRunner:
             if self.status.status == "stopping":
                 return {"success": False, "message": "Auto-calibration is already stopping"}
             self.status.status = "stopping"
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                hardware_lease_registry.request_stop(token, "operator_stop")
             # The script's graceful stop freezes the arm, drives it back to its
             # starting pose, and only then releases torque — up to ~10s. Say so,
             # or the wait reads as an unresponsive Stop button.
@@ -556,9 +628,37 @@ class _AutoCalArmRunner:
                             active=False, status="stopped", message="Auto-calibration stopped"
                         )
                 self._proc = None
+                self._release_problems = list(problems)
+            self._finalize_owned_lease(problems)
             # Final release for the stop path: the escalation (and the
             # fallback torque release) has finished, whatever the outcome.
             _notify_autocal_transition(phase=self.status.status)
+            if self._on_terminal is not None:
+                self._on_terminal()
+
+    def _finalize_owned_lease(self, problems: list[str]) -> None:
+        token = self._hardware_lease_token
+        if not self._owns_hardware_lease or token is None:
+            return
+        if not hardware_lease_registry.is_token_current(token):
+            return
+        if problems:
+            hardware_lease_registry.mark_unresolved(
+                token,
+                " ".join(problems),
+                {
+                    "safe": False,
+                    "device_closed": True,
+                    "torque_off": False,
+                    "evidence": " ".join(problems),
+                },
+            )
+        else:
+            hardware_lease_registry.release(
+                token,
+                safe_hardware_receipt("auto-calibration child exited and torque release was confirmed"),
+            )
+            self._hardware_lease_token = None
 
     def get_status(self) -> dict:
         with self._lock:
@@ -615,9 +715,11 @@ class AutoCalibrationBatchManager:
     _MAX_ARMS = 4
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._runners: list[_AutoCalArmRunner] = []
         self._robot_name: str | None = None
+        self._hardware_lease_token: HardwareLeaseToken | None = None
+        self._launching = False
 
     def _active(self) -> bool:
         return any(r.get_status()["active"] for r in self._runners)
@@ -743,12 +845,28 @@ class AutoCalibrationBatchManager:
                         "names": sorted(set(taken)),
                     }
 
+            try:
+                lease_token = hardware_lease_registry.claim(
+                    "auto_calibration",
+                    f"local:batch:{request.robot_name or 'unassigned'}",
+                    recovery=hardware_recovery_identity(
+                        "so101",
+                        target_ports=(arm.port for arm in arms),
+                    ),
+                )
+            except HardwareLeaseHeld as exc:
+                return held_response(exc)
+            self._hardware_lease_token = lease_token
+
             # --- Launch every arm concurrently. Each runner spawns its own
             # subprocess + reader thread, so this loop returns quickly and the
             # arms run in parallel. If a launch fails, that arm is 'failed' and
             # the rest still run. ---
             self._robot_name = request.robot_name
             self._runners = [_AutoCalArmRunner() for _ in arms]
+            for runner in self._runners:
+                runner._on_terminal = self._finalize_registry_if_done
+            self._launching = True
             launched = 0
             for runner, arm in zip(self._runners, arms, strict=True):
                 req = AutoCalibrationRequest(
@@ -759,7 +877,7 @@ class AutoCalibrationBatchManager:
                     arm=arm.arm,
                     motor_power=request.motor_power,
                 )
-                result = runner.start(req)
+                result = runner.start(req, lease_token=lease_token)
                 # Give the runner its identity even if the launch failed, so the
                 # status view can still name the failed arm.
                 runner._request = req
@@ -769,9 +887,20 @@ class AutoCalibrationBatchManager:
                     runner.status = AutoCalibrationStatus(
                         active=False, status="failed", error=result.get("message", "launch failed")
                     )
+            self._launching = False
 
             if launched == 0:
+                hardware_lease_registry.release(
+                    lease_token,
+                    safe_hardware_receipt(
+                        "no auto-calibration child opened hardware",
+                        torque_off=None,
+                        torque_not_applicable=True,
+                    ),
+                )
+                self._hardware_lease_token = None
                 return {"success": False, "message": "No arm could be launched"}
+            self._finalize_registry_if_done()
             return {
                 "success": True,
                 "message": f"Auto-calibration started on {launched} arm(s)",
@@ -787,11 +916,38 @@ class AutoCalibrationBatchManager:
         with self._lock:
             if not self._active():
                 return {"success": False, "message": "No batch auto-calibration is running"}
+            token = self._hardware_lease_token
+            if token is not None and hardware_lease_registry.is_token_current(token):
+                hardware_lease_registry.request_stop(token, "operator_stop")
             stopped = 0
             for runner in self._runners:
                 if runner.get_status()["active"] and runner.stop().get("success"):
                     stopped += 1
             return {"success": True, "message": f"Stopping {stopped} arm(s)"}
+
+    def _finalize_registry_if_done(self) -> None:
+        # Several child reader threads can become terminal together. Serialize
+        # their callbacks so only one can perform the final token transition.
+        with self._lock:
+            token = self._hardware_lease_token
+            if (
+                token is None
+                or self._launching
+                or self._active()
+                or not hardware_lease_registry.is_token_current(token)
+            ):
+                return
+            problems = [problem for runner in self._runners for problem in runner._release_problems]
+            if problems:
+                hardware_lease_registry.mark_unresolved(token, " ".join(problems))
+            else:
+                hardware_lease_registry.release(
+                    token,
+                    safe_hardware_receipt(
+                        "all auto-calibration children exited and torque release was confirmed"
+                    ),
+                )
+                self._hardware_lease_token = None
 
     def stop_and_wait(self, timeout: float = _STOP_AND_WAIT_CEILING_S) -> None:
         """Like stop(), but blocks until every arm's escalation has actually
@@ -851,6 +1007,8 @@ def _notify_autocal_transition(phase: str | None = None) -> None:
         runner.status.active for runner in auto_calibration_batch_manager._runners
     )
     notify_session_changed("auto_calibration", active, phase=phase)
+    if not active:
+        auto_calibration_batch_manager._finalize_registry_if_done()
 
 
 def auto_calibration_is_active() -> bool:

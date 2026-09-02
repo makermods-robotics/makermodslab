@@ -3433,13 +3433,34 @@
             "type": "string"
           },
           "port": {
-            "title": "Port",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
           }
         },
         "required": [
-          "arm_type",
-          "port"
+          "arm_type"
         ],
         "title": "ReleaseCanTorqueRequest",
         "type": "object"
@@ -3469,6 +3490,636 @@
           "problems"
         ],
         "title": "ReleaseCanTorqueResponse",
+        "type": "object"
+      },
+      "ReleaseSo101TorqueRequest": {
+        "description": "Exact serial targets from the durable SO-101 recovery identity.",
+        "properties": {
+          "ports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ports"
+          }
+        },
+        "title": "ReleaseSo101TorqueRequest",
+        "type": "object"
+      },
+      "ReleaseSo101TorqueResponse": {
+        "description": "so101_recovery.handle_release_so101_torque crash recovery result.",
+        "properties": {
+          "confirmed_ports": {
+            "title": "Confirmed Ports",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "confirmed_ports",
+          "problems"
+        ],
+        "title": "ReleaseSo101TorqueResponse",
+        "type": "object"
+      },
+      "RemoteCommissionBody": {
+        "additionalProperties": false,
+        "description": "Physical safeguards must be true before the follower is opened.",
+        "properties": {
+          "acknowledge_live_torque_enable_risk": {
+            "const": true,
+            "title": "Acknowledge Live Torque Enable Risk",
+            "type": "boolean"
+          },
+          "arm_secured": {
+            "const": true,
+            "title": "Arm Secured",
+            "type": "boolean"
+          },
+          "physical_power_cutoff_reachable": {
+            "const": true,
+            "title": "Physical Power Cutoff Reachable",
+            "type": "boolean"
+          },
+          "workspace_clear": {
+            "const": true,
+            "title": "Workspace Clear",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "arm_secured",
+          "workspace_clear",
+          "physical_power_cutoff_reachable",
+          "acknowledge_live_torque_enable_risk"
+        ],
+        "title": "RemoteCommissionBody",
+        "type": "object"
+      },
+      "RemoteConfigurationBody": {
+        "additionalProperties": false,
+        "description": "Exactly one role configuration; saving it never enables that role.",
+        "properties": {
+          "operator": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteOperatorConfigBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "robot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteRobotConfigBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role": {
+            "enum": [
+              "robot",
+              "operator"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "RemoteConfigurationBody",
+        "type": "object"
+      },
+      "RemoteJointLimitBody": {
+        "additionalProperties": false,
+        "properties": {
+          "max_acceleration_per_s2": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Acceleration Per S2",
+            "type": "number"
+          },
+          "max_velocity_per_s": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Velocity Per S",
+            "type": "number"
+          },
+          "maximum": {
+            "title": "Maximum",
+            "type": "number"
+          },
+          "minimum": {
+            "title": "Minimum",
+            "type": "number"
+          }
+        },
+        "required": [
+          "minimum",
+          "maximum",
+          "max_velocity_per_s",
+          "max_acceleration_per_s2"
+        ],
+        "title": "RemoteJointLimitBody",
+        "type": "object"
+      },
+      "RemoteOperatorConfigBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action_rate_hz": {
+            "default": 50,
+            "maximum": 100.0,
+            "minimum": 10.0,
+            "title": "Action Rate Hz",
+            "type": "integer"
+          },
+          "certificate_fingerprint": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Certificate Fingerprint",
+            "type": "string"
+          },
+          "control_uri": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Control Uri",
+            "type": "string"
+          },
+          "leader_robot_name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Leader Robot Name",
+            "type": "string"
+          },
+          "node_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Node Id",
+            "type": "string"
+          },
+          "robot_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Robot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "robot_id",
+          "leader_robot_name",
+          "control_uri",
+          "certificate_fingerprint"
+        ],
+        "title": "RemoteOperatorConfigBody",
+        "type": "object"
+      },
+      "RemotePairBody": {
+        "additionalProperties": false,
+        "properties": {
+          "operator_label": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Operator Label",
+            "type": "string"
+          },
+          "pairing_token": {
+            "maxLength": 256,
+            "minLength": 20,
+            "title": "Pairing Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pairing_token",
+          "operator_label"
+        ],
+        "title": "RemotePairBody",
+        "type": "object"
+      },
+      "RemoteRobotConfigBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action_rate_hz": {
+            "default": 50,
+            "maximum": 100.0,
+            "minimum": 10.0,
+            "title": "Action Rate Hz",
+            "type": "integer"
+          },
+          "action_watchdog_ms": {
+            "default": 200,
+            "maximum": 2000.0,
+            "minimum": 20.0,
+            "title": "Action Watchdog Ms",
+            "type": "integer"
+          },
+          "bind_address": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Bind Address",
+            "type": "string"
+          },
+          "browser_deadline_ms": {
+            "default": 2000,
+            "maximum": 10000.0,
+            "minimum": 100.0,
+            "title": "Browser Deadline Ms",
+            "type": "integer"
+          },
+          "control_deadline_ms": {
+            "default": 1000,
+            "maximum": 5000.0,
+            "minimum": 100.0,
+            "title": "Control Deadline Ms",
+            "type": "integer"
+          },
+          "control_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Control Port",
+            "type": "integer"
+          },
+          "first_action_deadline_ms": {
+            "default": 1000,
+            "maximum": 5000.0,
+            "minimum": 20.0,
+            "title": "First Action Deadline Ms",
+            "type": "integer"
+          },
+          "leader_calibration_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Leader Calibration Digest",
+            "type": "string"
+          },
+          "leader_calibration_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Leader Calibration Id",
+            "type": "string"
+          },
+          "max_acceleration_per_s2": {
+            "default": 300.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Acceleration Per S2",
+            "type": "number"
+          },
+          "max_velocity_per_s": {
+            "default": 60.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Velocity Per S",
+            "type": "number"
+          },
+          "node_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Node Id",
+            "type": "string"
+          },
+          "recording_enabled": {
+            "default": true,
+            "title": "Recording Enabled",
+            "type": "boolean"
+          },
+          "robot_name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Robot Name",
+            "type": "string"
+          },
+          "tls_certificate_path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Tls Certificate Path",
+            "type": "string"
+          },
+          "tls_private_key_path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Tls Private Key Path",
+            "type": "string"
+          },
+          "udp_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Udp Port",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "node_id",
+          "robot_name",
+          "bind_address",
+          "control_port",
+          "udp_port",
+          "tls_certificate_path",
+          "tls_private_key_path",
+          "leader_calibration_id",
+          "leader_calibration_digest"
+        ],
+        "title": "RemoteRobotConfigBody",
+        "type": "object"
+      },
+      "RemoteRuntimeStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "commissioning": {
+            "additionalProperties": true,
+            "title": "Commissioning",
+            "type": "object"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "durable_fault": {
+            "additionalProperties": true,
+            "title": "Durable Fault",
+            "type": "object"
+          },
+          "hardware_registry": {
+            "additionalProperties": true,
+            "title": "Hardware Registry",
+            "type": "object"
+          },
+          "live_hardware_enabled": {
+            "title": "Live Hardware Enabled",
+            "type": "boolean"
+          },
+          "protocol_version": {
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "robot",
+                  "operator"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime"
+          },
+          "runtime_enabled": {
+            "title": "Runtime Enabled",
+            "type": "boolean"
+          },
+          "simulation": {
+            "additionalProperties": true,
+            "title": "Simulation",
+            "type": "object"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "configured",
+          "role",
+          "config",
+          "runtime_enabled",
+          "live_hardware_enabled",
+          "state",
+          "runtime",
+          "simulation",
+          "commissioning",
+          "durable_fault",
+          "hardware_registry"
+        ],
+        "title": "RemoteRuntimeStatusResponse",
+        "type": "object"
+      },
+      "RemoteSimulationCredentials": {
+        "properties": {
+          "action_key_base64": {
+            "title": "Action Key Base64",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key_id",
+          "action_key_base64"
+        ],
+        "title": "RemoteSimulationCredentials",
+        "type": "object"
+      },
+      "RemoteSimulationDatagramBody": {
+        "additionalProperties": false,
+        "properties": {
+          "datagram_base64": {
+            "title": "Datagram Base64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "datagram_base64"
+        ],
+        "title": "RemoteSimulationDatagramBody",
+        "type": "object"
+      },
+      "RemoteSimulationStartBody": {
+        "additionalProperties": false,
+        "properties": {
+          "follower_calibration_digest": {
+            "title": "Follower Calibration Digest",
+            "type": "string"
+          },
+          "follower_calibration_id": {
+            "title": "Follower Calibration Id",
+            "type": "string"
+          },
+          "joint_names": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Joint Names",
+            "type": "array"
+          },
+          "leader_calibration_digest": {
+            "title": "Leader Calibration Digest",
+            "type": "string"
+          },
+          "leader_calibration_id": {
+            "title": "Leader Calibration Id",
+            "type": "string"
+          },
+          "limits": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RemoteJointLimitBody"
+            },
+            "title": "Limits",
+            "type": "object"
+          },
+          "rig_digest": {
+            "title": "Rig Digest",
+            "type": "string"
+          },
+          "rig_id": {
+            "title": "Rig Id",
+            "type": "string"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "tick_hz": {
+            "default": 50,
+            "maximum": 200.0,
+            "minimum": 10.0,
+            "title": "Tick Hz",
+            "type": "integer"
+          },
+          "units": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Units",
+            "type": "array"
+          },
+          "watchdog_ms": {
+            "default": 200,
+            "maximum": 2000.0,
+            "minimum": 20.0,
+            "title": "Watchdog Ms",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_id",
+          "rig_id",
+          "rig_digest",
+          "leader_calibration_id",
+          "leader_calibration_digest",
+          "follower_calibration_id",
+          "follower_calibration_digest",
+          "joint_names",
+          "units",
+          "limits"
+        ],
+        "title": "RemoteSimulationStartBody",
+        "type": "object"
+      },
+      "RemoteSimulationStartResponse": {
+        "properties": {
+          "credentials": {
+            "$ref": "#/components/schemas/RemoteSimulationCredentials"
+          },
+          "session": {
+            "additionalProperties": true,
+            "title": "Session",
+            "type": "object"
+          },
+          "simulation_only": {
+            "title": "Simulation Only",
+            "type": "boolean"
+          },
+          "status": {
+            "additionalProperties": true,
+            "title": "Status",
+            "type": "object"
+          }
+        },
+        "required": [
+          "simulation_only",
+          "session",
+          "credentials",
+          "status"
+        ],
+        "title": "RemoteSimulationStartResponse",
+        "type": "object"
+      },
+      "RemoteSimulationStopBody": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "default": "api_stop",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "RemoteSimulationStopBody",
+        "type": "object"
+      },
+      "RemoteStopBody": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "default": "api_stop",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "RemoteStopBody",
         "type": "object"
       },
       "RenameJobBody": {
@@ -3701,6 +4352,80 @@
           "offline"
         ],
         "title": "RunnersHardwareResponse",
+        "type": "object"
+      },
+      "ServoHealthResponse": {
+        "additionalProperties": true,
+        "description": "Snapshot shape is additive; individual register values may be null.",
+        "properties": {
+          "arms": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Arms",
+            "type": "array"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "maintenance": {
+            "additionalProperties": true,
+            "title": "Maintenance",
+            "type": "object"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "protocol_version": {
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "source_revision": {
+            "title": "Source Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "source_revision",
+          "read_only",
+          "available",
+          "complete",
+          "owner",
+          "arms",
+          "last_error",
+          "maintenance"
+        ],
+        "title": "ServoHealthResponse",
         "type": "object"
       },
       "SessionHeartbeatBody": {
@@ -4859,7 +5584,7 @@
   "paths": {
     "/api/v1/arms/release-torque": {
       "post": {
-        "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no session and no device object to clean up through. This reopens\nthe named bus WITHOUT the energizing handshake, broadcasts the disable,\nand closes. Refused (409 session.held) while any live session holds the\nhardware; not a session itself — no lease, no session events (see\ncan_recovery.py).",
+        "description": "De-energize a CAN follower after a crash left it holding torque.\n\nA SIGKILL or power loss leaves Damiao motors rigid at their last command\nwith no live session or device object to clean up through. This adopts\nonly the matching durable recovery identity, reopens the named bus(es)\nWITHOUT the energizing handshake, requires disable acknowledgement from\nevery motor, and closes every bus. Any mismatch or incomplete evidence\nretains the central hardware lockout.",
         "operationId": "release_can_torque",
         "requestBody": {
           "content": {
@@ -4894,6 +5619,611 @@
           }
         },
         "summary": "Release Can Torque",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation": {
+      "get": {
+        "description": "Public role/runtime status; never opens a device or starts a listener.",
+        "operationId": "remote_teleoperation_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Remote Teleoperation Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/browser-heartbeat": {
+      "post": {
+        "description": "Prove the operator's local control page is still present.",
+        "operationId": "heartbeat_remote_teleoperation_browser",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Heartbeat Remote Teleoperation Browser",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Heartbeat Remote Teleoperation Browser",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/commission": {
+      "post": {
+        "description": "Run the no-motion secured-arm proof; all physical gates must be true.",
+        "operationId": "commission_remote_teleoperation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteCommissionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Commission Remote Teleoperation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/configuration": {
+      "delete": {
+        "description": "Remove only the dormant remote-role config; robot calibrations are untouched.",
+        "operationId": "clear_remote_teleoperation_configuration",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clear Remote Teleoperation Configuration",
+        "tags": [
+          "system"
+        ]
+      },
+      "put": {
+        "description": "Persist one dormant role configuration; never enable it implicitly.",
+        "operationId": "configure_remote_teleoperation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteConfigurationBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Configure Remote Teleoperation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/credentials/{credential_id}/revoke": {
+      "post": {
+        "description": "Revoke one operator credential; an active owner is stopped locally.",
+        "operationId": "revoke_remote_teleoperation_credential",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "title": "Credential Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Remote Teleoperation Credential",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/disable": {
+      "post": {
+        "description": "Stop the role safely and leave its configuration dormant.",
+        "operationId": "disable_remote_teleoperation",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Disable Remote Teleoperation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/enable": {
+      "post": {
+        "description": "Explicitly start the configured listener or operator hardware session.",
+        "operationId": "enable_remote_teleoperation",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Enable Remote Teleoperation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/pair": {
+      "post": {
+        "description": "Exchange a one-time code over pinned TLS and store the credential privately.",
+        "operationId": "pair_remote_teleoperation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemotePairBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pair Remote Teleoperation",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pair Remote Teleoperation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/pairing-window": {
+      "post": {
+        "description": "Mint one short-lived pairing code, only from the robot's local UI.",
+        "operationId": "open_remote_teleoperation_pairing_window",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Open Remote Teleoperation Pairing Window",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Open Remote Teleoperation Pairing Window",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/recover-hardware": {
+      "post": {
+        "description": "Clear fault lockout only after a repeated matching secured-arm proof.",
+        "operationId": "recover_remote_teleoperation_hardware",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteCommissionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recover Remote Teleoperation Hardware",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/simulations": {
+      "post": {
+        "description": "Start a deterministic follower. This route cannot discover or open hardware.",
+        "operationId": "start_remote_teleoperation_simulation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteSimulationStartBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteSimulationStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Remote Teleoperation Simulation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/simulations/{session_id}/actions": {
+      "post": {
+        "description": "Submit an already authenticated canonical action datagram to the simulator.",
+        "operationId": "submit_remote_teleoperation_simulation_action",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteSimulationDatagramBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Remote Teleoperation Simulation Action",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Remote Teleoperation Simulation Action",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/simulations/{session_id}/stop": {
+      "post": {
+        "description": "Unambiguous robot-side STOP. Repeating a stale session id cannot hit a new session.",
+        "operationId": "stop_remote_teleoperation_simulation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteSimulationStopBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stop Remote Teleoperation Simulation",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Remote Teleoperation Simulation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/remote-teleoperation/stop": {
+      "post": {
+        "description": "Issue local STOP; operator STOP asks for an acknowledged robot receipt.",
+        "operationId": "stop_remote_teleoperation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteStopBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteRuntimeStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Remote Teleoperation",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/servo-health": {
+      "get": {
+        "description": "Read the cache populated by the current bus owner; performs no bus transaction.",
+        "operationId": "servo_health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServoHealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Servo Health",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/arms/so101/recover-torque": {
+      "post": {
+        "description": "Recover exact SO-101 serial buses after an unclean hardware-owner exit.\n\nThe request may provide the complete durable port identity or omit it to\nuse the owner-private retained target map. The raw Feetech transport opens\nwithout a handshake, disables and verifies every servo, then closes. Any\nmismatch or incomplete evidence retains lockout.",
+        "operationId": "release_so101_torque",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseSo101TorqueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseSo101TorqueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release So101 Torque",
         "tags": [
           "system"
         ]

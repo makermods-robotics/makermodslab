@@ -41,6 +41,14 @@ from .datasets import (
     invalidate_hub_status,
     push_dataset_to_hub,
 )
+from .hardware_lease import (
+    HardwareLeaseHeld,
+    HardwareLeaseToken,
+    hardware_lease_registry,
+    held_response,
+    safe_hardware_receipt,
+)
+from .hardware_recovery_identity import hardware_recovery_identity
 from .maker_rest_pose import (
     capture_maker_pose,
     maker_follower_arms,
@@ -276,6 +284,11 @@ identity_warnings: list[str] = []
 # Guards the start path so two concurrent POST /start-recording calls cannot
 # both pass the active-flag check.
 _state_lock = threading.Lock()
+_hardware_lease_token: HardwareLeaseToken | None = None
+# Written only by the one recording worker. Empty means the explicit torque
+# disable and both disconnects completed; non-empty is retained as a fault
+# receipt by the process-wide hardware registry.
+_hardware_cleanup_problems: list[str] = []
 
 # True while the session's cleanup is driving the follower(s) back to their
 # session-start pose (and on through the release): the recording loop is over
@@ -644,6 +657,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         identity_warnings, \
         discard_requested, \
         connect_retry_attempt
+    global _hardware_lease_token, _hardware_cleanup_problems
 
     from . import (
         auto_calibrate as _auto_calibrate,
@@ -761,6 +775,24 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         except CameraResolutionError as exc:
             logger.warning("Rejected recording start: %s", exc)
             return {"success": False, "status_code": 400, "message": str(exc)}
+        try:
+            lease_token = hardware_lease_registry.claim(
+                "recording",
+                f"local:{request.follower_port}",
+                recovery=hardware_recovery_identity(
+                    request.arm_type,
+                    target_ports=(request.follower_port, request.right_follower_port)
+                    if request.mode == "bimanual"
+                    else (request.follower_port,),
+                    feetech_ports=(request.leader_port, request.right_leader_port)
+                    if request.mode == "bimanual"
+                    else (request.leader_port,),
+                ),
+            )
+        except HardwareLeaseHeld as exc:
+            return held_response(exc, include_status=True)
+        _hardware_lease_token = lease_token
+        _hardware_cleanup_problems = []
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later release grace short until the server
@@ -838,6 +870,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 last_session_error, \
                 paused_accum_seconds, \
                 pause_started_at
+            global _hardware_lease_token
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
@@ -933,6 +966,26 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
 
                 recording_active = False
+                if _hardware_cleanup_problems:
+                    reason = " ".join(_hardware_cleanup_problems)
+                    hardware_lease_registry.mark_unresolved(
+                        lease_token,
+                        reason,
+                        {
+                            "safe": False,
+                            "device_closed": not any(
+                                "disconnect" in problem.lower() for problem in _hardware_cleanup_problems
+                            ),
+                            "torque_off": False,
+                            "evidence": reason,
+                        },
+                    )
+                else:
+                    hardware_lease_registry.release(
+                        lease_token,
+                        safe_hardware_receipt("recording torque disabled and devices closed"),
+                    )
+                    _hardware_lease_token = None
                 # Final release: record_with_web_events' own finally already
                 # released torque and disconnected before this ran, so the
                 # ports are free now — including on error paths.
@@ -959,6 +1012,16 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
     except Exception as e:
         recording_active = False
+        if hardware_lease_registry.is_token_current(lease_token):
+            hardware_lease_registry.release(
+                lease_token,
+                safe_hardware_receipt(
+                    "recording failed before its hardware worker opened a device",
+                    torque_off=None,
+                    torque_not_applicable=True,
+                ),
+            )
+            _hardware_lease_token = None
         # The claim above already broadcast active=True; undo the hint now
         # that the failed start released the flag.
         notify_session_changed("recording", False)
@@ -984,6 +1047,9 @@ def handle_stop_recording(discard: bool = False) -> dict[str, Any]:
     grace cuts the hold short ("release now").
     """
     global current_phase, phase_start_time, discard_requested
+
+    if _hardware_lease_token is not None and hardware_lease_registry.is_token_current(_hardware_lease_token):
+        hardware_lease_registry.request_stop(_hardware_lease_token, "operator_stop")
 
     if releasing:
         _release_now.set()
@@ -1695,6 +1761,9 @@ def record_with_web_events(
     global current_phase, phase_start_time, current_episode, saved_episodes, releasing
     global identity_warnings, connect_retry_attempt
     global paused_accum_seconds, pause_started_at
+    global _hardware_cleanup_problems
+
+    _hardware_cleanup_problems = []
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -2206,6 +2275,7 @@ def record_with_web_events(
         ended_normally = True
 
     finally:
+        cleanup_problems: list[str] = []
         try:
             if ended_normally and not _release_now.is_set():
                 # User-initiated stop / planned session end: no timed hold — the
@@ -2225,15 +2295,24 @@ def record_with_web_events(
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.
             if feetech:
-                force_disable_torque(robot, "robot")
-                force_disable_torque(teleop, "teleop")
+                cleanup_problems.extend(force_disable_torque(robot, "robot"))
+                cleanup_problems.extend(force_disable_torque(teleop, "teleop"))
             else:
-                release_maker_torque(robot, "CAN follower arm")
-            robot.disconnect()
+                cleanup_problems.extend(release_maker_torque(robot, "CAN follower arm"))
+            try:
+                robot.disconnect()
+            except Exception as exc:
+                cleanup_problems.append(f"Failed to disconnect recording robot: {exc}")
             if teleop:
-                teleop.disconnect()
+                try:
+                    teleop.disconnect()
+                except Exception as exc:
+                    cleanup_problems.append(f"Failed to disconnect recording leader: {exc}")
         finally:
             releasing = False
+            _hardware_cleanup_problems = cleanup_problems
+        if cleanup_problems:
+            raise RuntimeError(" ".join(cleanup_problems))
 
     if cfg.dataset.push_to_hub:
         # Same bare-id hazard as the UploadManager path, and the same single

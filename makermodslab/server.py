@@ -17,6 +17,7 @@ import concurrent.futures
 import contextlib
 import ctypes
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -129,6 +130,10 @@ from .record import (
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+from .remote_teleop.api_service import remote_teleoperation_runtime
+from .remote_teleop.contracts import SessionSpec
+from .remote_teleop.executor import JointLimit
+from .remote_teleop.service import remote_simulation_service
 from .replay import (
     ReplayRequest,
     handle_replay_status,
@@ -144,6 +149,18 @@ from .rollout import (
     handle_start_inference,
     handle_stop_episode,
     handle_stop_inference,
+)
+from .schemas.arms import (
+    RemoteCommissionBody,
+    RemoteConfigurationBody,
+    RemotePairBody,
+    RemoteRuntimeStatusResponse,
+    RemoteSimulationDatagramBody,
+    RemoteSimulationStartBody,
+    RemoteSimulationStartResponse,
+    RemoteSimulationStopBody,
+    RemoteStopBody,
+    ServoHealthResponse,
 )
 
 # Response models for the typed /api/v1 surface (see makermodslab/schemas/).
@@ -215,12 +232,14 @@ from .schemas.system import (
     PolicyExtraStatus,
     PolicyOptimizerDefaultsResponse,
     ReleaseCanTorqueResponse,
+    ReleaseSo101TorqueResponse,
     RestartResponse,
     RobotPortResponse,
     SupplyVoltageResponse,
     UpdateResult,
     UpdateStatus,
 )
+from .servo_health.service import servo_health_service
 from .sessions import (
     handle_current_session,
     handle_heartbeat_session,
@@ -228,6 +247,7 @@ from .sessions import (
     handle_stop_session,
     held_by,
 )
+from .so101_recovery import ReleaseSo101TorqueRequest, handle_release_so101_torque
 
 # Import our custom teleoperation functionality
 from .teleoperate import (
@@ -890,6 +910,279 @@ def stop_session(session_id: str):
     Returns the kind's stop-handler result verbatim beside the final
     identity."""
     return handle_stop_session(session_id)
+
+
+# --- Split-host SO-101 teleoperation (dormant until an explicit local enable) ---
+
+
+@v1_router.get(
+    "/arms/remote-teleoperation",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+)
+def remote_teleoperation_status():
+    """Public role/runtime status; never opens a device or starts a listener."""
+    return remote_teleoperation_runtime.status()
+
+
+def _remote_runtime_error(exc: Exception) -> ApiError:
+    status = 409 if isinstance(exc, RuntimeError) else 422
+    return ApiError(status_code=status, detail=str(exc), code=ErrorCode.REQUEST_VALIDATION)
+
+
+def _require_local_remote_request(request: Request) -> None:
+    """Remote-control authority is managed only from this laptop's UI.
+
+    STOP intentionally does not use this dependency: safety stop remains
+    callable even when the caller cannot prove management authority.
+    """
+    host = request.client.host if request.client is not None else ""
+    try:
+        local = host == "testclient" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        local = False
+    if not local:
+        raise ApiError(
+            status_code=403,
+            detail="remote teleoperation can only be managed from this host",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
+
+
+@v1_router.put(
+    "/arms/remote-teleoperation/configuration",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def configure_remote_teleoperation(body: RemoteConfigurationBody):
+    """Persist one dormant role configuration; never enable it implicitly."""
+    try:
+        return remote_teleoperation_runtime.configure(body)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.delete(
+    "/arms/remote-teleoperation/configuration",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def clear_remote_teleoperation_configuration():
+    """Remove only the dormant remote-role config; robot calibrations are untouched."""
+    try:
+        return remote_teleoperation_runtime.clear_configuration()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/commission",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def commission_remote_teleoperation(body: RemoteCommissionBody):
+    """Run the no-motion secured-arm proof; all physical gates must be true."""
+    try:
+        return remote_teleoperation_runtime.commission(body)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/recover-hardware",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def recover_remote_teleoperation_hardware(body: RemoteCommissionBody):
+    """Clear fault lockout only after a repeated matching secured-arm proof."""
+    try:
+        return remote_teleoperation_runtime.recover_fault(body)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/enable",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def enable_remote_teleoperation():
+    """Explicitly start the configured listener or operator hardware session."""
+    try:
+        return remote_teleoperation_runtime.enable()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/disable",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def disable_remote_teleoperation():
+    """Stop the role safely and leave its configuration dormant."""
+    try:
+        return remote_teleoperation_runtime.disable()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/pairing-window",
+    response_model=dict[str, Any],
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def open_remote_teleoperation_pairing_window():
+    """Mint one short-lived pairing code, only from the robot's local UI."""
+    try:
+        return remote_teleoperation_runtime.open_pairing_window()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/pair",
+    response_model=dict[str, Any],
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def pair_remote_teleoperation(body: RemotePairBody):
+    """Exchange a one-time code over pinned TLS and store the credential privately."""
+    try:
+        return remote_teleoperation_runtime.pair(body.pairing_token, body.operator_label)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/browser-heartbeat",
+    response_model=dict[str, Any],
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def heartbeat_remote_teleoperation_browser():
+    """Prove the operator's local control page is still present."""
+    try:
+        return remote_teleoperation_runtime.browser_heartbeat()
+    except (RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/stop",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+)
+def stop_remote_teleoperation(body: RemoteStopBody):
+    """Issue local STOP; operator STOP asks for an acknowledged robot receipt."""
+    try:
+        return remote_teleoperation_runtime.stop(body.reason)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/credentials/{credential_id}/revoke",
+    response_model=RemoteRuntimeStatusResponse,
+    tags=["system"],
+    dependencies=[Depends(_require_local_remote_request)],
+)
+def revoke_remote_teleoperation_credential(credential_id: str):
+    """Revoke one operator credential; an active owner is stopped locally."""
+    try:
+        return remote_teleoperation_runtime.revoke(credential_id)
+    except KeyError as exc:
+        raise ApiError(
+            status_code=404,
+            detail=str(exc),
+            code=ErrorCode.SESSION_NOT_FOUND,
+        ) from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _remote_runtime_error(exc) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/simulations",
+    response_model=RemoteSimulationStartResponse,
+    status_code=201,
+    tags=["system"],
+)
+def start_remote_teleoperation_simulation(body: RemoteSimulationStartBody):
+    """Start a deterministic follower. This route cannot discover or open hardware."""
+    if set(body.limits) != set(body.joint_names):
+        raise ApiError(
+            status_code=422,
+            detail="limits must contain exactly the configured joint names",
+            code=ErrorCode.REQUEST_VALIDATION,
+        )
+    try:
+        spec = SessionSpec(
+            source_id=body.source_id,
+            rig_id=body.rig_id,
+            rig_digest=body.rig_digest,
+            leader_calibration_id=body.leader_calibration_id,
+            leader_calibration_digest=body.leader_calibration_digest,
+            follower_calibration_id=body.follower_calibration_id,
+            follower_calibration_digest=body.follower_calibration_digest,
+            joint_names=tuple(body.joint_names),
+            units=tuple(body.units),
+        )
+        limits = {joint: JointLimit(**body.limits[joint].model_dump()) for joint in body.joint_names}
+        return remote_simulation_service.start(
+            spec,
+            limits,
+            tick_hz=body.tick_hz,
+            watchdog_ms=body.watchdog_ms,
+        )
+    except ValueError as exc:
+        raise ApiError(
+            status_code=422,
+            detail=str(exc),
+            code=ErrorCode.REQUEST_VALIDATION,
+        ) from exc
+    except RuntimeError as exc:
+        raise ApiError(status_code=409, detail=str(exc), code=ErrorCode.SESSION_HELD) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/simulations/{session_id}/actions",
+    response_model=dict[str, Any],
+    tags=["system"],
+)
+def submit_remote_teleoperation_simulation_action(session_id: str, body: RemoteSimulationDatagramBody):
+    """Submit an already authenticated canonical action datagram to the simulator."""
+    try:
+        return remote_simulation_service.submit(session_id, body.datagram_base64)
+    except KeyError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.SESSION_NOT_FOUND) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise ApiError(status_code=422, detail=str(exc), code=ErrorCode.REQUEST_VALIDATION) from exc
+
+
+@v1_router.post(
+    "/arms/remote-teleoperation/simulations/{session_id}/stop",
+    response_model=dict[str, Any],
+    tags=["system"],
+)
+def stop_remote_teleoperation_simulation(session_id: str, body: RemoteSimulationStopBody):
+    """Unambiguous robot-side STOP. Repeating a stale session id cannot hit a new session."""
+    try:
+        return remote_simulation_service.stop(session_id, body.reason)
+    except KeyError as exc:
+        raise ApiError(status_code=404, detail=str(exc), code=ErrorCode.SESSION_NOT_FOUND) from exc
+
+
+@v1_router.get("/arms/servo-health", response_model=ServoHealthResponse, tags=["system"])
+def servo_health():
+    """Read the cache populated by the current bus owner; performs no bus transaction."""
+    return servo_health_service.snapshot()
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
@@ -3533,13 +3826,29 @@ async def release_can_torque(request: ReleaseCanTorqueRequest):
     """De-energize a CAN follower after a crash left it holding torque.
 
     A SIGKILL or power loss leaves Damiao motors rigid at their last command
-    with no session and no device object to clean up through. This reopens
-    the named bus WITHOUT the energizing handshake, broadcasts the disable,
-    and closes. Refused (409 session.held) while any live session holds the
-    hardware; not a session itself — no lease, no session events (see
-    can_recovery.py).
+    with no live session or device object to clean up through. This adopts
+    only the matching durable recovery identity, reopens the named bus(es)
+    WITHOUT the energizing handshake, requires disable acknowledgement from
+    every motor, and closes every bus. Any mismatch or incomplete evidence
+    retains the central hardware lockout.
     """
     return await asyncio.to_thread(handle_release_can_torque, request)
+
+
+@v1_router.post(
+    "/arms/so101/recover-torque",
+    response_model=ReleaseSo101TorqueResponse,
+    tags=["system"],
+)
+async def release_so101_torque(request: ReleaseSo101TorqueRequest):
+    """Recover exact SO-101 serial buses after an unclean hardware-owner exit.
+
+    The request may provide the complete durable port identity or omit it to
+    use the owner-private retained target map. The raw Feetech transport opens
+    without a handshake, disables and verifies every servo, then closes. Any
+    mismatch or incomplete evidence retains lockout.
+    """
+    return await asyncio.to_thread(handle_release_so101_torque, request)
 
 
 @router.post("/identify-arm")
@@ -4071,6 +4380,8 @@ async def shutdown_event():
     # Only the watchdog stops. A run already training is left alone on purpose,
     # exactly as it is across a restart today.
     job_registry.shutdown()
+    remote_teleoperation_runtime.shutdown()
+    remote_simulation_service.shutdown()
 
     # Stop the AVFoundation pump first so its next tick can't interleave with
     # shutdown (and so --reload restarts don't log a destroyed-pending-task).

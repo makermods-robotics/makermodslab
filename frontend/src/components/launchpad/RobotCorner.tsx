@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 import {
   Gamepad2,
   Plus,
@@ -8,6 +9,7 @@ import {
   Loader2,
   Pencil,
   Trash2,
+  RadioTower,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -81,6 +83,7 @@ const StatusDot: React.FC<{ ready: boolean; className?: string }> = ({
  * sharing state through useRobots' module-level store.
  */
 const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
+  const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { t } = useTranslation();
@@ -380,6 +383,24 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 rounded-full px-2.5"
+            onClick={() => navigate("/remote-teleoperation")}
+          >
+            <RadioTower className="h-3.5 w-3.5" />
+            <span>{t("robot.corner.remoteTeleop")}</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {t("robot.corner.remoteTeleopTooltip")}
+        </TooltipContent>
+      </Tooltip>
 
       <Tooltip>
         <TooltipTrigger asChild>
