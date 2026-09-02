@@ -131,6 +131,15 @@ FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 
+# LiveKit credentials for remote inference (makermodslab.drtc). A dotenv file
+# holding LIVEKIT_URL / LIVEKIT_ROOM / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
+# It lives beside the rest of our persistent state rather than in the package
+# so a wheel install and a source checkout read the same credentials, and so
+# `.env` never lands inside site-packages. A `.env` in the CURRENT DIRECTORY
+# still wins over this one (see makermodslab.drtc._common.load_env), which is
+# what makes a local-SFU run's generated `.env.local` override the saved creds.
+DRTC_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.env")
+
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
 # calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
 # "<base>_right.json" — there is no way to point left/right at differently named

@@ -54,6 +54,19 @@ test = [
     "httpx>=0.27",
 ]
 
+# Remote inference over LiveKit Portal (`makermodslab.drtc`). OPTIONAL: nothing
+# in the Lab imports the package at startup, so a normal install never pulls
+# these. livekit-portal is pinned EXACTLY because the robot and the GPU side
+# must run the identical wire implementation — Portal fingerprints the schema
+# and silently drops packets whose fingerprint differs, which surfaces as a
+# healthy-looking session with 0 chunks and 0 observations rather than an
+# error. The GPU side's pin lives in the `livekit-drtc` repo's
+# `modal_policy*.py`; bump the two together or not at all.
+drtc = [
+    "livekit-portal==0.2.4",
+    "livekit-api>=0.7",
+]
+
 [project.scripts]
 # The installed command is `makermodslab`; the Python package/module is
 # `makermodslab` (imports, the wheel, `makermodslab.server:app`).
