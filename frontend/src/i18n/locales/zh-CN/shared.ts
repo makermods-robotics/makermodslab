@@ -16,6 +16,19 @@ export default {
       wiggle: "夹爪摆动",
     },
   },
+  robotAction: {
+    tooltip: {
+      teleoperation: "会移动机械臂：运行期间从臂将跟随主臂动作。",
+      recording: "会移动机械臂，同时把回合录制到数据集中。",
+      inference: "会移动机械臂：由训练好的策略驱动。",
+      replay: "会让机械臂重放一段已录制的回合。",
+      calibration: "接管机械臂以进行标定。",
+      auto_calibration: "会在扭矩下驱动机械臂顶到各关节限位。",
+      wiggle: "摆动夹爪，以便确认此端口对应哪条手臂。",
+      stop: "先让机械臂回到起始姿态，然后释放扭矩。",
+      releaseNow: "跳过回位，立即释放扭矩。",
+    },
+  },
   update: {
     title: "MakerMods Lab 有可用更新",
     // Chinese has a single plural category.

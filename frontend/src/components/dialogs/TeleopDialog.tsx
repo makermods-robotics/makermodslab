@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Button } from "@/components/ui/button";
+import { ReleaseActionButton } from "@/components/ui/robot-action-button";
 import UrdfViewer from "@/components/UrdfViewer";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
@@ -238,13 +238,17 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({
       <div className="flex items-center gap-2 border-b border-border px-4 py-2">
         <span className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
         <span className="text-sm font-semibold text-foreground">{title}</span>
-        <Button
+        {/* Done ENDS the session: the arm returns to its start pose and
+            torque is released. Same affordance as every other stop. */}
+        <ReleaseActionButton
+          action="stop"
           size="sm"
           onClick={handleDone}
-          className="ml-auto bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          className="ml-auto"
+          tooltipSide="bottom"
         >
           {t("dialogs.teleop.done")}
-        </Button>
+        </ReleaseActionButton>
       </div>
 
       <div className="flex flex-col gap-3 p-3">

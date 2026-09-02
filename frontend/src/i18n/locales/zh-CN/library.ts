@@ -46,6 +46,8 @@ export default {
       taskCount_other: "{{count}} 个任务",
       size: "大小",
     },
+    view: "查看数据集",
+    // 已废弃：卡片旧的“选择/已选择”按钮，现在点击卡片即可选择。
     select: "选择",
     selected: "已选择",
   },

@@ -66,7 +66,14 @@ export default {
 				},
 				ok: 'hsl(var(--ok))',
 				warn: 'hsl(var(--warn))',
-				info: 'hsl(var(--info))'
+				info: 'hsl(var(--info))',
+				// The "drives the robot arm" affordance (see index.css).
+				// `border` is the hover-only outline, not a default border.
+				robot: {
+					DEFAULT: 'hsl(var(--robot))',
+					foreground: 'hsl(var(--robot-foreground))',
+					border: 'hsl(var(--robot-border))'
+				}
 			},
 			borderRadius: {
 				lg: 'var(--radius)',

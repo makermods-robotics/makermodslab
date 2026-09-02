@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, Globe, HardDrive, Lock } from "lucide-react";
+import { Check, Eye, Globe, HardDrive, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
@@ -154,24 +154,38 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
 /** One selectable dataset card, in the job/model cards' design language:
  * status-style source chip top-left, selection check in the top-right action
  * slot, bold name, muted stats subtitle, then the detail rows and a footer
- * Select button (the card's call-to-action; the whole card stays clickable).
+ * View dataset button. The CARD is the selection control — clicking it (or
+ * Enter/Space on it) toggles selection; opening the episode viewer is the
+ * footer button's job alone, so the two actions no longer share one gesture.
  * Stretches to its grid row's height so a row of cards lines up evenly. */
 const DatasetCard: React.FC<{
   item: DatasetItem;
   selected: boolean;
   onSelect: () => void;
-  /** Opens the episode viewer for this dataset. The card itself opens the
-   * viewer on click; selecting is only done via the footer Select button.
+  /** Opens the episode viewer for this dataset, from the footer button only.
    * Optional: only wired up where the viewer dialog is actually rendered —
-   * falls back to select-on-click if absent. */
+   * without it the card renders no footer button at all (there is nowhere for
+   * it to lead). */
   onView?: (item: DatasetItem) => void;
 }> = ({ item, selected, onSelect, onView }) => {
   const { t } = useTranslation();
   return (
+    // A div rather than a <button>: the footer holds a real button, and a
+    // button inside a button is invalid DOM. role/tabIndex/Enter+Space give
+    // it the keyboard and AT behaviour of the element it can't be.
     <div
-      onClick={() => (onView ? onView(item) : onSelect())}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      onClick={() => onSelect()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
       className={cn(
-        "flex w-full cursor-pointer flex-col gap-2 overflow-hidden rounded-md border bg-card p-3 text-left transition-colors",
+        "flex w-full cursor-pointer flex-col gap-2 overflow-hidden rounded-md border bg-card p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         selected
           ? "border-ring bg-primary/5"
           : "border-border hover:border-muted-foreground/40",
@@ -216,32 +230,24 @@ const DatasetCard: React.FC<{
         </div>
       </div>
       <DatasetCardDetails item={item} />
-      <div className="mt-auto flex items-center pt-1">
-        <Button
-          size="sm"
-          variant={selected ? "outline" : "default"}
-          onClick={(e) => {
-            e.stopPropagation();
-            onSelect();
-          }}
-          aria-pressed={selected}
-          className={cn(
-            "h-8 gap-1",
-            selected
-              ? "border-ring text-primary hover:bg-primary/10"
-              : "bg-primary text-primary-foreground hover:bg-primary/90",
-          )}
-        >
-          {selected ? (
-            <>
-              <Check className="h-3.5 w-3.5" />{" "}
-              {t("library.datasets.selected")}
-            </>
-          ) : (
-            t("library.datasets.select")
-          )}
-        </Button>
-      </div>
+      {/* Only where a viewer is wired — a button that opens nothing is worse
+          than no button. stopPropagation keeps the card's select-on-click
+          from also firing underneath it. */}
+      {onView ? (
+        <div className="mt-auto flex items-center pt-1">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={(e) => {
+              e.stopPropagation();
+              onView(item);
+            }}
+            className="h-8 gap-1"
+          >
+            <Eye className="h-3.5 w-3.5" /> {t("library.datasets.view")}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -260,16 +266,16 @@ const FILTERS: ReadonlyArray<{ key: LibraryFilter; labelKey: string }> = [
 ];
 
 /** The library body: search + location filter over a three-up grid of dataset
- * cards. Clicking a card opens its episode viewer; the footer Select button
- * is the only way to select/deselect it (feeding the Collect panel's header
- * chip + the Train panel via the shared useSelectedDataset store). */
+ * cards. Clicking a card selects/deselects it (feeding the Collect panel's
+ * header chip + the Train panel via the shared useSelectedDataset store); the
+ * footer View dataset button is the only way into the episode viewer. */
 export const DatasetLibraryList: React.FC<{
   datasets: DatasetItem[];
   loading: boolean;
   selectedRepoId: string | null;
   onSelect: (item: DatasetItem) => void;
   /** Opens the episode viewer dialog for a dataset; omit where the caller
-   * doesn't render that dialog. */
+   * doesn't render that dialog — the cards then show no View button. */
   onView?: (item: DatasetItem) => void;
 }> = ({ datasets, loading, selectedRepoId, onSelect, onView }) => {
   const { t } = useTranslation();

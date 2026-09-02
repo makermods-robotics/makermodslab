@@ -63,6 +63,12 @@ export default {
       taskCount_other: "{{count}} tasks",
       size: "Size",
     },
+    // The card's footer button — the only way into the episode viewer now
+    // that clicking the card selects instead of opening it.
+    view: "View dataset",
+    // DEAD: the card's old Select/Selected toggle button, replaced by
+    // select-on-click. Kept so the two catalogs stay in step; delete from both
+    // languages together if nothing else claims them.
     select: "Select",
     selected: "Selected",
   },

@@ -35,6 +35,7 @@ import {
   Loader2,
   XCircle,
   ExternalLink,
+  Eye,
   Pencil,
   Play,
   FastForward,
@@ -676,14 +677,10 @@ const JobCard: React.FC<Props> = ({
     ]);
 
   return (
-    <Card
-      onClick={() => {
-        if (!isImported) openJobMonitor(job.id);
-      }}
-      className={`@container bg-card border-border rounded-md transition-colors h-full ${
-        isImported ? "" : "cursor-pointer hover:border-ring/50 hover:bg-muted/40"
-      }`}
-    >
+    // The card is not itself a control: opening the monitor is the View run
+    // button's job (first control in the action row below), so nothing happens
+    // by accident when the user reaches past a card for something else.
+    <Card className="@container bg-card border-border rounded-md transition-colors h-full">
       <CardContent className="flex h-full flex-col gap-2.5 p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -738,6 +735,20 @@ const JobCard: React.FC<Props> = ({
             ) : null}
           </div>
           <div className="flex items-center gap-0.5">
+            {/* Opens the run monitor — what the whole card used to do on
+                click. Hidden on imported models for exactly the reason the
+                click was: they have no run to monitor. */}
+            {!isImported ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => openJobMonitor(job.id)}
+                className="h-7 gap-1 px-2"
+                title={t("jobs.actions.viewRun")}
+              >
+                <Eye className="w-3.5 h-3.5" /> {t("jobs.actions.viewRun")}
+              </Button>
+            ) : null}
             {/* MINIMAL reorder: one slot up / one slot down, driving the
                 whole-list reorder endpoint (no drag-and-drop). Only on queued
                 cards, and only while there is something to reorder past. */}

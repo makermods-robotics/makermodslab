@@ -98,6 +98,9 @@ export default {
     renameAria: "Rename model",
     openHubJob: "Open Hub job page",
     viewOnHub: "View on Hub",
+    // The run card's monitor button — same words on the label and the hover,
+    // so one key rather than two that could drift apart.
+    viewRun: "View run",
   },
   // The rename dialog, rendered identically by JobCard and ModelCard.
   rename: {

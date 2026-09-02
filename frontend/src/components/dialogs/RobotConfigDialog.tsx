@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import {
+  ReleaseActionButton,
+  RobotActionButton,
+} from "@/components/ui/robot-action-button";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -40,11 +44,9 @@ import {
   ChevronDown,
   Loader2,
   Play,
-  Square,
   Circle,
   Camera,
   ShieldQuestion,
-  Hand,
   MoveHorizontal,
   RefreshCw,
   ScanSearch,
@@ -264,21 +266,23 @@ const DeviceSlotCell = ({
               <ScanSearch aria-hidden className="h-4 w-4" />
             )}
           </Button>
+          {/* Wiggle is not a session (seconds of open-loop motion through
+              the legacy endpoint), but it DRIVES the gripper servo — so it
+              wears the same amber as the session starts, and the bolt the
+              wrapper pins replaces the hand. The native title that used to
+              double as its tooltip comes off rather than firing beside the
+              shared one; the aria-label keeps the icon-only control named. */}
           {showWiggle && (
-            <Button
+            <RobotActionButton
+              action="wiggle"
               type="button"
-              variant="ghost"
               size="icon"
               onClick={onWiggle}
               disabled={busy || !port || wiggling || detecting}
+              busy={wiggling}
               aria-label={t("robotConfig.port.wiggle")}
-              title={`${t("robotConfig.port.wiggle")}. ${t(
-                "robotConfig.port.wiggleTip",
-              )}`}
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            >
-              <Hand aria-hidden className="h-4 w-4" />
-            </Button>
+              className="h-7 w-7"
+            />
           )}
         </div>
       </div>
@@ -2236,25 +2240,23 @@ const RobotConfigWindow = ({
         </div>
 
         {running ? (
-          <Button
+          <ReleaseActionButton
+            action="stop"
             onClick={handleStopCalibration}
-            variant="destructive"
             className="w-full"
           >
-            <Square className="mr-2 h-4 w-4" />
             {t("robotConfig.calib.cancel")}
-          </Button>
+          </ReleaseActionButton>
         ) : batchAutoCal.active ? (
-          <Button
+          <ReleaseActionButton
+            action="stop"
             onClick={stopBatchAutoCalibration}
-            variant="destructive"
             className="w-full"
           >
-            <Square className="mr-2 h-4 w-4" />
             {batchAutoCal.total === 1
               ? t("robotConfig.batch.stopSingle")
               : t("robotConfig.batch.stopAll")}
-          </Button>
+          </ReleaseActionButton>
         ) : null}
 
         {/* Mode first. The two flows differ in video, pose, and what happens
@@ -2311,14 +2313,14 @@ const RobotConfigWindow = ({
                 is read exclusively by the auto-calibration subprocess:
                 manual calibration never sends it, so offering it here
                 would imply it changes something about this run. */}
-            <Button
+            <RobotActionButton
+              action="calibration"
               onClick={() => handleStartCalibration()}
               disabled={!robotName || !deviceType || !portDetected}
               className="w-full"
             >
-              <Play className="mr-2 h-4 w-4" />
               {t("robotConfig.calib.start")}
-            </Button>
+            </RobotActionButton>
           </>
         )}
 
@@ -2327,10 +2329,14 @@ const RobotConfigWindow = ({
         {preStart && mode === "auto" && (
           <>
             {autoPreamble}
-            <Button
+            <RobotActionButton
+              action="auto_calibration"
               onClick={() => rowSlot && handleAutoCalibrateSlot(rowSlot)}
               disabled={!robotName || !rowSlot || !slotPort(rowSlot)}
               className="w-full"
+              // Kept: this names the ARM and PORT the run would drive,
+              // which the shared tooltip deliberately does not, and it
+              // is the only explanation when the button is disabled.
               title={
                 rowSlot && slotPort(rowSlot)
                   ? t("robotConfig.calib.autoTitle", {
@@ -2340,9 +2346,8 @@ const RobotConfigWindow = ({
                   : t("robotConfig.calib.autoDisabledTitle")
               }
             >
-              <Wand2 className="mr-2 h-4 w-4" />
               {t("robotConfig.calib.start")}
-            </Button>
+            </RobotActionButton>
           </>
         )}
 
@@ -2361,14 +2366,14 @@ const RobotConfigWindow = ({
                 {t("robotConfig.calib.zeroNote")}
               </AlertDescription>
             </Alert>
-            <Button
+            <RobotActionButton
+              action="calibration"
               onClick={() => handleStartCalibration()}
               disabled={!robotName || !deviceType || !portDetected}
               className="w-full"
             >
-              <Play className="mr-2 h-4 w-4" />
               {t("robotConfig.calib.zeroPose.start")}
-            </Button>
+            </RobotActionButton>
           </>
         )}
 
@@ -2703,16 +2708,16 @@ const RobotConfigWindow = ({
             {picking && (
               <>
                 <div className="flex gap-2">
-                  <Button
+                  <RobotActionButton
+                    action="auto_calibration"
                     onClick={() => setBatchAutoCalPromptOpen(true)}
                     disabled={selectedBatchSlots.length === 0}
                     className="flex-1"
                   >
-                    <Wand2 className="mr-2 h-4 w-4" />
                     {t("robotConfig.batch.start", {
                       count: selectedBatchSlots.length || 0,
                     })}
-                  </Button>
+                  </RobotActionButton>
                   <Button
                     onClick={() => {
                       setBatchAutoCalOpen(false);
@@ -3219,9 +3224,13 @@ const RobotConfigWindow = ({
               >
                 {t("common.cancel")}
               </Button>
-              <Button onClick={() => startBatchAutoCalibration()}>
+              {/* The press that actually POSTs the auto-calibration start. */}
+              <RobotActionButton
+                action="auto_calibration"
+                onClick={() => startBatchAutoCalibration()}
+              >
                 {t("robotConfig.batch.prompt.confirm")}
-              </Button>
+              </RobotActionButton>
             </DialogFooter>
           </DialogContent>
         </Dialog>
