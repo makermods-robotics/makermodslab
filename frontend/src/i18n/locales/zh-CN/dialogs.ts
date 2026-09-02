@@ -16,6 +16,11 @@ export default {
     episodesHeading: "回合",
     episodesHeadingWithCount: "回合（{{total}}）",
     episodeRow: "第 {{index}} 回合",
+    weightTimes: "\u00d7{{weight}}",
+    weightTitle: "训练时的采样频率为 {{weight}} 倍",
+    mixTitle: "训练配比",
+    mixTier_other: "\u00d7{{weight}} \u00b7 {{count}} 个回合",
+    mixShare: "占帧数 {{percent}}%",
     episodesEmpty: "将该数据集下载到本地后，回合会显示在这里。",
     noCameras: "该数据集没有相机画面 — 可以在机械臂上回放，或查看下方的关节曲线。",
     videoDecodeError: "当前浏览器无法解码该相机的视频。",
@@ -77,6 +82,9 @@ export default {
     notTrained: "尚未训练 — 该策略仍在开发中。",
     run: "在 {{robot}} 上运行",
     robotFallback: "机械臂",
+    // 放在 “运行” 与 “微调” 之间，因为真实顺序就是如此：微调需要操作者手上
+    // 还没有的数据，而指导正是获得这些数据的方式。
+    coach: "指导它 — 修好它做错的地方",
     fineTune: "微调该策略",
     likesUnavailable: "暂无点赞数据",
     viewOnHub: "在 HF Hub 上查看",

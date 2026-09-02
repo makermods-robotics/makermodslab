@@ -181,6 +181,10 @@ export default {
         // Source marker for a Hub-only row. Product name — same in every
         // language, keyed so the two markers have one uniform shape.
         hub: "Hub",
+        // Compact badge: this dataset carries per-episode sampling weights.
+        weighted: "weighted",
+        weightedTitle:
+          "Carries per-episode sampling weights — some episodes are sampled more often during training",
       },
     },
     startingPoint: {
@@ -213,12 +217,30 @@ export default {
   },
 
   // ── Panel 3 · Run (Deploy) ────────────────────────────────────────────────
+  // The post-coaching handoff, a sibling of CollectHandoff on the Launchpad:
+  // a session that produced data puts the next step where the operator LANDS.
+  coachHandoff: {
+    saved_one: "{{count}} correction saved to <0>{{dataset}}</0>",
+    saved_other: "{{count}} corrections saved to <0>{{dataset}}</0>",
+    next: "Merge them with <0>{{dataset}}</0> — what this skill was last trained on — then fine-tune it on the result. Training takes one dataset, so the merge isn't optional.",
+    manual:
+      "To turn these into a better policy, merge them with the dataset this checkpoint was <0>last</0> trained on, then fine-tune from the same checkpoint on the merged result. Both steps are in the dataset library and the training panel.",
+    action: "Merge & fine-tune",
+  },
+
   deploy: {
     title: "Run",
     picker: {
       placeholder: "Pick a policy",
       loading: "Loading policies…",
       empty: "No trained or imported policies yet",
+      // Shown INSTEAD of `empty` when the listing could not be fetched —
+      // an outage must not read as "you have no policies".
+      error: "Couldn’t load policies. Check the server and try again.",
+      // Badge on a run that exited non-zero but left usable weights.
+      failedBadge: "failed run",
+      hubDegraded:
+        "Hub unreachable — showing your local policies and the last Hub listing.",
       // aria-label and title on the same button.
       import: "Import policy",
       hint: "Pick a trained checkpoint or an imported Hub policy to run on your robot.",
@@ -239,6 +261,58 @@ export default {
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arm — leader setup isn't needed.)",
     robotNotReady_other:
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Inference only uses the follower arms — leader setup isn't needed.)",
+    // Coaching's variant: it teleoperates through the leader, so {{gap}} here
+    // is the ALL-arms gap and the parenthetical says why the leader matters.
+    robotNotReadyCoach_one:
+      "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Coaching also uses the leader arm — you teleoperate with it during takeovers, so it needs a port and a calibration.)",
+    robotNotReadyCoach_other:
+      "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Coaching also uses the leader arms — you teleoperate with them during takeovers, so they need a port and a calibration.)",
+    // Which shape the run takes. Option VALUES ("single"/"eval"/"coach") are
+    // identifiers the frontend switches on — only these labels are translated.
+    runMode: {
+      label: "What do you want to do with this skill?",
+      // Each row states its COMMITMENT before it is chosen: these three are not
+      // interchangeable menu items, and picking wrong is discovered at the arm.
+      single: {
+        title: "Just run it",
+        what: "One attempt, then stop.",
+        commitment: "hands off",
+      },
+      eval: {
+        title: "Score it",
+        what: "Repeat the task, and you judge every attempt into a success rate.",
+        commitment:
+          "hands on between episodes — you reset the scene and score each one",
+      },
+      coach: {
+        title: "Coach it",
+        what: "Take over when it's about to fail. Each rescue is saved as training data you can fine-tune on.",
+        commitment: "hands on — you hold the leader arm the whole session",
+      },
+    },
+    // Coaching-only parameters, shown when run mode is "coach".
+    coaching: {
+      correctionsLabel: "Corrections to collect",
+      correctionsHint:
+        "The session ends once you've saved this many. You can stop early at any point and keep everything recorded so far.",
+      datasetLabel: "Corrections dataset",
+      datasetPlaceholder: "e.g., fold_shirt_fixes",
+      // Stand-in for the typed half of the name while the box is empty.
+      datasetFallback: "correction",
+      // <0> wraps {{prefix}}, the literal on-disk name — an identifier, so it
+      // stays in the Latin script whatever the language.
+      datasetHint:
+        "Saved as <0>{{prefix}}</0> plus a timestamp. Leave it empty to use the greyed name, taken from the dataset this model was trained on; anything you type replaces it, and clearing the box brings it back.",
+      leaderLabel: "Leader arm",
+      leaderNoRobot: "Select a robot above.",
+      leaderMissing:
+        "This robot has no leader arm configured. Add its port and calibration in Robot settings — coaching can't run without one.",
+      // {{configs}} is one or two calibration file names — data, never translated.
+      leaderFrom:
+        "Taken from {{name}}: {{configs}}. You'll teleoperate with it during takeovers.",
+      bimanualWarning:
+        "Bimanual: park the leader arms near the robot's pose before taking over. With two arms the robot moves to meet the leaders rather than the other way round, so a takeover from across the bench sweeps both arms through the scene. Takeovers that would travel too far are refused.",
+    },
     checkpoint: {
       label: "Checkpoint",
       none: "No checkpoints available for this policy yet.",
@@ -258,10 +332,27 @@ export default {
       placeholder: "e.g., pick up the red block",
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
       hint: "This policy is language-conditioned ({{policyType}}).",
+      // Appended to `hint` when the task was auto-filled from the checkpoint's
+      // own training dataset. Leading space is added by the caller.
+      prefilled: "Filled in from the dataset it was trained on.",
+      // Placeholder when the lineage offered no task at all. Never an invented
+      // example: a fake task greyed into the slot the REAL inherited one uses
+      // is indistinguishable from one.
+      placeholderNone: "No task found on the training dataset — type one",
+      // Shown for a policy that does NOT read the task. Coaching still saves it.
+      hintCoach:
+        "Saved with every correction, so you can tell later what this session was teaching.",
+      leaveEmpty:
+        "Leave it empty to use the greyed task from the dataset it was trained on.",
+      multiTaskHint_one:
+        "Its training dataset has {{count}} task — pick the one you're running:",
+      multiTaskHint_other:
+        "Its training dataset has {{count}} tasks, most common first — pick the one you're running:",
     },
     duration: {
       label: "Max duration (s)",
       hint: "Per episode. An episode that runs this long without you calling it a success counts as a failure.",
+      singleHint: "The run stops after this long.",
     },
     episodes: {
       label: "Episodes",
@@ -270,6 +361,7 @@ export default {
       evalHint:
         "Evaluation run: {{episodes}} episodes with a reset between each, scored into an accuracy.",
       hint: "Leave at 1 for a single run. More than 1 starts a scored evaluation.",
+      scoreHint: "How many episodes to score into the accuracy.",
     },
     engine: {
       label: "Inference engine",
@@ -281,6 +373,9 @@ export default {
         "One policy forward per control step. The arm pauses briefly between action chunks.",
       rtcHint:
         "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
+      // Shown INSTEAD of the picker in coaching mode, which is pinned to sync.
+      coachingNote:
+        "Coaching always uses the Sync engine. Real-Time Chunking makes the arm jump back toward its pre-correction pose when the policy resumes, which isn't safe with a hand nearby.",
     },
     cameras: {
       title: "Cameras",
@@ -316,10 +411,36 @@ export default {
       coeffHint:
         "Weights are exp(-coeff × age): higher favours the newest prediction, lower averages more evenly. The ACT paper uses {{value}}.",
     },
+    // The action row: each verb selects its mode and launches it in one press.
+    runVerbs: {
+      groupLabel: "Start a run",
+      single: "Just run it",
+      // {{count}} is the episode / correction target — a number, so no plural.
+      eval: "Score it · {{count}}",
+      coach: "Coach it · {{count}}",
+    },
+    // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
+    blocked: {
+      noRobot: "Select a robot above.",
+      followerNotReady: "This robot's follower arm isn't ready.",
+      noCheckpoint: "Pick a skill and a checkpoint.",
+      armMismatch: "This checkpoint doesn't match the robot's arm count.",
+      camerasUnbound: "Bind every camera the checkpoint expects.",
+      temporalEnsemble: "Fix the temporal-ensemble setting.",
+      runInProgress: "A run is already in progress.",
+      taskRequired:
+        "Describe the task first — this policy is language-conditioned.",
+      leaderMissing:
+        "Coaching needs a leader arm — add its port and calibration in Robot settings.",
+      coachTaskRequired:
+        "Describe the task first — it's saved with every correction.",
+    },
     actions: {
       start: "Start inference",
       // {{episodes}} rather than {{count}} — the branch is picked in code.
       startEval: "Start evaluation ({{episodes}})",
+      // {{corrections}} rather than {{count}} — same reason as startEval.
+      startCoach: "Start coaching ({{corrections}})",
       starting: "Starting…",
       checking: "Checking…",
       stop: "Stop inference",

@@ -355,10 +355,18 @@ def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:
     return flags
 
 
+#: Trainer entry points. The weighted one is MakerMods Lab's own shim: same argv,
+#: same config parsing, but it patches lerobot's hardcoded sampler in-process so
+#: per-episode `sampling_weight` is honoured (see makermodslab/train_weighted.py).
+_TRAINER_MODULE = "lerobot.scripts.lerobot_train"
+_WEIGHTED_TRAINER_MODULE = "makermodslab.train_weighted"
+
+
 def build_training_command(
     request: TrainingRequest,
     output_dir: str,
     python_executable: str = "python",
+    weighted: bool = False,
     video_backend: str | None = None,
 ) -> list[str]:
     """Build the argv list to invoke `<python_executable> -m lerobot.scripts.lerobot_train`.
@@ -373,6 +381,17 @@ def build_training_command(
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
 
+    `weighted` swaps the trainer module for MakerMods Lab's weighted-sampling
+    shim. It is a fact about the DATASET, not about the request — the caller
+    resolves it from the dataset's own `meta/episodes` (see
+    `datasets.dataset_is_weighted`), because a client must not be able to claim a
+    dataset is or isn't weighted. Defaults to False so every existing call site
+    keeps producing byte-identical argv (R2). Both runners set it: the local one
+    from `dataset_is_weighted` directly, the cloud one likewise — the HF Jobs
+    container has no `makermodslab`, so the cloud wrapper materializes
+    `sampling.py` / `train_weighted.py` pod-side onto `PYTHONPATH` before
+    launching the trainer (see `runners/hf_cloud._WRAPPER_TEMPLATE`).
+
     `video_backend` overrides lerobot's dataset video decoder when set — the
     LOCAL runner passes "pyav" when torchcodec's native libraries don't load
     on this host (see utils.system.torchcodec_loads); the cloud runner leaves
@@ -382,7 +401,11 @@ def build_training_command(
     doesn't load (a plain string field, so the draccus raw-string merge that
     forbids list-typed overrides here is not a concern).
     """
-    cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
+    cmd: list[str] = [
+        python_executable,
+        "-m",
+        _WEIGHTED_TRAINER_MODULE if weighted else _TRAINER_MODULE,
+    ]
 
     # Resume: lerobot reconstructs the whole run (policy, dataset, optimizer,
     # batch size, …) from the checkpoint's train_config.json, so we pass ONLY

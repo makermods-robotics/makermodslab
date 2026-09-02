@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { render, screen, act } from "@testing-library/react";
 import i18n from "@/i18n";
+import { LANGUAGE_STORAGE_KEY } from "@/i18n/config";
 import { LanguageProvider, useLanguage } from "@/contexts/LanguageContext";
 import Hero from "@/components/launchpad/Hero";
 
@@ -27,9 +28,17 @@ function renderApp() {
 }
 
 afterEach(async () => {
+  // Reset both halves of the language state: i18next's active language and
+  // the persisted choice the next LanguageProvider would boot from.
+  localStorage.clear();
   await act(async () => {
     await i18n.changeLanguage("en");
   });
+  // The provider PERSISTS the choice, so resetting i18next is not enough: the
+  // next render would re-detect the stored language and start in Chinese.
+  // (Only observable once a localStorage exists in the test env at all — see
+  // the polyfill in src/test/setup.ts.)
+  localStorage.removeItem(LANGUAGE_STORAGE_KEY);
 });
 
 describe("LanguageProvider", () => {

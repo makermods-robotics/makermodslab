@@ -20,6 +20,7 @@ import {
 } from "@/lib/datasetName";
 import { useStudio } from "@/contexts/StudioContext";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
+import type { MergeStatus } from "@/lib/replayApi";
 import RecordingForm from "@/components/studio/RecordingForm";
 import RecordingSessionDialog, {
   RecordedInfo,
@@ -66,7 +67,14 @@ const CollectPanel: React.FC = () => {
 
   // The recording-form draft lives in StudioContext so filled-in parameters
   // survive route changes (this panel unmounts with the Launchpad route).
-  const { collectForm, updateCollectForm, closeStudio } = useStudio();
+  const {
+    collectForm,
+    updateCollectForm,
+    closeStudio,
+    mergePrefill,
+    clearMergePrefill,
+    openStudio,
+  } = useStudio();
   const {
     formOpen,
     datasetName,
@@ -88,6 +96,16 @@ const CollectPanel: React.FC = () => {
   // while the form is open (still expandable by hand).
   const [libraryOpen, setLibraryOpen] = useState(!formOpen);
   const [mergeOpen, setMergeOpen] = useState(false);
+  // Mirrors the merge dialog's own state so closing it mid-run does not throw
+  // away the fine-tune half of a coaching handoff.
+  const [mergeStatus, setMergeStatus] = useState<MergeStatus | null>(null);
+
+  // A coaching session that just ended asked for this merge, with both halves
+  // already chosen. Opening it here rather than at the call site keeps the
+  // dialog owned by the panel that owns the dataset list it needs.
+  useEffect(() => {
+    if (mergePrefill) setMergeOpen(true);
+  }, [mergePrefill]);
 
   // The episode viewer — opened by a dataset card's "view" button, separate
   // from selecting the card for recording.
@@ -388,11 +406,40 @@ const CollectPanel: React.FC = () => {
 
       <MergeDatasetsDialog
         open={mergeOpen}
-        onOpenChange={setMergeOpen}
+        onOpenChange={(next) => {
+          setMergeOpen(next);
+          // Closing consumes the prefill — UNLESS a merge it started is still
+          // running. A real merge takes minutes, and Radix fires this for
+          // Escape and outside-click as well as the X, so an operator who
+          // stepped away used to come back to a merged dataset and no
+          // fine-tune, with nothing saying why the one button they pressed
+          // had not finished.
+          if (!next && mergeStatus?.state !== "running") clearMergePrefill();
+        }}
+        onStatusChange={setMergeStatus}
         datasets={libraryDatasets}
-        onMerged={() => {
+        initialSources={mergePrefill?.sources}
+        initialOutput={mergePrefill?.suggestedOutput}
+        onMerged={(outputRepoId) => {
           clearDatasetInfoCache();
           refresh();
+          // The second half of the coaching loop. Corrections merged into the
+          // training set are still only a dataset; what the operator actually
+          // wanted was a better policy, and leaving them to find the training
+          // panel and re-pick both the base checkpoint and the dataset they
+          // just built is where the old prose-only handoff lost people.
+          const base = mergePrefill?.finetuneBaseJobId;
+          if (base && outputRepoId) {
+            clearMergePrefill();
+            setMergeOpen(false);
+            openStudio("train", {
+              train: {
+                baseJobId: base,
+                baseName: mergePrefill?.finetuneBaseName,
+                datasetRepoId: outputRepoId,
+              },
+            });
+          }
         }}
       />
 

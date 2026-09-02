@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCanArmType, jointsPerArm } from "./armTypes";
+import { armTypeFromRobotType, isCanArmType, jointsPerArm } from "./armTypes";
 
 // The client mirror of the backend's arm_capabilities.py predicates. These
 // pins are what keeps a new arm type from silently inheriting SO-101
@@ -31,5 +31,28 @@ describe("jointsPerArm", () => {
 
   it("defaults a missing arm_type to the SO-101 width", () => {
     expect(jointsPerArm(undefined)).toBe(6);
+  });
+});
+
+describe("armTypeFromRobotType", () => {
+  // Mirrors arm_capabilities.arm_type_from_robot_type — a robot_type STRING
+  // (from a dataset's meta/info.json), not a built config.
+  it("maps the names this app records", () => {
+    expect(armTypeFromRobotType("so101_follower")).toBe("so101");
+    expect(armTypeFromRobotType("bi_so_follower")).toBe("so101");
+    expect(armTypeFromRobotType("maker_follower")).toBe("maker");
+    expect(armTypeFromRobotType("bi_metal_follower")).toBe("metal");
+  });
+
+  it("maps legacy / differently-cased strings", () => {
+    expect(armTypeFromRobotType("so100_follower")).toBe("so101");
+    expect(armTypeFromRobotType("  Maker_Follower ")).toBe("maker");
+  });
+
+  it("returns null — not a default — when the arm can't be established", () => {
+    expect(armTypeFromRobotType(null)).toBeNull();
+    expect(armTypeFromRobotType(undefined)).toBeNull();
+    expect(armTypeFromRobotType("")).toBeNull();
+    expect(armTypeFromRobotType("aloha")).toBeNull();
   });
 });

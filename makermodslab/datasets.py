@@ -35,6 +35,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
+from .sampling import SAMPLING_WEIGHT_COLUMN
 from .utils.config import (
     get_hidden_datasets,
     get_saved_custom_datasets,
@@ -43,10 +44,32 @@ from .utils.config import (
     with_makermodslab_tag,
 )
 from .utils.hf_auth import cached_whoami, canonical_writable_namespace, hf_hub_offline, shared_hf_api
+from .utils.system import torchcodec_loads
 
 logger = logging.getLogger(__name__)
 
 CAMERA_FEATURE_PREFIX = "observation.images."
+
+
+def _sampling_weight(value: Any) -> float:
+    """One episode's sampling weight, defaulting to 1.0.
+
+    Absent column, null cell, or an unreadable value all mean 1.0 (R3) — never an
+    error, and never 0.0, which would drop the episode from training entirely.
+
+    Kept in step with `sampling.episode_weights_from_dataset`'s clamp: this reader
+    gates `dataset_is_weighted` (so whether the weighted sampler runs), that one
+    feeds the sampler, and a cell one accepts but the other rejects would crash a
+    run mid-training.
+    """
+    if value is None:
+        return 1.0
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    # Rejects negatives, infinities, and NaN (which satisfies no comparison).
+    return weight if 0 <= weight < float("inf") else 1.0
 
 
 def _safe_int(value: Any) -> int | None:
@@ -127,8 +150,15 @@ def invalidate_hub_status(repo_id: str) -> None:
     Dropping a same-named entry belonging to another namespace is harmless: it
     costs one re-check.
     """
+    global _HUB_CACHE_GEN
     with _HUB_STATUS_LOCK:
+        # Bump BEFORE dropping, under the same lock: a hub_copy_has_data or
+        # get_hub_status call whose network read straddles this invalidation
+        # sees a changed generation and discards its (now possibly stale)
+        # answer instead of writing it back into the cache we just cleaned.
+        _HUB_CACHE_GEN += 1
         _drop_resolved_keys(_HUB_STATUS_CACHE, repo_id)
+        _drop_resolved_keys(_HUB_HAS_DATA_CACHE, repo_id)
 
 
 def _drop_resolved_keys(cache: dict[str, Any], repo_id: str) -> None:
@@ -139,11 +169,24 @@ def _drop_resolved_keys(cache: dict[str, Any], repo_id: str) -> None:
     Shared by the hub-status and hub-summary caches, which key the same way.
     Dropping a same-named entry belonging to another namespace is harmless: it
     costs one re-check. Caller holds the matching lock.
+
+    Matching is case-insensitive: entries are keyed by the CANONICAL casing
+    the resolver produced ("myorg/pick"), while the caller may hold the local
+    spelling ("MyOrg/pick") — a case-sensitive pop of a namespaced id would
+    miss the entry and leave the stale answer serving for the process
+    lifetime. Resolving here instead would need a whoami; casefolding costs
+    at worst the same harmless extra drop as the suffix sweep.
     """
-    cache.pop(repo_id, None)
-    if "/" not in repo_id:
-        suffix = f"/{repo_id}"
-        for key in [k for k in cache if k.endswith(suffix)]:
+    lowered = repo_id.casefold()
+    if "/" in repo_id:
+        for key in [k for k in cache if k.casefold() == lowered]:
+            del cache[key]
+    else:
+        # Casefold the bare pop too: an unauthenticated session caches the
+        # caller's own spelling unresolved, and a slash-free key can never be
+        # reached by the suffix sweep below.
+        suffix = f"/{lowered}"
+        for key in [k for k in cache if k.casefold() == lowered or k.casefold().endswith(suffix)]:
             del cache[key]
 
 
@@ -261,18 +304,35 @@ def push_dataset_to_hub(local_repo_id: str, *, tags: list[str] | None, private: 
         # upload worker returns the friendly login instruction + docs link.
         raise RuntimeError("You must be authenticated with the Hugging Face Hub")
 
-    dataset = LeRobotDataset(local_repo_id)
+    # Same pyav fallback the training path takes (jobs.py): torchcodec is
+    # lerobot's default decoder and its dylibs do not load on a host without
+    # FFmpeg — `dlopen … libavutil.56.dylib` — so any frame access on this
+    # dataset raises. `None` means "leave lerobot's default alone" where
+    # torchcodec is fine.
+    dataset = LeRobotDataset(local_repo_id, video_backend=None if torchcodec_loads() else "pyav")
     logger.info(
         "Uploading %s to the Hub as %s (%d episodes)", local_repo_id, hub_repo_id, dataset.num_episodes
     )
     dataset.repo_id = hub_repo_id
-    dataset.push_to_hub(tags=tags, private=private)
+    try:
+        dataset.push_to_hub(tags=tags, private=private)
+    except Exception:
+        # A FAILED push may still have changed the Hub: push_to_hub creates
+        # the repo before sending files, so a death mid-push leaves an empty
+        # repo behind while the status cache still says "local_only" — which
+        # hides the very half-finished state the card warns about. Invalidate
+        # HERE, in the single push function, so every caller's failure path
+        # (the upload worker, record's trailing push, the runners' refill)
+        # surfaces it without each remembering to.
+        invalidate_hub_status(local_repo_id)
+        raise
 
     # The push just falsified both cached Hub facts for this dataset: it may
     # have created the repo (status), and it certainly changed what is inside
-    # it (the summary read from meta/info.json). Invalidating HERE rather than
-    # at each call site is the point of this being the single push: a caller
-    # that forgot would leave the info card insisting "Local only" about a
+    # it (the emptiness answer, and the summary read from meta/info.json).
+    # Invalidating HERE rather than at each call site is the point of this
+    # function being the single push: a caller that forgot would leave the info
+    # card insisting "Local only" — or, worse, "Upload didn't finish" — about a
     # dataset it had just successfully uploaded, for the process lifetime.
     # Callers may still invalidate their own extras (record's listing cache).
     invalidate_hub_status(local_repo_id)
@@ -308,6 +368,94 @@ def hub_repo_exists(repo_id: str) -> bool | None:
     except Exception as exc:
         logger.info("hub repo_exists(%s) failed: %s", hub_repo_id, exc)
         return None
+
+
+# Companion to _HUB_STATUS_CACHE, keyed the same way (RESOLVED lookup id) and
+# dropped by the same invalidation. Both answer questions about the HUB's
+# contents that only a push can change, so they share a lifetime — unlike a
+# fact about the LOCAL copy, which would go stale without any invalidation and
+# has no business being memoized beside them.
+#
+# Values are (claim, expires_at); expires_at None = no expiry (kept only so
+# tests can pin an immortal entry). BOTH definitive answers can be falsified
+# from OUTSIDE the app — a huggingface-cli re-upload fills an "empty" repo, a
+# Hub-web-UI file deletion guts a "has data" one — and neither path calls
+# invalidate_hub_status, so both expire after _HUB_HAS_DATA_TTL_S rather than
+# serving a wrong warning (or, for callers that refuse on it, a wrong refusal)
+# for the process lifetime. A failed probe (None, "no claim") is cached too,
+# for the shorter _HUB_NO_CLAIM_TTL_S: the shared HfApi client has no request
+# timeout, so re-probing a black-holed connection on every call would pin a
+# threadpool worker per poll — one hung probe per repo per minute bounds it.
+_HUB_HAS_DATA_CACHE: dict[str, tuple[bool | None, float | None]] = {}
+_HUB_HAS_DATA_TTL_S = 300.0
+_HUB_NO_CLAIM_TTL_S = 60.0
+# Bumped under _HUB_STATUS_LOCK by every invalidate_hub_status. The network
+# reads in hub_copy_has_data and get_hub_status run OUTSIDE the lock, so
+# without this an answer computed against a repo state that a concurrent push
+# has since changed could be written back AFTER that push's invalidation —
+# resurrecting exactly the stale claim the invalidation removed. The slow
+# reader loses instead: it compares generations before writing and discards
+# its answer on a mismatch.
+_HUB_CACHE_GEN = 0
+
+
+def hub_copy_has_data(repo_id: str, *, fresh: bool = False) -> bool | None:
+    """Does the Hub repo for `repo_id` actually contain a dataset?
+
+    A repo can exist and hold nothing. An upload is several Hub calls — create
+    the repo, then send the files — and when the later ones fail (a dropped
+    connection, or the bare-repo_id 404 that push_dataset_to_hub now prevents)
+    the empty repo created by the first one stays behind. "Exists" then reads
+    as "backed up" for a repo with no data in it, which is the one place this
+    app must not be wrong: it invites deleting the only copy.
+
+    Presence of ``meta/info.json`` is the test — the file lerobot writes for
+    every dataset and the one get_hub_dataset_info reads. The probe is
+    get_paths_info on that single path (one cheap call; a full list_repo_files
+    would fetch thousands of parquet/video entries to answer one membership
+    question). A successful probe finding nothing is proof of an empty repo,
+    not an inference from comparing counts: this deliberately asks whether the
+    Hub copy is USABLE, never whether it matches the local one. That second
+    question needs a record of which repo a local dataset was pushed to, which
+    the app doesn't keep, and guessing at it from episode counts mislabels
+    legitimate states.
+
+    * ``True``  — a dataset is there.
+    * ``False`` — the repo answered successfully and has no dataset in it.
+    * ``None``  — no claim: the probe failed (offline / transport error / repo
+      not visible), so callers must assume nothing.
+
+    Cached per resolved id and dropped by the same invalidate_hub_status;
+    every answer also expires — definitive ones after ``_HUB_HAS_DATA_TTL_S``,
+    a failed probe after ``_HUB_NO_CLAIM_TTL_S`` (see _HUB_HAS_DATA_CACHE for
+    why both). ``fresh=True`` skips the cache READ (the answer still lands in
+    it): a caller deciding whether to WRITE — the runners' push-if-absent —
+    must not act on a cached value, for the same reason hub_repo_exists is
+    uncached.
+    """
+    hub_repo_id = resolve_hub_repo_id(repo_id)
+    if not fresh:
+        with _HUB_STATUS_LOCK:
+            entry = _HUB_HAS_DATA_CACHE.get(hub_repo_id)
+        if entry is not None:
+            claim, expires_at = entry
+            if expires_at is None or time.monotonic() < expires_at:
+                return claim
+    with _HUB_STATUS_LOCK:
+        generation = _HUB_CACHE_GEN
+    try:
+        paths = shared_hf_api().get_paths_info(hub_repo_id, ["meta/info.json"], repo_type="dataset")
+        claim: bool | None = bool(paths)
+        ttl = _HUB_HAS_DATA_TTL_S
+    except Exception as exc:
+        logger.info("hub get_paths_info(%s) failed: %s", hub_repo_id, exc)
+        claim = None
+        ttl = _HUB_NO_CLAIM_TTL_S
+    expires_at = time.monotonic() + ttl
+    with _HUB_STATUS_LOCK:
+        if generation == _HUB_CACHE_GEN:
+            _HUB_HAS_DATA_CACHE[hub_repo_id] = (claim, expires_at)
+    return claim
 
 
 # Short-TTL cache of the merged /datasets listing. Startup + navigation re-hit
@@ -387,7 +535,7 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
     """Where a dataset repo with this id lives.
 
     Returns ``{"repo_id": ..., "status": "on_hub" | "local_only" | "absent" |
-    "unknown", "url": <hub url> | None}``:
+    "unknown", "url": <hub url> | None, "hub_has_data": bool | None}``:
 
     * ``on_hub``     — the repo exists on the Hub.
     * ``local_only`` — NOT on the Hub, but a usable local copy exists (a
@@ -400,6 +548,13 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
       contradictory "not downloaded locally" + "Local only / Upload" pair; the
       distinct status lets the card say "not found" instead.
     * ``unknown``    — offline / unauthenticated / any transport error.
+
+    ``hub_has_data`` qualifies ``on_hub``: False when that repo exists but
+    holds no dataset — a half-finished upload left the empty repo its first
+    call created (see hub_copy_has_data). The card must not call that a backup.
+    It is computed only when there is a LOCAL copy to protect; otherwise, and
+    for every other status, it is None ("no claim"). An empty repo with no
+    local copy is just litter on the Hub, and nothing here depends on it.
 
     Never raises. Definitive Hub answers (``on_hub`` / ``local_only``) are
     memoized per repo_id for the process lifetime; ``"unknown"`` and ``"absent"``
@@ -422,32 +577,66 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
 
     with _HUB_STATUS_LOCK:
         cached = _HUB_STATUS_CACHE.get(hub_repo_id)
+        generation = _HUB_CACHE_GEN
+
     if cached is not None:
-        url = f"https://huggingface.co/datasets/{hub_repo_id}" if cached == "on_hub" else None
-        return {"repo_id": repo_id, "status": cached, "url": url}
-
-    exists = hub_repo_exists(repo_id)
-    if exists is None:
-        # Offline / rate-limited / any other transport error: degrade to
-        # "unknown" without caching so it re-checks once connectivity returns.
-        return {"repo_id": repo_id, "status": "unknown", "url": None}
-
-    if exists:
-        status = "on_hub"
-    elif is_dataset_available_locally(repo_id):
-        # Not on the Hub, but a usable local copy exists — genuinely local-only.
-        status = "local_only"
+        status = cached
     else:
-        # Neither on the Hub nor local: don't mislabel this "local_only".
-        status = "absent"
+        exists = hub_repo_exists(repo_id)
+        if exists is None:
+            # Offline / rate-limited / any other transport error: degrade to
+            # "unknown" without caching so it re-checks once connectivity
+            # returns.
+            status = "unknown"
+        elif exists:
+            status = "on_hub"
+        elif is_dataset_available_locally(repo_id):
+            # Not on the Hub, but a usable local copy exists — genuinely
+            # local-only.
+            status = "local_only"
+        else:
+            # Neither on the Hub nor local: don't mislabel this "local_only".
+            status = "absent"
 
-    with _HUB_STATUS_LOCK:
-        # Cache only the definitive, stable answers; "absent" can flip to local
-        # without a hub-status invalidation, so leave it uncached (like "unknown").
-        if status in ("on_hub", "local_only"):
-            _HUB_STATUS_CACHE[hub_repo_id] = status
-    url = f"https://huggingface.co/datasets/{hub_repo_id}" if exists else None
-    return {"repo_id": repo_id, "status": status, "url": url}
+        with _HUB_STATUS_LOCK:
+            # Cache only the definitive, stable answers; "absent" can flip to
+            # local without a hub-status invalidation, so leave it uncached
+            # (like "unknown"). Gated on the generation captured before the
+            # network read (same straddle rule as hub_copy_has_data): a push
+            # completing mid-read invalidates, and writing our pre-push answer
+            # after that would pin a stale "local_only" for the process
+            # lifetime.
+            if status in ("on_hub", "local_only") and generation == _HUB_CACHE_GEN:
+                _HUB_STATUS_CACHE[hub_repo_id] = status
+
+    # ONE exit for every path: the route's response model silently strips any
+    # field a missed return site omits, so the shape must not be assembled in
+    # more than one place.
+    url = f"https://huggingface.co/datasets/{hub_repo_id}" if status == "on_hub" else None
+    return {
+        "repo_id": repo_id,
+        "status": status,
+        "url": url,
+        "hub_has_data": _hub_has_data_claim(repo_id, status),
+    }
+
+
+def _hub_has_data_claim(repo_id: str, status: str) -> bool | None:
+    """get_hub_status's ``hub_has_data``: the emptiness check, but only where
+    it changes what the user should do.
+
+    Asked only for a repo that IS on the Hub and DOES have a PUSHABLE local
+    copy — the one combination where calling an empty repo a backup could cost
+    data, and the one where the card's attached remedy (the Upload button →
+    push_dataset_to_hub) can actually run. A snapshot-cache-only copy is
+    excluded on purpose: the warning would mislabel an upload that never
+    happened and offer an Upload that cannot push it. Every other case is None,
+    which also spares the probe on the common path (a plain local-only or
+    hub-only dataset).
+    """
+    if status != "on_hub" or not local_pushable_copy_exists(repo_id):
+        return None
+    return hub_copy_has_data(repo_id)
 
 
 class DatasetHubEditError(Exception):
@@ -593,6 +782,33 @@ def _is_dataset_dir(path: Path) -> bool:
         return False
 
 
+def local_pushable_copy_exists(repo_id: str) -> bool:
+    """Is there a FLAT-layout copy of `repo_id` in the lerobot cache — the
+    only form ``push_dataset_to_hub`` can push?
+
+    A snapshot-cache download (a Hub dataset fetched for local use) is
+    deliberately NOT pushable: readable, but not the directory the push path
+    starts from. Shared by the jobs preflight, the runners' refill
+    (runners/_dataset) and the info card's emptiness claim, which must agree
+    with each other — and with LeRobotDataset itself — on what counts as a
+    pushable copy. The root is therefore derived the way lerobot derives
+    HF_LEROBOT_HOME ($HF_LEROBOT_HOME, else $HF_HOME/lerobot, else the
+    default) rather than a literal default that ignores HF_HOME: with only
+    HF_HOME set, a literal probe misses the copy, and callers turn that miss
+    into a wrong 409 or a skipped refill. $HF_LEROBOT_HOME is read per call
+    (tests redirect it after import); the HF_HOME half is huggingface_hub's
+    import-time constant, like every other consumer of it.
+    """
+    env_root = os.environ.get("HF_LEROBOT_HOME")
+    if env_root:
+        root = Path(env_root).expanduser()
+    else:
+        from huggingface_hub.constants import HF_HOME
+
+        root = Path(HF_HOME).expanduser() / "lerobot"
+    return _is_dataset_dir(root / repo_id)
+
+
 def is_dataset_available_locally(repo_id: str) -> bool:
     """True if lerobot could train on `repo_id` WITHOUT a Hub download.
 
@@ -669,6 +885,29 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+def _has_sampling_weight_column(path: Path) -> bool:
+    """Whether ``path``'s episode metadata carries a ``sampling_weight`` column.
+
+    Reads only the parquet FOOTER (``read_schema``), never the rows, so it is
+    cheap enough to run per dataset while building a listing.
+
+    This is an exact proxy for "is weighted", not an approximation: a merge with
+    every weight at 1 writes no column at all, so a present column always means
+    at least one episode is weighted. The authoritative check that gates which
+    trainer launches is still ``dataset_is_weighted`` — this one only decides
+    whether to draw a badge.
+    """
+    episodes_dir = path / "meta" / "episodes"
+    if not episodes_dir.is_dir():
+        return False
+    for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+        try:
+            return SAMPLING_WEIGHT_COLUMN in pq.read_schema(parquet_path).names
+        except Exception:
+            return False
+    return False
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -703,6 +942,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": top.name,
                         "last_modified": _dir_mtime_iso(top),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(top),
                     }
                 )
             continue
@@ -724,6 +964,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": f"{top.name}/{sub.name}",
                         "last_modified": _dir_mtime_iso(sub),
                         "private": False,
+                        "weighted": _has_sampling_weight_column(sub),
                     }
                 )
 
@@ -879,10 +1120,18 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         # Hub dataset — see get_hub_dataset_info). The card gates its local-only
         # affordances (rename, size, task counts) on this.
         "source": "local",
+        # Per-episode sampling weights present. Drives the "weighted" badge and
+        # the training mix panel; both runners honour it (the cloud wrapper
+        # materializes the sampler pod-side).
+        "weighted": _has_sampling_weight_column(path),
     }
 
 
-def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list[dict[str, Any]] | None:
+def _read_episode_rows(
+    meta_dir: Path,
+    columns: list[str] | None = None,
+    optional_columns: list[str] | None = None,
+) -> list[dict[str, Any]] | None:
     """Every row of ``meta/episodes/chunk-*/file-*.parquet``, column-pruned.
 
     v3.0-only: older v2.x datasets keep episodes in ``meta/episodes.jsonl``,
@@ -890,6 +1139,14 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
     viewer (episode list, video, joint chart) isn't offered for them — callers
     treat a None return as "not viewable", not an error. Returns None if the
     directory is absent or nothing could be read.
+
+    ``optional_columns`` are requested only from the files that actually have
+    them. That distinction is load-bearing: pyarrow raises when ``columns`` names
+    a column a file lacks, and the ``except`` below logs and *continues*, so
+    naming a not-universally-present column in ``columns`` would silently drop
+    every parquet file of every dataset written before that column existed —
+    ending with ``rows == []`` and a None return, i.e. "not viewable". A per-file
+    schema probe (footer only, no row groups read) keeps that from happening.
     """
     episodes_dir = meta_dir / "episodes"
     if not episodes_dir.is_dir():
@@ -897,7 +1154,11 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
     rows: list[dict[str, Any]] = []
     for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
         try:
-            table = pq.read_table(parquet_path, columns=columns)
+            requested = columns
+            if columns is not None and optional_columns:
+                present = set(pq.read_schema(parquet_path).names)
+                requested = [*columns, *[c for c in optional_columns if c in present]]
+            table = pq.read_table(parquet_path, columns=requested)
         except Exception as e:
             logger.warning(f"Could not read {parquet_path}: {e}")
             continue
@@ -988,7 +1249,14 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
         col_to_camera[from_col] = (camera, "from")
         col_to_camera[to_col] = (camera, "to")
 
-    rows = _read_episode_rows(path / "meta", columns=["episode_index", "tasks", "length", *video_cols])
+    rows = _read_episode_rows(
+        path / "meta",
+        columns=["episode_index", "tasks", "length", *video_cols],
+        # Only merged-with-weights datasets carry this. It MUST stay optional:
+        # see _read_episode_rows for what requiring it would do to every dataset
+        # recorded before the column existed (R3).
+        optional_columns=[SAMPLING_WEIGHT_COLUMN],
+    )
     if rows is None:
         return None
     out = []
@@ -1014,10 +1282,42 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
                 "duration": round(length / fps, 3),
                 "tasks": [str(t) for t in (row.get("tasks") or [])],
                 "video_offsets": video_offsets,
+                "sampling_weight": _sampling_weight(row.get(SAMPLING_WEIGHT_COLUMN)),
             }
         )
     out.sort(key=lambda e: e["episode_index"])
     return out
+
+
+def dataset_is_weighted(repo_id: str) -> bool:
+    """Whether any episode of ``repo_id`` carries a ``sampling_weight`` != 1.
+
+    Resolved from the dataset's own ``meta/episodes``, never from a request body:
+    weightedness decides which trainer module a run launches, and a client must
+    not be able to claim a dataset is (or isn't) weighted.
+
+    Local copy first, then the same Hub episode-metadata fetch the viewer uses,
+    so a dataset that only exists on the Hub is still classified correctly.
+    False when nothing resolves — a v2.x dataset, or one that predates the
+    column, has no weights to honour (R3).
+    """
+    try:
+        path = _resolve_local_dataset_path(repo_id)
+        if path is None:
+            path = _ensure_hub_episodes_root(repo_id)
+        if path is None:
+            return False
+        rows = _read_episode_rows(
+            path / "meta",
+            columns=["episode_index"],
+            optional_columns=[SAMPLING_WEIGHT_COLUMN],
+        )
+    except Exception as exc:
+        logger.warning("Could not read sampling weights for %s: %s", repo_id, exc)
+        return False
+    if rows is None:
+        return False
+    return any(_sampling_weight(row.get(SAMPLING_WEIGHT_COLUMN)) != 1.0 for row in rows)
 
 
 def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Path | None:
@@ -1332,22 +1632,15 @@ def is_dataset_private(repo_id: str) -> bool | None:
     return bool(getattr(info, "private", False))
 
 
-def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
-    """The RAW ``features`` map from a dataset's ``meta/info.json``.
-
-    The other readers above summarise info.json for a UI card (camera names,
-    episode counts); this one hands back the feature specs untouched —
-    ``dtype``/``shape``/``names`` per key — because the fine-tune preflight in
-    jobs.py compares them dimension-for-dimension against a checkpoint's own
-    ``input_features``/``output_features``. Local first (a plain file read, no
-    network), falling back to fetching just ``meta/info.json`` from the Hub for
-    a dataset with no local copy — the same tiny file get_hub_dataset_info
+def _read_dataset_info_json(repo_id: str) -> dict[str, Any] | None:
+    """A dataset's whole ``meta/info.json`` as a dict, local first (a plain file
+    read, no network) then falling back to fetching just that one tiny file from
+    the Hub for a dataset with no local copy — the same file get_hub_dataset_info
     uses.
 
     Returns None when it can't be read — not local, offline, absent/private
-    repo, malformed JSON, or no ``features`` map. None means "not established",
-    never "fine": a caller must treat it as a reason to stay silent rather than
-    as a clean bill of health.
+    repo, malformed JSON. None means "not established", never "fine": callers
+    must treat it as a reason to stay silent rather than a clean bill of health.
     """
     path = _resolve_local_dataset_path(repo_id)
     if path is not None:
@@ -1364,11 +1657,52 @@ def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
             )
             info = json.loads(Path(local).read_text())
         except Exception as exc:
-            logger.info("dataset features fetch for %s failed: %s", repo_id, exc)
+            logger.info("dataset info.json fetch for %s failed: %s", repo_id, exc)
             return None
+    return info if isinstance(info, dict) else None
 
-    features = info.get("features") if isinstance(info, dict) else None
+
+def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
+    """The RAW ``features`` map from a dataset's ``meta/info.json``.
+
+    The other readers above summarise info.json for a UI card (camera names,
+    episode counts); this one hands back the feature specs untouched —
+    ``dtype``/``shape``/``names`` per key — because the fine-tune preflight in
+    jobs.py compares them dimension-for-dimension against a checkpoint's own
+    ``input_features``/``output_features``.
+
+    Returns None when it can't be read (see _read_dataset_info_json) or carries
+    no ``features`` map. None means "not established", never "fine".
+    """
+    info = _read_dataset_info_json(repo_id)
+    features = info.get("features") if info is not None else None
     return features if isinstance(features, dict) else None
+
+
+def read_dataset_robot_type(repo_id: str) -> str | None:
+    """The raw ``robot_type`` string from a locally-cached dataset's
+    ``meta/info.json``, or None.
+
+    lerobot writes the recording robot's ``.name`` here (``so101_follower``,
+    ``bi_maker_follower``, …); a dataset recorded elsewhere can carry anything.
+    Callers normalise it with ``arm_capabilities.arm_type_from_robot_type`` to
+    decide whether a cross-arm fine-tune warning applies.
+
+    LOCAL ONLY — deliberately no Hub fallback. The one caller
+    (``get_policy_config_summary``) runs inside a synchronous GET handler and
+    this is a display nicety; a Hub round-trip there (for an imported model or
+    an uncached training dataset) would be a latency regression for no real
+    gain. None means "not established" — stay silent, don't warn.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    robot_type = info.get("robot_type") if isinstance(info, dict) else None
+    return robot_type if isinstance(robot_type, str) and robot_type.strip() else None
 
 
 class DatasetRenameError(Exception):
@@ -1762,6 +2096,12 @@ def list_all_datasets() -> list[dict[str, Any]]:
             a = existing.get("last_modified") or ""
             b = item.get("last_modified") or ""
             existing["last_modified"] = max(a, b) or None
+            # Carry the local-only facts the Hub row cannot know. Without this a
+            # dataset that exists in BOTH places lost its `weighted` flag, and
+            # the badge silently disappeared for exactly the datasets most
+            # likely to have been merged and pushed.
+            if "weighted" in item:
+                existing["weighted"] = item["weighted"]
         else:
             merged[rid] = {**item, "source": "local"}
 

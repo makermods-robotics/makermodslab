@@ -41,6 +41,11 @@ export default {
     resume: {
       // {{name}} is the parent run's name — data, rendered verbatim.
       titleFromStep: "Continuing “{{name}}” from step {{step}}",
+      // Shown only when the total differs from the parent run's. lerobot
+      // rebuilds the LR schedule from the new total, so the rate jumps at the
+      // resume point instead of continuing to decay.
+      lrSeam:
+        "Total steps differ from the original run ({{from}} → {{to}}). LeRobot rebuilds the learning-rate schedule from the new total, so the rate can jump back up at the resume point instead of continuing to decay. Keep {{from}} for an unbroken schedule.",
       titleFromLatest: "Continuing “{{name}}” from its latest checkpoint",
       // <0> emphasises the "Steps" control by name. {{steps}} is the
       // pre-formatted prefill. One complete sentence per runner, because the
@@ -55,10 +60,17 @@ export default {
       jobTimeoutDefault: "24h (default)",
     },
     finetune: {
+      // Used when the checkpoint picker is shown: the picker names the step, so
+      // repeating it here printed the same number twice.
+      title: "Fine-tuning from “{{name}}”",
       titleWithStep: "Fine-tuning from “{{name}}” (step {{step}})",
       titleLatest: "Fine-tuning from “{{name}}” (latest checkpoint)",
-      // <0> emphasises "fresh run", <1> the word "dataset".
-      body: "This starts a <0>fresh run</0> (new optimizer, from step 0) with the policy weights initialized from that model. Pick a <1>dataset</1> to train on and set your training parameters as usual.",
+      checkpointLabel: "Checkpoint",
+      // <0> emphasises "Fresh run".
+      body: "<0>Fresh run</0> from step 0 — new optimizer, with the policy weights loaded from this checkpoint.",
+      // {{base}} / {{dataset}} are arm names (SO-101 / Maker / Metal) — data.
+      armMismatch:
+        "This checkpoint was trained on the {{base}} arm, but the selected dataset was recorded on the {{dataset}} arm. Fine-tuning across arms transfers little and the result may not run on either robot.",
     },
     tooltip: {
       // A busy local slot no longer blocks Start — the submission queues.
@@ -221,6 +233,15 @@ export default {
 
   essentials: {
     steps: "Training steps",
+    // Resume only. The field is a TOTAL the run trains up to, not an increment
+    // added to the steps already done — the label and hint both say so, and the
+    // hint does the subtraction so the user never has to.
+    stepsTotal: "Total training steps",
+    stepsTotalHint:
+      "Resuming from step {{from}}, training {{remaining}} more steps.",
+    stepsTotalHintLatest: "Total step count, not additional steps.",
+    stepsTotalTooLow:
+      "Must be above {{from}} — the run has already trained that far, so this would train nothing.",
     batchSize: "Batch size",
     runName: "Run name",
     // Sits beside the Run name label on a continuation. {{step}} is

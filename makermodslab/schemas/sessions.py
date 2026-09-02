@@ -45,12 +45,15 @@ __all__ = [
     "AutoCalibrationArmOption",
     "AutoCalibrationOptions",
     "CalibrationOptions",
+    "CoachingCommandResponse",
     "CurrentSessionResponse",
     "EndedSessionInfo",
     "InferenceOptions",
     "PolicyCameraDims",
     "RecordingOptions",
     "ReplayOptions",
+    "SessionCoachingBody",
+    "SessionCoachingResponse",
     "SessionHeartbeatBody",
     "SessionHeartbeatResponse",
     "SessionInfo",
@@ -128,6 +131,22 @@ class InferenceOptions(BaseModel):
     # the arm under a different engine than the user chose).
     inference_engine: Literal["sync", "rtc"] = "sync"
     temporal_ensemble_coeff: float | None = None
+    # Coaching (DAgger) — the third inference session shape. `coaching=True`
+    # records each leader-arm takeover as one episode of a corrections dataset.
+    #
+    # Policy-shaped like the rest of this model: the LEADER arms a coaching
+    # session drives are hardware, so they resolve from the robot record
+    # server-side — see `_build_inference_request` in sessions.py. That also
+    # means a coaching session is NOT follower-only, unlike a plain rollout or
+    # an eval: it opens the leader bus, so the start-time readiness gate has to
+    # cover the leader arm too (see `handle_start_session`).
+    #
+    # `target_corrections` and `coaching_dataset_name` (given without the
+    # mandatory `rollout_` prefix, which is applied server-side) are clamped and
+    # validated in rollout, not here.
+    coaching: bool = False
+    target_corrections: int = 10
+    coaching_dataset_name: str = ""
 
 
 class ReplayOptions(BaseModel):
@@ -291,9 +310,51 @@ class CurrentSessionResponse(BaseModel):
     last_ended: EndedSessionInfo | None
 
 
+class CoachingCommandResponse(BaseModel):
+    """The 200 body of the coaching control verbs (rollout.handle_coaching_command).
+
+    Only the ACCEPTED shape is modelled: a refusal carries its own status code
+    and is raised as an HTTPException by the route, so it never reaches here.
+    """
+
+    success: bool
+    message: str
+
+
 class SessionStopResponse(BaseModel):
     """`result` is the kind's existing stop handler's response, verbatim —
     rich per-kind status stays on the feature endpoints this phase."""
 
     session: SessionInfo
+    result: dict[str, Any]
+
+
+class SessionCoachingBody(BaseModel):
+    """POST /api/v1/sessions/{session_id}/coaching. One operator command for a
+    coaching (DAgger) inference session. The runner interprets the verb against
+    the live phase — this layer forwards it and never pre-checks (a stale phase
+    copy would sometimes reject a command the arm was ready for)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # `recover` is deliberately NOT here any more: it did discard-then-reset,
+    # which is what `cancel` now does on its own, from every phase. `drop_last`
+    # is the new one — it un-records the correction the runner is still holding.
+    command: Literal[
+        "takeover",
+        "handback",
+        "cancel",
+        "hold",
+        "resume",
+        "reset",
+        "recovered",
+        "drop_last",
+    ]
+
+
+class SessionCoachingResponse(BaseModel):
+    """The runner's command result, verbatim (`success` plus a status message).
+    Rich coaching state stays on the /inference-status poll + the pushed
+    `coaching_state` websocket event."""
+
     result: dict[str, Any]

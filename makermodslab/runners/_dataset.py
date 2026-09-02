@@ -24,11 +24,14 @@ runners cannot drift on when a push happens or what it looks like.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
-from pathlib import Path
 
-from ..datasets import hub_repo_exists, push_dataset_to_hub
+from ..datasets import (
+    hub_copy_has_data,
+    hub_repo_exists,
+    local_pushable_copy_exists,
+    push_dataset_to_hub,
+)
 from ..utils.config import with_makermodslab_tag
 
 
@@ -52,17 +55,38 @@ def ensure_dataset_on_hub(local_repo_id: str, hub_repo_id: str, log: Callable[[s
     (offline / rate-limited / any transport error) we leave the Hub alone,
     because pushing into a repo we could not verify is worse than a remote
     job that fails resolving a dataset.
+
+    An EXISTING but EMPTY repo counts as absent. A half-finished upload
+    leaves behind the empty repo its first call created; "the repo exists"
+    was enough to skip the push, so the remote job would then die resolving
+    a dataset with no files in it. Refilling it is the whole remedy and
+    needs nothing from the user, so it happens silently rather than as a
+    refusal they'd have to act on. The emptiness read is ``fresh=True`` for
+    the same reason existence is uncached: a memo is wrong for a caller
+    about to decide whether to WRITE.
     """
-    if hub_repo_exists(hub_repo_id) is not False:
+    exists = hub_repo_exists(hub_repo_id)
+    if exists is None:
+        return
+    if exists and hub_copy_has_data(hub_repo_id, fresh=True) is not False:
         return
 
-    cache_root = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-    if not (cache_root / local_repo_id / "meta" / "info.json").is_file():
-        # Neither local nor on Hub. Let the trainer surface the error
-        # — same behaviour as before.
+    if not local_pushable_copy_exists(local_repo_id):
+        # Neither local nor usable on the Hub. Let the trainer surface the
+        # error — same behaviour as before — but say why in the job log:
+        # an empty repo was positively diagnosed, and silence here would
+        # leave the doomed run unexplained.
+        if exists:
+            log(
+                f"[upload] dataset {hub_repo_id} exists on the Hub but holds no data,"
+                " and there is no local copy to push."
+            )
         return
 
-    log(f"[upload] dataset {hub_repo_id} not on Hub; pushing local copy (public)...")
+    reason = (
+        "exists on the Hub but holds no data (an earlier upload didn't finish)" if exists else "not on Hub"
+    )
+    log(f"[upload] dataset {hub_repo_id} {reason}; pushing local copy (public)...")
     try:
         # Public by default: MakerMods Lab's global policy is that datasets it pushes
         # to the Hub are public and carry the required org/product tags (see
