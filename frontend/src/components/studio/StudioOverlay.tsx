@@ -4,7 +4,6 @@ import { ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
 import RobotCorner from "@/components/launchpad/RobotCorner";
-import LanguageSwitcher from "@/components/LanguageSwitcher";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import CollectPanel from "@/components/studio/CollectPanel";
 import TrainPanel from "@/components/studio/TrainPanel";
@@ -107,10 +106,6 @@ const StudioOverlay: React.FC = () => {
         <span className="hidden sm:inline-flex">
           <HfAuthChip />
         </span>
-        {/* Mounted here as well as on the Launchpad: this overlay is
-            `fixed inset-0` and covers the viewport, so the header switcher
-            would otherwise be unreachable while the studio is open. */}
-        <LanguageSwitcher />
         <RobotCorner />
         <Button
           variant="ghost"

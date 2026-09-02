@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { ChevronUp, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
-import LanguageSwitcher from "@/components/LanguageSwitcher";
 import Footer from "@/components/Footer";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
@@ -64,7 +63,6 @@ const Launchpad = () => {
             <Library className="h-3.5 w-3.5" />
             {t("launchpad.header.myLibrary")}
           </Button>
-          <LanguageSwitcher />
           {/* Wrapped (rather than tagging RobotCorner.tsx itself) since the
               same component also renders inside StudioOverlay's header —
               tagging it directly would give the tour two matching elements. */}
