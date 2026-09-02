@@ -68,6 +68,9 @@ export default {
       checkpointLabel: "Checkpoint",
       // <0> emphasises "Fresh run".
       body: "<0>Fresh run</0> from step 0 — new optimizer, with the policy weights loaded from this checkpoint.",
+      // {{base}} / {{dataset}} are arm names (SO-101 / Maker / Metal) — data.
+      armMismatch:
+        "This checkpoint was trained on the {{base}} arm, but the selected dataset was recorded on the {{dataset}} arm. Fine-tuning across arms transfers little and the result may not run on either robot.",
     },
     tooltip: {
       // A busy local slot no longer blocks Start — the submission queues.

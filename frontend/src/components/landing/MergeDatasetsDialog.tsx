@@ -15,6 +15,17 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { NumberInput } from "@/components/ui/number-input";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { ArmType, armTypeFromRobotType, ARM_TYPE_LABEL } from "@/lib/armTypes";
+import {
   Loader2,
   CheckCircle2,
   XCircle,
@@ -80,6 +91,9 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   const [status, setStatus] = useState<MergeStatus | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  // Non-null while the backend has refused pending confirmation (cross-arm
+  // sources); confirming re-submits with acknowledge_warnings.
+  const [pendingWarnings, setPendingWarnings] = useState<string[] | null>(null);
   const logBoxRef = useRef<HTMLDivElement>(null);
   const notifiedDone = useRef(false);
 
@@ -94,6 +108,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     setInfos({});
     setOutput("");
     setStartError(null);
+    setPendingWarnings(null);
     notifiedDone.current = false;
     getDatasetMergeStatus(baseUrl, fetchWithHeaders)
       .then((s) => setStatus(s.state === "running" ? s : null))
@@ -254,9 +269,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
   // on missing information would hide mergeable datasets, and the backend's own
   // refusal is the real gate. This only spares the user an obvious wasted click.
   //
-  // Checks fps, camera set and robot type — the three the frontend can see.
-  // The backend additionally compares feature keys/shapes, so passing here is
-  // not a promise the merge will be accepted.
+  // Checks fps and camera set — the hard incompatibilities the frontend can
+  // see (the backend refuses both outright). A different ARM is NOT blocked
+  // here: same-DOF families still merge, so it's an advisory the backend
+  // surfaces as a confirm-me warning (see armMismatchWarning below). The
+  // backend additionally compares feature keys/shapes, so passing here is not
+  // a promise the merge will be accepted.
   const anchorId = selectedIds[0] ?? null;
   const anchorInfo = anchorId ? infos[anchorId] : null;
   const incompatibilityOf = (repoId: string): string | null => {
@@ -280,18 +298,25 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         anchor: camsOf(anchorInfo) || "—",
       });
     }
-    if (
-      info.robot_type &&
-      anchorInfo.robot_type &&
-      info.robot_type !== anchorInfo.robot_type
-    ) {
-      return t("landing.mergeDatasets.incompatibleRobot", {
-        theirs: info.robot_type,
-        anchor: anchorInfo.robot_type,
-      });
-    }
     return null;
   };
+
+  // Advisory: the selected sources whose arm can be established span more than
+  // one family. Non-blocking — the backend refuses once with this reason, then
+  // proceeds when the user confirms. null when fewer than two arms are known
+  // (a warning must be provable, never a guess about an untagged dataset).
+  const armMismatchWarning = useMemo<string | null>(() => {
+    const byArm = new Map<ArmType, string[]>();
+    for (const repoId of selectedIds) {
+      const arm = armTypeFromRobotType(infos[repoId]?.robot_type);
+      if (arm) byArm.set(arm, [...(byArm.get(arm) ?? []), repoId]);
+    }
+    if (byArm.size < 2) return null;
+    const groups = [...byArm.entries()]
+      .map(([arm, ids]) => `${ids.join(", ")} (${ARM_TYPE_LABEL[arm]})`)
+      .join("; ");
+    return t("landing.mergeDatasets.armMismatchWarning", { groups });
+  }, [selectedIds, infos, t]);
 
   // Resulting mix: episodes each source contributes AFTER its weight, and that
   // as a share of the merged total. Shares are what the user is really tuning —
@@ -338,7 +363,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     !selected.has(effectiveOutput) &&
     status?.state !== "running";
 
-  const handleMerge = async () => {
+  const doMerge = async (acknowledgeWarnings: boolean) => {
     setStarting(true);
     setStartError(null);
     try {
@@ -348,11 +373,19 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         selectedIds,
         effectiveOutput,
         selectedIds.map((repoId) => weightOf(repoId)),
+        acknowledgeWarnings,
       );
       if (!res.started) {
-        setStartError(res.message);
+        // A refusal carrying warnings is "confirm to proceed", not an error.
+        if (res.warnings && res.warnings.length > 0 && !acknowledgeWarnings) {
+          setPendingWarnings(res.warnings);
+        } else {
+          setPendingWarnings(null);
+          setStartError(res.message);
+        }
         return;
       }
+      setPendingWarnings(null);
       // Seed a running status so the poll effect attaches immediately.
       setStatus({
         state: "running",
@@ -361,11 +394,14 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         logs: [],
       });
     } catch (e) {
+      setPendingWarnings(null);
       setStartError(e instanceof Error ? e.message : String(e));
     } finally {
       setStarting(false);
     }
   };
+
+  const handleMerge = () => doMerge(false);
 
   const state = status?.state ?? "idle";
 
@@ -586,6 +622,9 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                     ? t("landing.mergeDatasets.weightedHint")
                     : t("landing.mergeDatasets.weightHint")}
                 </p>
+                {armMismatchWarning && (
+                  <p className="mt-2 text-xs text-warn">{armMismatchWarning}</p>
+                )}
               </div>
             )}
 
@@ -691,6 +730,50 @@ const MergeDatasetsDialog: React.FC<Props> = ({
           </div>
         )}
       </DialogContent>
+
+      <AlertDialog
+        open={pendingWarnings !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingWarnings(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("landing.mergeDatasets.confirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                {/* Prefer the localized note the dialog already computed; fall
+                    back to the backend's (English) reason for anything the
+                    client didn't anticipate. */}
+                {armMismatchWarning ? (
+                  <p>{armMismatchWarning}</p>
+                ) : (
+                  (pendingWarnings ?? []).map((w, i) => <p key={i}>{w}</p>)
+                )}
+                <p>{t("landing.mergeDatasets.confirmPrompt")}</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={starting}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={starting}
+              onClick={(e) => {
+                // Keep the dialog mounted until doMerge resolves; close it by
+                // clearing pendingWarnings on success/failure inside doMerge.
+                e.preventDefault();
+                void doMerge(true);
+              }}
+            >
+              {t("landing.mergeDatasets.confirmProceed")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 };

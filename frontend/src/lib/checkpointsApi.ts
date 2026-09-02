@@ -27,6 +27,12 @@ export interface PolicyConfigSummary {
   // null when the checkpoint omits the feature.
   state_dim: number | null;
   action_dim: number | null;
+  /** Raw lerobot robot_type of the dataset this checkpoint was trained on
+   * (recovered via its train_config.json). null when it can't be
+   * established — an imported flat model, a deleted training dataset, an
+   * untagged one. The fine-tune panel normalises it with armTypeFromRobotType
+   * and warns when it disagrees with the selected dataset's arm. */
+  trained_on_robot_type?: string | null;
 }
 
 /** Collapse checkpoint entries that point at the same underlying checkpoint.

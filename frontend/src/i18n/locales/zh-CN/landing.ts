@@ -177,7 +177,11 @@ export default {
     done: "完成",
     incompatibleFps: "无法合并：该数据集为 {{theirs}} 帧率，而你先选中的数据集为 {{anchor}} 帧率。",
     incompatibleCameras: "无法合并：该数据集的摄像头为 [{{theirs}}]，而你先选中的数据集为 [{{anchor}}]。",
-    incompatibleRobot: "无法合并：该数据集的机器人为 {{theirs}}，而你先选中的数据集为 {{anchor}}。",
+    armMismatchWarning:
+      "这些数据集是在不同机械臂上录制的：{{groups}}。合并会混合机器人，用结果训练出的策略会学成两者的平均。",
+    confirmTitle: "合并在不同机械臂上录制的数据集？",
+    confirmPrompt: "只有在你确定这些机械臂等效时才继续合并。",
+    confirmProceed: "仍然合并",
     weightColumn: "权重",
     weightAria: "{{repoId}} 的权重",
     decreaseWeight: "降低权重",

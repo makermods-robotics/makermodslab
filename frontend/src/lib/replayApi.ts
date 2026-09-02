@@ -491,14 +491,19 @@ export const MAX_SOURCE_WEIGHT = 20;
 /** Start a merge. `sourceWeights` is a per-source integer repeat count,
  * positionally aligned with `sourceRepoIds`; omit it (or pass all 1s) for an
  * unweighted merge. A source with weight 3 contributes its episodes three
- * times, so training samples them three times as often. */
+ * times, so training samples them three times as often.
+ *
+ * When the sources span more than one arm family the merge is refused with
+ * `started: false` and a non-empty `warnings`; the caller shows them and
+ * re-calls with `acknowledgeWarnings: true` to proceed. */
 export async function startDatasetMerge(
   baseUrl: string,
   fetcher: Fetcher,
   sourceRepoIds: string[],
   outputRepoId: string,
   sourceWeights?: number[],
-): Promise<{ started: boolean; message: string }> {
+  acknowledgeWarnings?: boolean,
+): Promise<{ started: boolean; message: string; warnings?: string[] }> {
   // Only send weights when at least one is non-default, so an ordinary merge
   // keeps the exact request body it had before weights existed.
   const weighted = sourceWeights?.some((w) => w !== 1) ?? false;
@@ -509,6 +514,7 @@ export async function startDatasetMerge(
       source_repo_ids: sourceRepoIds,
       output_repo_id: outputRepoId,
       ...(weighted ? { source_weights: sourceWeights } : {}),
+      ...(acknowledgeWarnings ? { acknowledge_warnings: true } : {}),
     },
     action: "Merge datasets",
   });

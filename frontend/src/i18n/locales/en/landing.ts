@@ -215,11 +215,16 @@ export default {
     failed: "Merge failed",
     done: "Done",
     // --- Per-source weights ---------------------------------------------
-    // Incompatibility reasons. Camera lists and robot types are DATA — the
-    // names come from the dataset and are never translated.
+    // Incompatibility reasons. Camera lists are DATA — the names come from the
+    // dataset and are never translated.
     incompatibleFps: "Can't merge: {{theirs}} fps, but the first dataset you picked is {{anchor}} fps.",
     incompatibleCameras: "Can't merge: cameras are [{{theirs}}], but the first dataset you picked has [{{anchor}}].",
-    incompatibleRobot: "Can't merge: robot is {{theirs}}, but the first dataset you picked is {{anchor}}.",
+    // {{groups}} is a list of dataset ids grouped by arm name — data.
+    armMismatchWarning:
+      "These datasets were recorded on different arms: {{groups}}. Merging them mixes robots, so a policy trained on the result learns an average of both.",
+    confirmTitle: "Merge datasets recorded on different arms?",
+    confirmPrompt: "Merge anyway only if you know the arms are equivalent.",
+    confirmProceed: "Merge anyway",
     weightColumn: "Weight",
     // repoId is a dataset id — data, never translated.
     weightAria: "Weight for {{repoId}}",

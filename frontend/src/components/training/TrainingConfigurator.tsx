@@ -15,7 +15,12 @@ import HfAuthBanner from "@/components/landing/HfAuthBanner";
 import LocalDatasetCloudNotice from "@/components/training/config/LocalDatasetCloudNotice";
 import LocalCheckpointCloudNotice from "@/components/training/config/LocalCheckpointCloudNotice";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
+import {
+  JobCheckpoint,
+  getCheckpointPolicyConfig,
+  listJobCheckpoints,
+} from "@/lib/checkpointsApi";
+import { ARM_TYPE_LABEL, armTypeFromRobotType } from "@/lib/armTypes";
 import { Label } from "@/components/ui/label";
 
 import { Button } from "@/components/ui/button";
@@ -40,7 +45,7 @@ import {
   listNodes,
   nodeDisplayName,
 } from "@/lib/nodesApi";
-import { getDatasetInfo } from "@/lib/replayApi";
+import { DatasetInfo, getDatasetInfo } from "@/lib/replayApi";
 
 // Passed by the "Continue" button on a completed local job, or the "Resume"
 // button on a cloud run that ended before its step target.
@@ -585,25 +590,79 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         : null;
   const needsCheckpointUpload = checkpointUploadKind != null;
 
-  // Approximate on-disk size for the notice (cheap detail endpoint; local only).
-  const [datasetSizeBytes, setDatasetSizeBytes] = useState<number | null>(null);
+  // One detail lookup for the selected dataset, feeding both the cloud-upload
+  // size notice and the cross-arm fine-tune warning. Fetched when either
+  // consumer is live (cloud + local dataset needs the size; a fine-tune needs
+  // the arm) so the common non-cloud non-fine-tune case still makes no call.
+  const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
+  const wantDatasetInfo = !!datasetRepoId && (needsUpload || !!finetuneSeed);
   useEffect(() => {
-    if (!needsUpload || !datasetRepoId) {
-      setDatasetSizeBytes(null);
+    if (!wantDatasetInfo || !datasetRepoId) {
+      setDatasetInfo(null);
       return;
     }
+    const controller = new AbortController();
     let cancelled = false;
-    getDatasetInfo(baseUrl, fetchWithHeaders, datasetRepoId)
+    getDatasetInfo(baseUrl, fetchWithHeaders, datasetRepoId, controller.signal)
       .then((info) => {
-        if (!cancelled) setDatasetSizeBytes(info.size_bytes ?? null);
+        if (!cancelled) setDatasetInfo(info);
       })
       .catch(() => {
-        if (!cancelled) setDatasetSizeBytes(null);
+        if (!cancelled) setDatasetInfo(null);
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [needsUpload, datasetRepoId, baseUrl, fetchWithHeaders]);
+  }, [wantDatasetInfo, datasetRepoId, baseUrl, fetchWithHeaders]);
+  const datasetSizeBytes = needsUpload ? (datasetInfo?.size_bytes ?? null) : null;
+
+  // Cross-arm fine-tune warning: the base checkpoint was trained on one arm
+  // family and the selected dataset was recorded on another. Advisory only —
+  // the backend's dimension guard already hard-blocks a genuine width mismatch
+  // (SO-101 6 vs a CAN arm's 7); this catches the same-DOF case it can't see
+  // (Maker vs Metal) and shows it before Start. Silent whenever either arm
+  // can't be established, matching the resume LR-seam note's altitude.
+  const [baseTrainedOnRobotType, setBaseTrainedOnRobotType] = useState<
+    string | null
+  >(null);
+  useEffect(() => {
+    if (!finetuneJobId || effectiveFinetuneStep == null) {
+      setBaseTrainedOnRobotType(null);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    getCheckpointPolicyConfig(
+      baseUrl,
+      fetchWithHeaders,
+      finetuneJobId,
+      effectiveFinetuneStep,
+      controller.signal,
+    )
+      .then((cfg) => {
+        if (!cancelled) setBaseTrainedOnRobotType(cfg.trained_on_robot_type ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setBaseTrainedOnRobotType(null);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [finetuneJobId, effectiveFinetuneStep, baseUrl, fetchWithHeaders]);
+
+  const crossArmWarning = useMemo(() => {
+    const baseArm = armTypeFromRobotType(baseTrainedOnRobotType);
+    const datasetArm = armTypeFromRobotType(
+      finetuneSeed ? (datasetInfo?.robot_type ?? null) : null,
+    );
+    if (!baseArm || !datasetArm || baseArm === datasetArm) return null;
+    return t("training.configurator.finetune.armMismatch", {
+      base: ARM_TYPE_LABEL[baseArm],
+      dataset: ARM_TYPE_LABEL[datasetArm],
+    });
+  }, [baseTrainedOnRobotType, datasetInfo, finetuneSeed, t]);
 
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -1005,6 +1064,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               components={[<span key="0" className="font-medium" />]}
             />
           </p>
+          {crossArmWarning && (
+            <p className="mt-2 text-warn">{crossArmWarning}</p>
+          )}
         </div>
       ) : null}
       <ConfigurationTab
