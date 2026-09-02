@@ -4714,6 +4714,57 @@ def test_start_allows_matching_feature_space(tmp_path) -> None:
     assert record.state == "running"
 
 
+def test_policy_config_summary_reports_the_training_arm(tmp_path, tmp_lerobot_home) -> None:
+    """The fine-tune panel's cross-arm warning needs the arm a checkpoint was
+    trained on — recovered via train_config.json's dataset repo id → that
+    dataset's meta/info.json robot_type."""
+    from makermodslab.jobs import JobRegistry
+
+    ds_meta = tmp_lerobot_home / "user" / "corrections" / "meta"
+    ds_meta.mkdir(parents=True)
+    (ds_meta / "info.json").write_text(_json.dumps({"robot_type": "maker_follower", "features": {}}))
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        _json.dumps(
+            {
+                "type": "act",
+                "input_features": {"observation.state": {"type": "STATE", "shape": [7]}},
+                "output_features": {"action": {"type": "ACTION", "shape": [7]}},
+            }
+        )
+    )
+    (model / "train_config.json").write_text(_json.dumps({"dataset": {"repo_id": "user/corrections"}}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["trained_on_robot_type"] == "maker_follower"
+    assert summary["state_dim"] == 7
+
+
+def test_policy_config_summary_arm_is_none_when_unrecoverable(
+    tmp_path, tmp_lerobot_home, monkeypatch
+) -> None:
+    """No train_config.json and only the "(imported)" placeholder to fall back
+    on → None, with NO network attempt (it's a display nicety on a sync GET)."""
+    import makermodslab.jobs as jobs_mod
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)  # config.json only
+
+    monkeypatch.setattr(
+        jobs_mod,
+        "read_dataset_robot_type",
+        lambda repo_id: pytest.fail(f"unexpected lookup for {repo_id!r}"),
+    )
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    assert reg.get_policy_config_summary(rec.id, 0)["trained_on_robot_type"] is None
+
+
 # --- Deliberate stop vs genuine failure -------------------------------------
 #
 # Regression cover for the defect where every press of Stop landed in run

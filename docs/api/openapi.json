@@ -327,7 +327,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -372,6 +372,17 @@
               }
             ],
             "title": "State Dim"
+          },
+          "trained_on_robot_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trained On Robot Type"
           }
         },
         "required": [
@@ -379,7 +390,8 @@
           "image_features",
           "requires_task",
           "state_dim",
-          "action_dim"
+          "action_dim",
+          "trained_on_robot_type"
         ],
         "title": "CheckpointPolicyConfigResponse",
         "type": "object"
@@ -2505,6 +2517,11 @@
       },
       "MergeRequest": {
         "properties": {
+          "acknowledge_warnings": {
+            "default": false,
+            "title": "Acknowledge Warnings",
+            "type": "boolean"
+          },
           "output_repo_id": {
             "title": "Output Repo Id",
             "type": "string"
@@ -2539,7 +2556,7 @@
         "type": "object"
       },
       "MergeStartResponse": {
-        "description": "merge.py MergeManager.start — unlike the download routes, the\nstarted=False refusals return 200 with the reason in `message`.",
+        "description": "merge.py MergeManager.start — unlike the download routes, the\nstarted=False refusals return 200 with the reason in `message`.\n\n`warnings` is populated only when a merge is refused pending confirmation\n(the sources span more than one arm family): the client shows them and\nre-submits with `acknowledge_warnings=true`. Empty on every other outcome.",
         "properties": {
           "message": {
             "title": "Message",
@@ -2548,6 +2565,14 @@
           "started": {
             "title": "Started",
             "type": "boolean"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [
@@ -7330,7 +7355,7 @@
     },
     "/api/v1/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, and\nthe flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch.",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
         "operationId": "get_checkpoint_policy_config",
         "parameters": [
           {
@@ -12131,7 +12156,7 @@
     },
     "/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, and\nthe flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch.",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
         "operationId": "get_checkpoint_policy_config_jobs__job_id__checkpoints__step__policy_config_get",
         "parameters": [
           {

@@ -143,3 +143,50 @@ def arm_type_of_robot_config(robot_config: object) -> str:
     threading a parallel parameter that could drift out of agreement with it.
     """
     return _ROBOT_TYPE_TO_ARM_TYPE.get(getattr(robot_config, "type", None), "so101")
+
+
+# Human-readable name per arm type, for prose a user reads (merge/fine-tune
+# compatibility warnings). Not localized — the backend never is (see
+# frontend/docs/localization.md).
+ARM_TYPE_LABEL = {"so101": "an SO-101 arm", "maker": "a Maker arm", "metal": "a Metal arm"}
+
+# Substrings that identify an arm family inside a dataset's free-form
+# ``robot_type`` string. "maker"/"metal" are unambiguous; the SO family is
+# every string carrying an ``so100``/``so101`` marker or the bare
+# ``so_follower``/``so_leader`` device names lerobot writes for a bimanual SO
+# rig (``bi_so_follower``).
+_ROBOT_TYPE_STRING_MARKERS = (
+    ("maker", "maker"),
+    ("metal", "metal"),
+    ("so100", "so101"),
+    ("so101", "so101"),
+    ("so-100", "so101"),
+    ("so-101", "so101"),
+    ("so_follower", "so101"),
+    ("so_leader", "so101"),
+)
+
+
+def arm_type_from_robot_type(robot_type: object) -> str | None:
+    """Best-effort arm type for a dataset's ``meta/info.json`` ``robot_type``.
+
+    lerobot writes the recording robot's ``.name`` there — ``so101_follower``,
+    ``bi_maker_follower``, ``metal_follower`` — but a dataset recorded outside
+    this app (or imported from the Hub) can carry anything: ``so100``,
+    ``so-101``, ``aloha``, a custom string, or nothing at all.
+
+    Returns ``None`` — NOT the ``so101`` default ``arm_type_of_robot_config``
+    falls back to — when the string is missing, non-string or unrecognized.
+    The callers here are the merge / fine-tune compatibility warnings, which
+    must stay silent when an arm can't be established rather than raise a false
+    alarm about a community dataset tagged ``so100`` or an untagged one.
+    """
+    if not isinstance(robot_type, str):
+        return None
+    text = robot_type.strip().lower()
+    if not text:
+        return None
+    for marker, arm_type in _ROBOT_TYPE_STRING_MARKERS:
+        if marker in text:
+            return arm_type
+    return None

@@ -320,13 +320,100 @@ def _merge_incompatibility(repo_ids: list[str]) -> str | None:
             ):
                 differing.append(key)
         if differing:
+            # The arm note only makes sense when it's the proprioceptive vectors
+            # that clash — that's the difference two different-DOF robots cause.
+            arm_note = (
+                _arm_shape_note(base, other)
+                if {"observation.state", "action"}.intersection(differing)
+                else ""
+            )
             return (
                 f"Datasets have different features: `{base_id}` vs `{other_id}` "
                 f"differ in {', '.join(differing)}. All datasets must share "
-                "identical features to merge."
+                "identical features to merge." + arm_note
             )
 
     return None
+
+
+def _arm_shape_note(base_info: dict[str, Any], other_info: dict[str, Any]) -> str:
+    """A trailing sentence naming the arm-type difference when two sources'
+    ``robot_type`` strings resolve to different arm families — appended to the
+    feature-mismatch message so an SO-101 (6-DOF) vs Maker/Metal (7-DOF) merge
+    rejection reads as "different robots" rather than a bare "differ in action,
+    observation.state"."""
+    from .arm_capabilities import ARM_TYPE_LABEL, arm_type_from_robot_type
+
+    base_arm = arm_type_from_robot_type(base_info.get("robot_type"))
+    other_arm = arm_type_from_robot_type(other_info.get("robot_type"))
+    if base_arm and other_arm and base_arm != other_arm:
+        return (
+            f" These datasets were recorded on different robots — {ARM_TYPE_LABEL[base_arm]} "
+            f"and {ARM_TYPE_LABEL[other_arm]} — which have different joint counts, so "
+            "their state and action vectors can't be combined."
+        )
+    return ""
+
+
+def _dataset_arm_types(repo_ids: list[str]) -> dict[str, str]:
+    """Normalised arm type for each source whose arm can be established — a local
+    ``meta/info.json`` first, then the Hub's ``meta/info.json`` summary for a
+    source not in the cache. Sources whose ``robot_type`` is missing or
+    unrecognized are simply absent from the result (a warning must be provable,
+    not a guess).
+    """
+    from .arm_capabilities import arm_type_from_robot_type
+
+    arms: dict[str, str] = {}
+    for repo_id in repo_ids:
+        info = _load_info(repo_id)
+        if info is not None:
+            # A local source: trust its info.json even if it has no robot_type
+            # (an imported/community dataset) — don't then go to the Hub for it.
+            robot_type = info.get("robot_type")
+        else:
+            # Not in the cache: one small (cached) meta/info.json GET, the same
+            # shape of Hub probe _merge_source_problem already does per hub-only
+            # source.
+            from .datasets import get_hub_dataset_info
+
+            try:
+                hub_info = get_hub_dataset_info(repo_id)
+            except Exception:  # pragma: no cover — network/offline best-effort
+                hub_info = None
+            robot_type = hub_info.get("robot_type") if hub_info else None
+        arm_type = arm_type_from_robot_type(robot_type)
+        if arm_type is not None:
+            arms[repo_id] = arm_type
+    return arms
+
+
+def _arm_mismatch_warning(repo_ids: list[str]) -> str | None:
+    """A warning if the sources span more than one arm family, else None.
+
+    Advisory, not a hard block: the two CAN families (Maker, Metal) are both
+    7-DOF, so such a merge aggregates cleanly at the file level and the user may
+    know the joint semantics line up. A cross-DOF pair (SO-101 vs a CAN arm) is
+    already refused by ``_merge_incompatibility`` on the state/action shape —
+    this only names the reason. Datasets whose arm can't be established don't
+    count either way.
+    """
+    from .arm_capabilities import ARM_TYPE_LABEL
+
+    arms = _dataset_arm_types(repo_ids)
+    distinct = sorted(set(arms.values()))
+    if len(distinct) < 2:
+        return None
+    groups = "; ".join(
+        f"{', '.join(f'`{r}`' for r in repo_ids if arms.get(r) == arm)} on {ARM_TYPE_LABEL[arm]}"
+        for arm in distinct
+    )
+    return (
+        f"These datasets were recorded on different robot arms — {groups}. Merging them "
+        "makes one dataset whose episodes don't share joint semantics, so a policy trained "
+        "on it learns an average of two robots. Merge anyway only if you know the arms are "
+        "equivalent."
+    )
 
 
 #: Largest weight the UI/API will accept for one source. A fat-fingered "300"
@@ -343,6 +430,11 @@ class MergeRequest(BaseModel):
     #: Stored per episode in the merged dataset and applied at training time — it
     #: costs no extra disk. ``None`` means "all 1" (the pre-weights behaviour).
     source_weights: list[int] | None = None
+    #: Set once the user has seen and accepted an advisory warning (today: the
+    #: sources were recorded on different arm families). A merge that raises such
+    #: a warning refuses with ``started=False`` + ``warnings`` until this is
+    #: true; hard incompatibilities (fps, cameras, feature shape) ignore it.
+    acknowledge_warnings: bool = False
 
 
 def _weights_problem(n_sources: int, weights: list[int] | None) -> str | None:
@@ -583,6 +675,15 @@ class MergeManager:
             if incompat is not None:
                 logger.warning("Rejected merge: incompatible sources %s (%s)", sources, incompat)
                 return {"started": False, "message": incompat}
+            # Advisory (not a hard incompatibility): the sources span more than
+            # one arm family. Refuse once with the warning attached, then let the
+            # same request through when it comes back acknowledged.
+            arm_warning = _arm_mismatch_warning(sources)
+            if arm_warning is not None and not request.acknowledge_warnings:
+                logger.warning("Merge needs confirmation: %s", arm_warning)
+                return {"started": False, "message": arm_warning, "warnings": [arm_warning]}
+            if arm_warning is not None:
+                logger.warning("Proceeding with cross-arm merge (acknowledged): %s", arm_warning)
             self.state = "running"
             self.error = None
             self.output_repo_id = output
