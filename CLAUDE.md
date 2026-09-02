@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository purpose
 
-MakerMods Lab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm (single or bimanual). It exposes teleoperation, dataset recording, calibration, training, inference, and replay as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows. It is a fork of Hugging Face's [leLab](https://github.com/huggingface/leLab), heavily extended by [makermods-robotics](https://github.com/makermods-robotics).
+MakerMods Lab is a FastAPI + React web UI for policy development, wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101, Maker Arm v1 and Metal Arm leader/follower arms (each single or bimanual). It exposes teleoperation, dataset recording, curation, calibration, training, inference, and replay as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows. It is a fork of Hugging Face's [leLab](https://github.com/huggingface/leLab), heavily extended by [makermods-robotics](https://github.com/makermods-robotics).
+
+**Vocabulary:** a trained checkpoint is a **policy** in both the UI and the code. The term "skill" is retired — do not reintroduce it in identifiers, i18n keys, or user-facing copy.
 
 The frontend (React + Vite) lives in [`frontend/`](frontend/). The built bundle in `frontend/dist/` is committed and shipped inside the Python wheel as package data (`frontend.__init__.py` makes setuptools treat it as a package); [`makermodslab/server.py`](makermodslab/server.py) mounts it as `StaticFiles` at `/` so a single `makermodslab` process serves both API and UI on `:8000`.
 

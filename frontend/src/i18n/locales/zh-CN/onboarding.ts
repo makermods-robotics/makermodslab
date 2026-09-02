@@ -9,22 +9,22 @@ export default {
   },
   launchpad: {
     search: {
-      title: "查找技能",
-      description: "按名称搜索技能，或浏览下方的技能。",
+      title: "查找策略",
+      description: "按名称搜索策略，或浏览下方的策略。",
     },
-    skills: {
-      title: "浏览技能",
+    policies: {
+      title: "浏览策略",
       description:
-        "其他人训练并分享的技能 — 可以直接运行，也可以作为你自己技能的起点。",
+        "其他人训练并分享的策略 — 可以直接运行，也可以作为你自己策略的起点。",
     },
-    newSkill: {
-      title: "创建你自己的技能",
+    newPolicy: {
+      title: "创建你自己的策略",
       description:
         "采集数据集、训练策略并部署到机器人 — 全部都在此页面完成。",
     },
     robot: {
       title: "设置你的机器人",
-      description: "添加并配置用于录制和运行技能的机械臂。",
+      description: "添加并配置用于录制和运行策略的机械臂。",
     },
     library: {
       title: "你的库",
@@ -42,7 +42,7 @@ export default {
     },
     deploy: {
       title: "3 · 部署",
-      description: "在你的机器人上运行已训练的技能。",
+      description: "在你的机器人上运行已训练的策略。",
     },
   },
 } as const;

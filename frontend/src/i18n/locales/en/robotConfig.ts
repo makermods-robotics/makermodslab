@@ -79,28 +79,31 @@ export default {
     // aria-labels for the radiogroup; the bimanual grid also picks an arm.
     groupBimanual: "Device and arm",
     groupSingle: "Device",
+    // Row headings on a bimanual robot, one per side.
+    left: "Left",
+    right: "Right",
   },
 
   slotCard: {
     // aria-label and title differ on purpose: the title adds the fix.
-    undetectedLabel: "Saved port not currently detected",
-    undetectedTitle:
-      "Saved port not currently detected — plug in the arm and rescan",
+    undetectedLabel: "Port not detected",
+    undetectedTitle: "Saved port not detected. Plug in the arm and rescan.",
     noPort: "no port assigned",
+    readyLabel: "Ready",
   },
 
   // ---- Port picker, Detect, Wiggle ---------------------------------------
   port: {
     label: "Port",
     select: "Select a port",
-    none: "No arms detected — plug in & refresh",
+    none: "No arms detected. Plug in and rescan.",
     // Badge on a port another arm already holds. Uppercased in English only.
     otherArm: "other arm",
     // aria-label and title differ: the title explains what clearing does.
     clear: "Clear port",
     clearTitle: "Clear port — release it without assigning another",
     // aria-label and title are identical here, so they share one key.
-    rescan: "Rescan ports",
+    rescan: "Rescan",
     detect: "Detect",
     detecting: "Watching…",
     detectTitle:
@@ -108,7 +111,7 @@ export default {
     detectHelp:
       "Identify by hand — swing the arm's base wide to the left AND the right (10–15° past where it started, each way); the port that moves is assigned. Small wiggles won't register.",
     detectLive:
-      "Swing the base of the arm wide — clearly past its starting point both left and right. A small or one-sided wiggle is ignored (that's how bumps are filtered out). The port that sees the motion will be assigned to this arm.",
+      "Swing the base wide, past where it started, both ways. Small or one-sided motion is ignored.",
     // The Maker variants: its follower and leader answer different protocols
     // (CAN vs UART), so detection asks each port what it is instead of asking
     // the user to move something. Only a bimanual rig — two identical arms per
@@ -116,18 +119,32 @@ export default {
     detectHelpMaker:
       "Detected automatically — the Maker arm's follower and leader answer different protocols, so no gesture is needed. On a bimanual rig, swing one arm's base left AND right to say which side it is.",
     detectLiveMaker:
-      "Checking each port for the Maker arm… If two arms answer for this side, swing the base of the one you're assigning wide — clearly past its starting point both left and right.",
+      "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
     // The Metal arm's twin of the two keys above — same probe-first flow
     // (Damiao CAN follower vs UART leader), only the family name differs.
     detectHelpMetal:
       "Detected automatically — the Metal arm's follower and leader answer different protocols, so no gesture is needed. On a bimanual rig, swing one arm's base left AND right to say which side it is.",
     detectLiveMetal:
-      "Checking each port for the Metal arm… If two arms answer for this side, swing the base of the one you're assigning wide — clearly past its starting point both left and right.",
+      "Checking each port. If two arms answer, swing the base of the one you are assigning, both ways.",
     wiggle: "Wiggle",
     wiggling: "Wiggling…",
     wiggleTitle: "Move the gripper on this port to see which arm it is",
     wiggleHelp:
       "Confirms an arm is on this port — briefly drives its gripper so you can see which arm responds.",
+    // Short forms for the icon tooltips that replaced the help paragraphs.
+    // Kept to one or two clauses: a tooltip is read at a glance, and the long
+    // detectHelp/wiggleHelp text above is still what the live panel shows.
+    detectTip:
+      "Swing the base wide, left and right. Small wiggles are ignored.",
+    // The CAN arms answer a protocol probe instead, so there is no gesture to
+    // describe — this only appears on a single-arm CAN robot.
+    detectAuto: "Auto detect",
+    detectTipAuto: "Probes each port. No gesture needed.",
+    wiggleTip: "Drives the gripper so you can see which arm answers.",
+    // The blank first row of every port dropdown, and what an empty slot's
+    // trigger shows. Selecting it clears the port.
+    noneAssigned: "No port",
+    forSlot: "Port for {{slot}}",
     toast: {
       missingPortTitle: "Missing port",
       missingPortWiggle:
@@ -161,7 +178,8 @@ export default {
     detectTitle: "Assign detected port?",
     assignTitle: "Assign port?",
     // <0> is the monospaced port path, <1> the bold target arm label.
-    leadDetect: "Detected <0>{{port}}</0> — assign it to the <1>{{target}}</1>?",
+    leadDetect:
+      "Detected <0>{{port}}</0> — assign it to the <1>{{target}}</1>?",
     leadAssign: "Assign <0>{{port}}</0> to the <1>{{target}}</1>?",
     // <0> and <1> both bold the same arm label; <2> is the mono port path.
     swapClause:
@@ -175,15 +193,16 @@ export default {
 
   // ---- 02 · Calibration files -------------------------------------------
   files: {
-    step: "Calibration files",
+    step: "Calibration",
     calibrateAll: "Calibrate all",
     calibrateAllTitle: "Select every detected arm for auto-calibration",
-    calibrateAllDisabledTitle: "No arms detected — plug in an arm and rescan",
+    calibrateAllDisabledTitle: "No arms detected. Plug in an arm and rescan.",
     // aria-label and title are identical on both folder buttons.
     openLeaderFolder: "Open leader calibrations folder",
     openFollowerFolder: "Open follower calibrations folder",
     leader: "Leader",
     follower: "Follower",
+    calibrate: "Calibrate",
     newCalibration: "New calibration",
     newCalibrationTitle: "Create a new calibration for this arm",
     // Row labels. The parenthetical names LeRobot's device class for the slot
@@ -228,13 +247,18 @@ export default {
     // server's zero_pose_instructions() in makermodslab/zero_calibrate.py.
     zeroPose: {
       instructions:
-        "Move the arm by hand to its zero pose — folded against the base, gripper fully open — then confirm below. Torque is off, so the arm moves freely.",
+        "Move the arm by hand to match the pose above: folded against the base, gripper fully open. Torque is off, so the arm moves freely.",
       instructionsMetal:
-        "Move the arm by hand to its zero pose — standing upright, all joints at 0°, gripper closed — then confirm below. Torque is off, so the arm moves freely.",
+        "Move the arm by hand to match the pose above: standing upright, all joints at 0°, gripper closed. Torque is off, so the arm moves freely.",
       liveAngles: "Live joint angles",
       start: "Set zero pose",
       confirm: "Set zero and save",
       saving: "Setting zero and saving the calibration…",
+      // Caption on the reference-pose slot. The picture is what the user
+      // matches the real arm against, so each family names its own: the two
+      // zero poses are opposites at the gripper.
+      poseImage: "Zero pose: folded, gripper open",
+      poseImageMetal: "Zero pose: upright, gripper closed",
     },
     cancel: "Cancel calibration",
     auto: "Auto-calibrate",
@@ -262,6 +286,20 @@ export default {
     // Label in front of the backend's raw error text, which stays as sent.
     errorLabel: "Error:",
     demoTitle: "Calibration demo",
+    // The one-column flow: mode first, then video, pose, advanced, Start.
+    start: "Start",
+    // Combined instruction + warning shown while sweeping. One alert, not
+    // two: what to do and why the arm is limp belong in the same breath.
+    sweepNote:
+      "Move every joint through its full range, both ways. Torque is off, so the arm is limp. Keep it supported.",
+    autoNote:
+      "Each arm moves on its own to find its joint limits. Keep the area clear.",
+    zeroNote:
+      "Put the arm in the position shown above, then set zero. Torque stays off, so it moves freely.",
+    // Placeholder labels for media not shot yet.
+    videoAuto: "Auto-calibration demo",
+    poseMiddle: "Start pose: middle position",
+    poseAutoStart: "Start pose for auto-calibration",
     videoUnsupported: "Your browser does not support the video tag.",
     videoLink: "Click here to view the calibration video",
     toast: {
@@ -296,9 +334,9 @@ export default {
     titleMulti: "Multi-arm auto-calibration",
     stopSingle: "Stop auto-calibration",
     stopAll: "Stop all auto-calibration",
-    // <0> bolds "at the same time" — the point of the batch.
-    pickerIntro:
-      "Pick the arms to calibrate. Each runs its own hands-off calibration <0>at the same time</0> on its assigned port — one arm failing doesn't stop the others. Ports come from each arm's assignment above; an arm with no port yet can't be picked. Each arm replaces its own existing calibration; rename any of them afterward from the calibration list above.",
+    // Every arm with a detected port is ticked already (the user pressed
+    // "Calibrate all"), so the only thing left to say is how to opt one out.
+    pickerHint: "Untick any arm you want to skip. They run at the same time.",
     portUndetected: "port not detected",
     portMissing: "no port — assign above",
     start_one: "Auto-calibrate {{count}} arm",
@@ -320,14 +358,17 @@ export default {
     dismiss: "Dismiss",
     prompt: {
       // Singular names the arm, plural counts them — different sentences.
-      titleSingle: "Auto-calibrate {{arm}} — it will move",
+      titleSingle: "Auto-calibrate {{arm}}",
       titleFallbackArm: "this arm",
-      titleMulti: "Auto-calibrate multiple arms — they will move",
-      // <0> bolds the "moves under power" safety warning.
+      titleMulti: "Auto-calibrate {{count}} arms",
+      // <0> bolds the "moves on its own" safety warning, which is the whole
+      // point of the dialog. Everything else got cut: what the run does to
+      // the existing calibration is recoverable and reads fine after the
+      // fact, but an arm swinging at an unprepared bench does not.
       bodySingle:
-        "This arm will <0>move on its own under power</0> to find each joint's range. Clear the workspace and keep hands away from it. It replaces its own existing calibration.",
+        "The arm will <0>move on its own</0>. Put it at its resting position and clear the workspace.",
       bodyMulti:
-        "{{count}} arms will <0>move on their own under power</0> at the same time to find each joint's range. Clear the workspace and keep hands away from every arm. Each arm replaces its own existing calibration.",
+        "{{count}} arms will <0>move on their own</0>. Put them at their resting position and clear the workspace.",
       confirm: "Start auto-calibration",
     },
     toast: {
@@ -364,7 +405,7 @@ export default {
 
   // ---- 03 · Attached cameras ---------------------------------------------
   cameras: {
-    step: "Attached cameras",
+    step: "Cameras",
     on: "On",
     off: "Off",
     toggleLabel: "Turn cameras on or off",

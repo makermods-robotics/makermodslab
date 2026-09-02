@@ -3,7 +3,7 @@ export default {
     myLibrary: "My library",
     // Used for both aria-label and title on the same control — one key, two
     // attributes, rather than two keys that could drift apart.
-    openStudio: "Open the skill studio",
+    openStudio: "Open the policy studio",
   },
   hero: {
     // The rotating verbs in the slogan. Order matches WORDS in Hero.tsx.
@@ -14,14 +14,14 @@ export default {
     },
     // <0/> is the rotating verb above. Kept as one phrase so the translator
     // controls word order rather than us concatenating fragments.
-    slogan: "<0/> robot skills",
+    slogan: "<0/> robot policies",
     searchPlaceholder: "Clean my desk…",
-    searchLabel: "Search skills",
+    searchLabel: "Search policies",
   },
-  newSkill: {
-    title: "＋ New Skill",
+  newPolicy: {
+    title: "＋ New Policy",
     subtitle: "Collect, train, deploy — without leaving this page.",
-    aria: "Open the skill studio — collect, train, and deploy a new skill",
+    aria: "Open the policy studio — collect, train, and deploy a new policy",
     steps: {
       collect: {
         label: "1 · Collect",
@@ -33,16 +33,16 @@ export default {
       },
       deploy: {
         label: "3 · Deploy",
-        sub: "run a skill on your robot",
+        sub: "run a policy on your robot",
       },
     },
   },
-  skills: {
-    sectionLabel: "Skills",
-    previous: "Previous skills",
-    next: "Next skills",
-    empty: "No skills match your search.",
-    open: "Open skill {{title}}",
+  policies: {
+    sectionLabel: "Policies",
+    previous: "Previous policies",
+    next: "Next policies",
+    empty: "No policies match your search.",
+    open: "Open policy {{title}}",
     previewAlt: "{{title}} rollout preview",
     previewPlaceholder: "rollout preview",
     comingSoon: "Coming soon",
@@ -52,9 +52,9 @@ export default {
     steps: "{{steps}} steps",
     private: "private",
   },
-  // Curated display names, keyed by the slug in SKILL_NAME_KEYS (SkillCard).
+  // Curated display names, keyed by the slug in POLICY_NAME_KEYS (PolicyCard).
   // The Hub repo ids they map from are data and never appear here.
-  skillNames: {
+  policyNames: {
     sortingSocks: "Sorting socks",
     openingBottleCaps: "Opening bottle caps",
     foldingTowels: "Folding towels",

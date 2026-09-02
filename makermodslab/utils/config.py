@@ -481,7 +481,7 @@ _ROBOT_LIST_FIELDS = ("cameras",)
 
 # Auto-calibration drive torque, as a percentage of full torque. Threaded into
 # the vendored autocal subprocess as --torque-limit (percent × 10; see
-# makermodslab/auto_calibrate.py). Regular sessions (teleop/record/skill runs) run
+# makermodslab/auto_calibrate.py). Regular sessions (teleop/record/policy runs) run
 # at stock LeRobot torque and ignore this value (makermodslab/motor_power.py
 # reset_torque_limit). Bounded below because under ~10% the arm can't reliably
 # move its own weight; default = the vendored script's own DEFAULT_TORQUE_LIMIT

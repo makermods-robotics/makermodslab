@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -91,16 +90,19 @@ interface CameraConfigurationProps {
   cameras: CameraConfig[];
   onCamerasChange: (cameras: CameraConfig[]) => void;
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>; // Ref to expose stream release function
+  /** The section's on/off switch. False renders nothing and drops every
+   * stream, but the component stays MOUNTED — see the note on `streamsOff`. */
+  active?: boolean;
 }
 
 const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   cameras,
   onCamerasChange,
   releaseStreamsRef,
+  active = true,
 }) => {
   const { toast } = useToast();
   const { t } = useTranslation();
-  const eyebrow = useEyebrowClass();
 
   // Recording start pauses the previews via releaseStreamsRef; gate camera
   // enumeration on the same flag so the getUserMedia/devicechange probing fully
@@ -108,11 +110,20 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   // keep index 0 open and starve the recorder (OpenCVCamera(0) actual_fps=5.0).
   const [streamsPaused, setStreamsPaused] = useState(false);
 
+  // Switching the section off must release the devices, but it must NOT throw
+  // away what the user picked. The parent therefore keeps this component
+  // mounted and flips `active` instead of unmounting it: the streams and the
+  // enumeration probe stop either way, while `selectedCameraIndex`,
+  // `nameChoice` and `cameraName` survive, so switching back on returns to the
+  // same camera with its preview live. Unmounting reset all three and made the
+  // user re-pick the camera after every off/on cycle.
+  const streamsOff = streamsPaused || !active;
+
   const {
     cameras: availableCameras,
     isLoading: isLoadingCameras,
     refresh: refreshCameras,
-  } = useAvailableCameras({ enabled: !streamsPaused });
+  } = useAvailableCameras({ enabled: !streamsOff });
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
   // Tracks which name-picker option is active: "" (none yet), one of
@@ -311,44 +322,48 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   }, [releaseStreamsRef, releaseAllCameraStreams]);
 
 
+  // Every hook above runs unconditionally; only the markup is skipped. That is
+  // what lets the section switch off without losing the pending camera.
+  if (!active) return null;
+
   return (
     <div className="space-y-4">
-      {/* Cameras is a repeater, not a single labelled control, so it keeps an
-          eyebrow heading — the studio's one exception to the flat rule. */}
-      <h3 className={eyebrow}>{t("recording.cameras.heading")}</h3>
+      {/* No heading here: the only caller (the robot settings dialog) already
+          heads this section, and a second "Cameras" title under it was pure
+          duplication. */}
 
-      {/* Add Camera Section */}
-      <div className="bg-muted/50 rounded-lg p-4 space-y-4">
-        <h4 className="text-sm font-medium text-foreground">
-          {t("recording.cameras.addTitle")}
-        </h4>
+      {/* Add a camera */}
+      <div className="space-y-3 rounded-lg border border-border bg-muted/40 p-4">
+        <div className="flex items-center gap-2">
+          <h4 className="text-sm font-medium text-foreground">
+            {t("recording.cameras.addTitle")}
+          </h4>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => refreshCameras()}
+            disabled={isLoadingCameras}
+            className="ml-auto h-7 w-7 text-muted-foreground hover:text-foreground"
+            title={t("recording.cameras.rescanTooltip")}
+            aria-label={t("recording.cameras.rescanLabel")}
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${isLoadingCameras ? "animate-spin" : ""}`}
+            />
+          </Button>
+        </div>
 
         <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label className="text-sm font-medium text-muted-foreground">
-              {t("recording.cameras.availableLabel")}
-            </Label>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={() => refreshCameras()}
-              disabled={isLoadingCameras}
-              className="h-6 w-6 text-muted-foreground hover:text-foreground"
-              title={t("recording.cameras.rescanTooltip")}
-              aria-label={t("recording.cameras.rescanLabel")}
-            >
-              <RefreshCw
-                className={`w-3.5 h-3.5 ${isLoadingCameras ? "animate-spin" : ""}`}
-              />
-            </Button>
-          </div>
           <Select
             value={selectedCameraIndex}
             onValueChange={setSelectedCameraIndex}
             disabled={isLoadingCameras}
           >
-            <SelectTrigger className="bg-background border-border text-foreground">
+            <SelectTrigger
+              aria-label={t("recording.cameras.availableLabel")}
+              className="bg-background border-border text-foreground"
+            >
               <SelectValue
                 placeholder={
                   isLoadingCameras
@@ -390,26 +405,30 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
           </Select>
         </div>
 
-        {/* Live preview appears as soon as a camera is selected; naming +
-            confirmation happens alongside it. */}
+        {/* Preview on top, then naming and confirmation on one line under it.
+            The preview is width-capped: at the card's full width a 4:3 box is
+            ~490px tall and swallows the controls entirely. */}
         {selectedCamera && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="bg-card rounded-lg border border-border overflow-hidden">
+          <div className="space-y-2">
+            <div className="overflow-hidden rounded-md border border-border bg-card">
               <CameraStreamBox
                 cameraIndex={selectedCamera.index}
                 uniqueId={selectedCamera.uniqueId}
-                paused={streamsPaused}
+                paused={streamsOff}
+                aspectClassName="aspect-video"
               />
             </div>
 
-            <div className="flex flex-col justify-center gap-4">
+            <div className="space-y-2">
               <div className="space-y-2">
-                <Label className="text-sm font-medium text-muted-foreground">
-                  {t("recording.cameras.nameLabel")}{" "}
-                  <span className="text-warn">*</span>
-                </Label>
+                {/* No visible label: the placeholder already reads "Select a
+                    name", and the hint below says the camera needs one. */}
+                <div className="flex items-center gap-2">
                 <Select value={nameChoice} onValueChange={handleNameChoice}>
-                  <SelectTrigger className="bg-background border-border text-foreground">
+                  <SelectTrigger
+                    aria-label={t("recording.cameras.nameLabel")}
+                    className="min-w-0 flex-1 bg-background border-border text-foreground"
+                  >
                     <SelectValue
                       placeholder={t("recording.cameras.namePlaceholder")}
                     />
@@ -443,6 +462,17 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                     </SelectItem>
                   </SelectContent>
                 </Select>
+                {/* Deliberately NOT disabled when the name is missing: a dead
+                    button can't explain itself, so clicking runs addCamera's
+                    validation and its toast says what's missing. */}
+                <Button
+                  onClick={addCamera}
+                  className="shrink-0 bg-primary text-primary-foreground hover:bg-primary/90"
+                >
+                  <Plus className="mr-1.5 h-4 w-4" />
+                  {t("recording.cameras.addButton")}
+                </Button>
+                </div>
                 {nameChoice === CAMERA_NAME_CUSTOM && (
                   <Input
                     value={cameraName}
@@ -452,23 +482,12 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                     className="bg-background border-border text-foreground"
                   />
                 )}
+                {!cameraName.trim() && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("recording.cameras.nameRequiredHint")}
+                  </p>
+                )}
               </div>
-
-              {/* Deliberately NOT disabled when the name is missing: a dead
-                  button can't explain itself, so clicking runs addCamera's
-                  validation and its toast says what's missing. */}
-              <Button
-                onClick={addCamera}
-                className="bg-primary text-primary-foreground hover:bg-primary/90"
-              >
-                <Plus className="w-4 h-4 mr-2" />
-                {t("recording.cameras.addButton")}
-              </Button>
-              {!cameraName.trim() && (
-                <p className="text-xs text-muted-foreground">
-                  {t("recording.cameras.nameRequiredHint")}
-                </p>
-              )}
             </div>
           </div>
         )}
@@ -483,13 +502,16 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             })}
           </h4>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
+          {/* Three across once there is room: a two-up grid in this dialog
+              renders ~350px tiles, which is bigger than the pre-add preview
+              and turns four cameras into a wall of video. */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {cameras.map((camera) => (
               <CameraPreview
                 key={camera.id}
                 camera={camera}
                 connected={isCameraConnected(camera, availableCameras)}
-                paused={streamsPaused}
+                paused={streamsOff}
                 onRemove={() => removeCamera(camera.id)}
                 onUpdate={(updates) => updateCamera(camera.id, updates)}
               />
@@ -499,10 +521,10 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       )}
 
       {cameras.length === 0 && (
-        <div className="text-center py-8 text-muted-foreground">
-          <Camera className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
-          <p>{t("recording.cameras.emptyState")}</p>
-        </div>
+        <p className="flex items-center justify-center gap-2 py-2 text-sm text-muted-foreground">
+          <Camera className="h-4 w-4 shrink-0" />
+          {t("recording.cameras.emptyState")}
+        </p>
       )}
     </div>
   );
@@ -515,6 +537,10 @@ interface CameraStreamBoxProps {
   /** Shown when there's no index to stream. Distinguishes "nothing picked yet"
    * (dropdown preview) from "this configured camera is gone" (camera card). */
   emptyLabel?: string;
+  /** Frame shape. Configured cameras keep the 4:3 of the sensor; the wide
+   * pre-add preview overrides it, because a full-width 4:3 box in this dialog
+   * is ~490px tall and buries the controls under it. */
+  aspectClassName?: string;
 }
 
 /** Live preview for a camera. Used both for the pre-add preview (as soon as
@@ -535,6 +561,7 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
   uniqueId,
   paused,
   emptyLabel,
+  aspectClassName = "aspect-[4/3]",
 }) => {
   const { t } = useTranslation();
   const showStream = !paused && cameraIndex !== undefined;
@@ -542,7 +569,7 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
   // live language instead of freezing whatever loaded first.
   const emptyText = emptyLabel ?? t("recording.cameras.noneSelected");
   return (
-    <div className="aspect-[4/3] bg-muted relative">
+    <div className={`${aspectClassName} bg-muted relative`}>
       {showStream ? (
         <BackendCameraStream
           cameraIndex={cameraIndex}

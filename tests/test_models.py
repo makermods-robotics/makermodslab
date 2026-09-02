@@ -3127,7 +3127,7 @@ def test_hub_model_info_maps_expanded_fields() -> None:
 
 
 def test_hub_model_info_reads_episodes_from_final_checkpoint_train_config() -> None:
-    """dataset_episodes for a Hub skill comes from its final checkpoint's
+    """dataset_episodes for a Hub policy comes from its final checkpoint's
     train_config.json — a file read separate from the card-metadata dataset
     name, since the Hub card only ever carries the repo id, not episode
     granularity."""

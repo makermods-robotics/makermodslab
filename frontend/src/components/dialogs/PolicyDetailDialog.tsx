@@ -25,15 +25,15 @@ import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelInfo, ModelItem, getModelInfo } from "@/lib/modelsApi";
 import { getDatasetInfo } from "@/lib/replayApi";
 import {
-  SkillBadgePill,
-  classifySkill,
+  PolicyBadgePill,
+  classifyPolicy,
   formatCount,
-  isWipSkillId,
-  skillDisplayAuthorLabel,
-  skillDisplayTitle,
-  skillNamespace,
-  skillThumbnail,
-} from "@/components/launchpad/SkillCard";
+  isWipPolicyId,
+  policyDisplayAuthorLabel,
+  policyDisplayTitle,
+  policyNamespace,
+  policyThumbnail,
+} from "@/components/launchpad/PolicyCard";
 
 const formatBytes = (bytes: number | null | undefined): string => {
   if (bytes == null) return "";
@@ -43,21 +43,21 @@ const formatBytes = (bytes: number | null | undefined): string => {
   return `${bytes} B`;
 };
 
-export interface SkillDetailDialogProps {
+export interface PolicyDetailDialogProps {
   model: ModelItem | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
 /**
- * Skill detail — the marketplace's connective tissue. Shows badges, author, the
+ * Policy detail — the marketplace's connective tissue. Shows badges, author, the
  * real stats the payload carries (policy type, steps, base dataset lineage,
  * size), and the three market actions: Run on the corner robot (→ Deploy panel,
  * prefilled), Fine-tune (→ Train panel, base prefilled), and a Hub link. Likes
  * are display-only text — the API supports neither a count nor a like action, so
  * nothing is fabricated and there is no Like button.
  */
-const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
+const PolicyDetailDialog: React.FC<PolicyDetailDialogProps> = ({
   model,
   open,
   onOpenChange,
@@ -72,7 +72,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   const username = auth.status === "authenticated" ? auth.username : null;
   // The robot's own name is data; only the no-robot-selected fallback is copy.
-  const robotName = selectedRecord?.name ?? t("dialogs.skillDetail.robotFallback");
+  const robotName = selectedRecord?.name ?? t("dialogs.policyDetail.robotFallback");
 
   // Lazily enrich with /models/info while the dialog is open — a hub-only row's
   // list entry has null dataset/steps that model_info can recover (base dataset
@@ -80,7 +80,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   // A WIP preview has no repo behind it, so there is nothing to enrich and the
   // lookup would only 404 into the silent catch below.
   useEffect(() => {
-    if (!open || !model || isWipSkillId(model.id)) {
+    if (!open || !model || isWipPolicyId(model.id)) {
       setInfo(null);
       return;
     }
@@ -116,13 +116,13 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   if (!model) return null;
 
-  const isWip = isWipSkillId(model.id);
-  const badge = isWip ? "wip" : classifySkill(model, username);
-  const title = skillDisplayTitle(t, model);
-  const author = skillDisplayAuthorLabel(t, model);
+  const isWip = isWipPolicyId(model.id);
+  const badge = isWip ? "wip" : classifyPolicy(model, username);
+  const title = policyDisplayTitle(t, model);
+  const author = policyDisplayAuthorLabel(t, model);
   // "by <org>" reads right only for a real namespace — a bare local run and a
   // WIP preview both carry a standalone label instead.
-  const hasAuthor = !isWip && skillNamespace(model) !== null;
+  const hasAuthor = !isWip && policyNamespace(model) !== null;
   const policyType = info?.policy_type ?? model.policy_type;
   const policy = policyType ? policyTypeDisplayName(policyType) : null;
   const steps = info?.steps ?? model.steps;
@@ -135,9 +135,9 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   // `steps` and the byte size arrive pre-formatted — the catalog only supplies
   // the words around them.
   if (steps != null)
-    stats.push(t("dialogs.skillDetail.steps", { steps: formatCount(steps) }));
+    stats.push(t("dialogs.policyDetail.steps", { steps: formatCount(steps) }));
   if (sizeBytes != null) stats.push(formatBytes(sizeBytes));
-  if (model.private) stats.push(t("dialogs.skillDetail.private"));
+  if (model.private) stats.push(t("dialogs.policyDetail.private"));
 
   // Only a Hub-ONLY model needs the repo-id (lazy-import) path. A model with a
   // local copy (`local` or `both`) already has a job registry entry — its run
@@ -182,38 +182,38 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
         </DialogHeader>
 
         <div className="grid gap-5 sm:grid-cols-[1.2fr_1fr]">
-          {skillThumbnail(model) ? (
+          {policyThumbnail(model) ? (
             <img
-              src={skillThumbnail(model)}
-              alt={t("dialogs.skillDetail.previewAlt", { title })}
+              src={policyThumbnail(model)}
+              alt={t("dialogs.policyDetail.previewAlt", { title })}
               className="aspect-[4/3] w-full rounded-md object-cover"
             />
           ) : (
             <div
               className="media-slot aspect-[4/3] w-full"
-              data-label={t("dialogs.skillDetail.previewPlaceholder")}
+              data-label={t("dialogs.policyDetail.previewPlaceholder")}
             />
           )}
           <div className="flex flex-col">
             <div className="mb-2 flex flex-wrap items-center gap-1.5">
-              <SkillBadgePill badge={badge} />
+              <PolicyBadgePill badge={badge} />
               {model.source === "both" && (
                 <span
                   className={cn(
                     "rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold text-muted-foreground",
                     // `uppercase` does nothing to Chinese, but the
                     // letter-spacing that pairs with it does — both come off
-                    // together (mirrors SkillBadgePill).
+                    // together (mirrors PolicyBadgePill).
                     isCaselessScript(language) ? "" : "uppercase tracking-[0.06em]",
                   )}
                 >
-                  {t("dialogs.skillDetail.localAndHub")}
+                  {t("dialogs.policyDetail.localAndHub")}
                 </span>
               )}
             </div>
 
             <p className="mb-1 font-mono text-xs text-muted-foreground">
-              {hasAuthor ? t("dialogs.skillDetail.byAuthor", { author }) : author}
+              {hasAuthor ? t("dialogs.policyDetail.byAuthor", { author }) : author}
             </p>
             {stats.length > 0 && (
               <p className="mb-2 text-sm text-muted-foreground">
@@ -224,7 +224,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
               <div className="mb-3">
                 <p className="text-sm text-muted-foreground">
                   <Trans
-                    i18nKey="dialogs.skillDetail.trainedOn"
+                    i18nKey="dialogs.policyDetail.trainedOn"
                     values={{ dataset }}
                     components={[
                       <span key="0" className="text-foreground" />,
@@ -235,11 +235,11 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
                 {datasetEpisodes && (
                   <p className="text-xs text-muted-foreground">
                     {datasetTotalEpisodes != null
-                      ? t("dialogs.skillDetail.episodeSubsetOfTotal", {
+                      ? t("dialogs.policyDetail.episodeSubsetOfTotal", {
                           used: datasetEpisodes.length,
                           total: datasetTotalEpisodes,
                         })
-                      : t("dialogs.skillDetail.episodeSubset", {
+                      : t("dialogs.policyDetail.episodeSubset", {
                           used: datasetEpisodes.length,
                         })}
                   </p>
@@ -250,13 +250,13 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
             <div className="mt-auto flex flex-col gap-2 pt-2">
               {isWip ? (
                 <p className="rounded-md border border-warn/40 px-3 py-2 text-sm text-warn">
-                  {t("dialogs.skillDetail.notTrained")}
+                  {t("dialogs.policyDetail.notTrained")}
                 </p>
               ) : (
                 <>
                   <Button onClick={handleRun} className="w-full gap-2">
                     <Play className="h-4 w-4" />
-                    {t("dialogs.skillDetail.run", { robot: robotName })}
+                    {t("dialogs.policyDetail.run", { robot: robotName })}
                   </Button>
                   {/* Between running and fine-tuning, because that is the real
                       order: fine-tuning needs data the operator does not have
@@ -267,7 +267,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
                     className="w-full gap-2"
                   >
                     <GraduationCap className="h-4 w-4" />
-                    {t("dialogs.skillDetail.coach")}
+                    {t("dialogs.policyDetail.coach")}
                   </Button>
                   <Button
                     variant="outline"
@@ -275,14 +275,14 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
                     className="w-full gap-2"
                   >
                     <Sparkles className="h-4 w-4" />
-                    {t("dialogs.skillDetail.fineTune")}
+                    {t("dialogs.policyDetail.fineTune")}
                   </Button>
                 </>
               )}
               <div className="flex gap-2">
                 <span className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
                   <Heart className="h-4 w-4" />
-                  {t("dialogs.skillDetail.likesUnavailable")}
+                  {t("dialogs.policyDetail.likesUnavailable")}
                 </span>
                 {hubRepoId && (
                   <a
@@ -292,7 +292,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
                     className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm text-foreground transition-colors hover:bg-accent"
                   >
                     <ExternalLink className="h-4 w-4" />
-                    {t("dialogs.skillDetail.viewOnHub")}
+                    {t("dialogs.policyDetail.viewOnHub")}
                   </a>
                 )}
               </div>
@@ -304,4 +304,4 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   );
 };
 
-export default SkillDetailDialog;
+export default PolicyDetailDialog;

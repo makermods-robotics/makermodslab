@@ -139,7 +139,7 @@ def friendly_hint(error_text: str | None) -> str | None:
         )
     if "missing motor ids" in low or "motor check failed" in low:
         return (
-            "A follower motor isn't responding (often the gripper, id 6). If a skill was holding an object "
+            "A follower motor isn't responding (often the gripper, id 6). If a policy was holding an object "
             "it likely overloaded — remove it, power-cycle the arm, then try teleoperation first."
         )
     # Servo bus comms: lerobot's motors_bus raises these as ConnectionError with

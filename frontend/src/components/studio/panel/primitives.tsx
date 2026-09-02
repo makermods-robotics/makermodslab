@@ -42,7 +42,7 @@ export const PanelHeader: React.FC<{
 
 /**
  * The skin every panel's entry control wears. Exported separately because
- * Deploy's entry is a real <Select> (picking a skill IS the value, it doesn't
+ * Deploy's entry is a real <Select> (picking a policy IS the value, it doesn't
  * just open a form), so its SelectTrigger has to wear this rather than render
  * a PanelEntryControl.
  */
@@ -63,7 +63,7 @@ export const PanelEntryDot: React.FC<{ className: string }> = ({
 /**
  * The panels' shared entry control — a quiet select-style row (same height,
  * border, and radius as a shadcn SelectTrigger) so Collect's "Record new
- * dataset", Train's "Start a new training", and Deploy's real skill <Select>
+ * dataset", Train's "Start a new training", and Deploy's real policy <Select>
  * read as the same control. Used as a CollapsibleTrigger (asChild) that
  * slides the panel's form open in place.
  */

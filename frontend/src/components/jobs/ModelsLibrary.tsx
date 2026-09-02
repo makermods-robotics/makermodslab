@@ -42,7 +42,7 @@ const FILTERS = [
 ] as const satisfies ReadonlyArray<{ key: ModelsFilter; label: string }>;
 
 interface ModelsLibraryProps {
-  /** Select this model (job record + optional checkpoint step) as the skill
+  /** Select this model (job record + optional checkpoint step) as the policy
    * to deploy — wired to the Deploy panel's picker state. */
   onPick: (job: JobRecord, step: number | null) => void;
 }
@@ -172,7 +172,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
             className="h-7 shrink-0 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
           >
             <Download className="h-3.5 w-3.5" />
-            {t("jobs.modelsLibrary.importSkill")}
+            {t("jobs.modelsLibrary.importPolicy")}
           </Button>
         }
       />

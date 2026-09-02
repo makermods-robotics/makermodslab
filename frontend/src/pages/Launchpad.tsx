@@ -3,13 +3,12 @@ import { useTranslation } from "react-i18next";
 import { ChevronUp, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
-import LanguageSwitcher from "@/components/LanguageSwitcher";
 import Footer from "@/components/Footer";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
 import Hero from "@/components/launchpad/Hero";
-import SkillSlider from "@/components/launchpad/SkillSlider";
-import NewSkillBanner from "@/components/launchpad/NewSkillBanner";
+import PolicySlider from "@/components/launchpad/PolicySlider";
+import NewPolicyBanner from "@/components/launchpad/NewPolicyBanner";
 import ActivityStrip from "@/components/launchpad/ActivityStrip";
 import LibrarySheet from "@/components/launchpad/LibrarySheet";
 import RobotCorner from "@/components/launchpad/RobotCorner";
@@ -27,7 +26,7 @@ const ONBOARDING_KEY = "makerlab:onboarding-completed";
 
 /**
  * Layout D "Launchpad" — the single dashboard route. Marketplace-first hero
- * with the skill slider, the "+ New Skill" banner that slides the studio up,
+ * with the policy slider, the "+ New Policy" banner that slides the studio up,
  * and the always-visible robot corner. Config happens in dialogs; live
  * hardware sessions live on their own immersive routes.
  */
@@ -65,7 +64,6 @@ const Launchpad = () => {
             <Library className="h-3.5 w-3.5" />
             {t("launchpad.header.myLibrary")}
           </Button>
-          <LanguageSwitcher />
           {/* Wrapped (rather than tagging RobotCorner.tsx itself) since the
               same component also renders inside StudioOverlay's header —
               tagging it directly would give the tour two matching elements. */}
@@ -81,16 +79,16 @@ const Launchpad = () => {
         <CollectHandoff />
         <CoachHandoff />
         <Hero search={search} onSearchChange={setSearch} />
-        <SkillSlider search={search} />
+        <PolicySlider search={search} />
         <ActivityStrip />
         <div className="w-full">
-          <NewSkillBanner />
+          <NewPolicyBanner />
         </div>
       </main>
 
       <Footer />
 
-      {/* Pull up to open the skill studio — the studio's own header carries
+      {/* Pull up to open the policy studio — the studio's own header carries
           the mirrored "pull down" arrow back to here. Pinned to the
           viewport (not just after Footer in normal flow) so it's reachable
           without scrolling even when the hero/slider/banner stack above is

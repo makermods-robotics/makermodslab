@@ -1611,7 +1611,7 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
 
 def is_dataset_private(repo_id: str) -> bool | None:
     """Whether `repo_id` is a private Hub dataset repo — used to decide
-    whether a skill's training-episode provenance may be shown (see
+    whether a policy's training-episode provenance may be shown (see
     models._gate_dataset_episodes). None when it can't be resolved (offline,
     doesn't exist, or no access — including a dataset that was never pushed to
     the Hub at all): callers must treat that as private, not as "public",
