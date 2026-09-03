@@ -2669,6 +2669,36 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
     assert status["saved_episodes"] == 2
 
 
+def test_worker_invalidates_dataset_listing_after_saving_episodes(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A session that saved episodes must drop the cached /datasets listing so
+    the new dataset appears on the next fetch instead of after the 45s TTL. The
+    happy path used to skip this — only the discard / zero-episode branches
+    invalidated — so a dataset recorded right after a listing load stayed
+    invisible until the TTL lapsed or an unrelated mutation cleared the cache."""
+    import time
+
+    import makermodslab.datasets as datasets
+    import makermodslab.record as record
+
+    class _FakeDataset:
+        num_episodes = 1
+
+    def _clean_work(cfg, events, **kwargs):
+        record.current_phase = "completed"
+        record.saved_episodes = 1
+        return _FakeDataset()
+
+    with datasets._listing_cache_lock:
+        datasets._listing_cache = {"at": time.monotonic(), "value": [{"repo_id": "old/ds"}]}
+
+    _start_session_with_fake_work(monkeypatch, _clean_work)
+
+    with datasets._listing_cache_lock:
+        assert datasets._listing_cache is None
+
+
 # ---------------------------------------------------------------------------
 # I8: shutdown_event() has no UI to poll and no "press Stop again" gesture
 # available, but handle_stop_recording()'s first call is deliberately

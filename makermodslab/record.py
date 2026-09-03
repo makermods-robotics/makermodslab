@@ -915,6 +915,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                         request.dataset_repo_id, request.resume
                     )
 
+                # The session changed the local dataset listing — a fresh
+                # dataset on the happy path, a removed one on the discard
+                # branches above (whose helpers also invalidate, so this is
+                # idempotent). Drop the cached /datasets listing BEFORE the
+                # release hint so a client that refetches on the hint sees the
+                # new state instead of a <=45s-stale one.
+                invalidate_dataset_listing_cache()
+
                 recording_active = False
                 # Final release: record_with_web_events' own finally already
                 # released torque and disconnected before this ran, so the
