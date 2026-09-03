@@ -92,6 +92,7 @@ from .dagger_protocol import (
     parse_event as parse_dagger_event,
     parse_fields as parse_dagger_fields,
 )
+from .datasets import invalidate_dataset_listing_cache
 from .eval_protocol import (
     CMD_EPISODE,
     CMD_QUIT,
@@ -3672,6 +3673,13 @@ def _finalise_coaching_locked(rc: int | None, cs: _CoachSession, *, aborted: boo
         # the chance to record something, and a directory we cannot explain is
         # one we keep. See `_discard_empty_coaching_dataset` for the guards.
         _discard_empty_coaching_dataset(cs)
+    # The corrections dataset (kept, or just removed above) changed the local
+    # /datasets listing. Drop its cache before `_go_idle_locked` emits the
+    # release hint so a client refetching on the hint sees the new state. Skip
+    # it when the runner never reported a repo id — nothing reached disk, so a
+    # drop would only force a needless Hub re-fan-out.
+    if cs.dataset_repo_id is not None:
+        invalidate_dataset_listing_cache()
     _go_idle_locked()
     _last_result = {
         "inference_active": False,
