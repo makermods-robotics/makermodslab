@@ -167,6 +167,8 @@ export default {
         "Training on {{used}} of {{total}} episodes — adjust which ones from this dataset's viewer in My Library.",
       // aria-label and title on the same button.
       choose: "Choose dataset",
+      // Placeholder on the picker trigger before a dataset is chosen.
+      pick: "Pick a dataset",
       // <0> is the mono repo-id span; {{repoId}} is the typed Hub id.
       useHub: "Use <0>{{repoId}}</0> from the Hub",
       useHubHint: "Public dataset — training fetches it on demand.",
@@ -174,18 +176,8 @@ export default {
       noMatches:
         "No matching datasets. Type a full <0>org/name</0> id to use any public Hugging Face dataset.",
       hint: "Yours, or any public Hugging Face dataset.",
-      row: {
-        // Abbreviated episode count on a search result. {{episodes}} rather
-        // than {{count}}: this is a compact badge with no plural form.
-        episodes: "{{episodes}} ep",
-        // Source marker for a Hub-only row. Product name — same in every
-        // language, keyed so the two markers have one uniform shape.
-        hub: "Hub",
-        // Compact badge: this dataset carries per-episode sampling weights.
-        weighted: "weighted",
-        weightedTitle:
-          "Carries per-episode sampling weights — some episodes are sampled more often during training",
-      },
+      // The per-row markers (episode count / weighted / Hub) live with the
+      // picker that renders them now: `landing.datasetPicker.row.*`.
     },
     startingPoint: {
       label: "Starting point",
@@ -230,6 +222,12 @@ export default {
 
   deploy: {
     title: "Run",
+    // The panel's entry control — the opener that slides the run form open,
+    // matching collect.entry / train.entry.
+    entry: "Run a policy",
+    policy: {
+      label: "Policy *",
+    },
     picker: {
       placeholder: "Pick a policy",
       loading: "Loading policies…",
@@ -237,8 +235,8 @@ export default {
       // Shown INSTEAD of `empty` when the listing could not be fetched —
       // an outage must not read as "you have no policies".
       error: "Couldn’t load policies. Check the server and try again.",
-      // Badge on a run that exited non-zero but left usable weights.
-      failedBadge: "failed run",
+      // The "failed run" row badge lives with the picker that renders it now:
+      // `landing.modelPicker.failedBadge`.
       hubDegraded:
         "Hub unreachable — showing your local policies and the last Hub listing.",
       // aria-label and title on the same button.
@@ -251,7 +249,9 @@ export default {
       local: "local",
       both: "local · hub",
     },
-    intro: "Run this policy on your robot, then start inference.",
+    // The run form's one-line brief, in the slot and voice Train uses.
+    intro:
+      "Pick a policy and its checkpoint, set how long it runs, and check the cameras — then start.",
     noRobot:
       "Select a robot to run on — use the robot menu in the top-right corner of this window.",
     // <0> wraps the robot name; {{gap}} is the rendered follower-scoped setup
@@ -321,6 +321,8 @@ export default {
     checkpoint: {
       label: "Checkpoint",
       none: "No checkpoints available for this policy yet.",
+      // Placeholder on the disabled dropdown shown before a policy is picked.
+      pickPolicyFirst: "Pick a policy first",
     },
     // Checkpoint/robot arm-count mismatch. Each branch is one complete
     // sentence pair so word order is the translator's to choose. <0> is the
@@ -336,7 +338,13 @@ export default {
       label: "Task description",
       placeholder: "e.g., pick up the red block",
       // {{policyType}} is the policy identifier (act, smolvla, …) — data.
+      // The field is always shown, so the helper answers "is this even read?"
+      // in all three states: no policy picked yet, conditioned, not conditioned.
       hint: "This policy is language-conditioned ({{policyType}}).",
+      hintUnknown:
+        "Only language-conditioned policies use this — pick a policy to see whether yours does.",
+      hintNotConditioned:
+        "This policy ({{policyType}}) isn't language-conditioned — it ignores this.",
       // Appended to `hint` when the task was auto-filled from the checkpoint's
       // own training dataset. Leading space is added by the caller.
       prefilled: "Filled in from the dataset it was trained on.",
@@ -397,6 +405,17 @@ export default {
       disconnected: "Disconnected — reconnect it before starting",
       select: "Select a camera",
       robotHasNone: "This robot has no cameras — add them in Robot settings",
+      // Empty state of the read-only camera list when no robot is selected.
+      noRobot: "Select a robot to see its cameras.",
+      // A camera the checkpoint names that the robot has nothing matching.
+      // <0> emphasises the name; the name itself is DATA (the robot record's
+      // own key), interpolated, never translated.
+      unmatched:
+        "The policy expects camera <0>{{name}}</0> but this robot has no camera named “{{name}}” — rename one in Robot settings.",
+      // Matched by name, but the robot captures at a different size than the
+      // checkpoint trained at. All four numbers are raw pixel dimensions.
+      resolutionMismatch:
+        "<0>{{name}}</0> is set to {{robotWidth}}×{{robotHeight}} in Robot settings, but the policy trained at {{policyWidth}}×{{policyHeight}} — the run captures at the policy's size.",
     },
     thumbnail: {
       // The preview tile's two placeholder states.

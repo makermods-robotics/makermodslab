@@ -585,3 +585,51 @@ The frontend, and only the deviations from §6 and the S3.3 plan's §7 touch lis
 - **`useSessionHeartbeat` and `robotSetupGap` needed no change**, as predicted:
   the first keys off `session.id` alone, and remote inference passes
   `scope: "follower"` like inference and replay.
+
+### After the studio-rework merge (2026-09-03)
+
+§6 named the rework as slice 3's live invalidation risk. It landed
+(`feat/studio-panels-rework`, PR #107) and the merge cost was three conflicted
+files — `DeployPanel.tsx` and the two `studio` catalogs. The prediction held:
+nothing under `components/remote-inference/` changed, and the mount point moved
+rather than the surface. What moved:
+
+- **The run modes still live in `RunVerbs`, in the same place.** The rework's
+  opener slides a run FORM open under a `PanelEntryControl`; the verb row stays
+  below the form, outside the collapsible, and still launches on press. The 2x2
+  grid stands, so "Run it remotely" is where S3.4 put it.
+- **`<RemoteInferenceBlock>` now lives INSIDE the run form** (the
+  `CollapsibleContent`), between the engine picker and the camera list — the
+  same relative position, one container deeper. Its own visibility rule is
+  unchanged (`runMode === "remote" || remoteActive || remoteStatus?.exited`).
+- **The form is forced open while `remoteActive`.** `open={formOpen ||
+  remoteActive}` on the `Collapsible`, and the same expression on the
+  `PanelEntryControl` so the chevron does not claim the form is shut. Remote
+  inference is the one mode whose live surface — telemetry and, crucially, its
+  Stop — is inline in this panel rather than in the `InferenceSessionDialog` the
+  local modes open, so a collapsed form would leave an energized arm with no
+  Stop on screen. Cost: the entry control is inert for the length of a remote
+  run. The alternative considered and rejected was mounting the block outside
+  the collapsible, which would have popped the whole config block on a mere
+  HOVER over the remote verb (the verb row arms on hover).
+- **The "not visible until a skill is picked" limitation is gone.** The rework
+  un-gated the run parameters from `policyConfig` having loaded, and the forced
+  open above covers the rest: a remote run started from another tab or through
+  the API now shows its status and Stop as soon as the Deploy panel renders.
+  `docs/drtc/README.md`'s "Not yet done" bullet was corrected.
+- **The camera derivation was NOT duplicated.** The rework replaced the
+  per-feature binding dropdowns with name-based binding against Collect's
+  read-only `SessionCameraList`; `cameraBindingPayload` / `cameraDimsPayload`
+  are still built once in `handleStart`, above the remote fork, so the remote
+  request consumes the rework's derivation verbatim.
+- **`allCamerasBound` became `allCamerasReady`** in the guard context (the
+  rework's rename — "matched and plugged in" rather than "picked from a
+  dropdown"). `deployGuards.ts` and its test are untouched by the merge.
+- **Catalogs: the rework's new `deploy` keys arrived in the retired "skill"
+  vocabulary,** because PR #107 branched before the rebrand. They were merged as
+  `deploy.entry` ("Run a policy"), `deploy.policy.label` (the rework called it
+  `deploy.skill.label`) and `deploy.checkpoint.pickPolicyFirst` (its
+  `pickSkillFirst`), in both en and zh-CN, with `DeployPanel` referencing the
+  policy spellings. `deploy.picker.failedBadge` and `train.dataset.row.*` left
+  for `landing.modelPicker.failedBadge` / `landing.datasetPicker.row.*`, as the
+  rework moved the components that render them.

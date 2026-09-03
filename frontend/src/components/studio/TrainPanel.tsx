@@ -5,8 +5,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Trans, useTranslation } from "react-i18next";
-import { Check, ChevronsUpDown, Loader2, Play, Plus, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { ChevronsUpDown, Loader2, Play } from "lucide-react";
 
 import { useStudio } from "@/contexts/StudioContext";
 import { useApi } from "@/contexts/ApiContext";
@@ -15,7 +15,6 @@ import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Collapsible,
@@ -29,17 +28,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useTruncationTitle } from "@/hooks/useTruncationTitle";
 
 import { ModelItem } from "@/lib/modelsApi";
 import { useModels } from "@/hooks/useModels";
 import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
-import {
-  DatasetItem,
-  getDatasetInfo,
-  saveCustomDataset,
-} from "@/lib/replayApi";
-import { HUB_REPO_ID_RE } from "@/lib/repoId";
+import { getDatasetInfo, saveCustomDataset } from "@/lib/replayApi";
 import TrainingConfigurator, {
   FinetuneSeed,
   ResumeSeed,
@@ -81,71 +76,6 @@ function recordPolicyType(record: JobRecord): string | null {
   if (!type || type === UNKNOWN_POLICY_TYPE) return null;
   return type;
 }
-
-/** One search-result row: repo id + (local) episode count, lazily fetched, +
- * Hub marker for remote-only rows. Skips the network for Hub-only rows (a
- * remote meta.json read) — counts are shown "where available". */
-const DatasetResultRow: React.FC<{
-  item: DatasetItem;
-  selected: boolean;
-  onPick: () => void;
-}> = ({ item, selected, onPick }) => {
-  const { t } = useTranslation();
-  const { baseUrl, fetchWithHeaders } = useApi();
-  const [episodes, setEpisodes] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (item.source === "hub") return; // avoid a remote fetch just for a count
-    let cancelled = false;
-    getDatasetInfo(baseUrl, fetchWithHeaders, item.repo_id)
-      .then((info) => {
-        if (!cancelled) setEpisodes(info.total_episodes);
-      })
-      .catch(() => {
-        /* count is optional — leave it blank */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [item.repo_id, item.source, baseUrl, fetchWithHeaders]);
-
-  return (
-    <button
-      type="button"
-      onClick={onPick}
-      className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/50"
-    >
-      <span className="min-w-0 flex-1 truncate font-mono text-foreground">
-        {item.repo_id}
-      </span>
-      {episodes != null ? (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {t("studio.train.dataset.row.episodes", { episodes })}
-        </span>
-      ) : null}
-      {/* A weighted merge and its unweighted sibling are otherwise
-          indistinguishable here, and picking the wrong one silently trains the
-          wrong mix. `=== true` on purpose: the flag is absent (unknown), not
-          false, for Hub-only rows. */}
-      {item.weighted === true ? (
-        <span
-          className="shrink-0 font-mono text-xs text-info"
-          title={t("studio.train.dataset.row.weightedTitle")}
-        >
-          {t("studio.train.dataset.row.weighted")}
-        </span>
-      ) : null}
-      {item.source === "hub" ? (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {t("studio.train.dataset.row.hub")}
-        </span>
-      ) : null}
-      {selected ? (
-        <Check className="h-3.5 w-3.5 shrink-0 text-primary" />
-      ) : null}
-    </button>
-  );
-};
 
 /**
  * Studio panel 2 · Train. Mirrors the Collect panel's progressive disclosure:
@@ -363,7 +293,9 @@ const TrainPanel: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(
     () => selectedDataset,
   );
-  const [query, setQuery] = useState("");
+  // Hover title for the picker trigger below — only raised when the id is
+  // actually clipped by the half-panel-wide control.
+  const selectedIdHover = useTruncationTitle(selectedId);
   // A prefill's episode subset, paired with the repo id it was seeded for —
   // dropped (via the repoId guard below) if the user then picks a different
   // dataset, so a stale subset can never silently apply to it.
@@ -465,30 +397,9 @@ const TrainPanel: React.FC = () => {
     if (selectedId) setSelectedDataset(selectedId);
   }, [selectedId, setSelectedDataset]);
 
-  // Search-driven picker: results only exist while a query is typed — there is
-  // no standing list.
-  const trimmedQuery = query.trim();
-  const matches = useMemo(() => {
-    const q = trimmedQuery.toLowerCase();
-    if (!q) return [];
-    return datasets.filter((d) => d.repo_id.toLowerCase().includes(q));
-  }, [datasets, trimmedQuery]);
-
-  // A well-formed `org/name` id that isn't in the library yet is offered as a
-  // public Hub dataset — the affordance that ANY public dataset can be trained
-  // on, not just the user's own.
-  const hubCandidate = useMemo(() => {
-    if (!HUB_REPO_ID_RE.test(trimmedQuery)) return null;
-    const q = trimmedQuery.toLowerCase();
-    if (datasets.some((d) => d.repo_id.toLowerCase() === q)) return null;
-    return trimmedQuery;
-  }, [datasets, trimmedQuery]);
-
-  // Picking a result replaces the selection and collapses the results by
-  // clearing the query.
+  // Picking a result replaces the selection; the picker closes itself.
   const pickDataset = (repoId: string) => {
     setSelectedId(repoId);
-    setQuery("");
   };
 
   // Selecting a not-yet-listed public Hub id also pins it (best-effort, same
@@ -496,7 +407,6 @@ const TrainPanel: React.FC = () => {
   // training can fetch it on demand.
   const addHubDataset = (repoId: string) => {
     setSelectedId(repoId);
-    setQuery("");
     saveCustomDataset(baseUrl, fetchWithHeaders, repoId)
       .then(() => refreshDatasets())
       .catch(() => {
@@ -560,122 +470,69 @@ const TrainPanel: React.FC = () => {
                 </p>
               </div>
             ) : (
-              <div className="space-y-2">
-                <Label htmlFor="train-dataset-search">
-                  {t("studio.train.dataset.label")}
-                </Label>
-                {selectedId ? (
-                  <div className="flex flex-wrap gap-1.5">
-                    <span className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-muted/40 py-1 pl-2 pr-1 font-mono text-xs text-foreground">
-                      <span className="truncate">{selectedId}</span>
-                      <button
-                        type="button"
-                        aria-label={t("studio.train.dataset.remove", {
-                          repoId: selectedId,
-                        })}
-                        onClick={() => setSelectedId(null)}
-                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  </div>
-                ) : null}
-                {trainingEpisodeIndices && (
-                  <p className="text-xs text-muted-foreground">
-                    {datasetTotalEpisodes != null
-                      ? t("studio.train.dataset.episodeSubsetOfTotal", {
-                          used: trainingEpisodeIndices.length,
-                          total: datasetTotalEpisodes,
-                        })
-                      : t("studio.train.dataset.episodeSubset", {
-                          used: trainingEpisodeIndices.length,
-                        })}
-                  </p>
-                )}
-                <div className="relative">
-                  <Input
-                    id="train-dataset-search"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder={t("studio.train.dataset.searchPlaceholder")}
-                    className="h-8 pr-8 text-sm"
-                  />
-                  {/* "Choose dataset" — browse the full Local/Hugging Face list
-                    instead of typing a search term. Docked on the right edge
-                    of the search bar itself (a sibling overlay, not nested in
-                    the <input>) so it's reachable without typing anything. */}
-                  <DatasetPicker
-                    datasets={datasets}
-                    loading={datasetsLoading}
-                    onPickExisting={(item) => pickDataset(item.repo_id)}
-                    hideSearch
-                  >
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-0.5 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                      title={t("studio.train.dataset.choose")}
-                      aria-label={t("studio.train.dataset.choose")}
+            <div className="space-y-2">
+              <Label htmlFor="train-dataset">
+                {t("studio.train.dataset.label")}
+              </Label>
+              {/* One way in, not two: the whole control is the picker's
+                  trigger, and DatasetPicker's own search box is the only
+                  search — including the "use any public org/name" row, which
+                  moved into it (onPickHubId) rather than living in a second
+                  results list out here. The trigger wears SelectTrigger's own
+                  classes so it reads as the same kind of control as Starting
+                  point below it; it can't BE a SelectTrigger, because what it
+                  opens is a Popover. */}
+              <DatasetPicker
+                datasets={datasets}
+                loading={datasetsLoading}
+                onPickExisting={(item) => pickDataset(item.repo_id)}
+                onPickHubId={addHubDataset}
+              >
+                <button
+                  id="train-dataset"
+                  type="button"
+                  className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {selectedId ? (
+                    // Repo ids outrun a half-panel trigger routinely, so the
+                    // full id stays one hover away — and only then (the hook
+                    // measures the span and leaves `title` undefined while the
+                    // id fits whole).
+                    <span
+                      className="min-w-0 truncate font-mono text-xs"
+                      {...selectedIdHover}
                     >
-                      <ChevronsUpDown className="h-3.5 w-3.5" />
-                    </Button>
-                  </DatasetPicker>
-                </div>
-                {trimmedQuery ? (
-                  <div className="max-h-56 divide-y divide-border overflow-auto rounded-md border border-border">
-                    {matches.map((d) => (
-                      <DatasetResultRow
-                        key={d.repo_id}
-                        item={d}
-                        selected={selectedId === d.repo_id}
-                        onPick={() => pickDataset(d.repo_id)}
-                      />
-                    ))}
-                    {hubCandidate ? (
-                      <button
-                        type="button"
-                        onClick={() => addHubDataset(hubCandidate)}
-                        className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-muted/50"
-                      >
-                        <Plus className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate">
-                            {/* The typed repo id is DATA — one <0> slot, not a
-                              sentence stitched around it. */}
-                            <Trans
-                              i18nKey="studio.train.dataset.useHub"
-                              values={{ repoId: hubCandidate }}
-                              components={[
-                                <span key="0" className="font-mono" />,
-                              ]}
-                            />
-                          </span>
-                          <span className="block text-xs text-muted-foreground">
-                            {t("studio.train.dataset.useHubHint")}
-                          </span>
-                        </span>
-                      </button>
-                    ) : null}
-                    {matches.length === 0 && !hubCandidate ? (
-                      <p className="px-3 py-4 text-sm text-muted-foreground">
-                        {/* <0> holds the literal `org/name` id shape — syntax,
-                          so it is not translated. */}
-                        <Trans
-                          i18nKey="studio.train.dataset.noMatches"
-                          components={[<span key="0" className="font-mono" />]}
-                        />
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-                {!selectedId ? (
-                  <p className="text-xs text-muted-foreground">
-                    {t("studio.train.dataset.hint")}
-                  </p>
-                ) : null}
-              </div>
+                      {selectedId}
+                    </span>
+                  ) : (
+                    <span className="truncate text-muted-foreground">
+                      {t("studio.train.dataset.pick")}
+                    </span>
+                  )}
+                  <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
+                </button>
+              </DatasetPicker>
+              {/* The prefill's episode subset, reported against the selection
+                  the trigger above now shows (it used to hang off the removed
+                  chip). */}
+              {trainingEpisodeIndices && (
+                <p className="text-xs text-muted-foreground">
+                  {datasetTotalEpisodes != null
+                    ? t("studio.train.dataset.episodeSubsetOfTotal", {
+                        used: trainingEpisodeIndices.length,
+                        total: datasetTotalEpisodes,
+                      })
+                    : t("studio.train.dataset.episodeSubset", {
+                        used: trainingEpisodeIndices.length,
+                      })}
+                </p>
+              )}
+              {!selectedId ? (
+                <p className="text-xs text-muted-foreground">
+                  {t("studio.train.dataset.hint")}
+                </p>
+              ) : null}
+            </div>
             )}
 
             {/* Starting point — the optional fine-tune base. Sits directly
@@ -808,10 +665,13 @@ const TrainPanel: React.FC = () => {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Start training — pinned directly above the jobs library, level with
-          Collect's and Deploy's actions. The configurator portals its real,
-          fully-gated button into the slot while the form is open. */}
-      <div className="mt-auto pt-2">
+      {/* Start training — directly under the form at the panel's normal gap-5
+          rhythm, level with Collect's and Deploy's actions; nothing in the
+          column is bottom-pinned any more. The wrapper stays because this slot
+          holds two things: the disabled stand-in shown while the form is shut,
+          and the portal target the configurator renders its real, fully-gated
+          button into while it is open. */}
+      <div>
         {!formOpen ? (
           <Button disabled className="w-full gap-2">
             <Play className="h-4 w-4" />
@@ -821,10 +681,13 @@ const TrainPanel: React.FC = () => {
         <div ref={setActionsEl} className={formOpen ? undefined : "hidden"} />
       </div>
 
-      {/* Training jobs library — local + remote runs as cards, pinned to the
-          panel foot like Collect's datasets and Deploy's models. mt-0 keeps it
-          glued to the actions slot above, which carries the panel's mt-auto. */}
-      <LibrarySection className="mt-0">
+      {/* Training jobs library — local + remote runs as cards. LibrarySection's
+          own stretch now stands (no mt-0 override): the opener and Start row
+          top-pack, the free space falls between them and this, and the library
+          sits at the column foot so its footer lines up with Collect's and
+          Deploy's. Its body floors at GRID_MIN_H and scrolls its detail card
+          inside that box, so selecting a run can't move it. */}
+      <LibrarySection>
         <JobsLibrary open={jobsOpen} onOpenChange={setJobsOpen} />
       </LibrarySection>
 

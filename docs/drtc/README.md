@@ -411,9 +411,11 @@ landed, `robot_sync` only.
   transport read-out with the clear-local-override button. Everything lives in
   `frontend/src/components/remote-inference/`; the shared studio files carry
   only a run-mode entry, two guard flags and one mount point.
-  - Known limitation: that block renders inside the Deploy panel's
-    "a skill is selected" section, so a remote run started from another tab or
-    through the API is not visible until a skill is picked here.
+    Since the studio-panels rework merged, that block sits inside the Deploy
+    panel's run form, which is held open for as long as a remote run is live —
+    so a run started from another tab or through the API shows its status and
+    its Stop as soon as this panel renders. (Before the rework it was gated on
+    a policy being selected here, and was invisible until one was.)
 - **The Lab still does not launch Modal, and does not supervise the SFU.**
   Lifecycle option A: a human runs `modal run
 makermodslab/drtc/modal_policy.py` in one terminal and (optionally)
