@@ -105,7 +105,12 @@ from .eval_protocol import (
     parse_episode_end_reason,
     parse_event,
 )
-from .jobs import download_hub_checkpoint_ref, make_snapshot_progress_tqdm
+from .jobs import (
+    download_hub_checkpoint_ref,
+    make_snapshot_progress_tqdm,
+    policy_type_supports_rtc,
+    read_pretrained_policy_type,
+)
 from .models import (
     _downloaded_model_dir,
     _has_loadable_weights,
@@ -3416,6 +3421,38 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "status_code": 400,
             "message": f"Unrecognised policy ref: {request.policy_ref!r}",
         }
+
+    # Real-Time Chunking is a per-ARCHITECTURE capability, and the subprocess
+    # only discovers that after the policy is loaded and the arm is already
+    # claimed — `build_rollout_context` raises "RTC inference is not supported
+    # by policy type ..." out of `supports_rtc_inference(policy)`. An ACT run
+    # launched with rtc therefore spent a model download and a full arm+camera
+    # preflight to die on a message no UI user can act on. Refuse it here
+    # instead, off the checkpoint's own config.json.
+    #
+    # Only runs for rtc (sync is always fine), so the config read — a few KB,
+    # local for a local ref and a cached hf_hub_download for a Hub one — is paid
+    # once per RTC launch, not on every start. `@root` refs are handed to
+    # read_pretrained_policy_type as the bare repo id, which is where that shape
+    # keeps its config.json.
+    #
+    # Fail-open on both unknowns: an unreadable config (offline, private repo)
+    # gives None, and so does a policy type newer than
+    # policy_type_supports_rtc's table. Neither is evidence of anything, and the
+    # subprocess still guards.
+    if request.inference_engine == "rtc":
+        root_ref = _HUB_ROOT_REF_RE.match(request.policy_ref)
+        policy_type = read_pretrained_policy_type(root_ref.group("repo") if root_ref else request.policy_ref)
+        if policy_type and policy_type_supports_rtc(policy_type) is False:
+            _release_slot()
+            return {
+                "success": False,
+                "status_code": 400,
+                "message": (
+                    f"Real-Time Chunking isn't available for {policy_type} checkpoints; "
+                    "use the standard (sync) engine."
+                ),
+            }
 
     # Resolve the camera bindings against the robot record now (one small JSON
     # read, no hardware). A binding that names a camera the record doesn't have

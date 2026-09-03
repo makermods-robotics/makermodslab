@@ -868,6 +868,22 @@ const DeployPanel: React.FC = () => {
     };
   }, [open, baseUrl, fetchWithHeaders, policyConfigJobId, selectedStep, isBimanual]);
 
+  // Real-Time Chunking is an ARCHITECTURE capability, not a per-run taste: the
+  // server refuses `inference_engine: "rtc"` with a 400 for a checkpoint whose
+  // policy type can't run guided chunk prediction (ACT, diffusion, pi0_fast,
+  // tdmpc, vqbet…), before any slot or hardware is held. `supports_rtc: null`
+  // means the server doesn't KNOW the type — a policy newer than its table — so
+  // it stays on offer and the subprocess decides, same fail-open discipline.
+  const rtcAvailable = policyConfig?.supports_rtc !== false;
+
+  // Picking a checkpoint that can't run RTC drops a stale "rtc" selection back
+  // to the server default. Runs on the config that just landed (the fetch above
+  // swaps policyConfig in one setState), so the reset is a single render behind
+  // the checkpoint change and the launch below can't carry "rtc" for it.
+  useEffect(() => {
+    if (!rtcAvailable) setInferenceEngine("sync");
+  }, [rtcAvailable]);
+
   // Auto-bind robot cameras whose names match a policy-expected camera, by
   // name against the DISPLAY name (the bare name the user chose at record
   // time — that's what the robot record stores). No device enumeration is
@@ -1764,7 +1780,9 @@ const DeployPanel: React.FC = () => {
                       <SelectItem value="sync">
                         {t("studio.deploy.engine.sync")}
                       </SelectItem>
-                      <SelectItem value="rtc">
+                      {/* Disabled rather than hidden: a checkpoint that can't
+                          run RTC should say so, not silently offer one engine. */}
+                      <SelectItem value="rtc" disabled={!rtcAvailable}>
                         {t("studio.deploy.engine.rtc")}
                       </SelectItem>
                     </SelectContent>
@@ -1774,6 +1792,11 @@ const DeployPanel: React.FC = () => {
                       ? t("studio.deploy.engine.rtcHint")
                       : t("studio.deploy.engine.syncHint")}
                   </p>
+                  {rtcAvailable ? null : (
+                    <p className="text-xs text-muted-foreground">
+                      {t("studio.deploy.engine.rtcUnavailable")}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <p className="text-xs text-muted-foreground">
