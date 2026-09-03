@@ -7,7 +7,7 @@ reference implementation; a port re-implements layer 1 idiomatically and
 transcribes layers 2–3 (see README.md for the layering).
 
 Written for the next port's author — who may well be an AI agent. Sections
-marked *(reference)* name where the Python implementation lives.
+marked _(reference)_ name where the Python implementation lives.
 
 ## 1. Transport
 
@@ -21,7 +21,7 @@ marked *(reference)* name where the Python implementation lives.
   JSON still produces the error with status alone.
 - A connection-level failure (no HTTP response) is a distinct error type and
   its message must name the base URL and say what to check.
-- *(reference: `_transport.py`, `errors.py`)*
+- _(reference: `_transport.py`, `errors.py`)_
 
 ## 2. Error decoding
 
@@ -49,7 +49,7 @@ marked *(reference)* name where the Python implementation lives.
 - Method names used inside remediation texts are CONTRACT: implementations
   must provide them (`client.sessions.stop_current()`,
   `client.jobs.list()`, `client.system.hf_login(...)`, …).
-- *(reference: `errors.py` REMEDIATIONS / FAMILY_REMEDIATIONS)*
+- _(reference: `errors.py` REMEDIATIONS / FAMILY_REMEDIATIONS)_
 
 ## 4. Compatibility handshake
 
@@ -59,7 +59,7 @@ marked *(reference)* name where the Python implementation lives.
   propagate (the real request would hit them too).
 - Response models are tolerant everywhere: unknown keys are kept, never
   rejected (an older SDK must survive a newer server).
-- *(reference: `client.py`)*
+- _(reference: `client.py`)_
 
 ## 5. Sessions and the lease
 
@@ -115,7 +115,7 @@ marked *(reference)* name where the Python implementation lives.
 - Request parity is RATCHETED: a test equality-asserts the SDK's field set
   against the server's request model minus a reasoned exclusion list
   (server-managed internals), so a new backend knob fails the build until
-  typed. *(reference: test_jobs.py training-options parity test)*
+  typed. _(reference: test_jobs.py training-options parity test)_
 - Server-managed fields (set by the registry/runners, never by clients) are
   excluded ON PURPOSE and each exclusion carries its reason.
 
@@ -124,7 +124,7 @@ marked *(reference)* name where the Python implementation lives.
 - Every tagged v1 operation in the snapshot is either implemented (tied to
   its `operationId`) or listed as planned; the check is equality-asserted in
   both directions and the planned set only shrinks.
-  *(reference: `tests/test_coverage_ratchet.py`)*
+  _(reference: `tests/test_coverage_ratchet.py`)_
 - The reference test harness runs the SDK against the real FastAPI app
   in-process. Ports without that luxury must test against recorded
   fixtures generated from the same snapshot.

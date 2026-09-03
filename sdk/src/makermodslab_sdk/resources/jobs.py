@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import difflib
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
@@ -410,7 +410,7 @@ class JobsResource(Resource):
         )
 
     @operation("reorder_job_queue")
-    def reorder_queue(self, job_ids: list[str]) -> JobList:
+    def reorder_queue(self, job_ids: Sequence[str]) -> JobList:
         """Reorder the queue to exactly ``job_ids`` (every queued id, in the
         new order). A 409 job.queue_stale means the queue changed under you —
         refetch ``queue()`` and retry with the current ids.
@@ -423,7 +423,7 @@ class JobsResource(Resource):
             self._transport.request(
                 "POST",
                 "/api/v1/jobs/queue/reorder",
-                json={"job_ids": job_ids},
+                json={"job_ids": list(job_ids)},
                 action="Reorder job queue",
             )
         )

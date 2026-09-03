@@ -323,7 +323,7 @@ class ActiveSession:
     def __enter__(self) -> ActiveSession:
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> None:
         with self._lock:
             lost, detail = self._lost_reason, self._lost_detail
         self.stop()
@@ -337,7 +337,6 @@ class ActiveSession:
                 kind=self.kind,
                 reason=lost,
             )
-        return False
 
     def __repr__(self) -> str:
         state = "alive" if self.alive else (self.lost_reason or "stopped")

@@ -225,14 +225,14 @@ def _normalize_detail(raw: Any) -> str | None:
     non-string render as its repr soup."""
     if raw is None or isinstance(raw, str):
         return raw
-    if isinstance(raw, list):
-        import json
-
-        return "; ".join(
-            d.get("msg") if isinstance(d, dict) and d.get("msg") is not None else json.dumps(d) for d in raw
-        )
     import json
 
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for entry in raw:
+            msg = entry.get("msg") if isinstance(entry, dict) else None
+            parts.append(msg if isinstance(msg, str) else json.dumps(entry))
+        return "; ".join(parts)
     return json.dumps(raw)
 
 

@@ -10,12 +10,16 @@ SDK against a newer server keeps working, extra keys stay readable.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from makermodslab_sdk._operations import operation
 from makermodslab_sdk.resources._base import Resource, SdkModel
 from makermodslab_sdk.resources._waiting import wait_for_repo_operation
+
+# `list` is a method name on DatasetsResource, which shadows the builtin in
+# class-scope annotations — alias it for the one return type that needs it.
+_List = list
 
 
 class DatasetListItem(SdkModel):
@@ -231,7 +235,7 @@ class DatasetsResource(Resource):
         )
 
     @operation("datasets_episodes")
-    def episodes(self, repo_id: str) -> list[EpisodeSummary]:
+    def episodes(self, repo_id: str) -> _List[EpisodeSummary]:
         """Per-episode summaries of a local dataset (lengths, tasks, video slices).
 
         Example:
@@ -317,7 +321,7 @@ class DatasetsResource(Resource):
         )
 
     @operation("datasets_tags")
-    def tags(self, repo_id: str, tags: list[str]) -> DatasetTags:
+    def tags(self, repo_id: str, tags: Sequence[str]) -> DatasetTags:
         """Replace the Hub dataset repo's tags; returns the list actually
         written (protected org tags are re-added server-side).
 
@@ -449,7 +453,9 @@ class DatasetsResource(Resource):
         )
 
     @operation("upload_dataset")
-    def upload(self, repo_id: str, *, private: bool = False, tags: list[str] | None = None) -> UploadStart:
+    def upload(
+        self, repo_id: str, *, private: bool = False, tags: Sequence[str] | None = None
+    ) -> UploadStart:
         """Start pushing a local dataset to the Hub (background; one upload at
         a time). Poll ``upload_status()`` or block with ``wait_for_upload()``.
 
@@ -499,7 +505,7 @@ class DatasetsResource(Resource):
         )
 
     @operation("datasets_merge")
-    def merge(self, source_repo_ids: list[str], output_repo_id: str) -> MergeStart:
+    def merge(self, source_repo_ids: Sequence[str], output_repo_id: str) -> MergeStart:
         """Start merging local datasets into a new one (background subprocess).
         A refusal comes back ``started=False`` with the reason in ``message`` —
         check ``started``; poll ``merge_status()`` for progress.
@@ -624,7 +630,7 @@ class DatasetsResource(Resource):
         )
 
     @operation("datasets_set_excluded_episodes")
-    def set_excluded_episodes(self, repo_id: str, episode_indices: list[int]) -> ExcludedEpisodesSet:
+    def set_excluded_episodes(self, repo_id: str, episode_indices: Sequence[int]) -> ExcludedEpisodesSet:
         """Replace the exclusion set (the FULL list, not a delta — pass ``[]``
         to clear). Excluded episodes stay in the dataset; training skips them.
 
