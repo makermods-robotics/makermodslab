@@ -112,7 +112,7 @@ export const UrdfProvider: React.FC<UrdfProviderProps> = ({ children }) => {
     setCurrentAnimationConfig(null);
 
     toast.info("Switched to default model", {
-      description: "The default ARM100 robot model is now displayed.",
+      description: "The default SO-101 robot model is now displayed.",
     });
   }, []);
 

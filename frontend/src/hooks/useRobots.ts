@@ -10,7 +10,7 @@ export type RobotMode = "single" | "bimanual";
 // pure and independently testable (this module pulls in the API context on
 // import). Re-exported here because ArmType's importers already use this path.
 import type { ArmType } from "@/lib/armTypes";
-export { isCanArmType, jointsPerArm } from "@/lib/armTypes";
+export { armHasUrdf, isCanArmType, jointsPerArm } from "@/lib/armTypes";
 export type { ArmType } from "@/lib/armTypes";
 
 export interface RobotRecord {

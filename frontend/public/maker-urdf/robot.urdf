@@ -1,0 +1,838 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="generated_robot">
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-2.4247119e-06 -0.011534433 -6.4019571e-06" rpy="0 0 0" />
+      <mass value="0.38" />
+      <inertia ixx="0.00073862112" iyy="0.00080650506" izz="0.00036307747" ixy="-8.0836883e-09" ixz="-4.7811127e-08" iyz="8.664031e-09" />
+    </inertial>
+    <visual>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_012_solid_012.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_006_solid_006.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_005_solid_005.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_001_solid_001.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_012_solid_012.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_006_solid_006.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_005_solid_005.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.025700001 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_001_solid_001.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link_002">
+    <inertial>
+      <origin xyz="0.00013418072 0.00023828401 0.046440916" rpy="0 0 0" />
+      <mass value="0.55" />
+      <inertia ixx="0.00052916859" iyy="0.00063040742" izz="0.00042053163" ixy="-1.0885616e-06" ixz="7.8508149e-07" iyz="-5.4224413e-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_004_solid_004.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_013_solid_013.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_014_solid_014.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_002_solid_002.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_016_solid_016.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_007_solid_007.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_004_solid_004.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_013_solid_013.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_014_solid_014.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_002_solid_002.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_016_solid_016.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 0 -0.0565" rpy="1.5707963 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_007_solid_007.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link_003">
+    <inertial>
+      <origin xyz="0.13427204 -0.00029654773 0.00022721862" rpy="0 0 0" />
+      <mass value="0.7" />
+      <inertia ixx="0.0005845071" iyy="0.0037745579" izz="0.0036662821" ixy="3.191345e-07" ixz="1.8187056e-05" iyz="-9.7545913e-07" />
+    </inertial>
+    <visual>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_010_solid_010.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_011_solid_011.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_015_solid_015.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_062_solid_062.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_063_solid_063.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_010_solid_010.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_011_solid_011.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_015_solid_015.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_062_solid_062.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_063_solid_063.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link_004">
+    <inertial>
+      <origin xyz="-0.096444643 0.06526336 -0.00027147831" rpy="0 0 0" />
+      <mass value="0.6" />
+      <inertia ixx="0.00089523227" iyy="0.0030419585" izz="0.0031912836" ixy="0.00059423661" ixz="-1.2593049e-05" iyz="-1.1994228e-06" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_017_solid_017.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_009_solid_009.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_008_solid_008.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_018_solid_018.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_017_solid_017.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_009_solid_009.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_008_solid_008.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.19 -0.1148 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_018_solid_018.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link_005">
+    <inertial>
+      <origin xyz="-0.064496017 0.039703674 0.00044218785" rpy="0 0 0" />
+      <mass value="0.4" />
+      <inertia ixx="0.00047367421" iyy="0.00073202268" izz="0.00070367788" ixy="0.00024382658" ixz="-1.1016734e-05" iyz="6.7171958e-06" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_021_solid_021.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_053_solid_053.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_019_solid_019.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_020_solid_020.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_052_solid_052.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_021_solid_021.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_053_solid_053.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_019_solid_019.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_020_solid_020.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.016 -0.19111514 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/part_052_solid_052.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link_006">
+    <inertial>
+      <origin xyz="0.000825995 2.791615e-05 0.04138047" rpy="0 0 0" />
+      <mass value="0.35" />
+      <inertia ixx="0.00019885497" iyy="0.00022228033" izz="0.00017359585" ixy="4.5465992e-07" ixz="-7.6526832e-06" iyz="2.8673868e-08" />
+    </inertial>
+    <visual>
+      <origin xyz="0.02905628 0 0.2323833" rpy="-1.5707963 -0.17453293 0" />
+      <geometry>
+        <mesh filename="meshes/part_050_solid_050.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0.02905628 0 0.2323833" rpy="-1.5707963 -0.17453293 0" />
+      <geometry>
+        <mesh filename="meshes/part_051_solid_051.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0.02905628 0 0.2323833" rpy="-1.5707963 -0.17453293 0" />
+      <geometry>
+        <mesh filename="meshes/part_055_solid_055.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.02905628 0 0.2323833" rpy="-1.5707963 -0.17453293 0" />
+      <geometry>
+        <mesh filename="meshes/part_050_solid_050.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.02905628 0 0.2323833" rpy="-1.5707963 -0.17453293 0" />
+      <geometry>
+        <mesh filename="meshes/part_051_solid_051.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.02905628 0 0.2323833" rpy="-1.5707963 -0.17453293 0" />
+      <geometry>
+        <mesh filename="meshes/part_055_solid_055.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link_007">
+    <inertial>
+      <origin xyz="0.0024154705 -1.2124064e-05 -0.090671151" rpy="0 0 0" />
+      <mass value="0.4" />
+      <inertia ixx="0.00073581966" iyy="0.0008060648" izz="0.00040179619" ixy="-8.2289687e-07" ixz="-9.2628903e-05" iyz="9.7501444e-08" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_049_solid_049.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_048_solid_048.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_054_solid_054.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_056_solid_056.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_057_solid_057.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_061_solid_061.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_060_solid_060.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_058_solid_058.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_059_solid_059.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_022_solid_022.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_026_solid_026.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_023_solid_023.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_037_solid_037.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_034_solid_034.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_041_solid_041.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_044_solid_044.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_027_solid_027.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_047_solid_047.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_046_solid_046.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_024_solid_024.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_025_solid_025.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_028_solid_028.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_029_solid_029.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_030_solid_030.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_031_solid_031.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_032_solid_032.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_033_solid_033.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_035_solid_035.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_036_solid_036.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_038_solid_038.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_039_solid_039.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_040_solid_040.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_042_solid_042.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_043_solid_043.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_045_solid_045.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_049_solid_049.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_048_solid_048.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_054_solid_054.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_056_solid_056.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_057_solid_057.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_061_solid_061.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_060_solid_060.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_058_solid_058.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_059_solid_059.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_022_solid_022.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_026_solid_026.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_023_solid_023.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_037_solid_037.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_034_solid_034.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_041_solid_041.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_044_solid_044.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_027_solid_027.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_047_solid_047.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_046_solid_046.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_024_solid_024.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_025_solid_025.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_028_solid_028.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_029_solid_029.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_030_solid_030.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_031_solid_031.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_032_solid_032.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_033_solid_033.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_035_solid_035.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_036_solid_036.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_038_solid_038.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_039_solid_039.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_040_solid_040.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_042_solid_042.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_043_solid_043.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.1854333 0 0.02930628" rpy="1.5707963 -1.3962634 -3.1415927" />
+      <geometry>
+        <mesh filename="meshes/part_045_solid_045.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="link_002_joint" type="revolute">
+    <origin xyz="0 0.030799999 0" rpy="-1.5707963 0 0" />
+    <parent link="base_link" />
+    <child link="link_002" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-2.76111" upper="2.72446" effort="10" velocity="5" />
+  </joint>
+  <joint name="link_003_joint" type="revolute">
+    <origin xyz="0 0 0.0583" rpy="1.5707963 0 0" />
+    <parent link="link_002" />
+    <child link="link_003" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-3.05956" upper="-0.05585" effort="10" velocity="5" />
+  </joint>
+  <joint name="link_004_joint" type="revolute">
+    <origin xyz="0.19 0 0" rpy="0 0 0" />
+    <parent link="link_003" />
+    <child link="link_004" />
+    <axis xyz="0 0 -1" />
+    <limit lower="0.04887" upper="4.12072" effort="10" velocity="5" />
+  </joint>
+  <joint name="link_005_joint" type="revolute">
+    <origin xyz="-0.174 0.076315136 0" rpy="0 0 0" />
+    <parent link="link_004" />
+    <child link="link_005" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-1.13795" upper="1.81514" effort="10" velocity="5" />
+  </joint>
+  <joint name="link_006_joint" type="revolute">
+    <origin xyz="-0.084967787 0.032692166 0" rpy="1.5707963 0 0.17453293" />
+    <parent link="link_005" />
+    <child link="link_006" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.70344" upper="1.36136" effort="10" velocity="5" />
+  </joint>
+  <joint name="link_007_joint" type="revolute">
+    <origin xyz="-0.00025000013 0 0.04695" rpy="0 1.5707963 0" />
+    <parent link="link_006" />
+    <child link="link_007" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.67384" upper="2.6529" effort="10" velocity="5" />
+  </joint>
+</robot>

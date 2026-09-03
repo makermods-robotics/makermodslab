@@ -7,6 +7,8 @@ import React, {
   memo,
 } from "react";
 import { cn } from "@/lib/utils";
+import type { ArmType } from "@/lib/armTypes";
+import { urdfConfigFor } from "@/lib/urdfConfigs";
 
 import URDFManipulator from "urdf-loader/src/urdf-manipulator-element.js";
 import { useUrdf } from "@/hooks/useUrdf";
@@ -61,13 +63,21 @@ interface UrdfViewerProps {
   /** Small-tile mode (e.g. the studio's corner PIP): shrinks the connection
    * pill to a status dot and the joint label to fit a ~300px card. */
   compact?: boolean;
+  /**
+   * Which arm's URDF to load (path + mesh rewrite). "so101" (default) or
+   * "maker"; see lib/urdfConfigs. An arm type with no shipped URDF should
+   * render JointAngleReadout instead of this component.
+   */
+  armType?: ArmType;
 }
 
 const UrdfViewer: React.FC<UrdfViewerProps> = ({
   jointsKey = "joints",
   variant = "dark",
   compact = false,
+  armType = "so101",
 }) => {
+  const urdfConfig = useMemo(() => urdfConfigFor(armType), [armType]);
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
   const webglOk = isWebglSupported();
@@ -116,54 +126,11 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     registerUrdfProcessor(urdfProcessor);
   }, [registerUrdfProcessor, urdfProcessor]);
 
-  // Create URL modifier function for default model
-  const defaultUrlModifier = useCallback((url: string) => {
-    console.log(`🔗 defaultUrlModifier called with: ${url}`);
-
-    // Handle various package:// URL formats for the default SO-101 model
-    if (url.startsWith("package://so_arm_description/meshes/")) {
-      const modifiedUrl = url.replace(
-        "package://so_arm_description/meshes/",
-        "/so-101-urdf/meshes/"
-      );
-      console.log(`🔗 Modified URL (package): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    // Handle case where package path might be partially resolved
-    if (url.includes("so_arm_description/meshes/")) {
-      const modifiedUrl = url.replace(
-        /.*so_arm_description\/meshes\//,
-        "/so-101-urdf/meshes/"
-      );
-      console.log(`🔗 Modified URL (partial): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    // Handle the specific problematic path pattern we're seeing in logs
-    if (url.includes("/so-101-urdf/so_arm_description/meshes/")) {
-      const modifiedUrl = url.replace(
-        "/so-101-urdf/so_arm_description/meshes/",
-        "/so-101-urdf/meshes/"
-      );
-      console.log(`🔗 Modified URL (problematic path): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    // Handle relative paths that might need mesh folder prefix
-    if (
-      url.endsWith(".stl") &&
-      !url.startsWith("/") &&
-      !url.startsWith("http")
-    ) {
-      const modifiedUrl = `/so-101-urdf/meshes/${url}`;
-      console.log(`🔗 Modified URL (relative): ${modifiedUrl}`);
-      return modifiedUrl;
-    }
-
-    console.log(`🔗 Unmodified URL: ${url}`);
-    return url;
-  }, []);
+  // Mesh-URL rewrite for the shipped model, from the per-arm URDF config.
+  const defaultUrlModifier = useCallback(
+    (url: string) => urdfConfig.rewriteMeshUrl(url),
+    [urdfConfig]
+  );
 
   // Main effect to create and setup the viewer only once
   useEffect(() => {
@@ -179,14 +146,14 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
       : urlModifierFunc;
     setupMeshLoader(viewer, activeUrlModifier);
 
-    // Determine which URDF to load - fixed path to match the actual available file
+    // The shipped model for this arm type, or a drag-and-dropped upload.
     const urdfPath = isDefaultModel
-      ? "/so-101-urdf/urdf/so101_new_calib.urdf"
+      ? urdfConfig.urdfPath
       : customUrdfPath || "";
 
-    // Set the package path for the default model
+    // Set the package path for the shipped model.
     if (isDefaultModel) {
-      packageRef.current = "/"; // Set to root so we can handle full path resolution in URL modifier
+      packageRef.current = urdfConfig.packagePath;
     }
 
     // Setup model loading if a path is available
@@ -301,6 +268,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     customUrdfPath,
     urlModifierFunc,
     defaultUrlModifier,
+    urdfConfig,
     alternativeUrdfModels,
   ]);
 

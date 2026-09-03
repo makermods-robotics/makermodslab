@@ -30,7 +30,7 @@ from lerobot.teleoperators.so_leader import SO101Leader
 from lerobot.utils.errors import DeviceNotConnectedError
 
 from .api_errors import ErrorCode
-from .arm_capabilities import uses_feetech_bus
+from .arm_capabilities import ships_urdf, uses_feetech_bus
 from .arm_identity import verify_devices
 from .maker_rest_pose import (
     capture_maker_pose,
@@ -67,6 +67,33 @@ _SO101_URDF_JOINTS = {
     "wrist_flex": ("Wrist_Pitch", -1.65806, 1.65806, +1),
     "wrist_roll": ("Wrist_Roll", -2.79253, 2.79253, +1),
     "gripper": ("Jaw", -0.174533, 1.74533, +1),
+}
+
+
+# Maker arm → its own shipped URDF (`frontend/public/maker-urdf/robot.urdf`, a
+# CAD export from the Star-arm assembly). Unlike the SO-101 path, this is a
+# DIRECT degrees→radians map, not an affine range→range remap: a Maker
+# follower's observation is already the true joint angle in degrees about the
+# folded/gripper-open calibration zero (the SO-101 needs the remap only because
+# a Feetech-normalized value is not a physical angle without calibration).
+#
+# The URDF joints are `link_002_joint`..`link_007_joint` (generic exporter
+# names), one per Maker motor base→wrist. `sign` is whether motor-increasing
+# maps to URDF-increasing; `offset` (radians) covers a URDF zero pose that
+# differs from the arm's calibration zero. Both are the facts that can only be
+# pinned against real hardware — they start neutral here.
+#
+# There is no gripper joint: the Maker URDF's gripper geometry is rigid on the
+# last link. The gripper angle still travels in `joints_deg` for the numeric
+# readout.
+_MAKER_URDF_JOINTS: dict[str, tuple[str, int, float]] = {
+    # motor_name: (urdf_joint, sign, offset_rad)   # HARDWARE: confirm sign/offset
+    "shoulder_pan": ("link_002_joint", +1, 0.0),
+    "shoulder_lift": ("link_003_joint", +1, 0.0),
+    "elbow_flex": ("link_004_joint", +1, 0.0),
+    "wrist_flex": ("link_005_joint", +1, 0.0),
+    "wrist_yaw": ("link_006_joint", +1, 0.0),
+    "wrist_roll": ("link_007_joint", +1, 0.0),
 }
 
 
@@ -435,19 +462,17 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
 
 
 def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
-    """Live joint angles (degrees) of a Maker follower, keyed by motor name.
+    """Live joint angles (degrees) of a CAN follower, keyed by motor name.
 
-    The URDF path above cannot serve a Maker arm: `_SO101_URDF_JOINTS` maps six
-    SO-101 motors onto the one URDF that ships with MakerMods Lab
-    (`frontend/public/so-101-urdf`), and there is no Maker URDF yet. The Maker
-    arm also has a seventh joint (`wrist_yaw`) with no counterpart in that
-    model, so feeding its angles to the SO-101 viewer would animate the wrong
-    arm with silently wrong values — worse than showing nothing.
+    Every CAN-arm session broadcasts this under `joints_deg`. For the **Metal**
+    arm it is the only joint telemetry — no Metal URDF ships, so the frontend
+    renders a numeric readout in the 3D viewer's slot. For the **Maker** arm it
+    rides alongside `joints` (see get_maker_joint_positions_from_robot): the
+    model animates the six revolute joints, and `joints_deg` still carries the
+    seventh value, the gripper, which the URDF has no joint for.
 
-    So Maker sessions broadcast this instead: the raw per-joint angles the
-    frontend renders as a numeric readout while the 3D viewer stays hidden.
-    Values are already in degrees (the Maker follower's native unit) and keyed
-    by motor name, with the bimanual `left_`/`right_` prefix stripped.
+    Values are already in degrees (the CAN followers' native unit) and keyed by
+    motor name, with the bimanual `left_`/`right_` prefix stripped.
     """
     try:
         observation = robot.get_observation()
@@ -468,6 +493,54 @@ def get_maker_joint_degrees(robot, prefix: str = "") -> dict[str, float]:
         if isinstance(value, (int, float)):
             out[motor] = float(value)
     return out
+
+
+def get_maker_joint_positions_from_robot(robot, prefix: str = "") -> dict[str, float]:
+    """Live Maker joint angles as URDF joint→radians, for the 3D viewer.
+
+    The Maker counterpart of ``get_joint_positions_from_robot``. See
+    ``_MAKER_URDF_JOINTS`` for why this is a direct degrees→radians map rather
+    than the SO-101's affine remap.
+
+    Args:
+        robot: a ``MakerFollower`` (single) or one sub-arm of a bimanual rig.
+        prefix: motor-key prefix in the observation — ``""`` single-arm,
+            ``"left_"``/``"right_"`` for a bimanual ``BiMakerFollower``.
+
+    Returns:
+        ``{urdf_joint_name: radians}`` for the six mapped joints. A joint whose
+        motor is missing from the observation holds at 0.0; a failed read
+        returns every joint at 0.0 (never raises — this runs in the broadcast
+        tick).
+    """
+    try:
+        observation = robot.get_observation()
+        joint_positions: dict[str, float] = {}
+        debug_rows = []
+        for motor_name, (urdf_joint_name, sign, offset) in _MAKER_URDF_JOINTS.items():
+            motor_key = f"{prefix}{motor_name}.pos"
+            if motor_key not in observation and not prefix and f"left_{motor_name}.pos" in observation:
+                motor_key = f"left_{motor_name}.pos"
+            if motor_key not in observation:
+                logger.warning(f"Motor {motor_key} not found in observation")
+                joint_positions[urdf_joint_name] = 0.0
+                continue
+
+            deg = observation[motor_key]
+            urdf_rad = math.radians(deg) * sign + offset
+            joint_positions[urdf_joint_name] = urdf_rad
+            debug_rows.append(f"{motor_name:14s} {deg:+8.2f}° → {urdf_joint_name:15s} = {urdf_rad:+7.3f} rad")
+
+        now = time.time()
+        if now - getattr(get_maker_joint_positions_from_robot, "_last_log", 0) > 1.0:
+            get_maker_joint_positions_from_robot._last_log = now
+            logger.info("[maker-joint-debug]\n  " + "\n  ".join(debug_rows))
+
+        return joint_positions
+
+    except Exception as e:
+        logger.error(f"Error getting Maker joint positions: {e}")
+        return {urdf: 0.0 for urdf, _, _ in _MAKER_URDF_JOINTS.values()}
 
 
 def _device_buses(device) -> list:
@@ -1157,22 +1230,32 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                                     telemetry.sample(bus, prefix)
                                 last_current_sample_time = current_time
                             if not uses_feetech_bus(request.arm_type):
-                                # No Maker URDF ships yet, so `joints` stays
-                                # empty (the viewer has nothing to drive) and
-                                # the angles travel under `joints_deg` for the
-                                # numeric readout. See get_maker_joint_degrees.
+                                # CAN arms (Maker, Metal): the raw per-joint
+                                # degrees always travel under `joints_deg` for
+                                # the numeric readout. See get_maker_joint_degrees.
+                                cur_prefix = "left_" if is_bimanual else ""
                                 joint_data = {
                                     "type": "joint_update",
                                     "joints": {},
-                                    "joints_deg": get_maker_joint_degrees(
-                                        robot, prefix="left_" if is_bimanual else ""
-                                    ),
+                                    "joints_deg": get_maker_joint_degrees(robot, prefix=cur_prefix),
                                     "timestamp": current_time,
                                 }
                                 if is_bimanual:
                                     joint_data["joints_deg_right"] = get_maker_joint_degrees(
                                         robot, prefix="right_"
                                     )
+                                if ships_urdf(request.arm_type):
+                                    # The Maker arm also ships a URDF, so fill
+                                    # `joints` (URDF joint → radians) for the 3D
+                                    # viewer. Metal has no URDF and stays on
+                                    # the readout — `joints` stays empty.
+                                    joint_data["joints"] = get_maker_joint_positions_from_robot(
+                                        robot, prefix=cur_prefix
+                                    )
+                                    if is_bimanual:
+                                        joint_data["joints_right"] = get_maker_joint_positions_from_robot(
+                                            robot, prefix="right_"
+                                        )
                             else:
                                 if is_bimanual:
                                     joint_positions = get_joint_positions_from_robot(
