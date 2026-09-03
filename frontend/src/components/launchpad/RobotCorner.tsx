@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  Gamepad2,
   Plus,
   Settings,
   ChevronDown,
@@ -10,6 +9,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { RobotActionButton } from "@/components/ui/robot-action-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -383,21 +383,24 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
 
       <Tooltip>
         <TooltipTrigger asChild>
+          {/* Two tooltips, never both at once: the outer one only renders
+              content when the control is DISABLED (and a disabled button
+              swallows hover, which is why it needs the span), the inner
+              robot-action one only fires when it is enabled. */}
           <span>
-            <Button
+            <RobotActionButton
+              action="teleoperation"
               size="sm"
-              variant="secondary"
-              className="h-7 gap-1.5 rounded-full px-2.5"
+              // Keeps the compact chip geometry the secondary button had:
+              // the shared icon renders at the base size-4 otherwise.
+              className="h-7 gap-1.5 rounded-full px-2.5 [&_svg]:size-3.5"
               disabled={!!teleopDisabledReason || teleopStarting}
+              busy={teleopStarting}
               onClick={() => selectedRecord && handleTeleop(selectedRecord)}
+              tooltipSide="bottom"
             >
-              {teleopStarting ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Gamepad2 className="h-3.5 w-3.5" />
-              )}
               {t("robot.corner.teleop")}
-            </Button>
+            </RobotActionButton>
           </span>
         </TooltipTrigger>
         {teleopDisabledReason && (

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next";
 import { Check, GitMerge, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { RobotActionButton } from "@/components/ui/robot-action-button";
 import {
   Collapsible,
   CollapsibleContent,
@@ -326,16 +327,20 @@ const CollectPanel: React.FC = () => {
       {/* Start recording — pinned directly above the dataset library so the
           panel's primary action sits at the same level as Train's Start and
           Deploy's Start/Stop. Disabled until the robot is ready and the
-          required parameters are filled in. */}
+          required parameters are filled in.
+
+          This is also the recording session's real start: the session dialog
+          it mounts POSTs /api/v1/sessions on mount, so this press is the one
+          that energizes the arm — hence the shared robot-action affordance. */}
       <div className="mt-auto pt-2">
-        <Button
+        <RobotActionButton
+          action="recording"
           onClick={handleStartRecording}
           disabled={!canStart}
-          className="w-full gap-2"
+          className="w-full"
         >
-          <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
           {t("studio.collect.start")}
-        </Button>
+        </RobotActionButton>
       </div>
 
       {/* Dataset library — the user's own datasets, pinned to the panel foot

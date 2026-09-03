@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { RobotActionButton } from "@/components/ui/robot-action-button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
@@ -862,16 +863,17 @@ const InferenceModal: React.FC<Props> = ({
           ) : null}
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center pt-4">
-            <Button
+            <RobotActionButton
+              action="inference"
               onClick={handleStart}
               disabled={!canStart}
-              className="w-full sm:w-auto px-10 py-6 text-lg disabled:opacity-40 disabled:cursor-not-allowed"
+              busy={submitting}
+              className="w-full sm:w-auto px-10 py-6 text-lg disabled:opacity-40 disabled:cursor-not-allowed [&_svg]:size-5"
             >
-              <Play className="w-5 h-5 mr-2" />
               {submitting
                 ? t("landing.inference.starting")
                 : t("landing.inference.start")}
-            </Button>
+            </RobotActionButton>
             <Button
               onClick={() => onOpenChange(false)}
               variant="outline"

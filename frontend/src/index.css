@@ -51,6 +51,15 @@
     --warn: 32 95% 44%;
     --info: 221 83% 53%;
 
+    /* "this button drives the robot arm" — the amber affordance shared by
+       every energizing control (Button variant="robot", RobotActionButton).
+       A semantic token like --destructive, not a one-off class: the fill is
+       the tint, the foreground the dark amber text (8.8:1 here), and the
+       border only appears on hover. */
+    --robot: 48 96% 89%;
+    --robot-foreground: 22 82% 24%;
+    --robot-border: 38 92% 45%;
+
     --radius: 0.5rem;
 
     --shadow-1: 0 1px 2px 0 rgb(0 0 0 / 0.05);
@@ -104,6 +113,12 @@
     --ok: 142 71% 45%;
     --warn: 38 92% 50%;
     --info: 213 94% 68%;
+
+    /* Dark mode inverts the pairing the way --destructive does: a deep amber
+       fill under light amber text (10.8:1). Same role, same recognisability. */
+    --robot: 26 60% 17%;
+    --robot-foreground: 48 96% 77%;
+    --robot-border: 38 92% 50%;
 
     --shadow-1: 0 1px 2px 0 rgb(0 0 0 / 0.4);
     --shadow-2: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.5);

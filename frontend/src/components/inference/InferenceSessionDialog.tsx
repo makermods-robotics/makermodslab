@@ -13,6 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ReleaseActionButton } from "@/components/ui/robot-action-button";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
@@ -2235,17 +2236,17 @@ const InferenceSessionDialog: React.FC<{
                         ),
                       })}
                 </Button>
-                <Button
+                <ReleaseActionButton
+                  action="stop"
                   onClick={handleStop}
                   disabled={stopping}
-                  variant="outline"
+                  busy={stopping}
                   className="w-full font-semibold disabled:opacity-50"
                 >
-                  <Square className="w-4 h-4 mr-2" />
                   {stopping
                     ? t("inference.button.aborting")
                     : t("inference.button.abortEvaluation")}
-                </Button>
+                </ReleaseActionButton>
               </div>
             ) : evalMode ? (
               // Running an episode: calling it a success is the primary action,
@@ -2261,30 +2262,30 @@ const InferenceSessionDialog: React.FC<{
                     ? t("inference.button.endingEpisode")
                     : t("inference.button.taskSucceeded")}
                 </Button>
-                <Button
+                <ReleaseActionButton
+                  action="stop"
                   onClick={handleStop}
                   disabled={!status.inference_active || stopping}
-                  variant="outline"
+                  busy={stopping}
                   className="w-full font-semibold disabled:opacity-50"
                 >
-                  <Square className="w-4 h-4 mr-2" />
                   {stopping
                     ? t("inference.button.aborting")
                     : t("inference.button.abortEvaluation")}
-                </Button>
+                </ReleaseActionButton>
               </div>
             ) : (
-              <Button
+              <ReleaseActionButton
+                action="stop"
                 onClick={handleStop}
                 disabled={!status.inference_active || stopping}
-                variant="destructive"
-                className="w-full font-semibold py-6 text-lg disabled:opacity-50"
+                busy={stopping}
+                className="w-full font-semibold py-6 text-lg disabled:opacity-50 [&_svg]:size-5"
               >
-                <Square className="w-5 h-5 mr-2" />
                 {stopping
                   ? t("inference.button.stopping")
                   : t("inference.button.stop")}
-              </Button>
+              </ReleaseActionButton>
             )}
 
             {phaseMeta && (

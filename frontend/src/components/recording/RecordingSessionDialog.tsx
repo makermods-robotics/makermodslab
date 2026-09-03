@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { ReleaseActionButton } from "@/components/ui/robot-action-button";
 import { useToast } from "@/hooks/use-toast";
 import {
   RotateCcw,
@@ -849,21 +850,26 @@ const RecordingSessionDialog: React.FC<{
                 unmount — no control may imply the session is still alive. */}
             {!sessionEnded && (
               <div className="mb-6 flex justify-end gap-3">
-                <Button
+                {/* Both exits END the session and de-energize the arm (Done
+                    keeps the episodes, Quit discards them), so both wear the
+                    release affordance; the confirm dialog each opens is what
+                    distinguishes them. */}
+                <ReleaseActionButton
+                  action="stop"
                   onClick={requestDone}
                   disabled={!backendStatus.available_controls.stop_recording}
-                  className="bg-green-600 hover:bg-green-700 text-white flex-shrink-0"
+                  className="flex-shrink-0"
                 >
                   {t("recording.session.button.done")}
-                </Button>
-                <Button
+                </ReleaseActionButton>
+                <ReleaseActionButton
+                  action="stop"
                   onClick={requestQuit}
                   disabled={!backendStatus.available_controls.stop_recording}
-                  variant="outline"
-                  className="border-red-500/50 text-red-600 dark:text-red-300 hover:bg-red-500/10 flex-shrink-0"
+                  className="flex-shrink-0"
                 >
                   {t("recording.session.button.quit")}
-                </Button>
+                </ReleaseActionButton>
               </div>
             )}
 

@@ -11,7 +11,7 @@ import {
   AlertTriangle,
   Download,
   Loader2,
-  Play,
+  Zap,
   VideoOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -353,7 +353,11 @@ export const RunVerbs: React.FC<{
                 )}
               >
                 <span className="flex items-center gap-1.5 text-sm font-semibold">
-                  <Play className="h-3.5 w-3.5 shrink-0" />
+                  {/* The bolt is the shared "this drives the robot arm"
+                      affordance (lib/robotActions.ts): every verb here starts
+                      an inference session, so each one carries it. Icon only —
+                      `variant` stays the armed-state channel. */}
+                  <Zap className="h-3.5 w-3.5 shrink-0" />
                   {busy && isActive
                     ? t("studio.deploy.actions.starting")
                     : label(m.value)}
