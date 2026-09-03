@@ -19,6 +19,10 @@ dependencies = [
     "websockets>=15.0.1",
     "uvicorn>=0.24.0",
     "psutil>=5.9.0",
+    # Signs LiveKit room tokens for the bundled SFU (sfu.py, `--sfu`). Pure
+    # Python (pyjwt + protobuf stubs); the server binary itself is NOT a
+    # Python dependency — it is resolved from PATH at launch.
+    "livekit-api>=1.0",
     # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (b968c0c01), the
     # two-parent merge of robot/makermods-maker-arm (af9072a8c — the previous pin,
     # via the Maker-Mods org) and arm/makermods-metal (2503a5d7a). Upstream v0.6.2

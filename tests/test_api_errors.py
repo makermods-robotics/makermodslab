@@ -44,6 +44,7 @@ DOMAINS = frozenset(
         "session",
         "node",
         "system",
+        "sfu",
         "internal",
     ]
 )

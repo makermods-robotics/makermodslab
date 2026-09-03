@@ -976,12 +976,42 @@ training = [
 ]
 
 [[package]]
+name = "livekit-api"
+version = "1.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "livekit-protocol" },
+    { name = "protobuf" },
+    { name = "pyjwt" },
+    { name = "types-protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/da/0d/ff9502faa5e9785563e9648313a030fab65ed7f6ff8cf52d7bc6c9e01c97/livekit_api-1.2.1.tar.gz", hash = "sha256:eee78dba493b736bc8422660debc7cf89340f1b80c63890a36a18d99c938045c", size = 21780, upload-time = "2026-08-27T14:06:57.419Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/c8/bc29cf16427fc446aa4487c552503cef42eebfcb920902bb54b7180e40d3/livekit_api-1.2.1-py3-none-any.whl", hash = "sha256:aa15b0a194c9e8167d4261bc61381682df23f98bc6d77760fcded93d2ce4b4ca", size = 27586, upload-time = "2026-08-27T14:06:56.286Z" },
+]
+
+[[package]]
+name = "livekit-protocol"
+version = "1.1.26"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+    { name = "types-protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e8/49/733f3655717bd1bdccfbb4ab958ac7f51d7e17d37e61b98de2f6b2e0c107/livekit_protocol-1.1.26.tar.gz", hash = "sha256:de8d291abb2efd026fbe23394ee4c05358195f09102d3c13335978ba04d7bdb8", size = 123833, upload-time = "2026-08-28T17:15:50.225Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/a9/b9a9a04b921b1aaef9312c3a16523cd4ddb508dcc4be18ca0e300b750b7e/livekit_protocol-1.1.26-py3-none-any.whl", hash = "sha256:37db1272487518df2ce3e13624a5217d1e158c6832fe01166bb3fb1875a8ddd9", size = 150535, upload-time = "2026-08-28T17:15:48.535Z" },
+]
+
+[[package]]
 name = "makermodslab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi", extra = ["standard"] },
     { name = "lerobot", extra = ["core-scripts", "damiao", "feetech", "maker", "rebot", "training"] },
+    { name = "livekit-api" },
     { name = "psutil" },
     { name = "pygrabber", marker = "sys_platform == 'win32'" },
     { name = "uvicorn" },
@@ -1007,6 +1037,7 @@ requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
     { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "damiao", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=b968c0c015e16699a225070f677dc644543707f0" },
+    { name = "livekit-api", specifier = ">=1.0" },
     { name = "makermodslab", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },
     { name = "psutil", specifier = ">=5.9.0" },
@@ -1809,6 +1840,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyjwt"
+version = "2.13.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
+]
+
+[[package]]
 name = "pynput"
 version = "1.8.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2474,6 +2514,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e4/51/9aed62104cea109b820bbd6c14245af756112017d309da813ef107d42e7e/typer-0.25.1.tar.gz", hash = "sha256:9616eb8853a09ffeabab1698952f33c6f29ffdbceb4eaeecf571880e8d7664cc", size = 122276, upload-time = "2026-04-30T19:32:16.964Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3f/f9/2b3ff4e56e5fa7debfaf9eb135d0da96f3e9a1d5b27222223c7296336e5f/typer-0.25.1-py3-none-any.whl", hash = "sha256:75caa44ed46a03fb2dab8808753ffacdbfea88495e74c85a28c5eefcf5f39c89", size = 58409, upload-time = "2026-04-30T19:32:18.271Z" },
+]
+
+[[package]]
+name = "types-protobuf"
+version = "7.35.1.20260827"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/07/541ffc94a4baee7d92ec91d91018aa684f97ece608b74619863e3cfd9cb3/types_protobuf-7.35.1.20260827.tar.gz", hash = "sha256:5a98c18177cfd968d6a0de55ecfc4221aa829ef88bcd86104298e028516b04af", size = 69646, upload-time = "2026-08-27T12:06:04.93Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/e2/7ce7c4802bcf3732155dedc23fe3d2b506a387d6b42da61261886f42af80/types_protobuf-7.35.1.20260827-py3-none-any.whl", hash = "sha256:7cc452a012678a6a889287d4cb702ea54b9f90a6ab0f3aa4c019d21f3ae7529b", size = 86412, upload-time = "2026-08-27T12:06:03.826Z" },
 ]
 
 [[package]]

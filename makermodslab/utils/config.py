@@ -17,6 +17,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import uuid
 from pathlib import Path
@@ -190,6 +191,19 @@ INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.
 # load/probe, so stale identity can never be served from disk.
 NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
 
+# The bundled LiveKit SFU's API key/secret (sfu.py, `makermodslab --sfu`):
+# one pair per install, minted on the first --sfu run, in the `key: secret`
+# YAML shape livekit-server's --key-file reads. Mode 0600 — the secret signs
+# every room token, so it never rides in a command line or an env var; both
+# the SFU child and the token route read this file. Deleting it rotates the
+# pair (tokens minted before the restart stop validating, nothing else).
+LIVEKIT_KEY_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/livekit_keys.yaml")
+
+# The livekit-server config the launcher renders per run (sfu.render_config).
+# Regenerated on every --sfu start; its path is also the identity signal
+# `makermodslab --stop` uses to recognise the SFU child as ours.
+LIVEKIT_CONFIG_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/livekit_config.yaml")
+
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
 MAKERMODSLAB_TAG = "MakerModsLab"
@@ -276,6 +290,48 @@ def get_instance_id() -> str:
         _atomic_write_text(INSTANCE_ID_FILE, stored + "\n")
     _instance_id_cache = stored
     return stored
+
+
+def parse_livekit_keys(text: str) -> dict[str, str]:
+    """`key: secret` lines (livekit-server's key-file format) -> {key: secret}.
+
+    Blank lines and `#` comments are skipped; a line without a colon or with
+    an empty side is ignored rather than raised on, so a hand-edited file
+    degrades to "no keys" (and a fresh pair gets minted) instead of crashing
+    the launcher.
+    """
+    keys: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, secret = line.partition(":")
+        key, secret = key.strip(), secret.strip()
+        if key and secret:
+            keys[key] = secret
+    return keys
+
+
+def load_or_create_livekit_keys(path: str = LIVEKIT_KEY_FILE) -> tuple[str, str]:
+    """This install's SFU API key/secret pair, minted on first use.
+
+    Returns the first pair in the file (livekit-server accepts several; we
+    only ever write one). A missing, unreadable, or keyless file gets a fresh
+    pair written atomically with mode 0600.
+    """
+    try:
+        with open(path) as f:
+            existing = parse_livekit_keys(f.read())
+    except OSError:
+        existing = {}
+    if existing:
+        key, secret = next(iter(existing.items()))
+        return key, secret
+    key = f"mml_{secrets.token_hex(8)}"
+    secret = secrets.token_urlsafe(48)
+    _atomic_write_text(path, f"{key}: {secret}\n")
+    os.chmod(path, 0o600)
+    return key, secret
 
 
 def _port_file_for(robot_type: RobotSide) -> str:
