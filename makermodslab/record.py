@@ -445,7 +445,12 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     camera; when omitted `backend` falls back to `default_backend` and `fourcc`
     to MJPG (`_DEFAULT_FOURCC`) so multi-camera USB rigs don't exhaust isochronous
     bandwidth on Linux (see `_DEFAULT_FOURCC`). An explicit per-camera fourcc wins.
-    Cameras are addressed by their cv2 integer `camera_index`.
+
+    Cameras are addressed by their cv2 integer `camera_index`, which arrives
+    already re-anchored to the record's stored device identity by
+    utils/config.reanchor_camera_indices — a raw stored index is only a
+    position in AVFoundation's device list and can name a different camera
+    after any replug.
     """
     from lerobot.cameras.configs import Cv2Backends
     from lerobot.cameras.opencv import OpenCVCameraConfig

@@ -2419,6 +2419,89 @@ def test_start_recording_rejects_with_400_on_duplicate_camera_names(
     assert record.recording_active is False
 
 
+def test_start_recording_rejects_with_400_when_a_camera_is_not_attached(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The record's camera identity is absent from an enumeration that
+    answered, so its stored index now points at a different physical device.
+    Recording it would produce a dataset labelled "wrist" holding some other
+    camera's video — refuse the start instead (before the flag is claimed)."""
+    import makermodslab.record as record
+    from makermodslab import camera_identity
+    from makermodslab.utils import config as cfg
+
+    _idle_mutexes(monkeypatch)
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        "lab1",
+        {"cameras": [{"name": "wrist", "type": "opencv", "camera_index": 0, "unique_id": "uid-wrist"}]},
+        allow_create=True,
+    )
+    monkeypatch.setattr(
+        camera_identity,
+        "list_cameras_in_process",
+        lambda: [{"index": 0, "name": "FaceTime HD Camera", "unique_id": "uid-builtin"}],
+    )
+
+    result = record.handle_start_recording(_stub_recording_request(robot_name="lab1"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "wrist" in result["message"]
+    assert record.recording_active is False
+
+
+def test_create_record_config_uses_the_reanchored_camera_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The OpenCVCameraConfig opens the index the recorded DEVICE now sits at.
+    The record still says 0; the enumeration puts that device at 1."""
+    import makermodslab.record as record
+    from makermodslab import camera_identity
+    from makermodslab.utils import config as cfg
+
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        "lab1",
+        {
+            "cameras": [
+                {
+                    "name": "wrist",
+                    "type": "opencv",
+                    "camera_index": 0,
+                    "unique_id": "uid-wrist",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                }
+            ]
+        },
+        allow_create=True,
+    )
+    monkeypatch.setattr(
+        camera_identity,
+        "list_cameras_in_process",
+        lambda: [
+            {"index": 0, "name": "FaceTime HD Camera", "unique_id": "uid-builtin"},
+            {"index": 1, "name": "Robot Cam", "unique_id": "uid-wrist"},
+        ],
+    )
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower, arm_type="so101": ("leader", "follower"),
+    )
+
+    config = record.create_record_config(
+        _stub_recording_request(robot_name="lab1", dataset_repo_id="tester/ds")
+    )
+
+    assert config.robot.cameras["wrist"].index_or_path == 1
+
+
 def test_start_recording_ignores_a_stale_cameras_payload(
     monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
 ) -> None:

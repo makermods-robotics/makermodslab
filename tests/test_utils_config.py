@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -1119,3 +1120,146 @@ def test_bind_robot_cameras_copies_so_callers_cant_alias_the_record(
 
     assert bound["left"] is not bound["right"]
     assert bound["left"] == bound["right"]
+
+
+# --- Re-anchoring stored camera indices to the saved device ------------------
+#
+# A stored `camera_index` is a POSITION in AVFoundation's uniqueID-sorted device
+# list, so any replug renumbers it and the session opens a different physical
+# camera under the same label. The preview endpoint already re-anchors; these
+# cover the session seam (load_robot_cameras, which recording calls directly and
+# inference reaches through bind_robot_cameras) doing the same.
+#
+# The enumeration is always injected — tests/conftest.py's autouse fixture makes
+# "identity unavailable" the default so nothing here can touch the host's real
+# devices.
+
+
+def _enumeration(monkeypatch: pytest.MonkeyPatch, cameras: list[dict] | None) -> None:
+    """Pin what this process's AVFoundation device list answers.
+
+    None means "could not ask" (non-macOS, PyObjC missing, query failure); a
+    list — including the empty one — means the query answered.
+    """
+    from makermodslab import camera_identity
+
+    monkeypatch.setattr(camera_identity, "list_cameras_in_process", lambda: cameras)
+
+
+def test_load_robot_cameras_reanchors_the_index_to_the_saved_device(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record says index 1; the device it names now enumerates at 0 (the
+    camera that used to sort ahead of it was unplugged). The identity wins."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+    _enumeration(monkeypatch, [{"index": 0, "name": "USB Camera", "unique_id": "0x1400000005ac8600"}])
+
+    assert cfg.load_robot_cameras("lab1")["wrist"]["camera_index"] == 0
+
+
+def test_reanchoring_does_not_rewrite_the_robot_record(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new index is for THIS session only. A rig that is re-cabled between
+    runs must not have its saved index rewritten from under it."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+    before = Path(cfg.ROBOTS_PATH, "lab1.json").read_text()
+    _enumeration(monkeypatch, [{"index": 0, "name": "USB Camera", "unique_id": "0x1400000005ac8600"}])
+
+    assert cfg.load_robot_cameras("lab1")["wrist"]["camera_index"] == 0
+    assert Path(cfg.ROBOTS_PATH, "lab1.json").read_text() == before
+
+
+def test_load_robot_cameras_refuses_a_camera_that_is_not_attached(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enumeration answered and this device is not in it: opening the stale
+    index would record a DIFFERENT camera under this label, which is worse than
+    not starting. The message names the label and the saved port identity."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+    _enumeration(monkeypatch, [{"index": 0, "name": "FaceTime HD Camera", "unique_id": "0xdeadbeef"}])
+
+    with pytest.raises(cfg.CameraResolutionError) as exc:
+        cfg.load_robot_cameras("lab1")
+
+    assert "wrist" in str(exc.value)
+    assert "0x1400000005ac8600" in str(exc.value)
+
+
+def test_load_robot_cameras_refuses_when_the_machine_has_no_cameras(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An EMPTY enumeration is an answer, not a failure (camera_identity keeps
+    None and [] apart deliberately): the device is definitively absent."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+    _enumeration(monkeypatch, [])
+
+    with pytest.raises(cfg.CameraResolutionError):
+        cfg.load_robot_cameras("lab1")
+
+
+def test_load_robot_cameras_keeps_the_index_when_identity_is_unavailable(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Linux has no AVFoundation at all, so a machine that cannot answer must
+    still be able to record — with a warning that names the camera."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+    _enumeration(monkeypatch, None)
+
+    with caplog.at_level(logging.WARNING, logger="makermodslab.utils.config"):
+        cameras = cfg.load_robot_cameras("lab1")
+
+    assert cameras["wrist"]["camera_index"] == 1
+    assert any("wrist" in r.message for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_load_robot_cameras_keeps_the_index_when_the_entry_has_no_identity(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Records written before uniqueIDs were stored carry an index and nothing
+    else. Unverifiable is not the same as wrong: trust it, and say so."""
+    entry = _camera_entry("wrist")
+    del entry["unique_id"]
+    cfg.save_robot_record("lab1", {"cameras": [entry]}, allow_create=True)
+    _enumeration(monkeypatch, [{"index": 0, "name": "USB Camera", "unique_id": "0xother"}])
+
+    with caplog.at_level(logging.WARNING, logger="makermodslab.utils.config"):
+        cameras = cfg.load_robot_cameras("lab1")
+
+    assert cameras["wrist"]["camera_index"] == 1
+    assert any("wrist" in r.message for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_reanchoring_logs_the_resolved_binding_for_every_camera(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One INFO line per label with the index, the identity and the device name:
+    a crossed pair is then auditable after the fact, from the session's log."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+    _enumeration(monkeypatch, [{"index": 0, "name": "Robot Cam", "unique_id": "0x1400000005ac8600"}])
+
+    with caplog.at_level(logging.INFO, logger="makermodslab.utils.config"):
+        cfg.load_robot_cameras("lab1")
+
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("Session camera"))
+    assert "wrist" in line
+    assert "0x1400000005ac8600" in line
+    assert "Robot Cam" in line
+
+
+def test_bind_robot_cameras_reanchors_for_inference_too(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inference resolves its cameras through the same seam, so the checkpoint's
+    camera name gets the re-anchored index without its own plumbing."""
+    cfg.save_robot_record("lab1", {"cameras": [_camera_entry("wrist")]}, allow_create=True)
+    _enumeration(
+        monkeypatch,
+        [
+            {"index": 0, "name": "USB Camera", "unique_id": "0xother"},
+            {"index": 1, "name": "USB Camera", "unique_id": "0xanother"},
+            {"index": 2, "name": "USB Camera", "unique_id": "0x1400000005ac8600"},
+        ],
+    )
+
+    assert cfg.bind_robot_cameras("lab1", {"front": "wrist"})["front"]["camera_index"] == 2
