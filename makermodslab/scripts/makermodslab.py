@@ -172,15 +172,30 @@ def _ensure_port_available(name: str, port: int, host: str = "127.0.0.1") -> Non
     sys.exit(1)
 
 
+# The console-script names pyproject installs for the launcher. The prod
+# identity signal below matches on these EXACT basenames, never on a substring,
+# so `vim makermodslab` or `tail -f makermodslab.log` can never qualify.
+_LAUNCHER_SCRIPT_NAMES = frozenset({"makermodslab", "makermodslab-station"})
+
+
 def _identity_reason(cmdline: str, proc: psutil.Process) -> str | None:
     """Why `proc` is recognisably one of ours, or None if it isn't.
 
-    Two independent identity signals, deliberately narrow so `--stop` never
+    Three independent identity signals, deliberately narrow so `--stop` never
     touches an unrelated dev server that merely happens to hold :8000/:8080:
-      1. cmdline runs `uvicorn ... makermodslab.server` (the reload supervisor / prod
-         server — matches even a stale uv-tool snapshot from another venv).
+      1. cmdline runs `uvicorn ... makermodslab.server` — DEV mode only: the
+         reload supervisor is a subprocess with the app string in its argv.
       2. an orphaned reload worker (`multiprocessing.spawn` / `spawn_main`)
          whose cwd is THIS project checkout.
+      3. the prod launcher itself. Prod mode runs uvicorn IN-PROCESS
+         (`uvicorn.Config("makermodslab.server:app", ...)`), so signal 1's
+         string never appears in its argv — the cmdline is just
+         `.../python3 .../bin/makermodslab --lan ...`, and before this signal
+         existed `--stop` reported every prod server as a port stranger and
+         refused to touch it. Only the EXECUTED SCRIPT counts: argv[0]
+         directly, or argv[1] when argv[0] is a python interpreter (how a
+         shebang script shows up in ps) — an unrelated process merely naming
+         the launcher in an argument never qualifies.
     """
     if "makermodslab.server" in cmdline:
         return "uvicorn (makermodslab.server)"
@@ -188,6 +203,15 @@ def _identity_reason(cmdline: str, proc: psutil.Process) -> str | None:
         with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             if Path(proc.cwd()) == PROJECT_ROOT:
                 return "orphaned reload worker"
+    argv = list(getattr(proc, "info", {}).get("cmdline") or [])
+    if not argv:
+        with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            argv = proc.cmdline() or []
+    head = [Path(token).name for token in argv[:2]]
+    if head and head[0] in _LAUNCHER_SCRIPT_NAMES:
+        return "prod launcher (makermodslab)"
+    if len(head) == 2 and head[0].startswith("python") and head[1] in _LAUNCHER_SCRIPT_NAMES:
+        return "prod launcher (makermodslab)"
     return None
 
 
