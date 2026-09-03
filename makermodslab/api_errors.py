@@ -155,6 +155,24 @@ class ErrorCode(StrEnum):
     SYSTEM_RESTART_UNSUPPORTED = "system.restart_unsupported"
     SYSTEM_INSTALL_IN_PROGRESS = "system.install_in_progress"
 
+    # gpu.* — the remote GPU that runs the policy for a remote-inference run
+    # (modal_launcher.py), reached through the `modal` CLI. Its own level-1
+    # domain by the same argument `transport` earned one: a second external
+    # service this node depends on, with a different remedy set. `transport.*`
+    # would blunt four rungs that are carefully distinguished (the GPU is
+    # neither the SFU nor the room), and `system.*` would lie — `unauthenticated`
+    # and `launch_failed` are facts about Modal, not about this process.
+    # `cli_missing`: the binary isn't on PATH (remedy: `uv tool install modal`).
+    # `unauthenticated`: Modal rejected this machine (remedy: `modal token new`;
+    # the Lab never touches ~/.modal.toml). `already_running`/`not_running`: a
+    # start against a live launcher, a stop against a dead one — the GPU is a
+    # Lab-level resource, so these are its own, not `robot.busy.*`.
+    GPU_CLI_MISSING = "gpu.cli_missing"
+    GPU_UNAUTHENTICATED = "gpu.unauthenticated"
+    GPU_ALREADY_RUNNING = "gpu.already_running"
+    GPU_NOT_RUNNING = "gpu.not_running"
+    GPU_LAUNCH_FAILED = "gpu.launch_failed"
+
     # sfu.* — the bundled LiveKit server (sfu.py). `disabled`: this process
     # was started without --sfu (or an external SFU configured), so there is
     # no secret to sign room tokens with — the remedy is restarting the

@@ -48,6 +48,8 @@ __all__ = [
     "CoachingCommandResponse",
     "CurrentSessionResponse",
     "EndedSessionInfo",
+    "GpuLaunchResponse",
+    "GpuStatusResponse",
     "InferenceOptions",
     "PolicyCameraDims",
     "RecordingOptions",
@@ -565,6 +567,75 @@ class RemoteInferenceTransportStatusResponse(BaseModel):
     # probe never ran. Null on success.
     error_code: str | None
     message: str | None
+
+
+class GpuStatusResponse(BaseModel):
+    """GET /api/v1/remote-inference/gpu — shape authority:
+    modal_launcher.status().
+
+    Modelled EXACTLY, with no exclusion mode: the launcher funnels every branch
+    through one builder (`_status_locked`) that emits every key, null where
+    unknown, which is what lets a `response_model` sit on it without
+    materializing absences as lies.
+
+    The GPU is a LAB-LEVEL RESOURCE, not a session — it holds no hardware, has
+    no lease, and stopping it is not a safety action. That is why it has its
+    own three routes rather than a field on `RemoteInferenceOptions`: a 1-3
+    minute cold start inside `handle_start_remote_inference` would hold the
+    `robot.busy.remote_inference` discriminant while the arm sat completely
+    free.
+    """
+
+    # idle | starting | ready | failed | stopping.
+    state: str
+    # The container's own progress, parsed from its stdout: tailscale_up |
+    # loading | warmup | connecting | connected | claimed. Null before the
+    # first recognizable line. `connected` is what flips `state` to ready —
+    # `claimed` is a display refinement, because policy.py claims control in a
+    # background task and a healthy run may never print it.
+    phase: str | None
+    # Which wrapper is running ("sync" / "rtc"), i.e. which robot-side chunk
+    # player it pairs with. Null while idle.
+    engine: str | None
+    policy_hub_id: str | None
+    # The room the launcher pinned with --livekit-room. The one value whose
+    # mismatch is invisible by construction, so it is reported.
+    room: str | None
+    # Survives an idle transition on purpose: after a failure the log is the
+    # most useful thing left. Null before the first launch since boot.
+    log_path: str | None
+    started_at: float | None  # unix seconds
+    elapsed_s: float  # 0.0 while idle
+    # Terminal reason while failed/stopping, null otherwise. Backend prose.
+    message: str | None
+    hint: str | None
+    # The `gpu.*` code behind a FAILED state ("gpu.unauthenticated",
+    # "gpu.launch_failed"), null in every other state. The stable contract an
+    # SDK dispatches on — the prose above it is free to improve, and Modal's
+    # own auth failure and an expired tailnet auth key have entirely different
+    # remedies. A string rather than the enum because a newer server may name a
+    # condition this client has never heard of; match on it, do not exhaust it.
+    code: str | None
+    # The most recent non-empty output line, for the "what is it doing right
+    # now" strip while starting. Data — never translated.
+    last_line: str | None
+    # Seconds until the idle auto-stop fires. Null unless `ready` AND no remote
+    # session is running: a busy GPU is not idle, and a countdown that keeps
+    # ticking through a live run would be a lie.
+    idle_stop_in_s: float | None
+
+
+class GpuLaunchResponse(BaseModel):
+    """POST /api/v1/remote-inference/gpu/start — shape authority:
+    modal_launcher.start().
+
+    `started` is always true here (every refusal is a coded ApiError raised
+    before the spawn), and it is kept so the shape matches the install-manager
+    surface this one is modelled on. `gpu` is the status as of the spawn."""
+
+    started: bool
+    message: str
+    gpu: GpuStatusResponse
 
 
 class SessionCoachingBody(BaseModel):

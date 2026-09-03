@@ -663,6 +663,76 @@ def _sfu_key_file() -> str:
     return os.environ.get(sfu.ENV_KEY_FILE) or LIVEKIT_KEY_FILE
 
 
+@dataclass(frozen=True)
+class ResolvedTransport:
+    """Where the two halves of a remote run meet, resolved ONCE.
+
+    The SFU-first ladder of :func:`resolve_transport`, as a value. `missing` is
+    non-empty only on the LiveKit Cloud path and then nothing else in here is
+    meaningful; `child_token` is the parent-signed JWT the SFU path hands the
+    child and is empty on the Cloud path, where the child mints its own.
+    """
+
+    url: str
+    room: str
+    api_key: str
+    api_secret: str
+    child_token: str
+    source: str
+    missing: tuple[str, ...]
+
+
+def resolve_transport() -> ResolvedTransport:
+    """THE credential resolution — the session's preflight, the transport
+    endpoint and `modal_launcher` all call this and nothing else.
+
+    Two mutually exclusive paths, and the SFU wins: when this process runs one,
+    that is where the room is, and reading a LiveKit Cloud file to dial past
+    our own server would be a config error waiting to happen. On the Cloud path
+    we READ and never load — `_env.load_env` writes os.environ, and a server
+    that has stamped a url into its own environment can never re-resolve it.
+
+    Why one function rather than three call sites that happen to agree: the GPU
+    side and the robot side meeting in DIFFERENT ROOMS is invisible by
+    construction (Portal drops the mismatched stream in silence), so a second
+    credential path is not a duplication smell, it is the failure mode. The one
+    thing callers legitimately differ on is which URL a given peer can DIAL —
+    see :func:`sfu_modal_url` for the container's.
+
+    Raises `OSError`/`RuntimeError` from the SFU key file, as
+    :func:`_sfu_transport` does: the launcher wrote that file before the app
+    started, so an unreadable one is a broken install and not a configuration
+    the caller can repair. Total otherwise — a Cloud path with nothing
+    configured comes back with every variable in `missing`.
+    """
+    if sfu.sfu_enabled():
+        transport = _sfu_transport()
+        return ResolvedTransport(
+            url=transport.url,
+            room=transport.room,
+            api_key=transport.api_key,
+            api_secret=transport.api_secret,
+            child_token=transport.token,
+            source="sfu",
+            missing=(),
+        )
+    # `_read_env` is None only when the `[drtc]` extra is absent. Both session
+    # callers gate on `_extra_missing()` long before this, so the fallback is
+    # for the launcher's benefit: "nothing is configured" is the honest answer
+    # there, and it carries the same remedy.
+    env = _read_env() if _read_env is not None else {}
+    url = env.get("LIVEKIT_URL", "")
+    return ResolvedTransport(
+        url=url,
+        room=env.get("LIVEKIT_ROOM", ""),
+        api_key=env.get("LIVEKIT_API_KEY", ""),
+        api_secret=env.get("LIVEKIT_API_SECRET", ""),
+        child_token="",  # noqa: S106  # nosec B106 — an empty JWT: "the child mints its own"
+        source=_transport_source(url),
+        missing=tuple(_missing_credentials(env)),
+    )
+
+
 def _tailscale_ipv4() -> str | None:
     """This machine's tailnet IPv4, or None.
 
@@ -691,13 +761,19 @@ def _tailscale_ipv4() -> str | None:
     return first[0].strip() if first and first[0].strip() else None
 
 
-def _sfu_modal_url() -> str | None:
+def sfu_modal_url() -> str | None:
     """The signalling URL a Modal container should dial, or None.
 
     A container has no route to `127.0.0.1` and none to a LAN address either;
     what it can reach — with `--tailscale` and the `tailscale-auth` secret — is
     this machine's tailnet IP. Media is a separate problem and a separate flag
     (`--sfu-external-ip`; see sfu.render_config).
+
+    Public because it has two consumers: the transport endpoint (which reports
+    it so the panel can WRITE the `modal run` line) and `modal_launcher` (which
+    RUNS that line). Deliberately not a field of :class:`ResolvedTransport` —
+    it shells out to `tailscale ip -4`, and the session's own preflight has no
+    business paying for that.
     """
     ip = _tailscale_ipv4()
     if not ip:
@@ -1399,50 +1475,34 @@ def handle_start_remote_inference(request: RemoteInferenceRequest) -> dict[str, 
             "code": ErrorCode.TRANSPORT_EXTRA_MISSING,
         }
 
-    # 2. The transport. Two mutually exclusive paths, and the SFU wins: when
-    #    this process runs one, that is where the room is, and reading a
-    #    LiveKit Cloud file to dial past our own server would be a config
-    #    error waiting to happen. On the Cloud path, READ and never load —
-    #    `_env.load_env` writes os.environ, and a server that has stamped a
-    #    url into its own environment can never re-resolve it.
-    child_token = ""  # noqa: S105  # nosec B105 — an empty JWT, i.e. "the child mints its own"
-    if sfu.sfu_enabled():
-        try:
-            transport = _sfu_transport()
-        except (OSError, RuntimeError) as exc:
-            _release_slot()
-            logger.exception("The bundled SFU's key file could not be read")
-            return {
-                "success": False,
-                "status_code": 400,
-                "message": f"The Lab's SFU is running but its key file ({_sfu_key_file()}) "
-                f"couldn't be read: {exc}",
-                "code": ErrorCode.TRANSPORT_NOT_CONFIGURED,
-            }
-        url, room, probe_key, probe_secret = (
-            transport.url,
-            transport.room,
-            transport.api_key,
-            transport.api_secret,
-        )
-        child_token = transport.token
-        source = "sfu"
-    else:
-        env = _read_env()
-        missing = _missing_credentials(env)
-        if missing:
-            _release_slot()
-            return {
-                "success": False,
-                "status_code": 400,
-                "message": f"LiveKit credentials are incomplete (missing {', '.join(missing)}). "
-                + transport_hint(ErrorCode.TRANSPORT_NOT_CONFIGURED),
-                "code": ErrorCode.TRANSPORT_NOT_CONFIGURED,
-            }
-        url = env["LIVEKIT_URL"]
-        room = env["LIVEKIT_ROOM"]
-        probe_key, probe_secret = env["LIVEKIT_API_KEY"], env["LIVEKIT_API_SECRET"]
-        source = _transport_source(url)
+    # 2. The transport — `resolve_transport()` and nothing else, so the
+    #    preflight, the read-only transport endpoint and `modal_launcher` can
+    #    never resolve three different rooms (see that function's docstring).
+    try:
+        resolved = resolve_transport()
+    except (OSError, RuntimeError) as exc:
+        _release_slot()
+        logger.exception("The bundled SFU's key file could not be read")
+        return {
+            "success": False,
+            "status_code": 400,
+            "message": f"The Lab's SFU is running but its key file ({_sfu_key_file()}) "
+            f"couldn't be read: {exc}",
+            "code": ErrorCode.TRANSPORT_NOT_CONFIGURED,
+        }
+    if resolved.missing:
+        _release_slot()
+        return {
+            "success": False,
+            "status_code": 400,
+            "message": f"LiveKit credentials are incomplete (missing {', '.join(resolved.missing)}). "
+            + transport_hint(ErrorCode.TRANSPORT_NOT_CONFIGURED),
+            "code": ErrorCode.TRANSPORT_NOT_CONFIGURED,
+        }
+    url, room = resolved.url, resolved.room
+    probe_key, probe_secret = resolved.api_key, resolved.api_secret
+    child_token = resolved.child_token
+    source = resolved.source
 
     # 3. The room probe: SFU reachable, credentials valid, a policy present.
     _set_phase(PHASE_TRANSPORT_CHECK)
@@ -1772,47 +1832,41 @@ def handle_remote_inference_transport() -> dict[str, Any]:
         )
         return payload
 
+    # The SAME resolution the session's preflight runs and the same one
+    # `modal_launcher` builds its command from — one function, so this page can
+    # never describe a transport a run would not actually use.
+    try:
+        resolved = resolve_transport()
+    except (OSError, RuntimeError) as exc:
+        payload["error_code"] = str(ErrorCode.TRANSPORT_NOT_CONFIGURED)
+        payload["message"] = (
+            f"The Lab's SFU is running but its key file ({_sfu_key_file()}) couldn't be read: {exc}"
+        )
+        return payload
+
+    payload |= {
+        "configured": not resolved.missing,
+        "missing_vars": list(resolved.missing),
+        "url": resolved.url,
+        "room": resolved.room,
+        "source": resolved.source,
+    }
     if enabled:
-        try:
-            transport = _sfu_transport()
-        except (OSError, RuntimeError) as exc:
-            payload["error_code"] = str(ErrorCode.TRANSPORT_NOT_CONFIGURED)
-            payload["message"] = (
-                f"The Lab's SFU is running but its key file ({_sfu_key_file()}) couldn't be read: {exc}"
-            )
-            return payload
         payload |= {
-            "configured": True,
-            "missing_vars": [],
-            "url": transport.url,
-            "room": transport.room,
-            "source": "sfu",
-            "sfu_url": transport.url,
-            "sfu_modal_url": _sfu_modal_url(),
+            "sfu_url": resolved.url,
+            "sfu_modal_url": sfu_modal_url(),
             # The key ID, never the secret. It is the `--livekit-api-key` half
             # of the Modal line and it identifies rather than authorizes.
-            "sfu_key_id": transport.api_key,
+            "sfu_key_id": resolved.api_key,
         }
-        key, secret = transport.api_key, transport.api_secret
-    else:
-        env = _read_env()
-        missing = _missing_credentials(env)
-        url = env.get("LIVEKIT_URL", "")
-        payload |= {
-            "configured": not missing,
-            "missing_vars": missing,
-            "url": url,
-            "room": env.get("LIVEKIT_ROOM", ""),
-            "source": _transport_source(url),
-        }
-        if missing:
-            payload["error_code"] = str(ErrorCode.TRANSPORT_NOT_CONFIGURED)
-            payload["message"] = (
-                f"LiveKit credentials are incomplete (missing {', '.join(missing)}). "
-                + transport_hint(ErrorCode.TRANSPORT_NOT_CONFIGURED)
-            )
-            return payload
-        key, secret = env["LIVEKIT_API_KEY"], env["LIVEKIT_API_SECRET"]
+    if resolved.missing:
+        payload["error_code"] = str(ErrorCode.TRANSPORT_NOT_CONFIGURED)
+        payload["message"] = (
+            f"LiveKit credentials are incomplete (missing {', '.join(resolved.missing)}). "
+            + transport_hint(ErrorCode.TRANSPORT_NOT_CONFIGURED)
+        )
+        return payload
+    key, secret = resolved.api_key, resolved.api_secret
 
     url, room, source = payload["url"], payload["room"], payload["source"]
     probe = _probe_room(url, room=room, key=key, secret=secret)

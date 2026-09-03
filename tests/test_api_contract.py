@@ -296,6 +296,13 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # mirror: the flat surface only ever shrinks.
         "GET /api/v1/remote-inference-status",
         "GET /api/v1/remote-inference/transport",
+        # The GPU half (modal_launcher.py), a LAB-LEVEL resource rather than a
+        # session field: it holds no hardware, so it gets its own verbs instead
+        # of a `launch_gpu` option that would hold the busy discriminant for a
+        # 1-3 minute cold start while the arm sat free.
+        "POST /api/v1/remote-inference/gpu/start",
+        "POST /api/v1/remote-inference/gpu/stop",
+        "GET /api/v1/remote-inference/gpu",
     ]
 )
 

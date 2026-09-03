@@ -51,6 +51,11 @@ DOMAINS = frozenset(
         "transport",
         "system",
         "sfu",
+        # The remote GPU the policy runs on (modal_launcher.py), reached
+        # through the `modal` CLI. A second external service, with a remedy
+        # set of its own — see the ErrorCode comment for why neither
+        # `transport.*` nor `system.*` fits.
+        "gpu",
         "internal",
     ]
 )

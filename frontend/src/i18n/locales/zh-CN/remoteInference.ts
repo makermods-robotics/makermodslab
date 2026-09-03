@@ -37,9 +37,10 @@ export default {
     rtc: "实时分块",
   },
   modalRun: {
-    title: "在另一个终端里运行这条命令",
+    manualToggle: "改为自己手动启动",
+    title: "MakerMods Lab 将要运行的命令",
     intro:
-      "MakerMods Lab 负责驱动机械臂并核验房间；它不会启动 GPU。请先运行这条命令并让它保持运行，然后再按下方的远程按钮。",
+      "同一条命令，供手动启动使用 — 当 modal 命令缺失或尚未登录时，这是唯一的途径；当运行已连接却收不到任何东西时，也用它来做对照。",
     copy: "复制",
     copiedTitle: "命令已复制",
     copyFailedTitle: "复制失败",
@@ -50,6 +51,36 @@ export default {
       "请把 <0>{{placeholder}}</0> 替换为 <1>{{path}}</1> 中该 key id 对应的 secret。命令中的 key id 是真实值；MakerMods Lab 的接口从不返回 secret。",
     noTailnetUrl:
       "没有 tailnet 地址，命令中也就没有可供 GPU 端拨号的 URL。请在本机登录 Tailscale，然后重新检查传输。",
+  },
+  // GPU 侧，自 S3.8 起由 MakerMods Lab 自己启动。它不会作为远程按钮的前置条件 —
+  // 那仍由传输探测中的 operator 检查决定。
+  gpu: {
+    title: "Modal 上的策略服务",
+    start: "启动 GPU",
+    retry: "重试",
+    stop: "停止 GPU",
+    cancel: "取消",
+    // {{wrapper}} 是包装脚本的路径，属于数据，原样显示。
+    idleHint:
+      "从本机在 Modal A100 上运行 {{wrapper}}。冷启动通常需要 1-3 分钟；房间和凭据会自动填好。",
+    // {{seconds}} 是普通整数，刻意不使用 i18next 的 count 机制。
+    elapsed: "{{seconds}} 秒",
+    // 后端阶段取值。用于匹配，不直接展示 — 原值只作为新版服务端引入新阶段时的兜底。
+    phase: {
+      pending: "正在启动容器",
+      tailscale_up: "正在加入 tailnet",
+      loading: "正在加载检查点",
+      warmup: "正在预热模型",
+      connecting: "正在连接房间",
+      connected: "已在房间中",
+      claimed: "正在驱动",
+    },
+    running: "GPU 正在运行 — 这会产生费用。",
+    // {{minutes}} 是普通整数，刻意不使用 count 机制。
+    idleStopIn: "若约 {{minutes}} 分钟内没有远程运行开始，它会自动停止。",
+    idleStopPaused: "有远程运行正在使用它，因此不会自动停止。",
+    roomLabel: "房间",
+    logLabel: "日志",
   },
   transport: {
     title: "传输",

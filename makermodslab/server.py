@@ -38,7 +38,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
@@ -51,6 +51,10 @@ from lerobot.policies.factory import make_policy_config
 # lookup at call time, not a bound name frozen at import).
 from . import (
     datasets as dataset_browser,
+    # The GPU half of a remote-inference run, as a LAB-LEVEL resource (S3.8):
+    # it shells out to the `modal` CLI, imports nothing from `drtc/`, and is
+    # deliberately not a session — see its module docstring.
+    modal_launcher,
     models as model_browser,
     record as record_state,
     rollout as rollout_state,
@@ -221,6 +225,8 @@ from .schemas.nodes import (
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
+    GpuLaunchResponse,
+    GpuStatusResponse,
     RemoteInferenceStatusResponse,
     RemoteInferenceTransportStatusResponse,
     SessionCoachingBody,
@@ -1211,6 +1217,111 @@ def get_remote_inference_transport():
     pinned its transport at spawn (READY echoes the effective values).
     """
     return handle_remote_inference_transport()
+
+
+# --- Remote inference: the GPU half (modal_launcher.py, v1-only surface) ---
+#
+# A LAB-LEVEL RESOURCE, not a session, and that is the whole design decision of
+# S3.8 (docs/drtc/SLICE3.md "S3.8 as built"). The GPU holds no hardware, so:
+# these are their own verbs rather than a `launch_gpu` field on
+# `RemoteInferenceOptions` — that would hold `robot.busy.remote_inference` for
+# the 1-3 minute cold start while the arm sat completely free; stopping a
+# session does NOT stop the GPU (a lease expiry is a safety stop whose one job
+# is de-energizing an arm, and it must not grow a network call); and the GPU
+# reaching `ready` does NOT gate the arm — `_probe_room` still does, because it
+# observes the room rather than a log line.
+
+
+class GpuStartBody(BaseModel):
+    """The GPU side of the remote-run form. Field-for-field the subset of
+    `RemoteInferenceOptions` the container needs, with the same defaults: the
+    two halves are launched from one object precisely so horizon / fps / codec
+    / s_min cannot disagree (Portal fingerprints the wire schema and drops a
+    mismatched stream in silence).
+
+    `extra="forbid"` like every options model — a typo'd knob is a loud 422,
+    never a silently ignored one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: Literal["sync", "rtc"] = "sync"
+    # Required in practice: `--policy-path` has no default in either wrapper,
+    # so an empty one is refused (gpu.launch_failed) BEFORE the spawn rather
+    # than arriving as a Click usage error 90s into a cold-start log.
+    policy_hub_id: str = ""
+    task: str = ""
+    horizon: int = 16
+    fps: int = 30
+    video_codec: Literal["H264", "MJPEG"] = "H264"
+    s_min: int = 4
+
+
+@v1_router.post(
+    "/remote-inference/gpu/start",
+    response_model=GpuLaunchResponse,
+    tags=["sessions"],
+)
+def start_remote_inference_gpu(body: GpuStartBody):
+    """Launch the policy server on Modal, attached, from this machine.
+
+    Attached on purpose (no `--detach`): the local `modal run` process is the
+    app's lifeline, so stopping it stops the app — which is the cost-safety
+    property, and it means the GPU dies with the Lab. Detached would buy
+    "survives a restart" in exchange for orphaned A100s nobody knows about.
+
+    The API secret is NEVER in the command line: both wrappers' `main()` falls
+    back to LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, and the
+    launcher passes them there instead of in argv, which is world-readable in
+    `ps` on this machine.
+
+    Deliberately NOT refused while a local training run holds this machine: a
+    Modal A100 is not this machine's GPU.
+    """
+    return modal_launcher.start(
+        engine=body.engine,
+        policy_hub_id=body.policy_hub_id,
+        task=body.task,
+        horizon=body.horizon,
+        fps=body.fps,
+        video_codec=body.video_codec,
+        s_min=body.s_min,
+    )
+
+
+@v1_router.post(
+    "/remote-inference/gpu/stop",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def stop_remote_inference_gpu():
+    """Stop the GPU policy server (SIGTERM→SIGKILL over its process group).
+
+    Returns while the group is still going down, in state `stopping`; the
+    launcher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when
+    there is nothing to stop. Never touches the arm — a live remote-inference
+    session keeps running and its watchdogs report the empty room, which is a
+    better diagnosis than a stop the user did not ask for."""
+    return modal_launcher.stop()
+
+
+@v1_router.get(
+    "/remote-inference/gpu",
+    response_model=GpuStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_gpu():
+    """The GPU launcher's state: idle | starting | ready | failed | stopping,
+    plus the container's own phase, the room it was pinned to, the log path and
+    the idle auto-stop countdown.
+
+    Pollable unconditionally, and a poll is also one of the two things (with
+    the log pump) that can notice a cold start that overran or a ready GPU
+    nobody is using — neither deadline needs a thread of its own.
+
+    `state == "ready"` is a HINT derived from the container's stdout, never the
+    authority: the gate on energizing the arm stays the session's own room
+    probe."""
+    return modal_launcher.status()
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])

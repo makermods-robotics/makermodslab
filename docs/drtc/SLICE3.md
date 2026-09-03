@@ -1012,3 +1012,195 @@ interface. Two tests pin both halves.
   fallback needs.
 - **`DRTC_LOG_DIR` stays**, minus its SFU/cloudflared role: it is now just the
   parent of the sessions log dir.
+
+## S3.8 as built (2026-09-03)
+
+Lifecycle option B ("the Lab also launches Modal"), and its stated prerequisite
+was already met: `--livekit-room` landed on both wrappers in S3.3/S3.4, so this
+slice is smaller than §2 implies.
+
+### Option B landed as a Lab-level RESOURCE, not as a session field
+
+The obvious shape — `launch_gpu: bool` on `RemoteInferenceOptions` — was
+rejected, and the reasons are all in existing code:
+
+1. **The design's own pre-claim rule forbids it.** §2B wanted the GPU launched
+   in a pre-claim phase. Under a session field, `handle_start_remote_inference`
+   sets `remote_inference_active = True` before anything else (deliberately —
+   it is the race protection), so a 60-180 s cold start would hold the claim
+   with nothing touching hardware.
+2. **The mutex would lie.** `robot.busy.remote_inference` would refuse teleop,
+   record, replay and both calibrations for minutes **while the arm was
+   completely free**.
+3. **Three safety-critical sets would have to widen.** `_WINDING_DOWN_PHASES`,
+   `_WATCHED_PHASES` and `_dispatch_stop` all assume a session that has (or is
+   about to have) a child holding the bus. A phase with no child and no arm is
+   outside every one of them.
+4. **The lease's promise would break.** An expiry tick landing in the pre-claim
+   window would have `_dispatch_stop("remote_inference")` doing something that
+   is not de-energizing an arm — the exact opposite of what the lease is for.
+5. **The precedent is already in the tree.** `jobs.training_is_active()` is a
+   Lab-level resource the session consults but does not contain, and
+   `utils/system.InstallManager` is the singleton-plus-two-routes shape this
+   copies almost line for line.
+
+So: `makermodslab/modal_launcher.py`, three v1 routes
+(`POST /remote-inference/gpu/start`, `POST …/gpu/stop`, `GET …/gpu`, all
+`tags=["sessions"]`), `GpuLaunchResponse` / `GpuStatusResponse` in
+`schemas/sessions.py`, and a new `gpu.*` error domain. `SESSION_KINDS`,
+`STARTABLE_KINDS`, `_OPTIONS_MODELS`, `_REQUEST_BUILDERS`, `_dispatch_start`
+and `_dispatch_stop` are all **unchanged** — that is the point.
+
+The clinching UX argument is that the readiness signal already existed and was
+already being polled: `GET /remote-inference/transport` reports
+`operator_present`, so "Start GPU" → progress → the existing poll flips
+`operator_present` → "Run it remotely" unblocks, with zero new session surface.
+
+### ONE transport resolver
+
+`remote_inference.resolve_transport()` is now THE credential resolution, and
+three callers use it and nothing else: the session's preflight, the read-only
+transport endpoint, and `modal_launcher.resolve_transport_plan()`. A second
+credential path is not a duplication smell here — the two halves meeting in
+different rooms is invisible by construction (Portal drops the mismatched
+stream in silence), so it is the failure mode itself.
+
+The one thing callers legitimately differ on is which URL a given peer can
+DIAL, so `sfu_modal_url()` (the tailnet address, ex-`_sfu_modal_url`) is public
+and separate: it shells out to `tailscale ip -4`, and the session's own
+preflight has no business paying for that. `TransportPlan.needs_tailscale` is
+the SEAM for the open question `--sfu-external-ip` raises — if the Lab's SFU
+ever becomes directly reachable from a container, that goes false in one place
+and the argv, the child env and the tests all follow.
+
+### The secret is not in `ps`
+
+`modal run … --livekit-api-secret <secret>` would put a signing key in argv on
+the operator's own machine. Both wrappers' `main()` therefore gained six
+byte-identical lines:
+
+```python
+livekit_api_key = livekit_api_key or os.environ.get("LIVEKIT_API_KEY", "")
+livekit_api_secret = livekit_api_secret or os.environ.get("LIVEKIT_API_SECRET", "")
+```
+
+A `@local_entrypoint` body runs on the USER'S machine, so this resolves locally
+and the value then travels to the container as a `fn.remote(...)` kwarg over
+Modal's own TLS channel. `build_argv` passes neither flag; `child_env` passes
+both. The flag still wins when present, so every hand-typed invocation and
+every line of `docs/drtc/README.md` is unchanged.
+
+Scoped to the two CREDENTIALS only, deliberately not to `--livekit-url` /
+`--livekit-room`: those are not secrets, and keeping them flag-only means
+"which SFU, which room" stays a visible decision rather than one a stray
+`LIVEKIT_ROOM` in an operator's shell can flip — the exact failure class
+`--livekit-room` was added to close. The residual hazard is stated rather than
+hidden: an operator with `LIVEKIT_API_SECRET` exported who previously fell
+through to the `LiveKit-cloud` Modal secret now sends their local one.
+
+### Attached only, and what that costs
+
+No `--detach`. The local `modal run` process is the app's lifeline, so killing
+its process group (`rollout._terminate_tree`, reused) stops the app — the
+cost-safety property this slice wants. Detached would need `modal app stop`,
+persisted app ids and reattachment, and would introduce the one genuinely
+expensive failure mode in the design: an orphan A100 nobody knows about.
+(`modal app list --json` lists every running app in the WORKSPACE, so
+name-matching a reattach is a footgun, not a fallback.)
+
+The trade, stated plainly: **the GPU dies with the Lab.** Acceptable because
+the robot session dies with it too, and the child's `finally:` returns the arm
+to rest before releasing torque.
+
+### The two deadlines, and what does NOT happen on them
+
+- `_COLD_START_TIMEOUT_S = 300.0`. 60-180 s is the realistic band, but a cold
+  `hf-cache` volume plus a first-ever VLA `from_pretrained` can exceed 180, and
+  a false failure at that moment is maximally annoying. The message names the
+  last phase reached — "stuck at `loading`" and "stuck at `tailscale_up`" have
+  nothing in common as remedies.
+- `_GPU_IDLE_STOP_S = 600.0`, measured from whichever is LATER: reaching
+  `ready`, or the end of the last remote session. An A100 is ~$2-4/hr and
+  `_FN_KWARGS["timeout"] = 2h` already caps one forgotten run at ~$4-8; ten
+  minutes is longer than a realistic gap between two runs and wastes at most
+  ~$0.5. The panel says plainly that a ready GPU is billing, and shows the
+  countdown. Visibility is the cheapest cost control there is.
+
+Both are checked from the log pump and from the status poll — **not a thread**,
+the same argument `_check_watchdogs` makes ("there is nothing to watch that
+does not already wake one of those two").
+
+**The launcher's exit does not stop a session**, and `_dispatch_stop` does not
+stop the launcher. A lease expiry is a SAFETY stop whose one job is
+de-energizing an arm; adding a slower, network-dependent action to that path is
+exactly wrong. And `modal run`'s local exit is a weak signal — it can end on a
+log-stream disconnect while the app is fine. The session's own watchdogs
+already produce a _diagnosed_ message from the room itself, which is strictly
+better; on a nonzero exit the two cards simply sit side by side.
+
+**Readiness is a hint, never an authority.** `state: "ready"` is derived from
+the container's stdout (`[policy] connected as` — NOT `claimed control as`,
+which policy.py emits from a background, non-fatal task and a healthy run may
+never print). The gate on energizing the arm stays `_probe_room`. If Modal ever
+reformats its log lines the worst case is a misleading panel and a false
+cold-start timeout, not a wrong energization.
+
+**No refusal while a local training run holds the machine.** A Modal A100 is
+not this machine's GPU, and CLAUDE.md already flags the existing remote-
+inference↔training refusal as "the one asymmetry in the matrix, deliberate and
+revisitable" — a second, weaker instance would entrench a rule we already
+suspect.
+
+### The failure is coded, and the stop is bounded
+
+`classify_failure`'s verdict rides the status body as `code` (`gpu.*`, null in
+every non-failed state), so an SDK dispatches on the FAILURE the way it already
+dispatches on a coded refusal — `gpu.unauthenticated` (`modal token new`) and an
+expired tailnet auth key are not the same problem, and the prose beside the code
+stays free to improve. The panel shows the backend's own hint plus the raw code;
+it deliberately does NOT key a translated hint off it, because that would be a
+second, localized copy of server prose (CLAUDE.md: "the Python backend is never
+localized").
+
+`stopping` is bounded too. `_terminate_tree` escalates SIGTERM→SIGKILL, so the
+PROCESS is always gone; what can still hang is the stdout PIPE, whose write end
+an un-reaped grandchild may hold open — `readline` blocks forever, the pump
+never runs its finalizer, and the launcher would sit in `stopping` with no way
+out. So the terminate thread arms `_STOP_DRAIN_TIMEOUT_S = 10.0` **after the
+kill returns** (the bound is on the drain, not on the kill, which has a ceiling
+of its own), and the next status poll forces the terminal state — `idle` for an
+operator or idle-timer stop, `failed` for a deadline, keeping its diagnosis and
+the phase that diagnosis names. The message says the kill worked and the
+LISTENING stopped, which is the distinction that matters to an operator.
+
+Forcing also clears `_proc`, which ORPHANS the wedged pump: `_handle_line` and
+`_handle_exit` both guard on `_proc is proc`, so a zombie thread that finally
+wakes cannot write phases or a stale verdict into the next launch's state.
+
+### The generated command stays
+
+`ModalRunLine` / `modalCommand.ts` are kept, collapsed under "Run it yourself
+instead". Three reasons: it is the only route when `modal` is missing or
+unauthenticated; the only route to `--detach` or a hand-tuned
+`--slack`/`--rtc-schedule`; and the ground truth an operator compares against
+when the fingerprint watchdog fires. Its two invariants survive — the command
+text is DATA and is never localized, and the API still never returns the API
+secret (`LOCAL_SECRET_PLACEHOLDER` stays; the Lab-launched path reads the
+secret from the key file into the child env, never through a response body).
+
+### Ratchets and what was not touched
+
+`V1_ONLY_ROUTES` +3; `DOMAINS` += `"gpu"`. `LEGACY_ROUTES`,
+`UNTYPED_V1_ROUTES` and `RESPONSE_MODEL_EXEMPT` are all unchanged — the three
+routes ship typed, and there is deliberately **no log-stream route**: the
+status carries `log_path` and `last_line`, and a tail endpoint would be the
+first thing in this group to need an exemption entry.
+
+No `modal` Python dependency anywhere (the CLI is discovered as a binary), no
+`/reset` wiring (it re-spawns the LAST run globally from a `modal.Dict` with no
+session identity, so a Lab-driven reset could resurrect someone else's run — it
+stays a documented human escape hatch), no Modal secret management, no image
+changes, and **the Lab never reads `~/.modal.toml`**: it inherits the
+environment and lets the CLI do its own thing, so a missing token surfaces as a
+fast nonzero exit that `classify_failure` turns into `gpu.unauthenticated`
+naming `modal token new`.

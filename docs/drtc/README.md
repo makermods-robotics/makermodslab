@@ -140,6 +140,25 @@ interpolates.
 
 ## GPU side, on Modal
 
+**The Lab can now launch this for you.** Since S3.8 the remote-inference panel
+has a "Start GPU" button (`makermodslab/modal_launcher.py`, three routes under
+`/api/v1/remote-inference/gpu`): it finds the `modal` CLI on PATH, resolves the
+room and credentials through the SAME function the session's preflight uses,
+and runs the command below itself — attached, so stopping it stops the app. The
+GPU is a Lab-level resource there, not part of the session: it does not hold the
+arm, stopping a session does not stop it, and it stops itself after ten idle
+minutes because a ready A100 is billing. Everything in this section stays true
+and stays supported — it is the route when `modal` is missing or not signed in,
+when you want `--detach` or a hand-tuned flag, and it is the line to compare
+against when a run connects but receives nothing.
+
+One thing the Lab-launched path does differently: it passes the API key and
+secret in the CHILD'S ENVIRONMENT rather than as flags, because a
+`@local_entrypoint` body runs on your machine and `--livekit-api-secret` would
+put a signing key in `ps`. Both wrappers' `main()` falls back to
+`LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` for that reason; the flags still win
+when present, so every command in this file is unchanged.
+
 The Modal wrappers are invoked in **file form, from the repo root** — not as
 `python -m`:
 
@@ -434,6 +453,39 @@ python -m makermodslab.drtc._sync_player
 
 The design record is [`SLICE3.md`](SLICE3.md).
 
+### S3.8 (2026-09-03) — the Lab launches the GPU
+
+- **`makermodslab/modal_launcher.py`** plus three v1 routes
+  (`POST /api/v1/remote-inference/gpu/start`, `POST …/gpu/stop`,
+  `GET …/gpu`): the Lab shells out to the `modal` CLI, **attached** (no
+  `--detach`), so killing the process group stops the app — and the GPU dies
+  with the Lab, which is fine because the session does too.
+- **A LAB-LEVEL resource, not a session field.** It holds no hardware, so it
+  gets its own verbs: a `launch_gpu` option would hold
+  `robot.busy.remote_inference` for a 1-3 minute cold start while the arm sat
+  completely free. Its exit never stops a session; a session's stop (including
+  a lease expiry) never stops it; `SESSION_KINDS` / `STARTABLE_KINDS` /
+  `_dispatch_*` are untouched. See SLICE3.md "S3.8 as built" for the five
+  arguments.
+- **One transport resolver.** `remote_inference.resolve_transport()` is now the
+  only credential path, shared by the session's preflight, the transport
+  endpoint and the launcher — the two halves in different rooms is invisible by
+  construction, so a second path is the bug rather than a smell.
+- **The secret is never in argv.** Both wrappers' `main()` falls back to
+  `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`, and the launcher passes them in the
+  child's environment. The flags still win when present.
+- **Two deadlines, no new thread:** a 300 s cold-start bound (its message names
+  the last phase reached) and a 600 s idle auto-stop measured from `ready` or
+  the last session's end, whichever is later. The panel says a ready GPU is
+  billing and counts down. Both are checked from the log pump and the status
+  poll.
+- **Readiness is a hint.** `state: "ready"` comes from `[policy] connected as`
+  in the container's stdout — never `claimed control as`, which a healthy run
+  may never print. The gate on energizing the arm is still `_probe_room`.
+- New `gpu.*` error domain (`cli_missing`, `unauthenticated`, `already_running`,
+  `not_running`, `launch_failed`); `V1_ONLY_ROUTES` +3; the Lab still never
+  reads `~/.modal.toml`.
+
 ### S3.6 (2026-09-03) — the Lab-owned SFU
 
 - **`makermodslab --sfu` is the local-SFU story**, merged from
@@ -516,14 +568,15 @@ What that slice landed, `robot_sync` only (all of it is now shared):
   so a run started from another tab or through the API shows its status and
   its Stop as soon as this panel renders. (Before the rework it was gated on
   a policy being selected here, and was invisible until one was.)
-- **The Lab owns the SFU now, but still does not launch Modal.** S3.6 adopted
+- **The Lab owns the SFU, and now the GPU launch too.** S3.6 adopted
   the bundled `livekit-server` (`makermodslab --sfu`) and its token broker, so
   lifecycle option C is done: the SFU is a launcher child, not a session, and
-  the session mints the robot's token from it. What is left of option A is the
-  GPU half — a human runs `modal run makermodslab/drtc/modal_policy.py` in
-  another terminal, and the session VERIFIES an operator is in the room before
-  it energizes anything, refusing with a coded `transport.*` otherwise. The Lab
-  launching the GPU side is now S3.8.
+  the session mints the robot's token from it. The GPU half then landed as
+  S3.8 (above), and deliberately BESIDE the session rather than inside it —
+  the session still owns only the robot side, and still VERIFIES an operator
+  is in the room before it energizes anything, refusing with a coded
+  `transport.*` otherwise. Running `modal run makermodslab/drtc/modal_policy.py`
+  by hand in another terminal remains fully supported.
 - **No CAN-arm support here, and none planned in this slice.** `maker_follower`
   / `metal_follower` are not registered with draccus in either entrypoint, so
   `--robot.type=maker_follower` fails at CLI-parse time inside the child —

@@ -631,6 +631,27 @@ def main(  # nosec B107 — the empty `*_secret` defaults are "flag not passed",
     livekit_room: str = "",
     tailscale: bool = False,
 ) -> None:
+    """Resolve the run's arguments locally, then fire the container.
+
+    THIS BODY RUNS ON THE USER'S MACHINE: a @local_entrypoint is executed by
+    the local `modal` CLI, never in the container. That is why the two
+    credentials below may also arrive in the ENVIRONMENT — a
+    `--livekit-api-secret <secret>` flag would put a signing key in `ps` for
+    every process on that machine to read, so the Lab's launcher
+    (makermodslab/modal_launcher.py) passes them as env instead. The resolved
+    value then travels to the container as a `fn.remote(...)` kwarg over
+    Modal's own TLS channel.
+    """
+    # The flag still wins when present, so every hand-typed invocation and
+    # every line in docs/drtc/README.md is unchanged. Scoped to the two
+    # credentials ONLY, deliberately not to --livekit-url / --livekit-room:
+    # those are not secrets, and keeping them flag-only means "which SFU, which
+    # room" stays a VISIBLE decision rather than one a stray LIVEKIT_ROOM in an
+    # operator's shell can flip — which is the exact failure class
+    # --livekit-room was added to close.
+    livekit_api_key = livekit_api_key or os.environ.get("LIVEKIT_API_KEY", "")
+    livekit_api_secret = livekit_api_secret or os.environ.get("LIVEKIT_API_SECRET", "")
+
     # --tailscale routes to the twin function that carries the tailscale-auth
     # secret; everything else is identical (see the note above serve()).
     fn = serve_ts if tailscale else serve

@@ -41,9 +41,10 @@ export default {
     rtc: "Real-time chunking",
   },
   modalRun: {
-    title: "Run this in the other terminal",
+    manualToggle: "Run it yourself instead",
+    title: "What the Lab will run",
     intro:
-      "The Lab drives the arm and verifies the room; it does not launch the GPU. Start this first and leave it running, then press the remote verb below.",
+      "The same command, for launching by hand — the only route when the modal command is missing or not signed in, and the line to compare against when a run connects but receives nothing.",
     copy: "Copy",
     copiedTitle: "Command copied",
     copyFailedTitle: "Couldn't copy",
@@ -56,6 +57,38 @@ export default {
       "Replace <0>{{placeholder}}</0> with the secret beside that key id in <1>{{path}}</1>. The key id in the line is real; the Lab never sends the secret over its own API.",
     noTailnetUrl:
       "No tailnet address, so the command has no URL for the GPU side to dial. Sign in to Tailscale on this machine and re-check the transport.",
+  },
+  // The GPU half, which the Lab launches itself since S3.8. It does NOT gate
+  // the remote verb — that stays the transport probe's operator check.
+  gpu: {
+    title: "Policy server on Modal",
+    start: "Start GPU",
+    retry: "Try again",
+    stop: "Stop GPU",
+    cancel: "Cancel",
+    // {{wrapper}} is the wrapper's PATH — data, shown verbatim.
+    idleHint:
+      "Runs {{wrapper}} on a Modal A100 from this machine. Cold start is usually 1-3 minutes; the room and the credentials are filled in for you.",
+    // {{seconds}} is a plain integer, deliberately not i18next's magic `count`.
+    elapsed: "{{seconds}}s",
+    // Backend phase values. Matched on, never displayed raw — the raw value is
+    // the fallback for a phase a newer server introduces.
+    phase: {
+      pending: "Starting the container",
+      tailscale_up: "Joining the tailnet",
+      loading: "Loading the checkpoint",
+      warmup: "Warming up the model",
+      connecting: "Connecting to the room",
+      connected: "In the room",
+      claimed: "Driving",
+    },
+    running: "GPU running — this is billing.",
+    // {{minutes}} is a plain integer, deliberately not `count`.
+    idleStopIn:
+      "It stops itself in about {{minutes}} min if no remote run starts.",
+    idleStopPaused: "A remote run is using it, so it won't stop itself.",
+    roomLabel: "Room",
+    logLabel: "Log",
   },
   transport: {
     title: "Transport",

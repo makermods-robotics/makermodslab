@@ -1182,6 +1182,231 @@
         "title": "ExtraStatus",
         "type": "object"
       },
+      "GpuLaunchResponse": {
+        "description": "POST /api/v1/remote-inference/gpu/start — shape authority:\nmodal_launcher.start().\n\n`started` is always true here (every refusal is a coded ApiError raised\nbefore the spawn), and it is kept so the shape matches the install-manager\nsurface this one is modelled on. `gpu` is the status as of the spawn.",
+        "properties": {
+          "gpu": {
+            "$ref": "#/components/schemas/GpuStatusResponse"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "message",
+          "gpu"
+        ],
+        "title": "GpuLaunchResponse",
+        "type": "object"
+      },
+      "GpuStartBody": {
+        "additionalProperties": false,
+        "description": "The GPU side of the remote-run form. Field-for-field the subset of\n`RemoteInferenceOptions` the container needs, with the same defaults: the\ntwo halves are launched from one object precisely so horizon / fps / codec\n/ s_min cannot disagree (Portal fingerprints the wire schema and drops a\nmismatched stream in silence).\n\n`extra=\"forbid\"` like every options model — a typo'd knob is a loud 422,\nnever a silently ignored one.",
+        "properties": {
+          "engine": {
+            "default": "sync",
+            "enum": [
+              "sync",
+              "rtc"
+            ],
+            "title": "Engine",
+            "type": "string"
+          },
+          "fps": {
+            "default": 30,
+            "title": "Fps",
+            "type": "integer"
+          },
+          "horizon": {
+            "default": 16,
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "policy_hub_id": {
+            "default": "",
+            "title": "Policy Hub Id",
+            "type": "string"
+          },
+          "s_min": {
+            "default": 4,
+            "title": "S Min",
+            "type": "integer"
+          },
+          "task": {
+            "default": "",
+            "title": "Task",
+            "type": "string"
+          },
+          "video_codec": {
+            "default": "H264",
+            "enum": [
+              "H264",
+              "MJPEG"
+            ],
+            "title": "Video Codec",
+            "type": "string"
+          }
+        },
+        "title": "GpuStartBody",
+        "type": "object"
+      },
+      "GpuStatusResponse": {
+        "description": "GET /api/v1/remote-inference/gpu — shape authority:\nmodal_launcher.status().\n\nModelled EXACTLY, with no exclusion mode: the launcher funnels every branch\nthrough one builder (`_status_locked`) that emits every key, null where\nunknown, which is what lets a `response_model` sit on it without\nmaterializing absences as lies.\n\nThe GPU is a LAB-LEVEL RESOURCE, not a session — it holds no hardware, has\nno lease, and stopping it is not a safety action. That is why it has its\nown three routes rather than a field on `RemoteInferenceOptions`: a 1-3\nminute cold start inside `handle_start_remote_inference` would hold the\n`robot.busy.remote_inference` discriminant while the arm sat completely\nfree.",
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "elapsed_s": {
+            "title": "Elapsed S",
+            "type": "number"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "idle_stop_in_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Stop In S"
+          },
+          "last_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Line"
+          },
+          "log_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Path"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "policy_hub_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Hub Id"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "phase",
+          "engine",
+          "policy_hub_id",
+          "room",
+          "log_path",
+          "started_at",
+          "elapsed_s",
+          "message",
+          "hint",
+          "code",
+          "last_line",
+          "idle_stop_in_s"
+        ],
+        "title": "GpuStatusResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -9909,6 +10134,92 @@
           }
         },
         "summary": "Get Remote Inference Status",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu": {
+      "get": {
+        "description": "The GPU launcher's state: idle | starting | ready | failed | stopping,\nplus the container's own phase, the room it was pinned to, the log path and\nthe idle auto-stop countdown.\n\nPollable unconditionally, and a poll is also one of the two things (with\nthe log pump) that can notice a cold start that overran or a ready GPU\nnobody is using — neither deadline needs a thread of its own.\n\n`state == \"ready\"` is a HINT derived from the container's stdout, never the\nauthority: the gate on energizing the arm stays the session's own room\nprobe.",
+        "operationId": "get_remote_inference_gpu",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Inference Gpu",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu/start": {
+      "post": {
+        "description": "Launch the policy server on Modal, attached, from this machine.\n\nAttached on purpose (no `--detach`): the local `modal run` process is the\napp's lifeline, so stopping it stops the app — which is the cost-safety\nproperty, and it means the GPU dies with the Lab. Detached would buy\n\"survives a restart\" in exchange for orphaned A100s nobody knows about.\n\nThe API secret is NEVER in the command line: both wrappers' `main()` falls\nback to LIVEKIT_API_KEY / LIVEKIT_API_SECRET from the environment, and the\nlauncher passes them there instead of in argv, which is world-readable in\n`ps` on this machine.\n\nDeliberately NOT refused while a local training run holds this machine: a\nModal A100 is not this machine's GPU.",
+        "operationId": "start_remote_inference_gpu",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GpuStartBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLaunchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Remote Inference Gpu",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/gpu/stop": {
+      "post": {
+        "description": "Stop the GPU policy server (SIGTERM→SIGKILL over its process group).\n\nReturns while the group is still going down, in state `stopping`; the\nlauncher's own stdout pump lands it in `idle`. 409 `gpu.not_running` when\nthere is nothing to stop. Never touches the arm — a live remote-inference\nsession keeps running and its watchdogs report the empty room, which is a\nbetter diagnosis than a stop the user did not ask for.",
+        "operationId": "stop_remote_inference_gpu",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stop Remote Inference Gpu",
         "tags": [
           "sessions"
         ]
