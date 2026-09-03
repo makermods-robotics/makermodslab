@@ -542,7 +542,7 @@ The frontend, and only the deviations from §6 and the S3.3 plan's §7 touch lis
   transport read-out rather than trying to state which of the four conditions
   failed — the section below it says that exactly.
 - **`inferenceActive` in `DeployGuardContext` is now fed `inferenceActive ||
-  remoteActive`,** and the camera previews pause on the same value. The two
+remoteActive`,** and the camera previews pause on the same value. The two
   inference modes are mutually exclusive server-side; a remote run claims the
   cameras just as a local rollout does.
 - **`temporalEnsembleInvalid` is suppressed in remote mode.** The ACT control
@@ -603,7 +603,7 @@ rather than the surface. What moved:
   same relative position, one container deeper. Its own visibility rule is
   unchanged (`runMode === "remote" || remoteActive || remoteStatus?.exited`).
 - **The form is forced open while `remoteActive`.** `open={formOpen ||
-  remoteActive}` on the `Collapsible`, and the same expression on the
+remoteActive}` on the `Collapsible`, and the same expression on the
   `PanelEntryControl` so the chevron does not claim the form is shut. Remote
   inference is the one mode whose live surface — telemetry and, crucially, its
   Stop — is inline in this panel rather than in the `InferenceSessionDialog` the
@@ -633,3 +633,178 @@ rather than the surface. What moved:
   policy spellings. `deploy.picker.failedBadge` and `train.dataset.row.*` left
   for `landing.modelPicker.failedBadge` / `landing.datasetPicker.row.*`, as the
   rework moved the components that render them.
+
+---
+
+## S3.5 as built (2026-09-03)
+
+**Scope change.** The slice list above reserved S3.5 for lifecycle option B
+(the Lab launching Modal). A bench run displaced it: through the Lab, a SmolVLA
+eraser-place run at horizon 48 held a clean adaptive-sync transport — holds
+flat, no DEGRADE, e2e ~400 ms of which ~280 ms was inference — and the arm was
+still visibly jerky at ~1 Hz. 33 chunks in 29 s says why: at ~400 ms latency the
+adaptive-sync player aligns each arriving chunk by dropping its stale prefix, so
+the plan switches every ~0.9 s, and two flow-policy plans made 400 ms apart
+disagree at every seam. That is the failure in-painting exists to remove, and it
+is invisible on ACT (80-110 ms e2e). Option B is still open and unstarted.
+
+ANALYSIS §8.4 already had the RTC regime running live against
+`modal_policy_rtc.py --slack 2` on this same GPU image pin, so no image change
+was needed and none was made.
+
+### The shared glue — and the two pieces that deliberately did NOT move
+
+New `makermodslab/drtc/_session_glue.py`. It owns `emit` / `emit_stats` /
+`note_first_operator` / `or_none`, the `LoopControl` dataclass (the three stdin
+events, plus `start_command_pump`), `capture_start_poses_or_warn`,
+`ease_into_first_action`, `return_step`, `shielded` and `_shielded_disconnect`,
+and the four draccus flags. `robot_sync` and `robot_rtc` both import it;
+`tests/test_drtc_robot_rtc.py` asserts neither redefines any of them locally.
+
+- **The flags are FIELD FACTORIES, not a shared base dataclass.** Both configs
+  open with `robot: RobotConfig` (no default), and inheriting defaulted fields
+  from a base would order them before it and make the dataclass
+  unconstructible. Factories keep the defaults and the help text identical.
+- **The teardown's CALL SEQUENCE stayed written out in each entrypoint.** This
+  is the one place the brief's "lift it, don't duplicate it" had to bend, and
+  the reason is a test:
+  `test_drtc_robot_sync.py::test_every_teardown_step_goes_through_the_shield`
+  parses `run()`'s `finally:` and asserts every step is routed through
+  `shielded` / `_shielded_disconnect` and that `disconnect` / `close` /
+  `return_to_start_poses` are never called bare. That assertion is the ONLY
+  guard the torque-release path has — the block only executes with a real arm
+  attached — and collapsing the sequence into one `await teardown(...)` call
+  would have retired it silently, on both engines at once. So the ~10-line
+  sequence is stated twice and `tests/test_drtc_robot_rtc.py` applies the same
+  assertion to the second copy, PLUS a new one that the two sequences are
+  identical (compared as the ordered list of `shielded` step labels). Net: more
+  guarded than before, not less.
+- **`reset_torque_limit(robot, FOLLOWER)` likewise**, for the same reason (a
+  source assertion per entrypoint, and `test_motor_power_call_sites`'s rule
+  that a call site names its side).
+- **Credential resolution stayed in the entrypoints** (three lines each).
+  `_common` imports `livekit.api`; importing it from the glue would have made
+  the glue need the extra and cost its CI-importability, which is what lets its
+  pure parts be tested at all. The FLAGS are shared, so the two cannot drift on
+  what a parent passes; only `load_env` / `required_env` / `mint_token` are
+  restated.
+
+### What `robot_rtc`'s loop needed that `robot_sync`'s did not
+
+- **The `try` had to move up.** Everything from `codec = getattr(...)` to the
+  loop was outside any `try`, so a bad codec or a camera that would not open
+  raised with the arm already connected and energized and no teardown at all.
+  It now opens right after the start-pose capture, with `portal = None` ahead of
+  it, exactly as `robot_sync` has it.
+- **The ease-in fits, and at the same moment.** `last_action` stays `None` until
+  the first `schedule.pop_current()` returns something, and the send is gated on
+  `last_action is not None` — so the first scheduled action IS the first thing
+  ever commanded, same as `robot_sync`'s `cmd is not None` branch. It eases to
+  the RAW target rather than the low-pass output; the filter (off by default)
+  seeds its state to DC steady-state on its first sample, so its first output is
+  that same pose either way.
+- **One real difference, reported not papered over.** `robot_sync`'s player has
+  a `pending` flag that guarantees at most ONE outstanding request, and pushing
+  the first chunk clears it — so nothing is in flight while the ease blocks the
+  loop. `robot_rtc` paces with a COOLDOWN instead, so one or two requests may
+  already be out. Their chunks answer into the ease, and their round-trip
+  samples are inflated by its duration, spiking the JK estimate. It is clamped
+  to `[1, H//2]` and decays back over the next few samples (alpha 0.125), and
+  `robot_sync` has the same exposure for any chunk that lands mid-ease, so this
+  is parity rather than a new hazard — but it is real, and compensating for it
+  would have been a semantics change, not a port. Noted at the call site.
+- **Chunk alignment survives the ease** for the same reason it does on the other
+  engine: `control_step` and the wall clock freeze together, and a chunk landing
+  mid-ease is placed at `t_src + action_delay` where `t_src` is a frozen tick.
+
+### STATS on a frozen key set
+
+`drtc_protocol.STATS_KEYS` was NOT extended. `robot_rtc` fills every key:
+`chunks` / `reqs` / `uncorr` / `t` / `s_min` / `horizon` / `lat_steps` /
+`lat_ms` directly, `sched` from `ActionSchedule.remaining()`, `chunk_age_ms` /
+`active` / `e2e_*` / `rtt_us` as the sync engine does, and a new `holds`
+counter incremented on every dry tick — the exact quantity
+`AdaptiveBlockPlayer.holds` counts, so the panel's rate means the same thing on
+both engines. The two that needed a definition:
+
+- **`lead` = `max(s_min, d)`**, the steps of an arriving chunk the round trip
+  has already consumed. It is the RTC analogue of a prefetch lead, it is already
+  the `s=` term in the human log line and the `overlap_end` input, and it reads
+  correctly against the panel's existing `horizon - s_min` margin bar.
+- **`degrade` = `lead >= horizon - s_min`**, which is simultaneously ANALYSIS
+  §8.1's budget rule (`roundtrip < (H - s_min)/fps`) and, verbatim, the
+  predicate `_sync_player.in_degrade` uses.
+
+Everything with no analogue on the other engine — `merge_l2`, `prefix`,
+`smooth`, `emit`, `ret`, `late`, `stale` — stays on the human `[robot]` line.
+Nothing was smuggled in, and nothing the UI needs was unrepresentable.
+
+### Session surface
+
+- `engine: Literal["sync", "rtc"] = "sync"` and `s_min: int = 4` on
+  `RemoteInferenceOptions` and `RemoteInferenceRequest`, threaded through
+  `_build_remote_inference_request`. `_robot_sync_args` keeps its name (it is
+  the child's arg builder either way) and gains one conditional flag;
+  `_child_module(engine)` picks the module off `_CHILD_MODULES`.
+- **`--s_min` is sent for `rtc` ONLY.** On that engine it is half a contract —
+  the robot computes `overlap_end` from it and `policy_rtc` trusts the field.
+  On `sync` it only tunes when the player calls itself degraded, and the arg
+  builder's standing rule is to leave the scheduler knobs at the child's
+  defaults. Cost, stated plainly: an API caller who sets `s_min` with
+  `engine="sync"` has it ignored. The alternative (pass it always, since
+  `robot_sync` accepts the flag and defaults to the same 4) is a one-line flip
+  if that trade reads the wrong way.
+- **The backend does not, and cannot, verify engine-vs-policy.** It never loads
+  the checkpoint. The UI is the gate; the module docstring, the options schema
+  and `deployGuards`' own comment all say so.
+- `engine` is on the status dict and the response model (`str | None`, present
+  in every branch — live, terminal and idle). No new routes; `V1_ONLY_ROUTES`,
+  `LEGACY_ROUTES` and `UNTYPED_V1_ROUTES` all unchanged.
+
+### The two S3.4 display bugs
+
+- **`elapsed_s` no longer resets to 0 at the exit.** No new clock was needed:
+  `_terminal_payload_locked` runs exactly once, at the exit, on top of
+  `_payload_locked` — so its `time.time() - started_at` IS the run's length, and
+  the fix was to delete the `"elapsed_s": 0.0` override. Two pure tests pin the
+  value and that a later poll does not re-derive it.
+- **`holds` no longer blanks to "—" at the exit.** The panel's effect reset the
+  rate on `!remote_inference_active`, i.e. at exactly the moment someone reading
+  a failed run wants to know whether the arm had been starving. It now resets on
+  `started_at` changing (the run's identity, which survives into the terminal
+  payload), and the sampling effect simply skips non-live payloads.
+  `perSecondRate` already returns null for a dt of 0, so a repeated terminal
+  sample cannot overwrite the last real rate with a false zero.
+
+### UI
+
+- `RemoteRunConfig` gains `engine` and `sMin`; `DEFAULT_HORIZON` is
+  `{sync: 16, rtc: 50}` and switching engines re-seeds the horizon unless the
+  operator has already typed their own.
+- `defaultEngineForPolicyType` seeds from `policyConfig.policy_type`
+  (`smolvla` / `pi0` / `pi05` / `diffusion` → rtc, everything else including an
+  UNKNOWN type → sync), keyed on the resolved type so it re-seeds per checkpoint
+  and never under a live run.
+- **"≤ the checkpoint's `n_action_steps` if known" could not be implemented.**
+  `PolicyConfigSummary` (`GET /policy-config`) carries `policy_type`,
+  `image_features`, `requires_task`, `state_dim`, `action_dim` and
+  `trained_on_robot_type` — no chunk-size field. So the rtc default is a flat
+  50, which is the flow families' actual `chunk_size` and both `robot_rtc`'s and
+  `modal_policy_rtc.py`'s own default. Exposing `n_action_steps` /
+  `chunk_size` on that endpoint is the follow-up.
+- `deployGuards` gains `remoteEngineSupported` →
+  `studio.deploy.blocked.remoteEngineUnsupported`, ordered after the arm check
+  and BEFORE the transport one: it is a fact about the checkpoint with a
+  one-click remedy that "the transport isn't ready" would send the operator
+  straight past.
+- `modalCommand` switches script on the engine (`MODAL_WRAPPERS`) and emits
+  `--s-min` for rtc only, between `--fps` and `--video-codec` where
+  `modal_policy_rtc.py`'s `local_entrypoint` declares it. `modal_policy.py` has
+  no `s_min` parameter at all, so emitting it there would make the line fail to
+  parse. `slack` / `tolerance` / `max_guidance_weight` / `rtc_schedule` stay at
+  the wrapper defaults and a test asserts none of them appears.
+- New i18n namespace keys under `remoteInference.form.engine.*`,
+  `remoteInference.form.sMin*` and `remoteInference.engine.*` (en + zh-CN).
+  Deliberately NOT under `studio.deploy.engine.*` — that namespace already
+  belongs to the LOCAL rollout's own sync/rtc picker (`inference_engine` on
+  `InferenceOptions`), and they are different things.

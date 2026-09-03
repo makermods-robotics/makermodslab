@@ -16,6 +16,7 @@ import type { ModalRunLineInput } from "./modalCommand";
  */
 const cloud: ModalRunLineInput = {
   policyHubId: "makermods/pick-place",
+  engine: "sync",
   task: "",
   horizon: 16,
   fps: 30,
@@ -23,6 +24,16 @@ const cloud: ModalRunLineInput = {
   room: "portal-lerobot-inference",
   url: "wss://example.livekit.cloud",
   source: "cloud",
+  sMin: 4,
+};
+
+/** The rtc pairing: the other wrapper, the flow families' full chunk_size, and
+ * the one flag whose value the server trusts from the robot. */
+const rtcCloud: ModalRunLineInput = {
+  ...cloud,
+  engine: "rtc",
+  horizon: 50,
+  sMin: 4,
 };
 
 describe("the generated modal run line", () => {
@@ -83,6 +94,71 @@ describe("the generated modal run line", () => {
     expect(buildModalRunLine({ ...cloud, room: "" })).not.toContain(
       "--livekit-room",
     );
+  });
+});
+
+describe("the engine picks the wrapper the GPU side must run", () => {
+  // The two servers publish DIFFERENT state schemas — the rtc one carries five
+  // extra in-painting fields — and Portal fingerprints the schema. Running the
+  // sync wrapper against an rtc robot is therefore a session that connects,
+  // reports a healthy transport, and never receives a single chunk.
+  it("builds the rtc line: the rtc wrapper, --s-min, and horizon 50", () => {
+    expect(buildModalRunLine(rtcCloud)).toBe(
+      "modal run makermodslab/drtc/modal_policy_rtc.py " +
+        "--policy-path makermods/pick-place " +
+        "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference",
+    );
+  });
+
+  it("keeps the sync line on the sync wrapper, with no --s-min at all", () => {
+    // modal_policy.py's local_entrypoint has no s_min parameter, so the flag
+    // would make the line fail to parse rather than fall back to a default.
+    const line = buildModalRunLine(cloud);
+    expect(line).toContain("modal run makermodslab/drtc/modal_policy.py");
+    expect(line).not.toContain("--s-min");
+  });
+
+  it("forwards a non-default s-min verbatim on the rtc engine", () => {
+    // The robot computes `overlap_end = H - max(s_min, d)` and the server
+    // TRUSTS that field; the two values existing to be equal is the whole
+    // reason s_min is on the session at all.
+    expect(buildModalRunLine({ ...rtcCloud, sMin: 2 })).toContain("--s-min 2");
+  });
+
+  it("carries the task and the tailnet block on the rtc wrapper too", () => {
+    expect(
+      buildModalRunLine({
+        ...rtcCloud,
+        task: "Put the eraser on the mat",
+        source: "local_override",
+        url: "ws://100.64.0.1:7880",
+      }),
+    ).toBe(
+      "modal run makermodslab/drtc/modal_policy_rtc.py " +
+        "--policy-path makermods/pick-place " +
+        '--task "Put the eraser on the mat" ' +
+        "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
+        "--livekit-room portal-lerobot-inference " +
+        "--tailscale --livekit-url ws://100.64.0.1:7880 " +
+        `--livekit-api-key ${LOCAL_SECRET_PLACEHOLDER} ` +
+        `--livekit-api-secret ${LOCAL_SECRET_PLACEHOLDER}`,
+    );
+  });
+
+  it("leaves slack / tolerance / rtc-schedule at the wrapper's defaults", () => {
+    // Deliberately not exposed. They are knobs whose wrong values present as
+    // "the arm is sluggish" rather than as an error, and the wrapper's own
+    // defaults are the ones the August bench runs validated.
+    const line = buildModalRunLine(rtcCloud);
+    for (const flag of [
+      "--slack",
+      "--tolerance",
+      "--max-guidance-weight",
+      "--rtc-schedule",
+    ]) {
+      expect(line).not.toContain(flag);
+    }
   });
 });
 

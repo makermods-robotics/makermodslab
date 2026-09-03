@@ -37,10 +37,15 @@ const ModalRunLine: React.FC<{
 
   const line = buildModalRunLine({
     policyHubId: config.policyHubId.trim() || hubIdDefault,
+    // The engine picks WHICH wrapper this line runs. The two GPU servers
+    // publish different state schemas, so pairing the wrong one with the robot
+    // side is the same silent zero-chunk failure a wrong horizon is.
+    engine: config.engine,
     task,
     horizon: config.horizon,
     fps: config.fps,
     videoCodec: config.videoCodec,
+    sMin: config.sMin,
     room: transport?.room ?? "",
     url: transport?.url ?? "",
     source: transport?.source ?? "none",

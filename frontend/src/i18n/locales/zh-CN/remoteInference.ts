@@ -5,15 +5,36 @@ export default {
     hubIdLabel: "Hub 策略 id",
     hubIdHint: "GPU 容器要加载的仓库。本机不会下载它 — 本机只负责驱动机械臂。",
     hubIdInherited: "留空时将使用本次运行自己的输出仓库。",
+    engineLabel: "动作块引擎",
+    engine: {
+      // 选项 VALUE（"sync" / "rtc"）是后端标识符，只翻译这些标签。
+      sync: "自适应同步",
+      rtc: "实时分块",
+      syncHint:
+        "把每个动作块执行完，再刚好及时地请求下一个。适用于任何策略，也是 ACT 的唯一选择。",
+      rtcHint:
+        "每次请求都把尚未执行的动作一并发过去，让 GPU 据此生成能够接续的下一个动作块，从而消除块与块之间的接缝。只有流式策略（SmolVLA、π0、π0.5、diffusion）能这样被引导。",
+      rtcUnsupported:
+        "该检查点不是流式策略，无法以这种方式引导 — 实时运行不会比自适应同步更好，启动还更慢。请切换回“自适应同步”后再启动。",
+    },
     transportGroup: "传输",
     transportGroupHint:
-      "这三项必须与 GPU 侧完全一致。不一致不会报错：线上协议带有 schema 指纹，不匹配的数据包会被静默丢弃，运行看上去正常却收不到任何东西。",
+      "这几项必须与 GPU 侧完全一致。不一致不会报错：线上协议带有 schema 指纹，不匹配的数据包会被静默丢弃，运行看上去正常却收不到任何东西。",
     horizonLabel: "Horizon",
     fpsLabel: "帧率",
     codecLabel: "视频编码",
     durationLabel: "最长时长（秒）",
     durationHint: "到时后自动停止。你随时可以提前停止。",
     durationUnbounded: "0 — 一直运行，直到你停止它。",
+    sMinLabel: "最小预留",
+    // "--s-min" 是命令行标志名，与本面板中其他标识符一样保留拉丁文写法。
+    sMinHint:
+      "机械臂为一次往返预留的计划步数。它必须和上面命令里的 --s-min 完全一致：机械臂据此算出下一个动作块中还“新鲜”的部分，而 GPU 会直接采信这个结果。",
+  },
+  // 后端引擎取值。用于匹配，不直接展示 — 原值只作为新版服务端引入新引擎时的兜底。
+  engine: {
+    sync: "自适应同步",
+    rtc: "实时分块",
   },
   modalRun: {
     title: "在另一个终端里运行这条命令",

@@ -628,6 +628,13 @@ def _build_remote_inference_request(record: dict, opts: RemoteInferenceOptions):
         horizon=opts.horizon,
         fps=opts.fps,
         video_codec=opts.video_codec,
+        # Which chunk player drives the arm, and its one engine-specific knob.
+        # Threaded, never defaulted here: the request model's default is `sync`
+        # and silently dropping a caller's `rtc` would run the arm under a
+        # different regime than they asked for — the same reason
+        # InferenceOptions had to grow `inference_engine`.
+        engine=opts.engine,
+        s_min=opts.s_min,
         skip_identity_check=opts.skip_identity_check,
     )
 

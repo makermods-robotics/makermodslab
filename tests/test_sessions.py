@@ -373,6 +373,11 @@ def test_follower_only_kinds_ignore_leader_gaps(client, tmp_lerobot_home, monkey
         ("remote_inference", {}),  # policy_ref is required
         ("remote_inference", {"policy_ref": "r", "coaching": True}),  # wrong kind's field
         ("remote_inference", {"policy_ref": "r", "video_codec": "VP8"}),  # closed codec set
+        # Closed engine set: an unknown value would spawn the sync child while
+        # the operator's other terminal runs the rtc server, and Portal answers
+        # a schema-fingerprint mismatch by dropping every packet in silence.
+        ("remote_inference", {"policy_ref": "r", "engine": "inpaint"}),
+        ("remote_inference", {"policy_ref": "r", "s_min": "four"}),
         ("teleoperation", {"dataset_repo_id": "u/d"}),  # wrong kind's field: extra forbidden
         ("recording", {"dataset_repo_id": "u/d", "single_task": "t", "num_episodes": "lots"}),
         ("calibration", {}),  # device_type is required
@@ -710,6 +715,8 @@ def test_remote_inference_request_built_from_the_record(client, tmp_lerobot_home
                 "horizon": 32,
                 "fps": 25,
                 "video_codec": "MJPEG",
+                "engine": "rtc",
+                "s_min": 6,
                 "skip_identity_check": True,
             },
         },
@@ -724,6 +731,9 @@ def test_remote_inference_request_built_from_the_record(client, tmp_lerobot_home
     assert req.camera_dims["top"].width == 320 and req.camera_dims["top"].height == 240
     assert (req.checkpoint_state_dim, req.duration_s) == (6, 120)
     assert (req.horizon, req.fps, req.video_codec) == (32, 25, "MJPEG")
+    # The engine picks which chunk player is spawned; defaulting it here would
+    # silently run the arm under a regime the caller did not choose.
+    assert (req.engine, req.s_min) == ("rtc", 6)
     assert req.skip_identity_check is True
     # Cameras resolve server-side from this record; no device dict rides along.
     assert not hasattr(req, "cameras")

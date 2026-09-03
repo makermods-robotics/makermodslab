@@ -45,6 +45,15 @@ export interface DeployGuardContext {
    * are refused by the backend too; this only moves the refusal to before the
    * launch. */
   armSupportsRemote: boolean;
+  /** REMOTE mode only. The chosen engine suits this checkpoint's policy type.
+   *
+   * Unlike every other flag here this one has NO backend twin, and cannot: the
+   * server never loads the checkpoint (the GPU container does), so it cannot
+   * tell a flow policy from an ACT one and accepts whichever engine it is
+   * given. The UI is the only gate — `rtc` guides denoising, which an ACT
+   * checkpoint cannot act on, and the run would simply be worse than `sync`
+   * with nothing anywhere saying why. */
+  remoteEngineSupported: boolean;
 }
 
 export function deployBlockedReason(
@@ -75,6 +84,12 @@ export function deployBlockedReason(
   // ready" to someone holding a Metal arm would send them to the wrong problem.
   if (mode === "remote" && !ctx.armSupportsRemote)
     return "studio.deploy.blocked.remoteArmUnsupported";
+  // Before the transport check, and for the same reason the arm check is: this
+  // is a fact about the CHECKPOINT that no amount of transport fixing changes,
+  // and it has a one-click remedy (switch the engine back to Adaptive sync)
+  // that "the transport isn't ready" would send them right past.
+  if (mode === "remote" && !ctx.remoteEngineSupported)
+    return "studio.deploy.blocked.remoteEngineUnsupported";
   if (mode === "remote" && !ctx.transportReady)
     return "studio.deploy.blocked.transportNotReady";
 

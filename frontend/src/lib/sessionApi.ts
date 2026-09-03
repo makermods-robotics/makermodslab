@@ -140,6 +140,21 @@ export interface RemoteInferenceSessionOptions {
   fps?: number;
   /** Codec IDENTIFIERS — sent verbatim, never translated. */
   video_codec?: "H264" | "MJPEG";
+  /** Which chunk player runs on the arm, and therefore which GPU wrapper the
+   * other terminal must be running: `sync` pairs `robot_sync` with
+   * `modal_policy.py`, `rtc` pairs `robot_rtc` with `modal_policy_rtc.py`.
+   *
+   * `rtc` ships the still-to-execute prefix so the server can GUIDE denoising,
+   * which only a flow/diffusion policy (smolvla, pi0, pi05, diffusion) can act
+   * on. The BACKEND DOES NOT CHECK THIS — it never loads the checkpoint — so
+   * the client is the gate (`deployGuards.remoteEngineSupported`). Distinct
+   * from `InferenceSessionOptions.inference_engine`, which names lerobot's
+   * LOCAL rollout engine. */
+  engine?: "sync" | "rtc";
+  /** RTC only. Minimum execution budget in action steps; MUST equal the GPU
+   * side's `--s-min` (the robot computes `overlap_end = H - max(s_min, d)` and
+   * the server trusts that field). Ignored by the sync engine. */
+  s_min?: number;
   skip_identity_check?: boolean;
 }
 

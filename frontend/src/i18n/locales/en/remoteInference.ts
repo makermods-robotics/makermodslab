@@ -6,15 +6,39 @@ export default {
     hubIdHint:
       "The repo the GPU container loads. It is not downloaded here — this machine only drives the arm.",
     hubIdInherited: "Left empty, this run's own output repo is used.",
+    engineLabel: "Chunk engine",
+    engine: {
+      // Option VALUES ("sync" / "rtc") are backend identifiers — only these
+      // labels are translated.
+      sync: "Adaptive sync",
+      rtc: "Real-time chunking",
+      syncHint:
+        "Plays each action chunk to the end and asks for the next one just in time. Right for any policy, and the only choice for ACT.",
+      rtcHint:
+        "Sends the moves it has not made yet with every request, so the GPU shapes the next chunk to continue them. Removes the seam between chunks — only flow policies (SmolVLA, π0, π0.5, diffusion) can do this.",
+      rtcUnsupported:
+        "This checkpoint isn't a flow policy, so it can't be guided this way — a real-time run would be no better than adaptive sync, and slower to start. Switch back to Adaptive sync to launch.",
+    },
     transportGroup: "Transport",
     transportGroupHint:
-      "These three must match the GPU side exactly. A mismatch is not an error: the wire schema is fingerprinted, so mismatched packets are dropped silently and the run looks healthy while receiving nothing.",
+      "These must match the GPU side exactly. A mismatch is not an error: the wire schema is fingerprinted, so mismatched packets are dropped silently and the run looks healthy while receiving nothing.",
     horizonLabel: "Horizon",
     fpsLabel: "Frames per second",
     codecLabel: "Video codec",
     durationLabel: "Max duration (s)",
     durationHint: "The run stops itself after this long. Stop it early anytime.",
     durationUnbounded: "0 — the run continues until you stop it.",
+    sMinLabel: "Minimum budget",
+    // "--s-min" is a flag name, kept in the Latin script like every other
+    // identifier in this panel.
+    sMinHint:
+      "Steps of the plan the arm keeps in hand for the round trip. It must be the same number as --s-min in the command above: the arm works out which part of the next chunk is still fresh from it, and the GPU takes that answer on trust.",
+  },
+  // Backend engine values. Matched on, never displayed raw — the raw value is
+  // the fallback for an engine a newer server introduces.
+  engine: {
+    sync: "Adaptive sync",
+    rtc: "Real-time chunking",
   },
   modalRun: {
     title: "Run this in the other terminal",

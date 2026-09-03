@@ -1,4 +1,5 @@
 import type { TransportSource } from "@/hooks/useRemoteInferenceTransport";
+import type { RemoteEngine } from "./remoteRunConfig";
 
 /**
  * The `modal run` line the operator must paste into the OTHER terminal.
@@ -23,6 +24,16 @@ import type { TransportSource } from "@/hooks/useRemoteInferenceTransport";
 export interface ModalRunLineInput {
   /** "<owner>/<repo>" the container resolves with `from_pretrained`. */
   policyHubId: string;
+  /** Which robot-side chunk player the session will spawn — and therefore
+   * which SCRIPT this line has to run. The two servers publish different state
+   * schemas (the rtc one carries five extra in-painting fields), and Portal
+   * fingerprints the schema, so pairing the wrong two is a healthy-looking
+   * session that receives nothing. */
+  engine: RemoteEngine;
+  /** RTC only. Must equal the robot's `--s_min`: the robot computes
+   * `overlap_end = H - max(s_min, d)` per request and the server TRUSTS that
+   * field, falling back to its own `H - s_min` when it is absent. */
+  sMin: number;
   /** The task string the run is started with. The GPU side takes it as
    * `--task`, and a language-conditioned policy is STEERED by it — omitting it
    * there while the robot side has it does not fail, it just makes the policy
@@ -55,6 +66,14 @@ export const LOCAL_SFU_CONFIG_PATH =
  * obviously incomplete) before the operator fills the field in. */
 export const POLICY_PATH_PLACEHOLDER = "<owner>/<repo>";
 
+/** The wrapper each engine pairs with. Paths, run from the repo root, exactly
+ * as docs/drtc/README.md states them — `modal run` takes the wrapper in FILE
+ * form, never as `python -m`. */
+export const MODAL_WRAPPERS: Record<RemoteEngine, string> = {
+  sync: "makermodslab/drtc/modal_policy.py",
+  rtc: "makermodslab/drtc/modal_policy_rtc.py",
+};
+
 /**
  * The task as a double-quoted shell word.
  *
@@ -72,13 +91,17 @@ export function shellQuote(value: string): string {
 export function buildModalRunLine(input: ModalRunLineInput): string {
   const task = input.task.trim();
   const parts = [
-    "modal run makermodslab/drtc/modal_policy.py",
+    `modal run ${MODAL_WRAPPERS[input.engine]}`,
     `--policy-path ${input.policyHubId.trim() || POLICY_PATH_PLACEHOLDER}`,
-    // Flag order follows modal_policy.py's own local_entrypoint signature, so
-    // the line reads the same way the function does.
+    // Flag order follows each wrapper's own local_entrypoint signature, so the
+    // line reads the same way the function does. `--s-min` sits between --fps
+    // and --video-codec there, which is where it goes here.
     ...(task ? [`--task ${shellQuote(task)}`] : []),
     `--horizon ${input.horizon}`,
     `--fps ${input.fps}`,
+    // RTC only. The sync wrapper has no --s-min flag at all, so emitting it
+    // there would make the line fail to parse rather than run with a default.
+    ...(input.engine === "rtc" ? [`--s-min ${input.sMin}`] : []),
     `--video-codec ${input.videoCodec}`,
   ];
   // The room is what makes the two sides meet. The GPU side otherwise takes it

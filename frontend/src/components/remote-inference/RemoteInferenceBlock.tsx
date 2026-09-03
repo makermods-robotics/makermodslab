@@ -29,6 +29,9 @@ const RemoteInferenceBlock: React.FC<{
   config: RemoteRunConfig;
   onConfigChange: (next: RemoteRunConfig) => void;
   hubIdDefault: string;
+  /** Whether the selected checkpoint's policy family can be in-painted, i.e.
+   * whether the `rtc` engine is meaningful for it. */
+  rtcSupported: boolean;
   /** The effective task (typed, else the checkpoint's inherited default) —
    * the same string the start request carries. */
   task: string;
@@ -43,6 +46,7 @@ const RemoteInferenceBlock: React.FC<{
   config,
   onConfigChange,
   hubIdDefault,
+  rtcSupported,
   task,
   transportState,
   status,
@@ -103,6 +107,7 @@ const RemoteInferenceBlock: React.FC<{
             config={config}
             onChange={onConfigChange}
             hubIdDefault={hubIdDefault}
+            rtcSupported={rtcSupported}
             disabled={active}
           />
           <ModalRunLine

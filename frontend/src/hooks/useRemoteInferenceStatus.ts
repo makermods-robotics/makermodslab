@@ -71,7 +71,14 @@ export interface RemoteInferenceStatus {
    * enum values — matched on, never displayed raw. */
   phase: string | null;
   policy_ref: string | null;
+  /** Which chunk player the run was started with — "sync" (adaptive-sync,
+   * `robot_sync`) or "rtc" (in-painting, `robot_rtc`). Also says which of the
+   * two `modal run` lines the other terminal must be running. Backend
+   * identifiers, matched on; null only before any run since boot. */
+  engine: string | null;
   started_at: number | null;
+  /** Seconds since `started_at`. FROZEN at the exit on a terminal payload, so a
+   * finished run reports its real length rather than 0. */
   elapsed_s: number;
   duration_s: number | null;
   log_path: string | null;

@@ -28,6 +28,7 @@ is warranted for a function this thin.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -128,6 +129,22 @@ def test_request_has_expected_defaults() -> None:
     assert req.camera_bindings == {}
     assert req.checkpoint_state_dim is None
     assert req.skip_identity_check is False
+    # The default engine is the one that works for ANY policy. `rtc` guides
+    # denoising, which only a flow/diffusion checkpoint can act on, so defaulting
+    # to it would break every ACT run started without options.
+    assert req.engine == "sync"
+    # Same value modal_policy_rtc.py's `--s-min` defaults to. The two MUST agree
+    # (the robot computes overlap_end from it and the server trusts the field),
+    # so a run started with neither side's flag set still agrees.
+    assert req.s_min == 4
+
+
+def test_request_rejects_an_unknown_engine() -> None:
+    """An engine the map does not know would spawn the sync child while the
+    operator's other terminal runs the rtc server — a schema-fingerprint
+    mismatch, which Portal reports by silently dropping every packet."""
+    with pytest.raises(ValidationError):
+        _request(engine="inpaint")
 
 
 def test_request_rejects_unknown_fields() -> None:
@@ -196,6 +213,47 @@ def test_robot_sync_args_ask_for_the_safe_stop_and_the_ease_in() -> None:
     args = ri._robot_sync_args(_request(), [], url="u", room="r")
     assert "--return_to_rest=true" in args
     assert "--ease_in=true" in args
+
+
+def test_the_engine_picks_the_child_module() -> None:
+    """The two entrypoints are not interchangeable: `robot_rtc` publishes five
+    extra RTC state fields, and Portal fingerprints the whole state schema — so
+    a child that disagrees with the GPU server it is paired with connects, looks
+    healthy, and receives nothing."""
+    assert ri._child_module("sync") == "makermodslab.drtc.robot_sync"
+    assert ri._child_module("rtc") == "makermodslab.drtc.robot_rtc"
+
+
+def test_an_unknown_engine_falls_back_to_the_sync_child() -> None:
+    """Unreachable through the API (the options model's Literal refuses it), and
+    raising HERE would be a poor trade: `_child_module` runs on the startup
+    worker, after the arm has been claimed and preflighted."""
+    assert ri._child_module("nonsense") == "makermodslab.drtc.robot_sync"
+
+
+def test_only_the_rtc_engine_is_sent_s_min() -> None:
+    """`--s_min` is half a contract on the rtc engine — the robot computes
+    `overlap_end = H - max(s_min, d)` and `policy_rtc` trusts that field, so the
+    two sides must agree. On the sync engine it only tunes when the player calls
+    itself degraded, and it stays at the child's (identical) default with the
+    rest of the scheduler knobs."""
+    rtc = ri._robot_sync_args(_request(engine="rtc", s_min=6), [], url="u", room="r")
+    assert "--s_min=6" in rtc
+
+    sync = ri._robot_sync_args(_request(engine="sync", s_min=6), [], url="u", room="r")
+    assert not [a for a in sync if a.startswith("--s_min")]
+
+
+def test_both_engines_get_the_same_wire_settings_and_the_same_safe_stop() -> None:
+    """The engines share their whole session surface (`_session_glue`), and the
+    arg builder is the place that could quietly stop being true — an rtc run
+    without `--return_to_rest` would drop the arm at every stop."""
+    common = ["--fps=30", "--horizon=16", "--duration_s=60", "--video_codec=H264"]
+    safety = ["--livekit_url=u", "--livekit_room=r", "--return_to_rest=true", "--ease_in=true"]
+    for engine in ("sync", "rtc"):
+        args = ri._robot_sync_args(_request(engine=engine), [], url="u", room="r")
+        for flag in common + safety:
+            assert flag in args, f"{engine} is missing {flag}"
 
 
 def test_robot_sync_args_never_emit_a_no_flag() -> None:
@@ -840,6 +898,7 @@ STATUS_KEYS = {
     "warning",
     "phase",
     "policy_ref",
+    "engine",
     "started_at",
     "elapsed_s",
     "duration_s",
@@ -887,6 +946,70 @@ def test_the_terminal_status_carries_every_key_and_is_idempotent() -> None:
     assert first["exited"] is True
     assert first["outcome"] == "ok"
     assert second == first
+
+
+def test_the_terminal_status_freezes_the_elapsed_time_instead_of_zeroing_it() -> None:
+    """S3.4 overrode `elapsed_s` with 0.0 on the terminal payload, so a run that
+    had just failed 40 seconds in reported "0s / 60" — reading as a run that
+    never started, and losing the one number that says whether it died at once
+    or ran most of its course first.
+
+    The freeze needs no new clock: `_terminal_payload_locked` runs ONCE, at the
+    exit, and builds on `_payload_locked`, whose `time.time() - started_at` is
+    therefore measured to that moment and then stored verbatim in
+    `_last_result`."""
+    _live_session(phase=ri.PHASE_RUNNING)
+    ri._remote_started_at = time.time() - 40.0
+
+    payload = ri._terminal_payload_locked(
+        exit_code=1, outcome="failed", error="the room went empty", phase=ri.PHASE_ERROR
+    )
+    assert 39.0 < payload["elapsed_s"] < 45.0
+    ri._go_idle_locked()
+
+
+def test_the_frozen_elapsed_time_does_not_keep_growing_after_the_exit() -> None:
+    """The whole point of freezing it: once stored, the payload is a RECORD, and
+    a later poll must report the run's length rather than "time since it
+    started" ticking on forever."""
+    _live_session(phase=ri.PHASE_RUNNING)
+    ri._remote_started_at = time.time() - 12.0
+    proc = FakeProc()
+    proc.returncode = 0
+    ri._remote_proc = proc
+
+    first = ri.handle_remote_inference_status()
+    ri._remote_started_at = time.time() - 9000.0  # a live run would now say 9000
+    second = ri.handle_remote_inference_status()
+
+    assert 11.0 < first["elapsed_s"] < 17.0
+    assert second["elapsed_s"] == first["elapsed_s"]
+
+
+def test_the_status_always_names_the_engine() -> None:
+    """A panel that did not start the run still has to say which regime is
+    driving the arm — and therefore which of the two `modal run` lines the other
+    terminal must be running."""
+    idle = ri.handle_remote_inference_status()
+    assert idle["engine"] is None
+
+    _live_session(phase=ri.PHASE_RUNNING, engine="rtc")
+    assert ri.handle_remote_inference_status()["engine"] == "rtc"
+
+    proc = FakeProc()
+    proc.returncode = 0
+    ri._remote_proc = proc
+    assert ri.handle_remote_inference_status()["engine"] == "rtc"
+
+
+def test_the_fingerprint_leads_with_the_engine() -> None:
+    """The engine decides WHICH `modal run` line the operator's other terminal
+    has to be running, and comparing that line against this phrase is the whole
+    remedy the no-chunks watchdog offers."""
+    text = ri._fingerprint(_request(engine="rtc", horizon=50, camera_bindings={"front": "wrist"}))
+    assert text.startswith("engine=rtc, ")
+    assert "horizon=50" in text
+    assert "cameras=front" in text
 
 
 def test_a_recorded_diagnosis_survives_a_clean_child_exit() -> None:

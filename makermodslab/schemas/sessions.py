@@ -168,10 +168,11 @@ class RemoteInferenceOptions(BaseModel):
     same object.
 
     Deliberately NOT exposed (constants in remote_inference's arg builder, each
-    with a `# why` there): adaptive, base_lead, s_min, align, action_delay, the
-    latency coefficients, video_quality/bitrate, reliable_state. Their wrong
-    values present as "the arm freezes" or "the arm snaps at every boundary"
-    rather than as an error.
+    with a `# why` there): adaptive, base_lead, align, action_delay, the
+    latency coefficients, video_quality/bitrate, reliable_state, and — on the
+    rtc engine — slack / tolerance / max_guidance_weight / rtc_schedule. Their
+    wrong values present as "the arm freezes" or "the arm snaps at every
+    boundary" rather than as an error.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -194,6 +195,30 @@ class RemoteInferenceOptions(BaseModel):
     horizon: int = 16  # MUST match the GPU side
     fps: int = 30  # MUST match the GPU side
     video_codec: Literal["H264", "MJPEG"] = "H264"  # MUST match the GPU side
+    # WHICH chunk player runs on the arm, and therefore which GPU server the
+    # other terminal must be running:
+    #   sync -> makermodslab.drtc.robot_sync  <-> modal_policy.py
+    #   rtc  -> makermodslab.drtc.robot_rtc   <-> modal_policy_rtc.py
+    # The two are not interchangeable: `rtc` ships the still-to-execute prefix
+    # so the server can GUIDE denoising, which only a flow/diffusion policy
+    # (smolvla, pi0, pi05, diffusion) can act on — an ACT checkpoint serves
+    # plain chunks and the extra state fields are ignored, so `rtc` buys it
+    # nothing and costs it the play-to-completion contract it was evaluated in.
+    #
+    # The BACKEND DOES NOT VERIFY THIS. It never reads the checkpoint (the GPU
+    # container is what loads it), so it cannot tell a flow policy from an ACT
+    # one; the UI is the gate, and `deployGuards` refuses `rtc` for a
+    # non-flow policy_type before the launch. A caller driving this API
+    # directly owns that choice.
+    engine: Literal["sync", "rtc"] = "sync"
+    # Minimum execution budget, in action steps. MUST match the GPU side's
+    # `--s-min` on the rtc engine: the robot computes `overlap_end =
+    # H - max(s_min, d)` per request and the server trusts it, falling back to
+    # its OWN `H - s_min` when the field is absent — so two different values
+    # give two different fresh-region boundaries and the in-painting guidance
+    # is computed against the wrong mask. Only sent for `engine="rtc"`; the
+    # sync engine's own s_min stays at its (identical) child default.
+    s_min: int = 4
     skip_identity_check: bool = False
 
 
@@ -458,7 +483,18 @@ class RemoteInferenceStatusResponse(BaseModel):
     remote_inference_active: bool
     phase: str | None
     policy_ref: str | None
+    # Which chunk player the run was started with ("sync" / "rtc"), so a panel
+    # that did not start it can still say which regime is driving the arm — and
+    # which of the two `modal run` lines the other terminal has to be running.
+    # Null only when no run has been started since boot; a live or terminal
+    # payload always carries it.
+    engine: str | None
     started_at: float | None
+    # Seconds from `started_at`. FROZEN at the exit for a terminal payload
+    # (built once, from the globals, before they are cleared) rather than reset
+    # to 0 — a finished run that reports "0s" reads as a run that never
+    # happened, which is precisely the opposite of what a failed one needs to
+    # say.
     elapsed_s: float
     duration_s: int | None
     log_path: str | None

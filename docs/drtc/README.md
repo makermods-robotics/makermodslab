@@ -17,6 +17,7 @@ needed to run remote inference any more:
 | Credential loading                                        | `makermodslab/drtc/_env.py` (re-exported by `_common.py`)                                  |
 | Parent↔child line protocol                               | `makermodslab/drtc_protocol.py`                                                            |
 | Start-pose capture / ease-in / return-to-rest             | `makermodslab/drtc/_pose.py`                                                               |
+| Supervised-session glue shared by BOTH entrypoints        | `makermodslab/drtc/_session_glue.py`                                                       |
 | Local SFU scripts                                         | `tools/drtc/local_sfu.sh`, `tools/drtc/local_sfu_ts.sh`                                    |
 | Transport-only probe (no robot, no GPU)                   | `makermodslab/drtc/transport_probe.py`                                                     |
 | Design record                                             | `docs/drtc/ANALYSIS.md`, `SWEEP.md`, `SYNC_RESULTS.md` (verbatim from the source repo)     |
@@ -43,10 +44,12 @@ packets whose fingerprint differs on the two peers, so a mismatch does not
 raise — it presents as a healthy-looking session with 0 chunks and 0
 observations.
 
-Three modules are importable **without** the extra, which is what keeps their
+Four modules are importable **without** the extra, which is what keeps their
 tests in ordinary CI: `_env` (python-dotenv alone), `makermodslab/drtc_protocol.py`
 (stdlib alone — it is the parent's half of the line protocol, and the parent must
-never load the Portal dylib), and `_pose` (lerobot's motors, a hard dependency).
+never load the Portal dylib), `_pose` (lerobot's motors, a hard dependency), and
+`_session_glue` (the same footprint as `_pose`; its two portal-typed helpers
+take the portal object as an argument and only call methods on it).
 Everything else in `makermodslab/drtc/` imports `livekit.portal` at module top.
 
 ## Credentials
@@ -200,11 +203,24 @@ python -m makermodslab.drtc.robot_sync \
     --horizon=16
 ```
 
-### Safe start and stop (`robot_sync`, SO-101)
+### Safe start and stop (BOTH entrypoints, SO-101)
 
-`robot_sync` no longer snaps into the policy's first action, and no longer drops
-the arm at the end. Both behaviours are on by default; turning one off is for
-bench A/B only.
+Neither entrypoint snaps into the policy's first action, and neither drops the
+arm at the end. Both behaviours are on by default; turning one off is for bench
+A/B only. S3.1 built this for `robot_sync`; S3.5 lifted it into
+`makermodslab/drtc/_session_glue.py` and wired `robot_rtc` to the same code —
+shared, not copied, because two divergent copies of the logic that makes an
+energized arm safe is exactly the bug worth designing out.
+
+Two things deliberately stayed written out in each entrypoint rather than moving
+into the glue: **the teardown's call sequence** and the
+`reset_torque_limit(robot, FOLLOWER)` line. Both are pinned by source-level
+assertions (`tests/test_drtc_robot_sync.py`, `tests/test_drtc_robot_rtc.py`)
+that read the `finally:` block and check every step goes through `shielded` —
+the only guard those paths have, since they only run with a real arm attached.
+Hiding the sequence behind one helper call would have retired it on both engines
+at once. A third test asserts the two sequences are IDENTICAL, so they cannot
+drift.
 
 **draccus has no `--no-<flag>` form.** Turn a boolean off with
 `--<flag> false` (or `--<flag>=False`) — `--no-adaptive`, which this repo's
@@ -282,12 +298,40 @@ with `json.dumps(..., separators=(",", ":"))` — `format_event` collapses
 whitespace in the payload, which is lossless for compact JSON only, and
 `tests/test_drtc_protocol.py` pins that.
 
-### Two regimes — pick by policy type
+### Two regimes — both are session ENGINES, picked by policy type
 
-| Regime                     | For                                             | Robot entrypoint | GPU server                        | How it stays smooth                                                                                                                                                                            |
-| -------------------------- | ----------------------------------------------- | ---------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **adaptive-sync**          | ANY policy, especially **non-inpainting** (ACT) | `robot_sync`     | `policy` / `modal_policy`         | Plays each chunk to completion (one seam per boundary); the prefetch lead scales with measured round-trip latency so the next chunk lands before the current drains. Never re-plans mid-chunk. |
-| **full DRTC + inpainting** | **flow/diffusion** (smolvla, pi0, pi05)         | `robot_rtc`      | `policy_rtc` / `modal_policy_rtc` | Ships the still-to-execute prefix and the inference delay so the server guides denoising — overlapping chunks are dynamically consistent, no hard seams.                                       |
+Since S3.5 the two are not "the supported one and the bench script": they are
+the `engine` option on a `remote_inference` session (`sync` / `rtc`), they run
+the same session glue, and the Deploy panel picks the default from the
+checkpoint's `policy_type`.
+
+| Regime                     | `engine` | For                                                | Robot entrypoint | GPU server                        | How it stays smooth                                                                                                                                                                            |
+| -------------------------- | -------- | -------------------------------------------------- | ---------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **adaptive-sync**          | `sync`   | ANY policy, especially **non-inpainting** (ACT)    | `robot_sync`     | `policy` / `modal_policy`         | Plays each chunk to completion (one seam per boundary); the prefetch lead scales with measured round-trip latency so the next chunk lands before the current drains. Never re-plans mid-chunk. |
+| **full DRTC + inpainting** | `rtc`    | **flow/diffusion** (smolvla, pi0, pi05, diffusion) | `robot_rtc`      | `policy_rtc` / `modal_policy_rtc` | Ships the still-to-execute prefix and the inference delay so the server guides denoising — overlapping chunks are dynamically consistent, no hard seams.                                       |
+
+**How to pick.** By policy family, and the UI does it for you: flow/diffusion
+checkpoints default to `rtc` at horizon 50, everything else to `sync` at
+horizon 16. Choosing `rtc` for a non-flow policy is BLOCKED client-side
+(`deployGuards.remoteEngineSupported`) — and it has to be client-side, because
+the backend never loads the checkpoint and therefore cannot tell the two apart.
+
+**Why it matters even on a healthy transport** (bench, 2026-09-03): a SmolVLA
+eraser-place run at horizon 48 held a flat `sync` transport — no DEGRADE,
+e2e ~400 ms of which ~280 ms was inference — and the arm was still visibly jerky
+at ~1 Hz. 33 chunks in 29 s: with ~400 ms latency the adaptive-sync player
+aligns each arriving chunk by dropping its stale prefix, so the plan switches
+every ~0.9 s, and two flow-policy plans made 400 ms apart disagree at every
+seam. Nothing about the transport is wrong; the regime is. ACT at 80-110 ms e2e
+never shows it, which is why `sync` remains the right default for everything
+else.
+
+**Both sides must agree on `s_min`, not just on horizon/fps/codec.** The robot
+computes `overlap_end = H - max(s_min, d)` per request and ships it; the server
+trusts that number and falls back to its own `H - s_min` only when the field is
+absent. Two different values put the in-painting mask on a different boundary
+than the guidance. Both default to 4, and the panel emits `--s-min` into the
+generated `modal run` line from the same field the session is started with.
 
 ## Local SFU (`tools/drtc/`)
 
@@ -343,7 +387,8 @@ needs only that one file plus
 
 ```bash
 pytest tests/test_drtc_schedule.py tests/test_drtc_env.py \
-       tests/test_drtc_protocol.py tests/test_drtc_pose.py
+       tests/test_drtc_protocol.py tests/test_drtc_pose.py \
+       tests/test_drtc_robot_sync.py tests/test_drtc_robot_rtc.py
 ```
 
 - `tests/test_drtc_schedule.py` — the offline core: absolute-step alignment,
@@ -357,8 +402,16 @@ pytest tests/test_drtc_schedule.py tests/test_drtc_env.py \
   always-present STATS key set, and the two-STOP rule.
 - `tests/test_drtc_pose.py` — bus discovery, gripper exclusion, and the
   action→bus target mapping, with fake buses.
+- `tests/test_drtc_robot_sync.py` / `tests/test_drtc_robot_rtc.py` — the
+  interrupt shield, plus the two SOURCE-level assertions per entrypoint that no
+  runtime test can reach: every teardown step goes through `shielded`, and the
+  torque cap is cleared right after `connect()`. The rtc file adds two more —
+  that the two teardown sequences are IDENTICAL, and that neither entrypoint
+  redefines a piece of `_session_glue` locally. The shield's own unit tests
+  `importorskip` the extra; everything read off the source runs everywhere,
+  which matters because those are the halves a refactor drops.
 
-None needs LiveKit, hardware or a GPU, so all four run in ordinary CI without
+None needs LiveKit, hardware or a GPU, so all six run in ordinary CI without
 the extra installed. The `return_to_rest_pose` poll loop itself is deliberately
 NOT re-tested here — it settles for `RETURN_SETTLE_S` and is already covered by
 the replay tests; driving it would mean sleeping.
@@ -370,10 +423,30 @@ The adaptive-sync simulation that produced `SYNC_RESULTS.md` is still a
 python -m makermodslab.drtc._sync_player
 ```
 
-## Done since the port (S3.1, 2026-09-02)
+## Done since the port
 
-The design record is [`SLICE3.md`](SLICE3.md); this is what its S3.1 slice
-landed, `robot_sync` only.
+The design record is [`SLICE3.md`](SLICE3.md).
+
+### S3.5 (2026-09-03) — the RTC regime becomes an engine
+
+- **`robot_rtc` hardened to `robot_sync`'s standard, on shared code.** New
+  `makermodslab/drtc/_session_glue.py` owns the event emitters, the stdin
+  command pump, the start-pose capture, the first-action ease-in, the interrupt
+  shield and the four transport/safety flags; both entrypoints import it. It is
+  importable WITHOUT the `drtc` extra, same rule as `_pose`.
+- **`engine` + `s_min` on `RemoteInferenceOptions`.** `engine` picks the child
+  module; `s_min` is sent only for `rtc`, where it is half a contract with the
+  GPU side. `engine` is on the status payload too.
+- **Two display fixes.** `elapsed_s` is FROZEN at the exit instead of reset to
+  0 (a finished run reported "0s / 60", reading as one that never started), and
+  the status panel keeps the last `holds` rate after a run ends instead of
+  blanking it to "—" at exactly the moment a failed run needs it.
+- **The UI picks the engine from the checkpoint** and blocks `rtc` for a
+  non-flow policy, because the backend cannot make that check itself.
+
+### S3.1 (2026-09-02) — `robot_sync` hardening
+
+What that slice landed, `robot_sync` only (all of it is now shared):
 
 - **Return-to-rest on stop, for the SO-101** — see "Safe start and stop" above.
   Every exit path (STOP, Ctrl-C, duration elapsed, a crash) drives the arm back
@@ -411,11 +484,11 @@ landed, `robot_sync` only.
   transport read-out with the clear-local-override button. Everything lives in
   `frontend/src/components/remote-inference/`; the shared studio files carry
   only a run-mode entry, two guard flags and one mount point.
-    Since the studio-panels rework merged, that block sits inside the Deploy
-    panel's run form, which is held open for as long as a remote run is live —
-    so a run started from another tab or through the API shows its status and
-    its Stop as soon as this panel renders. (Before the rework it was gated on
-    a policy being selected here, and was invisible until one was.)
+  Since the studio-panels rework merged, that block sits inside the Deploy
+  panel's run form, which is held open for as long as a remote run is live —
+  so a run started from another tab or through the API shows its status and
+  its Stop as soon as this panel renders. (Before the rework it was gated on
+  a policy being selected here, and was invisible until one was.)
 - **The Lab still does not launch Modal, and does not supervise the SFU.**
   Lifecycle option A: a human runs `modal run
 makermodslab/drtc/modal_policy.py` in one terminal and (optionally)
@@ -423,10 +496,6 @@ makermodslab/drtc/modal_policy.py` in one terminal and (optionally)
   energizes anything and refuses with a coded `transport.*` otherwise. Option B
   (the Lab launches the GPU side) is S3.5; option C (a supervised local SFU) is
   S3.6, and only if earned.
-- **`robot_rtc` is untouched.** It still calls `robot.disconnect()` straight out
-  of its control loop, with no ease-in, no stdin protocol and no
-  `--livekit_url`/`--livekit_room`. Slice 3 is adaptive-sync only; if the RTC
-  regime is ever brought under a session it needs the same treatment.
 - **No CAN-arm support here, and none planned in this slice.** `maker_follower`
   / `metal_follower` are not registered with draccus in either entrypoint, so
   `--robot.type=maker_follower` fails at CLI-parse time inside the child —

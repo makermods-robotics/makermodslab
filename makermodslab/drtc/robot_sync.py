@@ -81,13 +81,25 @@ Not portable back to the standalone repo
 This file used to be a pure LiveKit/lerobot client that the `livekit-drtc` repo
 could have taken back unchanged. It no longer is: it imports
 `makermodslab.drtc_protocol` (the stdin/stdout line protocol a Lab feature
-module drives it with) and `._pose` (which imports `makermodslab.rest_pose`, so
-a stop returns the arm to where the operator left it before torque is
-released). That is the real, accepted cost of integration — the safety
-behaviour and the supervised lifecycle are the whole point of bringing it
-in-tree, and neither can be expressed without Lab modules. `_schema.py`,
-`_sync_player.py`, `_latency.py` and `policy.py` remain dependency-free and
-still are portable.
+module drives it with) and `._session_glue` / `._pose` (which import
+`makermodslab.rest_pose`, so a stop returns the arm to where the operator left
+it before torque is released). That is the real, accepted cost of integration —
+the safety behaviour and the supervised lifecycle are the whole point of
+bringing it in-tree, and neither can be expressed without Lab modules.
+`_schema.py`, `_sync_player.py`, `_latency.py` and `policy.py` remain
+dependency-free and still are portable.
+
+The session glue is SHARED with `robot_rtc.py`
+----------------------------------------------
+Everything below that is about being a supervised session rather than about
+adaptive-sync scheduling lives in `._session_glue`: the event emitters, the
+stdin command pump, the start-pose capture, the first-action ease-in, the
+interrupt shield and the four transport/safety flags. `robot_rtc` runs the same
+glue, so the two entrypoints cannot drift on the behaviour that makes an
+energized arm safe. What stays written out HERE is the teardown's call sequence
+and the torque-cap reset, both pinned by source assertions in
+`tests/test_drtc_robot_sync.py` — see that module's own note on why hiding them
+behind a helper would retire the only guard those paths have.
 
 Supervised operation
 --------------------
@@ -106,7 +118,6 @@ NOTE: no `from __future__ import annotations` here — it would stringize the
 """
 
 import asyncio
-import sys
 import threading
 import time
 from collections import OrderedDict
@@ -137,30 +148,34 @@ from lerobot.robots import (  # noqa: F401
 from lerobot.utils.import_utils import register_third_party_plugins
 
 from ..drtc_protocol import (
-    EVENT_ACTIVE,
     EVENT_BYE,
     EVENT_CONNECTED,
-    EVENT_EASING,
     EVENT_ERROR,
     EVENT_READY,
     EVENT_RETURNING,
-    EVENT_STATS,
-    format_event,
     format_ready,
-    format_stats,
-    pump_commands,
 )
 from ..motor_power import FOLLOWER, reset_torque_limit
 from ._common import fmt_us, load_env, mint_token, required_env
 from ._latency import JKLatencyEstimator
-from ._pose import (
-    capture_start_poses,
-    ease_to_action,
-    ensure_uncapped,
-    feetech_buses,
-    return_to_start_poses,
-)
+from ._pose import feetech_buses
 from ._schema import CHUNK_NAME, robot_wire_schema
+from ._session_glue import (
+    LoopControl,
+    _shielded_disconnect,
+    capture_start_poses_or_warn,
+    ease_in_field,
+    ease_into_first_action,
+    emit,
+    emit_stats,
+    livekit_room_field,
+    livekit_url_field,
+    note_first_operator,
+    or_none,
+    return_step,
+    return_to_rest_field,
+    shielded,
+)
 from ._sync_player import AdaptiveBlockPlayer
 
 # Register any third-party robot/camera plugins (entry points) BEFORE draccus
@@ -168,60 +183,6 @@ from ._sync_player import AdaptiveBlockPlayer
 register_third_party_plugins()
 
 IDENTITY = "robot"
-
-
-def _emit(event: str, payload: str = "") -> None:
-    """Write one protocol event to stdout, flushed.
-
-    stdout is a pipe under a supervising parent, so it is block-buffered by
-    default — without the flush the parent would not see CONNECTED (or a
-    per-second STATS) until 4-8 KB of unrelated lerobot log had accumulated
-    behind it, which is most of a short run."""
-    print(format_event(event, payload), flush=True)
-
-
-def shielded(what: str, fn, *args, attempts: int = 2, reraise: bool = False, **kwargs):
-    """Run one TEARDOWN step so that no interrupt can skip the steps after it.
-
-    `contextlib.suppress(Exception)` does NOT cover `KeyboardInterrupt` — it
-    derives from BaseException — so a Ctrl-C landing inside the return-to-rest,
-    or inside the transport teardown, propagates straight out of the `finally`
-    block and skips `robot.disconnect()`: the call that RELEASES TORQUE. The
-    arm is then left energized, holding the policy's last command, with no BYE
-    for a supervising parent to read. That is the worst outcome available on
-    the one path whose entire job is to make the arm safe.
-
-    So every teardown step is individually shielded, and one that was
-    interrupted is retried once — by then the abort event is set (see the call
-    sites), so the retry unwinds immediately instead of resuming a long move.
-    Returns the step's value, or None when it failed or was given up on.
-
-    `reraise=True` shields the step from INTERRUPTS only and lets a genuine
-    exception propagate, which is what the torque release itself wants: an arm
-    that could not be disconnected is a failed run and the process should exit
-    saying so, exactly as it did before this shield existed.
-    """
-    for attempt in range(1, attempts + 1):
-        try:
-            return fn(*args, **kwargs)
-        except KeyboardInterrupt:
-            remaining = attempts - attempt
-            print(f"[robot] Ctrl-C during {what}; {'retrying' if remaining else 'giving up on it'}")
-        except Exception as exc:
-            print(f"[robot] {what} failed: {exc}")
-            if reraise:
-                raise
-            return None
-    return None
-
-
-def _or_none(value):
-    """Portal's metrics report 0 for "no sample yet"; STATS reports that as null.
-
-    A genuine 0 µs e2e or RTT is not physically reachable, so collapsing the
-    two is safe and keeps the "null means unknown" contract honest for the
-    parent's typed status model."""
-    return value or None
 
 
 @dataclass
@@ -316,60 +277,20 @@ class RobotSideConfig:
     latency_beta: float = field(default=0.25, metadata={"help": "JK estimator smoothing (deviation)"})
     latency_k: float = field(default=1.5, metadata={"help": "JK estimator deviation multiplier"})
 
-    # --- transport pinning -------------------------------------------------
-    livekit_url: str = field(
-        default="",
-        metadata={
-            "help": "SFU URL to dial. Unset falls back to LIVEKIT_URL from the "
-            "credential files (see _env.load_env's precedence). Pin it when "
-            "a parent has already verified the transport, so the whole "
-            "'parent probed room X, the child's .env.local said room Y' "
-            "class of failure cannot happen; the effective value is echoed "
-            "back in the READY event."
-        },
-    )
-    livekit_room: str = field(
-        default="",
-        metadata={
-            "help": "Room to join. Unset falls back to LIVEKIT_ROOM. Same "
-            "rationale as --livekit_url; note the GPU side's room comes ONLY "
-            "from its Modal secret unless it is launched with --livekit-room."
-        },
-    )
-
-    # --- graceful stop -----------------------------------------------------
-    return_to_rest: bool = field(
-        default=True,
-        metadata={
-            "help": "Capture the pose the arm starts in and drive it back there "
-            "before releasing torque, on every exit path (STOP, Ctrl-C, "
-            "duration elapsed, or a crash). ON by default: the safe "
-            "behaviour is the right default everywhere, and cutting torque "
-            "wherever the policy left the arm drops it. `--return_to_rest false` "
-            "is a bench A/B flag. The GRIPPER is excluded from the captured "
-            "pose (the policy may have left it holding something), matching "
-            "teleoperation and recording rather than replay."
-        },
-    )
-    ease_in: bool = field(
-        default=True,
-        metadata={
-            "help": "Ramp the arm from wherever it is to the first chunk's step-0 "
-            "pose before executing, instead of stepping straight to it at "
-            "full speed. ON by default for the same reason as "
-            "--return_to_rest; `--ease_in false` is the A/B baseline that "
-            "reproduces the pre-2026-09-02 snap."
-        },
-    )
+    # --- transport pinning + graceful stop ---------------------------------
+    # Defined once in `_session_glue` so this entrypoint and `robot_rtc` cannot
+    # drift on the flags a supervising parent passes both of them.
+    livekit_url: str = livekit_url_field()
+    livekit_room: str = livekit_room_field()
+    return_to_rest: bool = return_to_rest_field()
+    ease_in: bool = ease_in_field()
 
 
 async def run(cfg: RobotSideConfig) -> None:
     # A supervising parent drives these three over stdin (see drtc_protocol):
     # STOP -> stop_event (leave the loop, return, exit 0); a second STOP ->
     # abort_event (cut the return short); QUIT -> all three (no return at all).
-    stop_event = threading.Event()
-    abort_event = threading.Event()
-    quit_event = threading.Event()
+    control = LoopControl()
 
     load_env()
     # Flags win over the credential files so a parent can pin the transport it
@@ -380,7 +301,7 @@ async def run(cfg: RobotSideConfig) -> None:
     token = mint_token(IDENTITY, room)
     # Emitted BEFORE the bus is opened, so a parent that spots a transport
     # mismatch can kill the child before anything is energized.
-    _emit(EVENT_READY, format_ready(url, room))
+    emit(EVENT_READY, format_ready(url, room))
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
@@ -400,16 +321,9 @@ async def run(cfg: RobotSideConfig) -> None:
         for warning in reset_torque_limit(robot, FOLLOWER):
             print(f"[robot] WARNING: {warning}")
 
-    # Only now is it safe to read stdin: SOFollower.calibrate() prompts with
-    # input() during connect() on an uncalibrated arm, reading the very same
-    # stdin, and racing that prompt with this reader would let a real command be
-    # eaten by the prompt. Daemon so an EOF-blocked read never holds up exit.
-    threading.Thread(
-        target=pump_commands,
-        args=(sys.stdin, stop_event, abort_event, quit_event),
-        name="drtc-robot-stdin",
-        daemon=True,
-    ).start()
+    # Only now is it safe to read stdin — see LoopControl.start_command_pump for
+    # why the pump cannot start before connect().
+    control.start_command_pump()
 
     schema, state_keys, action_keys = robot_wire_schema(robot)
     print(
@@ -420,13 +334,8 @@ async def run(cfg: RobotSideConfig) -> None:
 
     # Capture where the operator left the arm, now — after connect, before
     # anything moves — so every exit path can drive it back there while torque
-    # is still on. Empty for a non-Feetech (Koch/OMX) arm, which makes the
-    # return a logged no-op rather than a wrong-units move; see _pose.py.
-    start_poses = capture_start_poses(robot) if cfg.return_to_rest else []
-    if cfg.return_to_rest and not start_poses:
-        print(
-            "[robot] WARNING: no Feetech bus to capture a start pose from; torque will be released in place"
-        )
+    # is still on.
+    start_poses = capture_start_poses_or_warn(robot, cfg.return_to_rest)
 
     portal = None
     try:
@@ -511,7 +420,7 @@ async def run(cfg: RobotSideConfig) -> None:
 
         print(f"[robot] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
         await portal.connect(url, token)
-        _emit(EVENT_CONNECTED)
+        emit(EVENT_CONNECTED)
         print(
             f"[robot] connected; {cfg.fps} fps, block horizon {cfg.horizon}, "
             f"adaptive={'on' if cfg.adaptive else 'off'} (base_lead={cfg.base_lead}, "
@@ -529,7 +438,7 @@ async def run(cfg: RobotSideConfig) -> None:
         active_seen = False
 
         while cfg.duration_s <= 0 or (time.monotonic() - start) < cfg.duration_s:
-            if stop_event.is_set():
+            if control.stop_event.is_set():
                 # STOP / QUIT / Ctrl-C. Leave the loop; the finally below owns
                 # the return-to-rest and the release.
                 print("[robot] stop requested")
@@ -550,10 +459,7 @@ async def run(cfg: RobotSideConfig) -> None:
                 action = {action_keys[idx]: cmd[f"a{idx}"] for idx in range(len(action_keys))}
                 if not eased:
                     eased = True
-                    # FIRST-ACTION EASE-IN. Until now nothing has been sent, so
-                    # the arm is still exactly where the operator left it and
-                    # this is the one send that can be an arbitrarily large
-                    # jump. Ramp into it (see _pose.ease_to_action) instead.
+                    # FIRST-ACTION EASE-IN (see _session_glue.ease_into_first_action).
                     #
                     # The loop is deliberately BLOCKED for the duration: no
                     # tick advances, no observation goes out, so no request is
@@ -562,43 +468,23 @@ async def run(cfg: RobotSideConfig) -> None:
                     # this chunk already cleared it. Because control_step and
                     # the wall clock are frozen TOGETHER, the player's
                     # step-axis alignment stays coherent; only the mapping from
-                    # step to wall time gains an offset, which we absorb below
+                    # step to wall time gains an offset, which we absorb here
                     # rather than letting the pacing loop burst to catch up.
                     if cfg.ease_in:
-                        ease_started = time.monotonic()
-                        _emit(EVENT_EASING)
-                        _arrived, reason = ease_to_action(robot, action, abort_event=stop_event)
-                        print(f"[robot] first-action ease-in: {reason}")
-                        # Unconditionally, not just on arrival: the ease stamps
-                        # a gentle RETURN_POS_SPEED profile cap into RAM
-                        # Goal_Velocity on EVERY exit path, and a survivor would
-                        # throttle the whole run (see _pose.ensure_uncapped).
-                        # An ease that settled short still proceeds — the arm is
-                        # closer to the plan than it was, and refusing to run
-                        # would leave it energized mid-air for no gain.
-                        ensure_uncapped(robot)
-                        eased_for = time.monotonic() - ease_started
+                        eased_for, stopped = ease_into_first_action(robot, action, control)
                         start += eased_for
                         last_log += eased_for
                         next_tick = time.monotonic()
-                        if stop_event.is_set():
+                        if stopped:
                             # A stop landed during the ease; it came back
                             # cut-short. Skip execution entirely.
-                            print("[robot] stop requested during the ease-in")
                             break
                 robot.send_action(action)
                 last_action = action
             elif last_action is not None:
                 robot.send_action(last_action)
 
-            if not active_seen:
-                # Poll every tick only until the first operator appears: this is
-                # the transition a supervising parent's "did the GPU ever join?"
-                # watchdog waits on, so a 1 Hz sample would cost it a second.
-                operator = portal.active_operator()
-                if operator is not None:
-                    active_seen = True
-                    _emit(EVENT_ACTIVE, f"operator={operator}")
+            active_seen = note_first_operator(portal, active_seen)
 
             # 2. Request the NEXT block only when the runway drops to the ADAPTIVE
             #    lead — one inference per block, timed to the measured round-trip
@@ -647,29 +533,26 @@ async def run(cfg: RobotSideConfig) -> None:
                 # ... and beside it, the machine-readable twin. Every key
                 # always present (null where unknown) so the parent's status
                 # response model can be exact — see drtc_protocol.STATS_KEYS.
-                _emit(
-                    EVENT_STATS,
-                    format_stats(
-                        {
-                            "t": elapsed,
-                            "chunks": chunks,
-                            "reqs": observations_emitted,
-                            "sched": runway,
-                            "lead": lead,
-                            "s_min": cfg.s_min,
-                            "horizon": cfg.horizon,
-                            "lat_steps": est_steps,
-                            "lat_ms": round(est_ms, 1),
-                            "holds": holds,
-                            "degrade": bool(degrade),
-                            "chunk_age_ms": None if age is None else round(age, 1),
-                            "active": operator,
-                            "e2e_p50_us": _or_none(m.policy.e2e_us_p50),
-                            "e2e_p95_us": _or_none(m.policy.e2e_us_p95),
-                            "rtt_us": _or_none(m.rtt.rtt_us_last),
-                            "uncorr": uncorr,
-                        }
-                    ),
+                emit_stats(
+                    {
+                        "t": elapsed,
+                        "chunks": chunks,
+                        "reqs": observations_emitted,
+                        "sched": runway,
+                        "lead": lead,
+                        "s_min": cfg.s_min,
+                        "horizon": cfg.horizon,
+                        "lat_steps": est_steps,
+                        "lat_ms": round(est_ms, 1),
+                        "holds": holds,
+                        "degrade": bool(degrade),
+                        "chunk_age_ms": None if age is None else round(age, 1),
+                        "active": operator,
+                        "e2e_p50_us": or_none(m.policy.e2e_us_p50),
+                        "e2e_p95_us": or_none(m.policy.e2e_us_p95),
+                        "rtt_us": or_none(m.rtt.rtt_us_last),
+                        "uncorr": uncorr,
+                    }
                 )
                 last_log = now
 
@@ -683,9 +566,9 @@ async def run(cfg: RobotSideConfig) -> None:
         # hand-run bench session gets the same return-before-release a
         # supervised one does. Swallowed so the process still exits 0.
         print("[robot] interrupted (Ctrl-C)")
-        stop_event.set()
+        control.stop_event.set()
     except Exception as exc:
-        _emit(EVENT_ERROR, str(exc))
+        emit(EVENT_ERROR, str(exc))
         raise
     finally:
         # Order is load-bearing: the return needs torque, and it is
@@ -699,21 +582,13 @@ async def run(cfg: RobotSideConfig) -> None:
         # second Ctrl-C during the return is the second STOP press — cut it
         # short and release where the arm is, nearer rest than it started —
         # which is what setting `abort_event` before the retry does.
-        if start_poses and not quit_event.is_set():
-            _emit(EVENT_RETURNING)
+        if start_poses and not control.quit_event.is_set():
+            emit(EVENT_RETURNING)
             print("[robot] returning to the start pose ...")
-
-            def _return_or_cut_short() -> None:
-                """One attempt at the return; a Ctrl-C cuts the RETRY short."""
-                if abort_event.is_set():
-                    return
-                try:
-                    return_to_start_poses(start_poses, abort_event=abort_event)
-                except KeyboardInterrupt:
-                    abort_event.set()
-                    raise
-
-            shielded("the return to the start pose", _return_or_cut_short)
+            shielded(
+                "the return to the start pose",
+                return_step(start_poses, control.abort_event),
+            )
         print("[robot] disconnecting...")
         # `portal` is None when the failure landed before it was built (a bad
         # codec name, a camera that would not open) — the arm is connected and
@@ -728,21 +603,7 @@ async def run(cfg: RobotSideConfig) -> None:
         # reads that as the child dying, which is the truth. Only the interrupt
         # is swallowed.
         shielded("the torque release (robot.disconnect)", robot.disconnect, reraise=True)
-        shielded("the BYE event", _emit, EVENT_BYE, attempts=1)
-
-
-async def _shielded_disconnect(portal) -> None:
-    """`await portal.disconnect()`, swallowing errors AND interrupts.
-
-    The async twin of :func:`shielded` — one step, not retried: a transport
-    that would not close is not going to close on a second ask, and the arm's
-    torque release is waiting behind it."""
-    try:
-        await portal.disconnect()
-    except KeyboardInterrupt:
-        print("[robot] Ctrl-C during the transport disconnect; continuing to the torque release")
-    except Exception as exc:
-        print(f"[robot] transport disconnect failed: {exc}")
+        shielded("the BYE event", emit, EVENT_BYE, attempts=1)
 
 
 @draccus.wrap()

@@ -463,6 +463,8 @@ export default {
         "The remote transport isn't ready — check it in the Remote run section below.",
       remoteArmUnsupported:
         "Remote runs need a single SO-101 arm. Bimanual rigs and the CAN arms aren't supported yet.",
+      remoteEngineUnsupported:
+        "Real-time chunking only works for flow policies. Switch the chunk engine back to Adaptive sync.",
     },
     actions: {
       start: "Start inference",

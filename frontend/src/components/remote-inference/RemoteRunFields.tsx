@@ -11,14 +11,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  DEFAULT_HORIZON,
   VIDEO_CODECS,
+  type RemoteEngine,
   type RemoteRunConfig,
 } from "./remoteRunConfig";
 import { POLICY_PATH_PLACEHOLDER } from "./modalCommand";
 
 /**
- * The remote run's own fields: the Hub id the GPU loads, plus the compact
- * transport group that MUST match the GPU side.
+ * The remote run's own fields: the Hub id the GPU loads, the engine, plus the
+ * compact transport group that MUST match the GPU side.
  *
  * Everything else a remote run needs — robot, checkpoint, cameras, task — is
  * the Deploy panel's existing form, reused verbatim. That is the point: a
@@ -31,8 +33,13 @@ const RemoteRunFields: React.FC<{
    * same way the task and coaching-dataset fields offer theirs: visibly not
    * the operator's input, and restored the moment they clear the box. */
   hubIdDefault: string;
+  /** Whether this checkpoint's policy family can be in-painted at all. False
+   * also for an UNKNOWN policy type — the rtc option stays selectable so the
+   * refusal explains itself rather than vanishing, and `deployGuards` blocks
+   * the launch. */
+  rtcSupported: boolean;
   disabled?: boolean;
-}> = ({ config, onChange, hubIdDefault, disabled }) => {
+}> = ({ config, onChange, hubIdDefault, rtcSupported, disabled }) => {
   const { t } = useTranslation();
   const set = <K extends keyof RemoteRunConfig>(
     key: K,
@@ -60,6 +67,56 @@ const RemoteRunFields: React.FC<{
             ? ` ${t("remoteInference.form.hubIdInherited")}`
             : ""}
         </p>
+      </div>
+
+      {/* The engine. It picks the robot-side chunk player AND the GPU wrapper
+          in the command below, so it sits above the transport group that has
+          to match it. */}
+      <div className="space-y-2">
+        <Label htmlFor="remote-engine">
+          {t("remoteInference.form.engineLabel")}
+        </Label>
+        <Select
+          value={config.engine}
+          disabled={disabled}
+          onValueChange={(v) => {
+            // Switching engines re-seeds the horizon, because the two regimes
+            // want different ones (one open-loop ACT block vs the flow
+            // families' full chunk_size) and a horizon carried over from the
+            // other engine is the mismatch Portal drops packets over. An
+            // operator who has already typed their own keeps it.
+            const engine = v as RemoteEngine;
+            const kept =
+              config.horizon !== DEFAULT_HORIZON[config.engine]
+                ? config.horizon
+                : DEFAULT_HORIZON[engine];
+            onChange({ ...config, engine, horizon: kept });
+          }}
+        >
+          <SelectTrigger id="remote-engine">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {/* Option VALUES ("sync" / "rtc") are what the backend parses —
+                only the labels are translated. */}
+            <SelectItem value="sync">
+              {t("remoteInference.form.engine.sync")}
+            </SelectItem>
+            <SelectItem value="rtc">
+              {t("remoteInference.form.engine.rtc")}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {config.engine === "rtc"
+            ? t("remoteInference.form.engine.rtcHint")
+            : t("remoteInference.form.engine.syncHint")}
+        </p>
+        {config.engine === "rtc" && !rtcSupported ? (
+          <p className="text-xs leading-relaxed text-warn">
+            {t("remoteInference.form.engine.rtcUnsupported")}
+          </p>
+        ) : null}
       </div>
 
       <div className="space-y-3 rounded-lg border border-border bg-muted/40 p-3">
@@ -137,12 +194,36 @@ const RemoteRunFields: React.FC<{
               }}
             />
           </div>
+          {/* RTC only. The sync wrapper has no --s-min flag at all, and the
+              sync robot's own s_min is left at its default with the rest of
+              the scheduler knobs. */}
+          {config.engine === "rtc" ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="remote-s-min" className="text-xs">
+                {t("remoteInference.form.sMinLabel")}
+              </Label>
+              <NumberInput
+                id="remote-s-min"
+                min={1}
+                value={config.sMin}
+                disabled={disabled}
+                onChange={(v) => {
+                  if (v !== undefined) set("sMin", v);
+                }}
+              />
+            </div>
+          ) : null}
         </div>
         <p className="text-xs text-muted-foreground">
           {config.durationS === 0
             ? t("remoteInference.form.durationUnbounded")
             : t("remoteInference.form.durationHint")}
         </p>
+        {config.engine === "rtc" ? (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("remoteInference.form.sMinHint")}
+          </p>
+        ) : null}
       </div>
     </div>
   );

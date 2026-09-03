@@ -24,14 +24,22 @@ NOT a variant of it: the two share only the middle of the ladder (`_prepare_robo
 
 What it owns, and what it does not
 ----------------------------------
-This session owns the ROBOT side only: it spawns
-`python -m makermodslab.drtc.robot_sync`, which opens the follower bus, joins a
-LiveKit room and plays the action chunks a remote operator sends back. The GPU
-side (`modal run makermodslab/drtc/modal_policy.py`) and the SFU are started by
-a human in other terminals; the session VERIFIES both before it energizes
-anything (see :func:`_probe_room`) and promises exactly what it can keep — "I
-own the arm; I checked the other two halves first". Lifecycle option A of
-docs/drtc/SLICE3.md.
+This session owns the ROBOT side only: it spawns one of the two chunk players
+(`_CHILD_MODULES`, picked by the request's `engine`), which opens the follower
+bus, joins a LiveKit room and plays the action chunks a remote operator sends
+back. The GPU side (`modal run makermodslab/drtc/modal_policy.py`, or
+`modal_policy_rtc.py` for the rtc engine) and the SFU are started by a human in
+other terminals; the session VERIFIES both before it energizes anything (see
+:func:`_probe_room`) and promises exactly what it can keep — "I own the arm; I
+checked the other two halves first". Lifecycle option A of docs/drtc/SLICE3.md.
+
+The two engines are the same session in every respect this module can see: the
+same preflight ladder, the same protocol, the same watchdogs, the same stop.
+They differ only in which module is spawned and in one flag — see
+`_robot_sync_args`. What the backend CANNOT do is check the engine against the
+policy: it never reads the checkpoint, so it cannot tell a flow policy from an
+ACT one. The UI is the gate (`deployGuards.ts`), and a caller driving this API
+directly owns the choice.
 
 Why a subprocess, and why stdin
 -------------------------------
@@ -62,8 +70,10 @@ really always carries them):
     warning                 : str | None      (arm-identity warn-but-allow)
     phase                   : str | None      (the vocabulary below)
     policy_ref              : str | None
+    engine                  : str | None      ("sync" / "rtc"; null before any run)
     started_at              : float | None    (unix seconds)
-    elapsed_s               : float
+    elapsed_s               : float           (FROZEN at the exit on a terminal
+                                               payload, not reset to 0)
     duration_s              : int | None
     log_path                : str | None
     returning_to_rest       : bool
@@ -335,7 +345,26 @@ class RemoteInferenceRequest(BaseModel, extra="forbid"):
     # frame); MJPEG only for <=~256px policies, where a frame fits one SCTP
     # chunk. Portal's PNG/RAW stay off the API — they are bench codecs.
     video_codec: Literal["H264", "MJPEG"] = "H264"
+    # Which chunk player runs on the arm — and therefore which module is
+    # spawned and which GPU server the other terminal must be running. See
+    # `_CHILD_MODULES`, and `schemas/sessions.RemoteInferenceOptions.engine`
+    # for why the BACKEND CANNOT VERIFY the choice against the checkpoint.
+    engine: Literal["sync", "rtc"] = "sync"
+    # Minimum execution budget in action steps; MUST match the GPU side's
+    # `--s-min` on the rtc engine (the robot computes `overlap_end` from it and
+    # the server trusts the field). Only sent for `engine="rtc"`.
+    s_min: int = 4
     skip_identity_check: bool = False
+
+
+# The child each engine spawns. `sync` plays every chunk to completion and
+# adapts WHEN it prefetches; `rtc` re-plans continuously and ships the
+# still-to-execute prefix so the server can guide denoising — which is what
+# makes overlapping flow-policy chunks agree instead of fighting at every seam.
+_CHILD_MODULES: dict[str, str] = {
+    "sync": "makermodslab.drtc.robot_sync",
+    "rtc": "makermodslab.drtc.robot_rtc",
+}
 
 
 @dataclass(frozen=True)
@@ -489,6 +518,16 @@ def _robot_sync_args(
 ) -> list[str]:
     """The child's flags, without the interpreter/module prefix.
 
+    Engine-aware, but only just: the two entrypoints deliberately share their
+    whole session surface (`._session_glue`), so every flag below means the same
+    thing on both and only `--s_min` is engine-specific. It is sent for `rtc`
+    alone because there it is HALF A CONTRACT — the robot computes
+    `overlap_end = H - max(s_min, d)` and `policy_rtc` trusts that field, so a
+    disagreement silently guides the denoiser against the wrong mask. The sync
+    engine's own `s_min` only tunes when its player declares itself degraded,
+    and it is left at the child's (identical) default with the other scheduler
+    knobs.
+
     `robot_args` is `_prepare_robot`'s output — the same `--robot.type/port/id/
     cameras` block `lerobot-rollout` gets, and the cameras in it are keyed by
     the POLICY-expected names (see `_session_cameras` / `bind_robot_cameras`).
@@ -507,12 +546,12 @@ def _robot_sync_args(
     the argv a log records, not inherited from a default someone could flip.
 
     Everything else is left at the child's defaults on purpose (`adaptive`,
-    `base_lead`, `s_min`, `align`, `action_delay`, the JK constants,
-    `video_quality`, `video_bitrate_kbps`, `reliable_state`): they are knobs
-    whose wrong values present as "the arm freezes" or "the arm snaps at every
-    boundary" rather than as an error, and `reliable_state` in particular
-    auto-follows the codec — forcing it wrong head-of-line-blocks state behind
-    H264 retransmits.
+    `base_lead`, `align`, `action_delay`, `pacing`, `epsilon`, the JK constants,
+    the rtc engine's low-pass, `video_quality`, `video_bitrate_kbps`,
+    `reliable_state`): they are knobs whose wrong values present as "the arm
+    freezes" or "the arm snaps at every boundary" rather than as an error, and
+    `reliable_state` in particular auto-follows the codec — forcing it wrong
+    head-of-line-blocks state behind H264 retransmits.
     """
     return [
         *robot_args,
@@ -520,11 +559,22 @@ def _robot_sync_args(
         f"--horizon={request.horizon}",
         f"--duration_s={request.duration_s}",
         f"--video_codec={request.video_codec}",
+        *([f"--s_min={request.s_min}"] if request.engine == "rtc" else []),
         f"--livekit_url={url}",
         f"--livekit_room={room}",
         "--return_to_rest=true",
         "--ease_in=true",
     ]
+
+
+def _child_module(engine: str) -> str:
+    """The `python -m` target for one engine.
+
+    Falls back to the sync entrypoint for an engine the map does not know —
+    unreachable through the API (the options model's Literal refuses anything
+    else) and it would be a poor trade to raise here, in the worker thread,
+    after the arm has already been claimed and preflighted."""
+    return _CHILD_MODULES.get(engine, _CHILD_MODULES["sync"])
 
 
 def _fingerprint(request: RemoteInferenceRequest) -> str:
@@ -533,10 +583,17 @@ def _fingerprint(request: RemoteInferenceRequest) -> str:
     Named in the no-chunks watchdog's message because these — plus the camera
     names — are the whole content of Portal's schema fingerprint, and the
     operator's next action is to compare them against the other terminal's
-    `modal run` line."""
+    `modal run` line.
+
+    `engine` leads it, because it decides WHICH `modal run` line that is: an
+    rtc robot against `modal_policy.py` sends a state schema carrying five
+    extra RTC fields, and Portal answers a fingerprint mismatch by silently
+    dropping every packet — the healthiest-looking zero-chunk failure there
+    is."""
     cameras = ", ".join(request.camera_bindings) or "none"
     return (
-        f"horizon={request.horizon}, fps={request.fps}, video_codec={request.video_codec}, cameras={cameras}"
+        f"engine={request.engine}, horizon={request.horizon}, fps={request.fps}, "
+        f"video_codec={request.video_codec}, cameras={cameras}"
     )
 
 
@@ -689,6 +746,7 @@ def _payload_locked(*, shutting_down: bool) -> dict[str, Any]:
         "warning": _remote_meta.get("warning"),
         "phase": _remote_meta.get("phase"),
         "policy_ref": _remote_meta.get("policy_ref"),
+        "engine": _remote_meta.get("engine"),
         "started_at": _remote_started_at,
         "elapsed_s": elapsed,
         "duration_s": _remote_meta.get("duration_s"),
@@ -709,7 +767,15 @@ def _terminal_payload_locked(
 ) -> dict[str, Any]:
     """The finished payload: the live shape with the exit fields filled in.
 
-    Built BEFORE `_go_idle_locked` clears the globals it reads."""
+    Built BEFORE `_go_idle_locked` clears the globals it reads — which is also
+    what FREEZES `elapsed_s` at the run's true length: this function runs once,
+    at the exit (or at a pre-spawn failure), so `_payload_locked`'s
+    `time.time() - _remote_started_at` is measured from `started_at` to that
+    moment and then stored verbatim in `_last_result`. It is deliberately NOT
+    zeroed. S3.4 zeroed it, and a finished run reporting "0s / 60" read as a run
+    that never started — exactly the wrong thing to tell someone whose 40-second
+    run just failed, and the one number that says whether it failed at once or
+    ran most of its course first."""
     payload = _payload_locked(shutting_down=False)
     payload.update(
         {
@@ -720,7 +786,6 @@ def _terminal_payload_locked(
             "error": error,
             "hint": friendly_hint(error),
             "phase": phase,
-            "elapsed_s": 0.0,
             "returning_to_rest": False,
         }
     )
@@ -1218,6 +1283,7 @@ def handle_start_remote_inference(request: RemoteInferenceRequest) -> dict[str, 
         _remote_meta = {
             "phase": PHASE_RESOLVING,
             "policy_ref": request.policy_ref,
+            "engine": request.engine,
             "duration_s": request.duration_s,
             "fingerprint": _fingerprint(request),
         }
@@ -1373,13 +1439,13 @@ def _run_startup(
     cmd = [
         sys.executable,
         "-m",
-        "makermodslab.drtc.robot_sync",
+        _child_module(request.engine),
         *_robot_sync_args(request, robot_args, url=url, room=room),
     ]
     try:
         proc, log_handle, log_path = _spawn(cmd)
     except Exception as exc:
-        logger.exception("Failed to spawn robot_sync")
+        logger.exception("Failed to spawn the %s remote-inference child", request.engine)
         _fail_startup(f"Failed to start remote inference: {exc}")
         return
 

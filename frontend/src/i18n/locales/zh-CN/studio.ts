@@ -350,6 +350,8 @@ export default {
       coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
       transportNotReady: "远程传输尚未就绪 — 请在下方的远程运行区块中检查。",
       remoteArmUnsupported: "远程运行目前仅支持单臂 SO-101。双臂配置和 CAN 机械臂尚不支持。",
+      remoteEngineUnsupported:
+        "实时分块只适用于流式策略。请把动作块引擎切换回“自适应同步”。",
     },
     actions: {
       start: "开始推理",

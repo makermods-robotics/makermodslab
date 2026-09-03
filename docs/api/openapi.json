@@ -3859,6 +3859,17 @@
             "title": "Elapsed S",
             "type": "number"
           },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
           "error": {
             "anyOf": [
               {
@@ -3999,6 +4010,7 @@
           "remote_inference_active",
           "phase",
           "policy_ref",
+          "engine",
           "started_at",
           "elapsed_s",
           "duration_s",

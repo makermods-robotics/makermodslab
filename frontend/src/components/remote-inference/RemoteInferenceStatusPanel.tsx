@@ -77,16 +77,28 @@ const RemoteInferenceStatusPanel: React.FC<{
   const { t } = useTranslation();
   const stats = status.stats;
 
-  // The previous sample, kept only to difference `holds` against. Reset when a
-  // run ends so the next run's first sample has no stale predecessor.
+  // The previous sample, kept only to difference `holds` against.
   const [holdsRate, setHoldsRate] = useState<number | null>(null);
   const prevRef = useRef<{ t: number; value: number } | null>(null);
+
+  // Reset on a NEW RUN, not on the run ending. Resetting on `!active` blanked
+  // the rate to "—" the instant a run finished, at exactly the moment someone
+  // reading a failed run wants to know whether the arm had been starving. The
+  // last computed rate now stands as part of the terminal picture. `started_at`
+  // is the run's identity: it survives into the terminal payload and only
+  // changes when the next run claims the slot. Declared FIRST so that on the
+  // render where a new run's first sample arrives, this clears before the
+  // difference below is taken.
   useEffect(() => {
-    if (!status.remote_inference_active || !stats) {
-      prevRef.current = null;
-      setHoldsRate(null);
-      return;
-    }
+    prevRef.current = null;
+    setHoldsRate(null);
+  }, [status.started_at]);
+
+  useEffect(() => {
+    // Only a live run contributes samples. A terminal payload repeats its last
+    // one on every poll, and differencing it against itself is a dt of 0 —
+    // which `perSecondRate` reports as "no rate" rather than as a false zero.
+    if (!status.remote_inference_active || !stats) return;
     const current = { t: stats.t, value: stats.holds };
     const rate = perSecondRate(current, prevRef.current);
     prevRef.current = current;
@@ -120,6 +132,17 @@ const RemoteInferenceStatusPanel: React.FC<{
                   defaultValue: status.phase,
                 })
               : t("remoteInference.phase.idle")}
+            {/* Which chunk player is driving the arm. Shown even for a run this
+                tab did not start — it is also which of the two `modal run`
+                lines the other terminal has to be running. The engine VALUE is
+                a backend identifier; only its label is translated. */}
+            {status.engine ? (
+              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
+                {t(`remoteInference.engine.${status.engine}` as never, {
+                  defaultValue: status.engine,
+                })}
+              </span>
+            ) : null}
           </p>
           <p className="font-mono text-xs text-muted-foreground">
             {t("remoteInference.status.elapsed", {

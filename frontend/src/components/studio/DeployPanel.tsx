@@ -64,6 +64,9 @@ import {
 } from "@/hooks/useRemoteInferenceTransport";
 import RemoteInferenceBlock from "@/components/remote-inference/RemoteInferenceBlock";
 import {
+  DEFAULT_HORIZON,
+  defaultEngineForPolicyType,
+  policySupportsRtc,
   armSupportsRemoteInference,
   DEFAULT_REMOTE_RUN_CONFIG,
   type RemoteRunConfig,
@@ -630,6 +633,37 @@ const DeployPanel: React.FC = () => {
   // never unmounts it), so the beat survives closing the studio.
   useSessionHeartbeat(remoteSessionId, tabOwnerId(), remoteActive);
 
+  // Whether this checkpoint can be in-painted at all — the rtc engine's whole
+  // premise. Unknown policy type counts as "no": guessing rtc for one would
+  // pair the arm with a GPU server the operator was never told to start.
+  const rtcSupported = policySupportsRtc(policyConfig?.policy_type);
+
+  // Preselect the engine from the checkpoint's policy family, and the horizon
+  // from the engine. A flow policy defaults to rtc because that is the whole
+  // reason the engine exists: at ~400 ms round trip the sync player re-plans
+  // about once a second, and two flow-policy plans made 400 ms apart disagree
+  // at every seam — a visible ~1 Hz twitch with a perfectly healthy transport.
+  //
+  // Keyed on the RESOLVED policy type so it re-seeds when the operator picks a
+  // different checkpoint, and never while a run is live (the fields are
+  // disabled then, and re-seeding under a live run would make the generated
+  // command disagree with the arm). It seeds a DEFAULT, so it deliberately
+  // overwrites: an engine left on rtc from the previous checkpoint is exactly
+  // the state this exists to correct.
+  const seededEngineFor = useRef<string | null>(null);
+  useEffect(() => {
+    const policyType = policyConfig?.policy_type ?? null;
+    if (!policyType || remoteActive) return;
+    if (seededEngineFor.current === policyType) return;
+    seededEngineFor.current = policyType;
+    const engine = defaultEngineForPolicyType(policyType);
+    setRemoteConfig((prev) => ({
+      ...prev,
+      engine,
+      horizon: DEFAULT_HORIZON[engine],
+    }));
+  }, [policyConfig?.policy_type, remoteActive]);
+
   // Edge-triggered "consume once": handleStart sets the pending flag, and the
   // effect below latches it into showDeployMilestone the first time the live
   // InferenceSessionDialog closes, then clears the pending flag so it can't
@@ -1069,6 +1103,11 @@ const DeployPanel: React.FC = () => {
       // backend makes anyway — this only moves them to before the launch.
       transportReady: transportIsReady(remoteTransport.transport),
       armSupportsRemote: armSupportsRemoteInference(robot),
+      // This one has NO backend twin and cannot have: the server never loads
+      // the checkpoint, so it cannot tell a flow policy from an ACT one and
+      // accepts whichever engine it is handed. Sync suits any policy, so only
+      // the rtc choice can be wrong here.
+      remoteEngineSupported: remoteConfig.engine !== "rtc" || rtcSupported,
       requiresTask: !!policyConfig?.requires_task,
       // The effective value: an empty box that falls back to a real default is
       // not a missing task, and blocking on it would be a dead end.
@@ -1265,6 +1304,10 @@ const DeployPanel: React.FC = () => {
             horizon: remoteConfig.horizon,
             fps: remoteConfig.fps,
             video_codec: remoteConfig.videoCodec,
+            // The engine picks which chunk player the server spawns; s_min is
+            // half a contract with the GPU side and is only read for rtc.
+            engine: remoteConfig.engine,
+            s_min: remoteConfig.sMin,
           },
         });
         setRemoteSessionId(session.id);
@@ -1917,6 +1960,7 @@ const DeployPanel: React.FC = () => {
                 config={remoteConfig}
                 onConfigChange={setRemoteConfig}
                 hubIdDefault={selectedJob?.hf_repo_id ?? ""}
+                rtcSupported={rtcSupported}
                 // The SAME string the start request sends, so the GPU side and
                 // the robot side steer the policy identically.
                 task={effectiveTask}
