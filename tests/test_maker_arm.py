@@ -596,6 +596,151 @@ def test_maker_return_leaves_joints_absent_from_the_pose_alone() -> None:
     assert arm.pos["gripper"] == -50.0
 
 
+# ---------------------------------------------------------------------------
+# A destination that moves: the mid-session re-alignment chases the leader
+#
+# The teardown return goes to a pose captured once, which cannot move. The
+# re-alignment goes to the LEADER, and the UI says "resumed" the instant Resume
+# is pressed — so the operator's hand is back on it while the follower is still
+# walking. Sampling the destination once would deliver everything the leader
+# moved during the walk in one unramped step at the end.
+# ---------------------------------------------------------------------------
+
+
+def test_a_move_without_a_target_fn_keeps_the_old_fixed_plan() -> None:
+    """Every teardown caller passes no target_fn and must keep byte-for-byte
+    its old motion: one interpolation planned up front, all joints on one
+    timeline. The chase is strictly opt-in."""
+    from makermodslab.maker_rest_pose import MAKER_RETURN_FPS, return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 30.0})
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0})
+
+    # 30 deg at 30 deg/s is 1.0s, and the ramp runs at MAKER_RETURN_FPS.
+    steps = int(1.0 * MAKER_RETURN_FPS)
+    ramp = [sent["shoulder_pan.pos"] for sent in arm.sent[:steps]]
+    assert ramp == [pytest.approx(30.0 * (1 - step / steps)) for step in range(1, steps + 1)]
+
+
+def test_chase_follows_a_target_that_moves_during_the_slew() -> None:
+    """The point of target_fn: a leader the operator keeps moving is followed,
+    and the arm lands where the leader ENDED UP, not where it was when Resume
+    was pressed."""
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 30.0})
+    target = {"shoulder_pan": 0.0}
+    calls = {"n": 0}
+
+    def _moving_target() -> dict[str, float]:
+        calls["n"] += 1
+        if calls["n"] == 5:
+            # The operator carries on past the original destination.
+            target["shoulder_pan"] = -10.0
+        return dict(target)
+
+    arrived, reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_moving_target)
+
+    assert arrived is True
+    assert reason in ("", "settled")
+    # Landed on the LAST target, not the first — a fixed plan would have
+    # stopped at 0 and left 10 deg to be snapped by the next passthrough tick.
+    assert arm.pos["shoulder_pan"] == pytest.approx(-10.0, abs=2.0)
+    assert arm.sent[-1]["shoulder_pan.pos"] == pytest.approx(-10.0, abs=2.0)
+
+
+def test_chase_never_steps_faster_than_the_rate_cap() -> None:
+    """A moving target must not become an excuse to jump: each tick steps
+    toward wherever the target is now by at most speed_deg_s * dt, which is
+    what keeps the arm from snapping when the leader moves a long way."""
+    from makermodslab.maker_rest_pose import (
+        MAKER_RETURN_FPS,
+        MAKER_RETURN_SPEED_DEG_S,
+        return_maker_to_pose,
+    )
+
+    arm = _MakerArmDouble({"shoulder_pan": 20.0})
+    target = {"shoulder_pan": 0.0}
+    calls = {"n": 0}
+
+    def _jumping_target() -> dict[str, float]:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            target["shoulder_pan"] = -60.0  # a whole arm-length in one tick
+        return dict(target)
+
+    return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_jumping_target)
+
+    cap = MAKER_RETURN_SPEED_DEG_S / MAKER_RETURN_FPS
+    setpoints = [20.0] + [sent["shoulder_pan.pos"] for sent in arm.sent]
+    biggest = max(abs(b - a) for a, b in zip(setpoints, setpoints[1:], strict=False))
+    assert biggest <= cap + 1e-9
+
+
+def test_chase_keeps_the_last_good_target_when_the_refresh_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A leader read that dies mid-chase must not raise out of a courtesy move
+    and must not abandon the arm part-way: it keeps walking to the last target
+    it knows. Logged ONCE — at 30 Hz for a whole ceiling, per-tick logging
+    would bury the session."""
+    import logging
+
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    arm = _MakerArmDouble({"shoulder_pan": 20.0})
+
+    def _broken_target() -> dict[str, float]:
+        raise RuntimeError("UART leader went away")
+
+    with caplog.at_level(logging.WARNING, logger="makermodslab.maker_rest_pose"):
+        arrived, _reason = return_maker_to_pose(arm, {"shoulder_pan": 0.0}, target_fn=_broken_target)
+
+    assert arrived is True
+    assert arm.pos["shoulder_pan"] == pytest.approx(0.0, abs=2.0)
+    warnings = [r for r in caplog.records if "refresh" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_chase_aborts_as_promptly_as_the_fixed_plan() -> None:
+    """The abort event and the ceiling apply to the chase exactly as they do to
+    the plan — a stop mid-re-alignment must not wait for the leader to settle."""
+    import threading
+
+    from makermodslab.maker_rest_pose import return_maker_to_pose
+
+    abort = threading.Event()
+    abort.set()
+    arm = _MakerArmDouble({"shoulder_pan": 40.0})
+
+    arrived, reason = return_maker_to_pose(
+        arm, {"shoulder_pan": 0.0}, abort_event=abort, target_fn=lambda: {"shoulder_pan": 0.0}
+    )
+
+    assert (arrived, reason) == (False, "cut-short")
+    assert arm.sent == []
+
+
+def test_each_arm_of_a_bimanual_chase_gets_its_own_target_fn() -> None:
+    """The two arms return on separate threads, so each is handed its own
+    refresh rather than sharing one — a shared fn would be called concurrently
+    and would read one UART leader from two threads at once."""
+    from makermodslab.maker_rest_pose import return_maker_arms_to_rest
+
+    left = _MakerArmDouble({"shoulder_pan": 15.0})
+    right = _MakerArmDouble({"shoulder_pan": -15.0})
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_label="the leader's pose",
+        target_fns=[lambda: {"shoulder_pan": 5.0}, lambda: {"shoulder_pan": -5.0}],
+    )
+
+    assert all(ok for ok, _reason in verdicts)
+    assert left.pos["shoulder_pan"] == pytest.approx(5.0, abs=2.0)
+    assert right.pos["shoulder_pan"] == pytest.approx(-5.0, abs=2.0)
+
+
 def test_bimanual_maker_arms_are_returned_concurrently() -> None:
     """Two arms on separate CAN buses: returning them in series would take
     twice as long and leave the second hanging under gravity meanwhile."""
@@ -608,6 +753,79 @@ def test_bimanual_maker_arms_are_returned_concurrently() -> None:
 
     assert abs(left.pos["shoulder_pan"]) <= 2.0
     assert abs(right.pos["shoulder_pan"]) <= 2.0
+
+
+def test_action_targets_strip_the_bimanual_side_prefixes() -> None:
+    """A robot-level action is keyed left_/right_ (BiMakerFollower.send_action
+    splits on exactly those); the sub-arms the return drives speak bare names.
+    Getting this wrong would hand each arm an empty pose and silently skip the
+    move the caller asked for."""
+    from makermodslab.maker_rest_pose import maker_targets_from_action
+
+    class _Bi:
+        left_arm = "L"
+        right_arm = "R"
+
+    targets = maker_targets_from_action(
+        _Bi(),
+        {
+            "left_shoulder_pan.pos": 10.0,
+            "left_gripper.pos": -40.0,
+            "right_shoulder_pan.pos": -10.0,
+            "right_elbow_flex.pos": 5.0,
+        },
+    )
+
+    assert targets == [
+        ("L", {"shoulder_pan": 10.0}),
+        ("R", {"shoulder_pan": -10.0, "elbow_flex": 5.0}),
+    ]
+
+
+def test_action_targets_of_a_single_arm_are_the_bare_action() -> None:
+    from makermodslab.maker_rest_pose import maker_targets_from_action
+
+    robot = object()
+    targets = maker_targets_from_action(
+        robot, {"shoulder_pan.pos": 3.0, "gripper.pos": 0.0, "not_a_joint": "x"}
+    )
+
+    assert targets == [(robot, {"shoulder_pan": 3.0})]
+
+
+def test_action_targets_pair_device_for_device_with_maker_follower_arms() -> None:
+    """The two helpers are used together — one names the arms, the other says
+    where to send them — so their ordering must not drift apart."""
+    from makermodslab.maker_rest_pose import maker_follower_arms, maker_targets_from_action
+
+    class _Bi:
+        left_arm = "L"
+        right_arm = "R"
+
+    robot = _Bi()
+    action = {"left_shoulder_pan.pos": 1.0, "right_shoulder_pan.pos": 2.0}
+
+    assert [d for d, _ in maker_follower_arms(robot)] == [
+        d for d, _ in maker_targets_from_action(robot, action)
+    ]
+
+
+def test_arms_to_rest_reports_each_arms_verdict() -> None:
+    """The mid-session re-alignment logs what happened; a thread whose join
+    timed out must not read back as a success."""
+    from makermodslab.maker_rest_pose import return_maker_arms_to_rest
+
+    left = _MakerArmDouble({"shoulder_pan": 3.0})
+    right = _MakerArmDouble({"shoulder_pan": -3.0})
+
+    verdicts = return_maker_arms_to_rest(
+        [(left, {"shoulder_pan": 0.0}), (right, {"shoulder_pan": 0.0})],
+        target_label="the leader's pose",
+    )
+
+    assert len(verdicts) == 2
+    assert all(ok for ok, _reason in verdicts)
+    assert return_maker_arms_to_rest([]) == []
 
 
 def test_maker_follower_arms_finds_both_sides_of_a_bimanual_robot() -> None:
