@@ -193,6 +193,8 @@ export default {
     zeroPose: {
       instructions:
         "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全张开。扭矩已关闭，可以自由移动。",
+      instructionsLeader:
+        "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
       instructionsMetal:
         "用手把机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
       liveAngles: "实时关节角度",
@@ -200,6 +202,7 @@ export default {
       confirm: "设为零位并保存",
       saving: "正在设置零位并保存标定…",
       poseImage: "零位姿态：折叠，夹爪张开",
+      poseImageLeader: "Star Arm 102 主控臂零位姿态：折叠，夹爪闭合",
       poseImageMetal: "零位姿态：竖直，夹爪闭合",
     },
     cancel: "取消标定",
