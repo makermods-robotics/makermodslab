@@ -243,7 +243,6 @@ export default {
         "Hub unreachable — showing your local policies and the last Hub listing.",
       // aria-label and title on the same button.
       import: "Import policy",
-      hint: "Pick a trained checkpoint or an imported Hub policy to run on your robot.",
     },
     // Where a policy lives. Rendered as a small marker beside its name.
     source: {
@@ -269,12 +268,14 @@ export default {
       "<0>{{name}}</0> {{gap}}. Open Robot settings before running inference. (Coaching also uses the leader arms — you teleoperate with them during takeovers, so they need a port and a calibration.)",
     // Which shape the run takes. Option VALUES ("single"/"eval"/"coach") are
     // identifiers the frontend switches on — only these labels are translated.
+    // `eval` is no longer offered as a verb in the panel; its copy stays for
+    // the scored-evaluation path that other entry points still drive.
     runMode: {
       label: "What do you want to do with this skill?",
-      // Each row states its COMMITMENT before it is chosen: these three are not
+      // Each row states its COMMITMENT before it is chosen: these are not
       // interchangeable menu items, and picking wrong is discovered at the arm.
       single: {
-        title: "Just run it",
+        title: "Run",
         what: "One attempt, then stop.",
         commitment: "hands off",
       },
@@ -285,9 +286,10 @@ export default {
           "hands on between episodes — you reset the scene and score each one",
       },
       coach: {
-        title: "Coach it",
+        title: "Human in the loop",
         what: "Take over when it's about to fail. Each rescue is saved as training data you can fine-tune on.",
-        commitment: "hands on — you hold the leader arm the whole session",
+        commitment:
+          "take control of the follower with the leader when it's failing, and gather data",
       },
     },
     // Coaching-only parameters, shown when run mode is "coach".
@@ -414,16 +416,16 @@ export default {
     // The action row: each verb selects its mode and launches it in one press.
     runVerbs: {
       groupLabel: "Start a run",
-      single: "Just run it",
+      single: "Run",
       // {{count}} is the episode / correction target — a number, so no plural.
       eval: "Score it · {{count}}",
-      coach: "Coach it · {{count}}",
+      coach: "Human in the loop · {{count}}",
     },
     // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
     blocked: {
       noRobot: "Select a robot above.",
       followerNotReady: "This robot's follower arm isn't ready.",
-      noCheckpoint: "Pick a skill and a checkpoint.",
+      noCheckpoint: "Pick a policy and a checkpoint.",
       armMismatch: "This checkpoint doesn't match the robot's arm count.",
       camerasUnbound: "Bind every camera the checkpoint expects.",
       temporalEnsemble: "Fix the temporal-ensemble setting.",

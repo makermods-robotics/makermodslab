@@ -245,30 +245,28 @@ const RUN_MODES: {
   handsOn?: boolean;
 }[] = [
   { value: "single", stem: "single" },
-  // NOT "hands off". Eval parks after every episode and waits for the operator
-  // to rearrange the scene and call the outcome — see rollout.py's reset phase
-  // and POST /inference-next-episode; there is no timer. An operator who read
-  // "hands off" and walked away came back to a run stalled on episode 2.
-  { value: "eval", stem: "eval", handsOn: true },
+  // Eval ("Score it") is deliberately NOT offered here. The scored-evaluation
+  // engine still exists and the mode is still a valid `RunMode` — it is just
+  // not one of the two things this panel asks the operator to choose between.
   { value: "coach", stem: "coach", handsOn: true },
 ];
 
 /**
- * The three things you can do with a trained skill, as the panel's action row.
+ * The two things you can do with a trained policy, as the panel's action row.
  *
  * This replaces a chooser-plus-Start pair. A chooser is a control you set and
- * then forget you set: the operator picks "Score it", gets distracted by the
+ * then forget you set: the operator picks a mode, gets distracted by the
  * camera bindings, comes back and presses a button that says Start — and the
- * button's own label is the only thing telling them which of three quite
- * different sessions is about to begin. One of those sessions asks them to
- * stand at the robot holding a leader arm for an hour.
+ * button's own label is the only thing telling them which of two quite
+ * different sessions is about to begin. One of them asks them to stand at the
+ * robot holding a leader arm for an hour.
  *
  * So the verb IS the button. Pressing one selects that mode and launches it in
  * the same gesture; there is nothing left in a position to be wrong about.
  * Each verb still states its own commitment, and a verb that cannot run right
  * now says why on itself rather than greying out the whole panel — a missing
  * leader arm blocks coaching, and should say so on the coaching button, not
- * disable "Just run it".
+ * disable "Run".
  *
  * `onArm` fires on focus/hover so the options above follow the verb the
  * operator is considering, which keeps the old chooser's one real virtue: you
@@ -289,12 +287,11 @@ export const RunVerbs: React.FC<{
       ? t("studio.deploy.runVerbs.coach", { count: counts.coach })
       : m === "eval"
         ? t("studio.deploy.runVerbs.eval", { count: counts.eval })
-        : t("studio.deploy.runVerbs.single");
-  const blocked = blockedReason(active);
+        : t("studio.deploy.runVerbs.single");  const blocked = blockedReason(active);
   return (
     <div className="flex flex-col gap-2">
       <div
-        className="grid grid-cols-3 gap-2"
+        className="grid grid-cols-2 gap-2"
         role="group"
         aria-label={t("studio.deploy.runVerbs.groupLabel")}
       >
@@ -1412,11 +1409,6 @@ const DeployPanel: React.FC = () => {
             <Download className="h-3.5 w-3.5" />
           </Button>
         </div>
-        {!selectedJob ? (
-          <p className="text-xs text-muted-foreground">
-            {t("studio.deploy.picker.hint")}
-          </p>
-        ) : null}
       </div>
       <ImportModelModal
         open={importModalOpen}
@@ -1652,17 +1644,14 @@ const DeployPanel: React.FC = () => {
                   <div className="rounded-lg border border-border bg-muted/40 p-3">
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       <span className="font-semibold text-foreground">
-                        Coaching pays off once the skill already works
+                        Coaching pays off once the policy already works
                         sometimes.
                       </span>{" "}
                       It learns from rescuing the policy's own mistakes, so it
                       needs the policy to get far enough to make interesting
                       ones — roughly a 1-in-10 success rate. If it fails
                       immediately every time, record more demonstrations first;
-                      that's faster than correcting your way there.{" "}
-                      <span className="whitespace-nowrap">
-                        Score it above to check.
-                      </span>
+                      that's faster than correcting your way there.
                     </p>
                   </div>
                   <div className="space-y-2">

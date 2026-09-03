@@ -175,7 +175,6 @@ export default {
       failedBadge: "运行失败",
       hubDegraded: "无法连接 Hub — 正在显示本地策略和上次的 Hub 列表。",
       import: "导入策略",
-      hint: "选择一个已训练的检查点，或已从 Hub 导入的策略，在机器人上运行。",
     },
     source: {
       hub: "hub",
@@ -194,10 +193,10 @@ export default {
     // 标识符 — 只有这些标签会被翻译。
     runMode: {
       label: "你想用这个技能做什么？",
-      // 每一行在被选中之前就先说明它要你付出什么：这三者并不是可以随手互换的
+      // 每一行在被选中之前就先说明它要你付出什么：它们并不是可以随手互换的
       // 菜单项，而选错往往要等到人站在机械臂前才发现。
       single: {
-        title: "直接跑一次",
+        title: "运行",
         what: "尝试一次，然后停止。",
         commitment: "无需上手",
       },
@@ -207,9 +206,9 @@ export default {
         commitment: "片段之间需要上手 — 由你复位现场并为每次尝试评分",
       },
       coach: {
-        title: "指导它",
+        title: "人在回路",
         what: "在它快要失败时接管。每次挽救都会保存为可用于微调的训练数据。",
-        commitment: "需要上手 — 整个会话你都要握着主臂",
+        commitment: "当它快要失败时，用主臂接管从臂并采集数据",
       },
     },
     // 仅在运行模式为 “指导” 时显示的参数。
@@ -316,16 +315,16 @@ export default {
     // 操作行：每个动词都在一次按下中同时选定模式并启动。
     runVerbs: {
       groupLabel: "开始一次运行",
-      single: "直接跑一次",
+      single: "运行",
       // {{count}} 是片段数 / 纠正次数目标，是数字，因此没有复数形式。
       eval: "打分 · {{count}}",
-      coach: "指导 · {{count}}",
+      coach: "人在回路 · {{count}}",
     },
     // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
     blocked: {
       noRobot: "请先在上方选择一台机器人。",
       followerNotReady: "这台机器人的从臂尚未就绪。",
-      noCheckpoint: "请选择一个技能和一个检查点。",
+      noCheckpoint: "请选择一个策略和一个检查点。",
       armMismatch: "该检查点与这台机器人的机械臂数量不匹配。",
       camerasUnbound: "请为检查点所需的每个摄像头完成绑定。",
       temporalEnsemble: "请先修正时间集成设置。",
