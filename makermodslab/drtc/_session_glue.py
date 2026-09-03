@@ -314,6 +314,20 @@ def livekit_room_field():
     )
 
 
+def livekit_token_field():
+    return field(
+        default="",
+        metadata={
+            "help": "Pre-minted room token to join with. Unset mints one from "
+            "LIVEKIT_API_KEY/SECRET, which is the LiveKit Cloud path. The "
+            "Lab passes one when it runs its own SFU (makermodslab --sfu): "
+            "the API secret then lives only in a 0600 file the server "
+            "reads, and the child — which needs no credential beyond a "
+            "token scoped to one room and one identity — is never given it."
+        },
+    )
+
+
 def return_to_rest_field():
     return field(
         default=True,

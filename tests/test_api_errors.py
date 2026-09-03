@@ -50,6 +50,7 @@ DOMAINS = frozenset(
         # would `system.*` (it is not this process).
         "transport",
         "system",
+        "sfu",
         "internal",
     ]
 )

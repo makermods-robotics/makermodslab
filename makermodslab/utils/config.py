@@ -17,6 +17,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import uuid
 from pathlib import Path
@@ -132,26 +133,23 @@ FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 
-# LiveKit credentials for remote inference (makermodslab.drtc). A dotenv file
-# holding LIVEKIT_URL / LIVEKIT_ROOM / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
+# LiveKit CLOUD credentials for remote inference (makermodslab.drtc). A dotenv
+# file holding LIVEKIT_URL / LIVEKIT_ROOM / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
 # It lives beside the rest of our persistent state rather than in the package
 # so a wheel install and a source checkout read the same credentials, and so
-# `.env` never lands inside site-packages. It is the LOWEST-precedence source:
-# a `.env` in the current directory, and then the local-SFU override below,
-# layer on top (see makermodslab.drtc._env.load_env for the full order).
+# `.env` never lands inside site-packages.
+#
+# It is the FALLBACK, not the primary path: when this process runs the bundled
+# SFU (`makermodslab --sfu`, see sfu.py) the session mints its own url, room
+# and token in-process and never reads this file. It is also the only file left
+# in the chain — the cwd `.env` / `.env.local` rungs and the `livekit.local.env`
+# override the retired tools/drtc scripts wrote are gone (S3.6), so the whole
+# precedence is now: process environment, then this file.
 DRTC_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.env")
 
-# Written by tools/drtc/local_sfu*.sh while a LOCAL LiveKit SFU is running: the
-# URL/key/secret that point the ROBOT side at ws://127.0.0.1:7880 instead of the
-# saved credentials above. Loaded with override=True (it is the "current
-# transport", not the default), so deleting it is how the robot goes back to
-# LiveKit Cloud. Lives here rather than as a cwd `.env.local` so the robot can
-# be started from any directory — the source repo's cwd-relative override was
-# the cause of two "connection refused" false starts on 2026-09-02.
-DRTC_LOCAL_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.local.env")
-# The local SFU's own config (random API key/secret, ports). Delete to rotate.
-DRTC_SFU_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.local.yaml")
-# livekit-server / cloudflared logs from those scripts.
+# Remote-inference session logs, one file per run (remote_inference._LOG_DIR
+# appends "sessions/"). The directory predates the bundled SFU, when the
+# retired tools/drtc scripts also logged livekit-server and cloudflared here.
 DRTC_LOG_DIR = os.path.expanduser("~/.cache/huggingface/lerobot/logs/drtc")
 
 # Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
@@ -212,6 +210,19 @@ INSTANCE_ID_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/instance_id.
 # deliberately NOT: a peer is re-verified against its live /api/v1/health on
 # load/probe, so stale identity can never be served from disk.
 NODES_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/nodes.json")
+
+# The bundled LiveKit SFU's API key/secret (sfu.py, `makermodslab --sfu`):
+# one pair per install, minted on the first --sfu run, in the `key: secret`
+# YAML shape livekit-server's --key-file reads. Mode 0600 — the secret signs
+# every room token, so it never rides in a command line or an env var; both
+# the SFU child and the token route read this file. Deleting it rotates the
+# pair (tokens minted before the restart stop validating, nothing else).
+LIVEKIT_KEY_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/livekit_keys.yaml")
+
+# The livekit-server config the launcher renders per run (sfu.render_config).
+# Regenerated on every --sfu start; its path is also the identity signal
+# `makermodslab --stop` uses to recognise the SFU child as ours.
+LIVEKIT_CONFIG_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/livekit_config.yaml")
 
 # Tag stamped on every dataset pushed to the Hub from MakerMods Lab, so we can later
 # query the Hub for MakerMods Lab-produced datasets and compute usage metrics.
@@ -299,6 +310,48 @@ def get_instance_id() -> str:
         _atomic_write_text(INSTANCE_ID_FILE, stored + "\n")
     _instance_id_cache = stored
     return stored
+
+
+def parse_livekit_keys(text: str) -> dict[str, str]:
+    """`key: secret` lines (livekit-server's key-file format) -> {key: secret}.
+
+    Blank lines and `#` comments are skipped; a line without a colon or with
+    an empty side is ignored rather than raised on, so a hand-edited file
+    degrades to "no keys" (and a fresh pair gets minted) instead of crashing
+    the launcher.
+    """
+    keys: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, secret = line.partition(":")
+        key, secret = key.strip(), secret.strip()
+        if key and secret:
+            keys[key] = secret
+    return keys
+
+
+def load_or_create_livekit_keys(path: str = LIVEKIT_KEY_FILE) -> tuple[str, str]:
+    """This install's SFU API key/secret pair, minted on first use.
+
+    Returns the first pair in the file (livekit-server accepts several; we
+    only ever write one). A missing, unreadable, or keyless file gets a fresh
+    pair written atomically with mode 0600.
+    """
+    try:
+        with open(path) as f:
+            existing = parse_livekit_keys(f.read())
+    except OSError:
+        existing = {}
+    if existing:
+        key, secret = next(iter(existing.items()))
+        return key, secret
+    key = f"mml_{secrets.token_hex(8)}"
+    secret = secrets.token_urlsafe(48)
+    _atomic_write_text(path, f"{key}: {secret}\n")
+    os.chmod(path, 0o600)
+    return key, secret
 
 
 def _port_file_for(robot_type: RobotSide) -> str:

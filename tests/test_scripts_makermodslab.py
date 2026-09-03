@@ -439,18 +439,42 @@ def test_bad_bind_fails_fast_before_anything_starts(
     assert "no-such-if0" in caplog.text
 
 
-def test_bind_is_ignored_in_dev_mode_with_a_warning(
+def test_bind_in_dev_mode_reaches_the_sfu_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """`--bind` is not ignored in dev — it is NARROWED to the SFU.
+
+    Vite serves localhost only and uvicorn follows it, so the web halves stay
+    on loopback. The SFU is not a web server for this browser: a remote peer (a
+    Modal container) has to reach its SIGNALLING port, and a loopback bind is
+    what made a dev session LiveKit-Cloud-only.
+    """
     import makermodslab.scripts.makermodslab as launcher
 
+    captured: dict = {}
     monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
-    monkeypatch.setattr(launcher, "_run_dev", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher, "_resolve_bind_host", lambda value: value)
     monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev", "--bind", "100.64.0.7"])
 
     with caplog.at_level(logging.WARNING):
         launcher.main()
-    assert "--bind is ignored in --dev mode" in caplog.text
+    assert captured["sfu_host"] == "100.64.0.7"
+    assert "--bind applies to the SFU only in --dev mode" in caplog.text
+
+
+def test_dev_mode_without_bind_leaves_the_sfu_on_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default is unchanged: a dev session that never asked for a remote
+    peer must not start advertising itself on an interface."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev"])
+
+    launcher.main()
+    assert captured["sfu_host"] == "127.0.0.1"
 
 
 # --- Shutdown reliability: --stop, port preflight, process-tree teardown -----
@@ -682,3 +706,58 @@ def test_terminate_tree_terminates_parent_and_children(
     # Parent (1) plus both children (2, 3) all get terminate(); nothing killed.
     assert sorted(terminated) == [1, 2, 3]
     assert killed == []
+
+
+# --- --sfu: fail-fast binary check, handoff to the run functions, --stop identity
+
+
+def test_sfu_flag_without_binary_exits_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No livekit-server on PATH: a one-line exit with the per-OS install hint,
+    BEFORE the PATH self-link or any server start — never a half-started
+    stack."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    calls: list[str] = []
+    monkeypatch.setattr(launcher.sfu, "find_livekit_server", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: calls.append("symlinks"))
+    monkeypatch.setattr(launcher, "_run_prod", lambda **kwargs: calls.append("run_prod"))
+    monkeypatch.setattr(launcher.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu"])
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 1
+    assert calls == []
+    assert "livekit-server" in caplog.text
+    assert "brew install livekit" in caplog.text
+
+
+def test_sfu_flag_hands_the_binary_to_run_prod_and_run_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.setattr(
+        launcher.sfu, "find_livekit_server", lambda *a, **k: "/opt/homebrew/bin/livekit-server"
+    )
+    assert _run_main(monkeypatch, ["--sfu"])["sfu_bin"] == "/opt/homebrew/bin/livekit-server"
+    assert _run_main(monkeypatch, [])["sfu_bin"] is None
+
+    captured: dict = {}
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(launcher, "_run_dev", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--dev", "--sfu"])
+    launcher.main()
+    assert captured["sfu_bin"] == "/opt/homebrew/bin/livekit-server"
+
+
+def test_identity_reason_recognises_our_sfu_child_but_not_a_foreign_livekit() -> None:
+    """`--stop` must reap the livekit-server WE spawned (pointed at our
+    generated config) and leave a user's own livekit-server alone."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    ours = _FakeProc(300, ["/opt/homebrew/bin/livekit-server", "--config", launcher.LIVEKIT_CONFIG_FILE])
+    foreign = _FakeProc(301, ["livekit-server", "--config", "/etc/livekit/livekit.yaml"])
+    assert launcher._identity_reason(" ".join(ours.info["cmdline"]), ours) == "livekit-server (--sfu)"
+    assert launcher._identity_reason(" ".join(foreign.info["cmdline"]), foreign) is None

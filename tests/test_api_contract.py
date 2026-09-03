@@ -258,6 +258,10 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # peer's own coded refusals pass through with THEIR status and body).
         "GET /api/v1/nodes/{instance_id}/jobs/{job_id}",
         "GET /api/v1/nodes/{instance_id}/jobs/{job_id}/logs",
+        # LiveKit SFU token broker (sfu.py): the one party holding the API
+        # secret signs short-lived, role-scoped room tokens for Portal
+        # participants. Born versioned; 409 sfu.disabled without --sfu.
+        "POST /api/v1/sfu/token",
         "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
         "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Environment proxies: the peer's own policy-extra status / install /
@@ -292,7 +296,6 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # mirror: the flat surface only ever shrinks.
         "GET /api/v1/remote-inference-status",
         "GET /api/v1/remote-inference/transport",
-        "POST /api/v1/remote-inference/clear-local-override",
     ]
 )
 

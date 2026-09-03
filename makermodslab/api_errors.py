@@ -155,6 +155,12 @@ class ErrorCode(StrEnum):
     SYSTEM_RESTART_UNSUPPORTED = "system.restart_unsupported"
     SYSTEM_INSTALL_IN_PROGRESS = "system.install_in_progress"
 
+    # sfu.* — the bundled LiveKit server (sfu.py). `disabled`: this process
+    # was started without --sfu (or an external SFU configured), so there is
+    # no secret to sign room tokens with — the remedy is restarting the
+    # launcher with --sfu, not retrying.
+    SFU_DISABLED = "sfu.disabled"
+
     # The residual 500.
     INTERNAL_UNEXPECTED = "internal.unexpected"
 

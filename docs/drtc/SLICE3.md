@@ -349,6 +349,22 @@ Note the pleasant consequence of the sessions-first design: **start and stop nee
 
 ## Implementation slices
 
+### Renumbering (2026-09-03)
+
+The plan below was written before S3.5 was repurposed, so the numbers past S3.4
+no longer mean what the entries say. What actually happened, and what is left:
+
+| Slice    | What it is                                                    | State                                                            |
+| -------- | ------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **S3.5** | The RTC in-painting regime becomes a session ENGINE           | **done** — repurposed from the design's "the Lab launches Modal" |
+| **S3.6** | Adopt the Lab-owned SFU (`makermodslab --sfu`) and its signer | **done** — this slice; the design's option C, earned             |
+| **S3.7** | MolmoAct2 over DRTC                                           | next                                                             |
+| **S3.8** | The Lab launches Modal (the design's old S3.5, lifecycle B)   | later                                                            |
+| **S3.9** | CAN arms                                                      | later                                                            |
+
+The two entries at the bottom of this section still carry their original
+wording; read them through the table.
+
 **S3.0 — Prerequisite.** Merge PR #111 (the preview). _Gate:_ existing CI green; no new checks.
 
 **S3.1 — `robot_sync.py` hardening (no API surface).**
@@ -867,3 +883,132 @@ whose only change over `b968c0c01` is the Star-leader unwrap-window fix
 (`rebot_102_leader`) — nothing the DRTC child imports — but the backend suite
 ran against the OLD pin still installed in the venv, so the bump itself has to
 be exercised on the bench.
+
+---
+
+## S3.6 as built (2026-09-03)
+
+The design's option C ("the Lab also owns the SFU") said _"a lot of surface for
+something a 146-line shell script does well"_ and deferred it to "only if
+earned". It was earned by someone else: `feat/livekit-sfu` landed
+`makermodslab --sfu` and `POST /api/v1/sfu/token` for remote TELEOPERATION, and
+once the surface exists, keeping a second, worse local-SFU story for remote
+inference is the expensive choice. This slice merges that branch and adopts it.
+
+### What the session takes from the SFU, and what it stops reading
+
+When `sfu.sfu_enabled()` (the launcher exported a key file), a remote-inference
+start resolves its whole transport in-process and **reads no credential file at
+all**:
+
+| Piece           | Source                                                  |
+| --------------- | ------------------------------------------------------- |
+| url             | `sfu.local_url()` — `ws://127.0.0.1:7880`               |
+| room            | `sfu.default_room(get_instance_id())` — `mml-<id[:12]>` |
+| child's token   | `sfu.mint_token(role="robot", identity="robot", ...)`   |
+| the probe's key | `sfu.api_keys()`, from the 0600 key file                |
+
+The token rides a NEW `--livekit_token` flag, defined once in
+`_session_glue.livekit_token_field()` so the two entrypoints cannot drift, and
+consumed as `token = cfg.livekit_token or mint_token(IDENTITY, room)`.
+`_common.mint_token` stays for the Cloud path. The consequence worth stating:
+**the child process never holds an API secret** — a JWT scoped to one room and
+one identity is what it needs, and that is all it gets.
+
+**The Portal identities are CONTRACTS, not defaults.** The child is `robot` and
+the GPU side is `policy`; `_probe_room` looks for the latter by name (or by
+Portal's `lk.portal.role` attribute). `sfu.default_identity` mints
+`<role>-<8 hex>` for a browser or a laptop and is deliberately NOT used here —
+a random identity would make the room probe blind.
+
+### What was retired
+
+- `tools/drtc/local_sfu.sh`, `tools/drtc/local_sfu_ts.sh` (deleted).
+- Three credential rungs in `drtc/_env`: cwd `.env`, cwd `.env.local`, and
+  `livekit.local.env`. All were cwd-relative or `override=True`, and both
+  properties are bugs in a long-lived server. `read_env` is now
+  `livekit.env` < process environment, and `search_from` is accepted-and-ignored.
+- `config.DRTC_LOCAL_ENV_PATH`, `config.DRTC_SFU_CONFIG_PATH`.
+- `handle_clear_local_override`, `POST /api/v1/remote-inference/clear-local-override`,
+  `ClearLocalOverrideResponse`, and its `V1_ONLY_ROUTES` row. Removing a row
+  from that register is allowed — it is the record of what exists, not a
+  shrink-only ratchet like `LEGACY_ROUTES`.
+- `_resolved_transport_source`. There were two source walkers because the
+  status model's `source` was narrower than the route's; with one enum for both
+  (`sfu | cloud | process_env | none`), `_transport_source` serves both.
+- `transport_hint`'s `local_override` branch, replaced by `sfu`.
+
+### The transport endpoint
+
+`GET /api/v1/remote-inference/transport` keeps every key it had except the
+three local-script ones (`sfu_config_exists`, `local_env_exists`,
+`local_env_path`) and gains six:
+
+`sfu_enabled`, `sfu_url` (loopback), `sfu_modal_url` (the TAILNET url a Modal
+container should dial — `ws://<tailscale ip -4>:7880`, null when tailscale is
+absent or not logged in), `sfu_external_ip`, `sfu_key_id` and `sfu_key_file`,
+plus `sfu_install_hint` when the binary is missing.
+
+**`sfu_key_id` is the key's NAME and the secret is never returned.** The key ID
+is the `--livekit-api-key` half of the generated `modal run` line and it
+identifies rather than authorizes; the secret signs every room token for the
+life of the install, so the panel names the file and a human reads it. A test
+asserts the secret is absent from the raw response body.
+
+`sfu_modal_url` is not `sfu_url`. A Modal container has no route to loopback
+and none to a LAN address; offering it one would be a line that cannot work.
+Null is the honest answer, and the panel says so.
+
+### The change to sfu.py — `--sfu-external-ip`
+
+`render_config` gained `external_ip: bool = False`. True writes
+`use_external_ip: true` and **drops** the `rtc.node_ip` pin — the two are
+mutually exclusive, because pinning the tailnet address is exactly what makes
+the STUN-discovered public candidate unreachable.
+
+Why it is needed at all: **signalling and media take different paths.** A Modal
+container reaches signalling over the tailnet (`--tailscale` stands up a
+loopback→SOCKS5 relay for it), but WebRTC media and data channels hole-punch
+directly, and a tailnet address is not a route the container has. The public
+`<ip>:7882` candidate is the only one it can punch to. Off stays the default:
+the STUN self-probe stalls a station with no internet, and a LAN-only station
+does not want it.
+
+Threaded as launcher flag `--sfu-external-ip`, exported as
+`MAKERMODSLAB_SFU_EXTERNAL_IP=1` so the app can REPORT it (it cannot act on it
+— the config was rendered before the app started). Two additive helpers came
+with it: `sfu.external_ip_enabled()` and `sfu.local_url()`, the app-side
+counterpart of `sfu_url()` for a child with no request to derive a host from.
+
+### `--bind` in `--dev` mode now reaches the SFU
+
+As merged, `_run_dev` called `_start_sfu(sfu_bin, "127.0.0.1")` unconditionally
+and `main()` warned that `--bind` was ignored in dev. That is right for Vite and
+uvicorn (Vite serves localhost only), but the SFU is not a web server for the
+developer's browser: a Modal container has to reach its SIGNALLING port, and a
+loopback bind made a `--dev` session LiveKit-Cloud-only. The user runs `--dev`.
+
+Fixed here, as narrowly as it goes: `_run_dev` takes `sfu_host="127.0.0.1"`,
+`main()` passes the already-resolved `bind_host or "127.0.0.1"`, the one
+`_start_sfu` call uses it, and the warning narrows to "`--bind` applies to the
+SFU only in `--dev` mode (Vite and uvicorn serve localhost)". Vite and uvicorn
+are untouched, no new flag, and the default is unchanged — a dev session that
+never asked for a remote peer does not start advertising itself on an
+interface. Two tests pin both halves.
+
+### Notes worth keeping
+
+- **The token is on the argv.** A JWT is visible in `ps` to this user's own
+  processes. It is a deliberate trade — short-lived, one room, one identity —
+  and it is what keeps the SECRET off the command line, which is the property
+  `sfu.py`'s docstring actually promises. If the coordinator wants it tighter,
+  the child's environment is the next rung down (`/proc/PID/environ` is 0600),
+  at the cost of the flag being invisible in a log of the spawn.
+- **`livekit-api` moved from the `[drtc]` extra to core dependencies**
+  (`>=1.0`, his bound). The token route needs it at boot and so does the room
+  probe; leaving a second copy in the extra would only invite the two bounds to
+  drift. The extra is now `livekit-portal==0.2.4` + `python-dotenv>=1` — the
+  FFI dylib the server must never load, plus the dotenv reader the Cloud
+  fallback needs.
+- **`DRTC_LOG_DIR` stays**, minus its SFU/cloudflared role: it is now just the
+  parent of the sessions log dir.

@@ -12,25 +12,22 @@ import type { Fetcher } from "@/lib/apiClient";
  * `list_participants` call against the SFU, so it is fetched when the panel
  * asks rather than on a timer.
  *
- * The one mutation on this surface is `clearLocalOverride()`. It deletes
- * `livekit.local.env`, sending the robot side back to LiveKit Cloud — the fix
- * for the documented top footgun of the local-SFU path, where that file
- * OUTLIVES the script that wrote it and the robot keeps dialing a dead
- * ws://127.0.0.1:7880. It is idempotent (an absent file is a 200 with
- * `removed: false`), and it deliberately does NOT touch livekit.local.yaml —
- * deleting that would rotate the local SFU's own credentials.
+ * Two transports arrive through one shape. When the Lab was started with
+ * `--sfu` it hosts the LiveKit server itself and mints the url, the room and
+ * the robot child's token in-process; otherwise it falls back to LiveKit Cloud
+ * credentials in `livekit.env`. `sfu_enabled` selects which, and the whole
+ * `sfu_*` block is null/false in the Cloud case.
+ *
+ * There is NO mutation on this surface any more. `clearLocalOverride()` went
+ * with the shell SFU scripts in S3.6 — the dotenv override it deleted was
+ * written by a script that no longer exists.
  */
 
-/** Which layer of the env chain supplied LIVEKIT_URL. Wider than the RUNNING
- * session's `transport.source`, because a pre-launch panel has remedies to
- * offer that a running session does not ("your shell exported LIVEKIT_URL" and
- * "livekit.env says so" are different problems). */
-export type TransportSource =
-  | "cloud"
-  | "local_override"
-  | "cwd"
-  | "process_env"
-  | "none";
+/** Which layer supplied LIVEKIT_URL. `sfu` means the Lab's own server, where
+ * nothing on disk is consulted at all; the other three are the LiveKit Cloud
+ * fallback, and they are three different remedies ("your shell exported
+ * LIVEKIT_URL" and "livekit.env says so" are not the same problem). */
+export type TransportSource = "sfu" | "cloud" | "process_env" | "none";
 
 export interface RemoteInferenceTransportStatus {
   /** The optional `[drtc]` extra. False ⇒ the probe did not run and the four
@@ -45,10 +42,28 @@ export interface RemoteInferenceTransportStatus {
   /** Room NAME — data. */
   room: string;
   source: TransportSource;
-  sfu_config_exists: boolean;
-  local_env_exists: boolean;
-  /** Always the path, whether the file exists or not. */
-  local_env_path: string;
+  /** Whether this Lab process runs its own LiveKit server (`--sfu`). Everything
+   * below is null/false when it does not, so the panel renders the block from
+   * this one flag. */
+  sfu_enabled: boolean;
+  /** The loopback signalling URL a local child dials. Data. */
+  sfu_url: string | null;
+  /** The URL a MODAL container should dial: ws://<tailnet ipv4>:7880. Null when
+   * tailscale is absent or not logged in — a container has no route to loopback
+   * or to a LAN address, so there is nothing honest to offer then. Data. */
+  sfu_modal_url: string | null;
+  /** Whether the SFU advertises its STUN-discovered public IP (the launcher's
+   * --sfu-external-ip). Without it a container can reach signalling over the
+   * tailnet and still never punch a media path. */
+  sfu_external_ip: boolean;
+  /** The key's NAME — the `--livekit-api-key` half of the Modal line. It
+   * identifies rather than authorizes. THE SECRET IS NEVER RETURNED. Data. */
+  sfu_key_id: string | null;
+  /** Where the secret actually lives, for a human to read. Data. */
+  sfu_key_file: string | null;
+  /** The per-OS install line, present ONLY when `livekit-server` is missing
+   * from PATH. Backend prose — shown verbatim. */
+  sfu_install_hint: string | null;
   /** NULL (not false) when the probe did not run: no extra, or not
    * configured. A third state, and the panel must render it as one. */
   endpoint_reachable: boolean | null;
@@ -58,13 +73,6 @@ export interface RemoteInferenceTransportStatus {
    * Backend data — matched on, shown verbatim, never translated. */
   error_code: string | null;
   message: string | null;
-}
-
-export interface ClearLocalOverrideResult {
-  success: boolean;
-  /** False when the file was already absent — not an error. */
-  removed: boolean;
-  path: string;
 }
 
 export async function getRemoteInferenceTransport(
@@ -77,18 +85,6 @@ export async function getRemoteInferenceTransport(
     fetcher,
     "/api/v1/remote-inference/transport",
     { signal, action: "Read remote transport" },
-  );
-}
-
-export async function clearRemoteLocalOverride(
-  baseUrl: string,
-  fetcher: Fetcher,
-): Promise<ClearLocalOverrideResult> {
-  return apiRequest<ClearLocalOverrideResult>(
-    baseUrl,
-    fetcher,
-    "/api/v1/remote-inference/clear-local-override",
-    { method: "POST", action: "Clear the local LiveKit override" },
   );
 }
 
@@ -119,7 +115,6 @@ export interface UseRemoteInferenceTransport {
   /** The thrown error's own text, or null. Backend prose — shown as raised. */
   error: string | null;
   refresh: () => void;
-  clearLocalOverride: () => Promise<ClearLocalOverrideResult>;
 }
 
 /**
@@ -161,13 +156,5 @@ export function useRemoteInferenceTransport(
     };
   }, [enabled, baseUrl, fetchWithHeaders, nonce]);
 
-  const clearLocalOverride = useCallback(async () => {
-    const result = await clearRemoteLocalOverride(baseUrl, fetchWithHeaders);
-    // The whole point of clearing the override is that the NEXT resolution
-    // differs, so re-read rather than patching the cached answer.
-    refresh();
-    return result;
-  }, [baseUrl, fetchWithHeaders, refresh]);
-
-  return { transport, loading, error, refresh, clearLocalOverride };
+  return { transport, loading, error, refresh };
 }

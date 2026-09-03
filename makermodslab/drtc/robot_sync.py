@@ -68,11 +68,11 @@ The pre-port docstring said ``--no-adaptive``, which has never worked here.
 ``--horizon`` MUST match policy.py's ``--horizon`` and should equal the
 checkpoint's ``n_action_steps`` (and be ``<=`` its ``chunk_size``) so one
 transmitted chunk is exactly one open-loop block. LiveKit creds come from
-`~/.cache/huggingface/lerobot/livekit.env` (a local SFU's override comes from
-`~/.cache/huggingface/lerobot/livekit.local.env`, written by
-`tools/drtc/local_sfu*.sh`; see `_env.load_env` for the full precedence), and
-``--livekit_url`` / ``--livekit_room`` pin either one explicitly for a parent
-that has already verified the transport. The remote policy runs in this
+`~/.cache/huggingface/lerobot/livekit.env` (see `_env.load_env`), and
+``--livekit_url`` / ``--livekit_room`` / ``--livekit_token`` pin the transport
+explicitly for a parent that has already verified it — which is what the Lab
+does when it hosts the SFU itself (`makermodslab --sfu`): it signs the token
+here and this process never sees an API secret. The remote policy runs in this
 package's `policy.py`, launched on Modal by
 `modal run makermodslab/drtc/modal_policy.py` (see docs/drtc/README.md).
 
@@ -169,6 +169,7 @@ from ._session_glue import (
     emit,
     emit_stats,
     livekit_room_field,
+    livekit_token_field,
     livekit_url_field,
     note_first_operator,
     or_none,
@@ -282,6 +283,7 @@ class RobotSideConfig:
     # drift on the flags a supervising parent passes both of them.
     livekit_url: str = livekit_url_field()
     livekit_room: str = livekit_room_field()
+    livekit_token: str = livekit_token_field()
     return_to_rest: bool = return_to_rest_field()
     ease_in: bool = ease_in_field()
 
@@ -298,7 +300,11 @@ async def run(cfg: RobotSideConfig) -> None:
     # passed — are what READY reports and what we dial.
     url = cfg.livekit_url or required_env("LIVEKIT_URL")
     room = cfg.livekit_room or required_env("LIVEKIT_ROOM")
-    token = mint_token(IDENTITY, room)
+    # A token handed to us is already scoped to this room and identity and was
+    # signed by whoever owns the SFU's secret (the Lab, under `--sfu`). Minting
+    # our own is the LiveKit Cloud path, and needs the API secret in this
+    # process's environment.
+    token = cfg.livekit_token or mint_token(IDENTITY, room)
     # Emitted BEFORE the bus is opened, so a parent that spots a transport
     # mismatch can kill the child before anything is energized.
     emit(EVENT_READY, format_ready(url, room))

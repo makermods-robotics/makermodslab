@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildModalRunLine,
+  LOCAL_KEY_ID_PLACEHOLDER,
   LOCAL_SECRET_PLACEHOLDER,
   POLICY_PATH_PLACEHOLDER,
 } from "./modalCommand";
@@ -25,6 +26,9 @@ const cloud: ModalRunLineInput = {
   url: "wss://example.livekit.cloud",
   source: "cloud",
   sMin: 4,
+  // The key NAME the transport endpoint reports. Real, and unused on the Cloud
+  // path — only the SFU line carries it.
+  sfuKeyId: "APIkey123",
 };
 
 /** The rtc pairing: the other wrapper, the flow families' full chunk_size, and
@@ -53,10 +57,10 @@ describe("the generated modal run line", () => {
     expect(buildModalRunLine(cloud)).not.toContain("--livekit-url");
   });
 
-  it("adds --tailscale, the url and both secret placeholders for a local SFU", () => {
+  it("adds --tailscale, the url, the real key id and a secret placeholder for the Lab SFU", () => {
     const line = buildModalRunLine({
       ...cloud,
-      source: "local_override",
+      source: "sfu",
       url: "ws://100.64.0.1:7880",
     });
     expect(line).toBe(
@@ -65,15 +69,17 @@ describe("the generated modal run line", () => {
         "--horizon 16 --fps 30 --video-codec H264 " +
         "--livekit-room portal-lerobot-inference " +
         "--tailscale --livekit-url ws://100.64.0.1:7880 " +
-        `--livekit-api-key ${LOCAL_SECRET_PLACEHOLDER} ` +
+        "--livekit-api-key APIkey123 " +
         `--livekit-api-secret ${LOCAL_SECRET_PLACEHOLDER}`,
     );
   });
 
-  it("never emits a real key or secret — the API does not expose them", () => {
-    const line = buildModalRunLine({ ...cloud, source: "local_override" });
-    expect(line).toContain(`--livekit-api-key ${LOCAL_SECRET_PLACEHOLDER}`);
+  it("never emits the API secret — the endpoint does not expose it", () => {
+    const line = buildModalRunLine({ ...cloud, source: "sfu" });
+    // The key ID is real: it names the pair, it does not authorize with it.
+    expect(line).toContain("--livekit-api-key APIkey123");
     expect(line).toContain(`--livekit-api-secret ${LOCAL_SECRET_PLACEHOLDER}`);
+    expect(line).not.toContain("s3cret");
   });
 
   it("forwards the codec identifier verbatim", () => {
@@ -86,6 +92,13 @@ describe("the generated modal run line", () => {
     expect(buildModalRunLine({ ...cloud, policyHubId: "   " })).toContain(
       `--policy-path ${POLICY_PATH_PLACEHOLDER}`,
     );
+  });
+
+  it("falls back to a key-id placeholder before the SFU has reported one", () => {
+    // Still copy-able, and obviously incomplete — the same contract the
+    // policy-path placeholder has.
+    const line = buildModalRunLine({ ...cloud, source: "sfu", sfuKeyId: "  " });
+    expect(line).toContain(`--livekit-api-key ${LOCAL_KEY_ID_PLACEHOLDER}`);
   });
 
   it("omits the room flag when the transport reports none", () => {
@@ -131,7 +144,7 @@ describe("the engine picks the wrapper the GPU side must run", () => {
       buildModalRunLine({
         ...rtcCloud,
         task: "Put the eraser on the mat",
-        source: "local_override",
+        source: "sfu",
         url: "ws://100.64.0.1:7880",
       }),
     ).toBe(
@@ -141,7 +154,7 @@ describe("the engine picks the wrapper the GPU side must run", () => {
         "--horizon 50 --fps 30 --s-min 4 --video-codec H264 " +
         "--livekit-room portal-lerobot-inference " +
         "--tailscale --livekit-url ws://100.64.0.1:7880 " +
-        `--livekit-api-key ${LOCAL_SECRET_PLACEHOLDER} ` +
+        "--livekit-api-key APIkey123 " +
         `--livekit-api-secret ${LOCAL_SECRET_PLACEHOLDER}`,
     );
   });

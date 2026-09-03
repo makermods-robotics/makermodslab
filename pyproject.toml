@@ -19,6 +19,12 @@ dependencies = [
     "websockets>=15.0.1",
     "uvicorn>=0.24.0",
     "psutil>=5.9.0",
+    # Signs LiveKit room tokens for the bundled SFU (sfu.py, `--sfu`). Pure
+    # Python (pyjwt + protobuf stubs); the server binary itself is NOT a
+    # Python dependency — it is resolved from PATH at launch. CORE, not an
+    # extra: the token route is part of the base surface, and remote
+    # inference's own preflight (the room probe) signs with it too.
+    "livekit-api>=1.0",
     # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (eaab69339), the
     # two-parent merge of robot/makermods-maker-arm (af9072a8c — the previous pin,
     # via the Maker-Mods org) and arm/makermods-metal (85a3000d4). Upstream v0.6.2
@@ -60,11 +66,16 @@ test = [
 # must run the identical wire implementation — Portal fingerprints the schema
 # and silently drops packets whose fingerprint differs, which surfaces as a
 # healthy-looking session with 0 chunks and 0 observations rather than an
-# error. The GPU side's pin lives in the `livekit-drtc` repo's
-# `modal_policy*.py`; bump the two together or not at all.
+# error. The GPU side's pin lives in the two `modal_policy*.py` wrappers; bump
+# the two together or not at all.
+#
+# `livekit-api` is NOT here any more: since the bundled SFU landed it is a CORE
+# dependency (the token route signs with it), so listing it again would only
+# invite the two bounds to drift. What is left is the FFI dylib the server
+# process must never load, plus the dotenv reader the child's credential
+# fallback needs.
 drtc = [
     "livekit-portal==0.2.4",
-    "livekit-api>=0.7",
     "python-dotenv>=1",
 ]
 

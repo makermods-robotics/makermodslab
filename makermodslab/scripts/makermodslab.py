@@ -20,6 +20,13 @@ pre-built frontend at /. Opens the user's browser to the local app.
 
 --dev mode: spawns the Vite dev server (frontend/, port 8080) for HMR
 and starts uvicorn with --reload. Opens the browser to :8080.
+
+--sfu (either mode): also runs a LiveKit SFU (`livekit-server`, from PATH)
+alongside, bound where the API is bound, and hands the app the key file so
+/api/v1/sfu/token can sign room tokens. The launcher — not the app — owns
+that child: uvicorn --reload restarts the app process on every save. In --dev
+mode --bind is honoured for the SFU ALONE (Vite and uvicorn stay on
+localhost), because a remote peer has to reach its signalling port.
 """
 
 import argparse
@@ -27,6 +34,7 @@ import contextlib
 import ipaddress
 import logging
 import os
+import platform
 import signal
 import socket
 import subprocess
@@ -38,6 +46,9 @@ from pathlib import Path
 
 import psutil
 import uvicorn
+
+from makermodslab import sfu
+from makermodslab.utils.config import LIVEKIT_CONFIG_FILE, LIVEKIT_KEY_FILE, load_or_create_livekit_keys
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -199,6 +210,10 @@ def _identity_reason(cmdline: str, proc: psutil.Process) -> str | None:
     """
     if "makermodslab.server" in cmdline:
         return "uvicorn (makermodslab.server)"
+    if sfu.BINARY_NAME in cmdline and LIVEKIT_CONFIG_FILE in cmdline:
+        # The SFU child we spawned: livekit-server pointed at OUR generated
+        # config. A user's own livekit-server (different config) is a stranger.
+        return "livekit-server (--sfu)"
     if "multiprocessing.spawn" in cmdline or "spawn_main" in cmdline:
         with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             if Path(proc.cwd()) == PROJECT_ROOT:
@@ -237,7 +252,7 @@ def _find_makermodslab_pids() -> tuple[dict[int, str], dict[int, tuple[int, str]
       them — they might be someone else's server on the same port.
     """
     me = os.getpid()
-    ports = {BACKEND_PORT, FRONTEND_DEV_PORT}
+    ports = {BACKEND_PORT, FRONTEND_DEV_PORT, sfu.SFU_HTTP_PORT, sfu.SFU_TCP_PORT}
     kill_targets: dict[int, str] = {}
     strangers: dict[int, tuple[int, str]] = {}
     for proc in psutil.process_iter(["pid", "cmdline", "name"]):
@@ -297,9 +312,10 @@ def _run_stop() -> None:
     if not kill_targets:
         if not strangers:
             logger.info(
-                "Nothing to stop: no MakerMods Lab process found on :%d / :%d.",
+                "Nothing to stop: no MakerMods Lab process found on :%d / :%d / :%d.",
                 BACKEND_PORT,
                 FRONTEND_DEV_PORT,
+                sfu.SFU_HTTP_PORT,
             )
         return
     for pid, reason in kill_targets.items():
@@ -332,6 +348,84 @@ def _resolve_bind_host(value: str) -> str:
     raise ValueError(f"interface {value!r} has no IPv4 address to bind")
 
 
+def _require_livekit_server() -> str:
+    """Path to livekit-server, or a clean one-line exit with the per-OS
+    install hint. Called from main() before anything starts, so a missing
+    binary never leaves a half-started server behind."""
+    binary = sfu.find_livekit_server()
+    if binary:
+        return binary
+    override = os.environ.get(sfu.ENV_BIN)
+    if override:
+        logger.error("❌ --sfu: %s=%s is not a file.", sfu.ENV_BIN, override)
+    else:
+        logger.error("❌ --sfu needs `%s` on your PATH and it was not found.", sfu.BINARY_NAME)
+    logger.error("   %s", sfu.install_hint(platform.system()))
+    logger.error("   (or point %s at the binary)", sfu.ENV_BIN)
+    sys.exit(1)
+
+
+def _start_sfu(binary: str, host: str, external_ip: bool = False) -> subprocess.Popen:
+    """Spawn livekit-server bound like the API, wait for its signalling port,
+    and export the app-side settings (key file + port) into THIS process's
+    environment — which both the prod uvicorn (same process) and the dev
+    uvicorn subprocess (env copy) inherit.
+
+    Ports are checked first so an orphan from a previous run is a clear
+    `makermodslab --stop` hint rather than a livekit bind error. The child
+    gets its own session so Ctrl+C reaches it through _terminate_tree and
+    never as a stray SIGINT that races our own shutdown.
+
+    `external_ip` (--sfu-external-ip) is passed straight to
+    `sfu.render_config`, and exported so the app can REPORT it: a Modal
+    container reaches the signalling URL over the tailnet but has to
+    hole-punch for media, and only the STUN-discovered public candidate that
+    flag turns on is punchable from there.
+    """
+    for name, port in (("SFU signalling", sfu.SFU_HTTP_PORT), ("SFU ICE/TCP", sfu.SFU_TCP_PORT)):
+        _ensure_port_available(name, port, host)
+    key_file = LIVEKIT_KEY_FILE
+    load_or_create_livekit_keys(key_file)
+    config_text = sfu.render_config(bind_host=host, key_file=key_file, external_ip=external_ip)
+    Path(LIVEKIT_CONFIG_FILE).parent.mkdir(parents=True, exist_ok=True)
+    Path(LIVEKIT_CONFIG_FILE).write_text(config_text)
+
+    logger.info("📡 Starting LiveKit SFU on ws://%s:%d ...", sfu.public_host(host), sfu.SFU_HTTP_PORT)
+    proc = subprocess.Popen(
+        [binary, "--config", LIVEKIT_CONFIG_FILE, "--key-file", key_file],
+        start_new_session=True,
+    )
+    if not _wait_for_port(sfu.SFU_HTTP_PORT, timeout=15):
+        logger.error("❌ LiveKit SFU never came up on :%d (see its log lines above)", sfu.SFU_HTTP_PORT)
+        _terminate_tree(proc.pid)
+        sys.exit(1)
+    os.environ[sfu.ENV_KEY_FILE] = key_file
+    os.environ[sfu.ENV_PORT] = str(sfu.SFU_HTTP_PORT)
+    os.environ[sfu.ENV_EXTERNAL_IP] = "1" if external_ip else "0"
+    if external_ip:
+        logger.info("   SFU advertising its STUN-discovered public IP (--sfu-external-ip)")
+    logger.info(
+        "   SFU ports: %d/tcp (signalling), %d/tcp + %d/udp (media) — open these for remote peers",
+        sfu.SFU_HTTP_PORT,
+        sfu.SFU_TCP_PORT,
+        sfu.SFU_UDP_PORT,
+    )
+    return proc
+
+
+def _watch_sfu(proc: subprocess.Popen, server: uvicorn.Server) -> None:
+    """Daemon-thread body for prod: if the SFU child dies, stop uvicorn too.
+    A silently missing SFU would leave /sfu/token handing out tokens for a
+    server nobody can reach; better to exit loudly and let the operator
+    (or systemd's Restart=) bring both back."""
+    while not server.should_exit:
+        if proc.poll() is not None:
+            logger.error("❌ LiveKit SFU exited (code %s) — shutting down", proc.returncode)
+            server.should_exit = True
+            return
+        time.sleep(1)
+
+
 def _open_browser_when_ready():
     """Background-thread helper: poll the port, open the browser when up."""
     for _ in range(60):
@@ -346,7 +440,13 @@ def _open_browser_when_ready():
         return
 
 
-def _run_prod(lan: bool = False, no_ui: bool = False, host: str | None = None):
+def _run_prod(
+    lan: bool = False,
+    no_ui: bool = False,
+    host: str | None = None,
+    sfu_bin: str | None = None,
+    sfu_external_ip: bool = False,
+):
     """Serve built frontend from backend on a single port.
 
     `lan` binds 0.0.0.0 for headless stations serving other machines on the
@@ -354,7 +454,8 @@ def _run_prod(lan: bool = False, no_ui: bool = False, host: str | None = None):
     browser worth opening in that deployment). `host` is an already-resolved
     --bind address and takes precedence over the --lan/default choice (main()
     logs when both were given). `no_ui` skips serving (and requiring) the
-    built frontend entirely — a pure API node.
+    built frontend entirely — a pure API node. `sfu_bin` (--sfu) runs a
+    LiveKit SFU alongside, bound to the same host, for the process lifetime.
     """
     if not no_ui and not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
@@ -364,6 +465,7 @@ def _run_prod(lan: bool = False, no_ui: bool = False, host: str | None = None):
     if host is None:
         host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104  # nosec B104 — binds all interfaces only behind the explicit --lan opt-in; loopback otherwise
     _ensure_port_available("Backend", BACKEND_PORT, host)
+    sfu_proc = _start_sfu(sfu_bin, host, sfu_external_ip) if sfu_bin else None
     if host == "127.0.0.1":
         logger.info("🚀 Starting MakerMods Lab on http://localhost:%d ...", BACKEND_PORT)
         if not no_ui:
@@ -416,11 +518,32 @@ def _run_prod(lan: bool = False, no_ui: bool = False, host: str | None = None):
                 with contextlib.suppress(ValueError, OSError):
                     signal.signal(_sig, _shutdown)
 
-    server.run()
+    if sfu_proc is not None:
+        threading.Thread(target=_watch_sfu, args=(sfu_proc, server), daemon=True).start()
+    try:
+        server.run()
+    finally:
+        # uvicorn's own graceful shutdown has run by now; the SFU child is
+        # ours to reap. Idempotent if _watch_sfu saw it die already.
+        if sfu_proc is not None:
+            _terminate_tree(sfu_proc.pid)
+            logger.info("  ✅ LiveKit SFU stopped")
 
 
-def _run_dev():
-    """Vite dev server (HMR) + uvicorn --reload."""
+def _run_dev(
+    sfu_bin: str | None = None,
+    sfu_external_ip: bool = False,
+    sfu_host: str = "127.0.0.1",
+):
+    """Vite dev server (HMR) + uvicorn --reload (+ the LiveKit SFU with --sfu).
+
+    `sfu_host` is the ONE thing `--bind` still means in dev mode. Vite and
+    uvicorn stay on loopback — Vite serves localhost only — but the SFU is not
+    a web server for this browser: a remote peer (a Modal container) has to
+    reach its SIGNALLING port, and a loopback bind makes a dev session
+    LiveKit-Cloud-only. So `--bind` is honoured for the SFU alone, and defaults
+    to loopback like everything else here.
+    """
     # --dev needs the frontend *source* (Vite config, package.json), which
     # only exists in a git checkout. A non-editable `uv tool install`
     # resolves PROJECT_ROOT into site-packages, where the shipped wheel has
@@ -455,6 +578,16 @@ def _run_dev():
         _terminate_tree(frontend_process.pid)
         sys.exit(1)
 
+    # Before the backend spawn: _start_sfu exports the app-side env the
+    # reload supervisor copies into every worker it starts.
+    children: list[tuple[str, subprocess.Popen]] = [("frontend", frontend_process)]
+    if sfu_bin:
+        try:
+            children.insert(0, ("sfu", _start_sfu(sfu_bin, sfu_host, sfu_external_ip)))
+        except SystemExit:
+            _terminate_tree(frontend_process.pid)
+            raise
+
     logger.info("🚀 Starting backend (port %d) with --reload...", BACKEND_PORT)
     backend_process = subprocess.Popen(
         [
@@ -473,9 +606,11 @@ def _run_dev():
         start_new_session=True,
     )
 
+    children.insert(0, ("backend", backend_process))
+
     if not _wait_for_port(BACKEND_PORT, timeout=15):
         logger.error("❌ Backend never came up")
-        for p in (backend_process, frontend_process):
+        for _name, p in children:
             _terminate_tree(p.pid)
         sys.exit(1)
 
@@ -485,13 +620,15 @@ def _run_dev():
     logger.info("✅ Dev mode running — Ctrl+C to stop")
     logger.info("   Frontend: http://localhost:%d", FRONTEND_DEV_PORT)
     logger.info("   Backend:  http://localhost:%d", BACKEND_PORT)
+    if sfu_bin:
+        logger.info("   SFU:      ws://%s:%d", sfu.public_host(sfu_host), sfu.SFU_HTTP_PORT)
 
     def shutdown(signum, frame):
         logger.info("🛑 Shutting down...")
         # Walk each child's whole process tree (npm -> node -> vite, uvicorn
         # --reload -> reloader -> worker) so no grandchild outlives Ctrl+C and
-        # keeps holding :8000/:8080.
-        for name, p in [("backend", backend_process), ("frontend", frontend_process)]:
+        # keeps holding :8000/:8080 (or :7880).
+        for name, p in children:
             _terminate_tree(p.pid)
             logger.info(f"  ✅ {name} stopped")
         sys.exit(0)
@@ -501,12 +638,10 @@ def _run_dev():
 
     while True:
         time.sleep(2)
-        if backend_process.poll() is not None:
-            logger.error("❌ Backend died")
-            shutdown(None, None)
-        if frontend_process.poll() is not None:
-            logger.error("❌ Frontend died")
-            shutdown(None, None)
+        for name, p in children:
+            if p.poll() is not None:
+                logger.error("❌ %s died", name.capitalize())
+                shutdown(None, None)
 
 
 def main():
@@ -551,9 +686,28 @@ def main():
         ),
     )
     parser.add_argument(
+        "--sfu",
+        action="store_true",
+        help=(
+            "Also run a LiveKit SFU (`livekit-server` from PATH) bound like the API, for remote "
+            "teleoperation/inference peers; /api/v1/sfu/token then signs room tokens. Exits with "
+            "install instructions if the binary is missing"
+        ),
+    )
+    parser.add_argument(
+        "--sfu-external-ip",
+        action="store_true",
+        help=(
+            "With --sfu: let the SFU STUN-discover this machine's public IP and advertise it as "
+            "an ICE candidate, instead of pinning the bound address. Needed for a peer with no "
+            "route to the bound address (a Modal container reaching the signalling URL over the "
+            "tailnet but hole-punching for media); needs UDP 7882 reachable here"
+        ),
+    )
+    parser.add_argument(
         "--stop",
         action="store_true",
-        help="Stop a running MakerMods Lab and free its ports (:8000/:8080), then exit.",
+        help="Stop a running MakerMods Lab and free its ports (:8000/:8080/:7880), then exit.",
     )
     args = parser.parse_args()
 
@@ -572,6 +726,12 @@ def main():
             sys.exit(1)
         if args.lan:
             logger.info("--bind wins over --lan: binding %s instead of 0.0.0.0", bind_host)  # noqa: S104
+
+    # Same fail-fast rule as --bind: a missing livekit-server is a one-line
+    # exit before anything starts, never a half-started stack.
+    sfu_bin = _require_livekit_server() if args.sfu else None
+    if args.sfu_external_ip and not args.sfu:
+        logger.warning("--sfu-external-ip does nothing without --sfu")
 
     _ensure_path_symlinks()
 
@@ -599,10 +759,21 @@ def main():
         if args.lan:
             logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
         if args.bind:
-            logger.warning("--bind is ignored in --dev mode (Vite serves localhost only)")
-        _run_dev()
+            logger.warning("--bind applies to the SFU only in --dev mode (Vite and uvicorn serve localhost)")
+        _run_dev(
+            sfu_bin=sfu_bin,
+            sfu_external_ip=args.sfu_external_ip,
+            # `bind_host` is None unless --bind was given and resolved.
+            sfu_host=bind_host or "127.0.0.1",
+        )
     else:
-        _run_prod(lan=args.lan, no_ui=args.no_ui, host=bind_host)
+        _run_prod(
+            lan=args.lan,
+            no_ui=args.no_ui,
+            host=bind_host,
+            sfu_bin=sfu_bin,
+            sfu_external_ip=args.sfu_external_ip,
+        )
 
 
 def station():

@@ -408,30 +408,6 @@
         "title": "CheckpointPolicyConfigResponse",
         "type": "object"
       },
-      "ClearLocalOverrideResponse": {
-        "description": "POST /api/v1/remote-inference/clear-local-override — shape authority:\nremote_inference.handle_clear_local_override.",
-        "properties": {
-          "path": {
-            "title": "Path",
-            "type": "string"
-          },
-          "removed": {
-            "title": "Removed",
-            "type": "boolean"
-          },
-          "success": {
-            "title": "Success",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success",
-          "removed",
-          "path"
-        ],
-        "title": "ClearLocalOverrideResponse",
-        "type": "object"
-      },
       "CoachingCommandResponse": {
         "description": "The 200 body of the coaching control verbs (rollout.handle_coaching_command).\n\nOnly the ACCEPTED shape is modelled: a refusal carries its own status code\nand is raised as an HTTPException by the route, so it never reaches here.",
         "properties": {
@@ -1221,7 +1197,7 @@
       },
       "HealthCapabilities": {
         "additionalProperties": true,
-        "description": "Capabilities block of /health (server.py health_check).\n\nThe health doc grows additively as the node registry needs more\n(gpu, hardware inventory, …) — extra=\"allow\" keeps keys the handler adds\nbefore this model learns about them, instead of silently filtering them\nout of the handshake.",
+        "description": "Capabilities block of /health (server.py health_check).\n\nThe health doc grows additively as the node registry needs more\n(gpu, hardware inventory, …) — extra=\"allow\" keeps keys the handler adds\nbefore this model learns about them, instead of silently filtering them\nout of the handshake. Absent-or-present keys (`gpu`, and `sfu` — the\nbundled LiveKit server's signalling URL, `{\"url\": \"ws://host:7880\"}`,\nonly when started with --sfu) are deliberately NOT declared here: a\ndeclared optional would materialize as null on nodes without one, and\nthe contract is \"absent means none/unknown\".",
         "properties": {
           "accepts_jobs": {
             "title": "Accepts Jobs",
@@ -4042,7 +4018,7 @@
         "type": "object"
       },
       "RemoteInferenceTransport": {
-        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is narrower than the transport ROUTE's field of the same name on\npurpose: this one is `remote_inference._transport_source`'s range, and that\nfunction answers \"which FILE names this exact url\", folding the process\nenvironment and the unattributable into \"cloud\". The route's\n`_resolved_transport_source` walks the same chain but can also say\n`process_env` / `none`, which only a pre-launch panel needs.",
+        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is `remote_inference._transport_source`'s range, the SAME set the\ntransport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit\nserver, so the url, room and the child's token were minted in-process),\n`process_env`, `cloud` (livekit.env) or `none`. It used to be narrower than\nthe route's; one walker now serves both, and the two values it lost —\n`local_override` and `cwd` — retired with the shell SFU scripts in S3.6.",
         "properties": {
           "operator_present": {
             "title": "Operator Present",
@@ -4054,9 +4030,10 @@
           },
           "source": {
             "enum": [
+              "sfu",
               "cloud",
-              "local_override",
-              "cwd"
+              "process_env",
+              "none"
             ],
             "title": "Source",
             "type": "string"
@@ -4108,14 +4085,6 @@
             "title": "Extra Installed",
             "type": "boolean"
           },
-          "local_env_exists": {
-            "title": "Local Env Exists",
-            "type": "boolean"
-          },
-          "local_env_path": {
-            "title": "Local Env Path",
-            "type": "string"
-          },
           "message": {
             "anyOf": [
               {
@@ -4149,15 +4118,73 @@
             "title": "Room",
             "type": "string"
           },
-          "sfu_config_exists": {
-            "title": "Sfu Config Exists",
+          "sfu_enabled": {
+            "title": "Sfu Enabled",
             "type": "boolean"
+          },
+          "sfu_external_ip": {
+            "title": "Sfu External Ip",
+            "type": "boolean"
+          },
+          "sfu_install_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Install Hint"
+          },
+          "sfu_key_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Key File"
+          },
+          "sfu_key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Key Id"
+          },
+          "sfu_modal_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Modal Url"
+          },
+          "sfu_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sfu Url"
           },
           "source": {
             "enum": [
+              "sfu",
               "cloud",
-              "local_override",
-              "cwd",
               "process_env",
               "none"
             ],
@@ -4176,9 +4203,13 @@
           "url",
           "room",
           "source",
-          "sfu_config_exists",
-          "local_env_exists",
-          "local_env_path",
+          "sfu_enabled",
+          "sfu_url",
+          "sfu_modal_url",
+          "sfu_external_ip",
+          "sfu_key_id",
+          "sfu_key_file",
+          "sfu_install_hint",
           "endpoint_reachable",
           "operator_present",
           "error_code",
@@ -4713,6 +4744,98 @@
           "episode_indices"
         ],
         "title": "SetExcludedEpisodesResponse",
+        "type": "object"
+      },
+      "SfuTokenBody": {
+        "description": "Request for a LiveKit room token (sfu.py). Every field is optional:\nthe server picks a unique identity and the station's default room, and\n`operator` is the role a laptop or a policy worker wants. `robot` is for\nthe one participant that publishes cameras/state (normally this station\nitself, in a later phase); `viewer` subscribes only.",
+        "properties": {
+          "identity": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity"
+          },
+          "role": {
+            "default": "operator",
+            "enum": [
+              "robot",
+              "operator",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "ttl_seconds": {
+            "default": 3600,
+            "maximum": 43200.0,
+            "minimum": 60.0,
+            "title": "Ttl Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "SfuTokenBody",
+        "type": "object"
+      },
+      "SfuTokenResponse": {
+        "description": "server.py issue_sfu_token — everything a Portal participant needs for\n`connect(url, token)`, plus the room/identity the token was scoped to\n(echoed back because the server fills in defaults the caller may have\nomitted) and the token's expiry as epoch seconds.",
+        "properties": {
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "identity": {
+            "title": "Identity",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "robot",
+              "operator",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "token",
+          "room",
+          "identity",
+          "role",
+          "expires_at"
+        ],
+        "title": "SfuTokenResponse",
         "type": "object"
       },
       "SkillListItem": {
@@ -9791,31 +9914,9 @@
         ]
       }
     },
-    "/api/v1/remote-inference/clear-local-override": {
-      "post": {
-        "description": "Delete livekit.local.env, sending the robot side back to LiveKit Cloud.\n\nThe ONE mutation the transport surface gets, and it earns it: that file is\nwritten by tools/drtc/local_sfu*.sh and OUTLIVES the script, so after a\nCtrl-C the robot keeps dialing a dead ws://127.0.0.1:7880 — the documented\ntop footgun of the local-SFU path. Deleting a file the Lab's own config\nmodule already names is the cheapest possible fix.\n\nIdempotent: an absent file is a 200 with `removed=false`, not a 404. The\nlocal SFU's own config (livekit.local.yaml, which holds the key/secret) is\nNOT touched — deleting that rotates the SFU's credentials, which is a\ndifferent and more destructive act.\n\nDeliberately NOT guarded by `_held_by()`: deleting a dotenv touches no\nhardware, and a live child resolved its transport at spawn.",
-        "operationId": "clear_remote_inference_override",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ClearLocalOverrideResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Clear Remote Inference Override",
-        "tags": [
-          "sessions"
-        ]
-      }
-    },
     "/api/v1/remote-inference/transport": {
       "get": {
-        "description": "What transport a remote-inference child would resolve RIGHT NOW, and\nwhether anything is answering on it. Read-only; touches no hardware and\nstarts nothing.\n\nResolved through `drtc._env.read_env()`, never `load_env()`: load_env\nstamps the local-SFU override into os.environ, and in a long-lived server\nDELETING livekit.local.env could then never un-set it — the server would\nkeep dialing a dead ws://127.0.0.1:7880 until restarted.\n\n`endpoint_reachable` / `operator_present` come from one `list_participants`\ncall behind remote_inference._probe_room, bounded at 3s, and are null when\nthat probe did not run at all. A missing [drtc] extra is REPORTED here\nrather than raised: the panel's job is to tell the user what to install,\nand the install command must name the PRIMARY CHECKOUT — an editable\ninstall run from a worktree silently re-points every other session's\nmakermodslab.\n\nDeliberately NOT refused while a session is live. Unlike\n/arms/release-torque this reads dotenv files and asks the SFU who is in a\nroom; it touches nothing the running child owns, and a live child already\npinned its transport at spawn (READY echoes the effective values).",
+        "description": "What transport a remote-inference child would resolve RIGHT NOW, and\nwhether anything is answering on it. Read-only; touches no hardware and\nstarts nothing.\n\nTwo transports, one shape. When this process runs the Lab's own SFU\n(`makermodslab --sfu`) the url, room and credentials come from sfu.py\nin-process and livekit.env is never read; the `sfu_*` block then carries\nwhat the panel needs for the GPU side's command line — including the key\nNAME and the file the secret lives in, never the secret. Otherwise the\nLiveKit Cloud credentials are resolved through `drtc._env.read_env()`,\nnever `load_env()`: load_env writes os.environ, and a server that has\nstamped a url into its own environment can never re-resolve it.\n\n`endpoint_reachable` / `operator_present` come from one `list_participants`\ncall behind remote_inference._probe_room, bounded at 3s, and are null when\nthat probe did not run at all. A missing [drtc] extra is REPORTED here\nrather than raised: the panel's job is to tell the user what to install,\nand the install command must name the PRIMARY CHECKOUT — an editable\ninstall run from a worktree silently re-points every other session's\nmakermodslab.\n\nDeliberately NOT refused while a session is live. Unlike\n/arms/release-torque this reads dotenv files and asks the SFU who is in a\nroom; it touches nothing the running child owns, and a live child already\npinned its transport at spawn (READY echoes the effective values).",
         "operationId": "get_remote_inference_transport",
         "responses": {
           "200": {
@@ -10307,6 +10408,48 @@
         "summary": "Stop Session",
         "tags": [
           "sessions"
+        ]
+      }
+    },
+    "/api/v1/sfu/token": {
+      "post": {
+        "description": "Sign a short-lived, role-scoped LiveKit room token.\n\nThe station is the only party holding the SFU secret, so participants\n(a laptop's makermodslab, a Modal worker, a browser) get their JWT here\ninstead of carrying the secret. The URL is built from the host the\ncaller reached THIS API on — the one address known to be routable from\nwhere they sit. 409 sfu.disabled when the launcher wasn't started with\n--sfu: the remedy is a restart with the flag, not a retry.",
+        "operationId": "issue_sfu_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SfuTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SfuTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Issue Sfu Token",
+        "tags": [
+          "sfu"
         ]
       }
     },

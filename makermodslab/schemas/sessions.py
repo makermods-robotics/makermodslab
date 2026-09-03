@@ -45,7 +45,6 @@ __all__ = [
     "AutoCalibrationArmOption",
     "AutoCalibrationOptions",
     "CalibrationOptions",
-    "ClearLocalOverrideResponse",
     "CoachingCommandResponse",
     "CurrentSessionResponse",
     "EndedSessionInfo",
@@ -448,16 +447,16 @@ class RemoteInferenceTransport(BaseModel):
     """The transport the session actually resolved (the READY echo, not what
     the parent believed it passed — see drtc_protocol.format_ready).
 
-    `source` is narrower than the transport ROUTE's field of the same name on
-    purpose: this one is `remote_inference._transport_source`'s range, and that
-    function answers "which FILE names this exact url", folding the process
-    environment and the unattributable into "cloud". The route's
-    `_resolved_transport_source` walks the same chain but can also say
-    `process_env` / `none`, which only a pre-launch panel needs."""
+    `source` is `remote_inference._transport_source`'s range, the SAME set the
+    transport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit
+    server, so the url, room and the child's token were minted in-process),
+    `process_env`, `cloud` (livekit.env) or `none`. It used to be narrower than
+    the route's; one walker now serves both, and the two values it lost —
+    `local_override` and `cwd` — retired with the shell SFU scripts in S3.6."""
 
     url: str
     room: str
-    source: Literal["cloud", "local_override", "cwd"]
+    source: Literal["sfu", "cloud", "process_env", "none"]
     operator_present: bool
 
 
@@ -528,17 +527,36 @@ class RemoteInferenceTransportStatusResponse(BaseModel):
     which is a third state distinct from false."""
 
     extra_installed: bool
-    configured: bool  # all four LIVEKIT_* vars resolved
+    # Under the Lab's own SFU this is True by construction (the credentials are
+    # minted in-process); on the Cloud path it means all four LIVEKIT_* vars
+    # resolved.
+    configured: bool
     missing_vars: list[str]  # [] when configured
     url: str  # "" when unresolved — never null
     room: str
-    source: Literal["cloud", "local_override", "cwd", "process_env", "none"]
-    # The two local-SFU artifacts, by config.DRTC_SFU_CONFIG_PATH /
-    # DRTC_LOCAL_ENV_PATH. `local_env_exists` outliving its script is the
-    # documented top footgun — it is why the clear-override action exists.
-    sfu_config_exists: bool
-    local_env_exists: bool
-    local_env_path: str  # always the path, whether it exists or not
+    source: Literal["sfu", "cloud", "process_env", "none"]
+    # --- the Lab-owned SFU (makermodslab --sfu; see makermodslab/sfu.py) ---
+    # Everything below is null/false when this process does not run one, so a
+    # panel can render the whole block from one flag.
+    sfu_enabled: bool
+    sfu_url: str | None  # the loopback signalling URL a local child dials
+    # The URL a MODAL container should dial: ws://<tailnet ipv4>:7880. Null
+    # when tailscale is absent or not logged in — a container has no route to
+    # loopback or to a LAN address, so there is nothing honest to offer then.
+    sfu_modal_url: str | None
+    # Whether the SFU advertises its STUN-discovered public IP (the launcher's
+    # --sfu-external-ip). Without it a Modal container can reach signalling
+    # over the tailnet and still never punch a media path.
+    sfu_external_ip: bool
+    # The key's NAME — the `--livekit-api-key` half of the Modal line. It
+    # identifies rather than authorizes. THE SECRET IS NEVER RETURNED; the
+    # panel names the file below and a human reads it.
+    sfu_key_id: str | None
+    sfu_key_file: str | None
+    # The per-OS install line, present ONLY when `livekit-server` is missing
+    # from PATH — otherwise null, which is how the panel knows `--sfu` is a
+    # flag the user can actually pass.
+    sfu_install_hint: str | None
     # Null (not false) when the probe did not run.
     endpoint_reachable: bool | None
     operator_present: bool | None
@@ -547,15 +565,6 @@ class RemoteInferenceTransportStatusResponse(BaseModel):
     # probe never ran. Null on success.
     error_code: str | None
     message: str | None
-
-
-class ClearLocalOverrideResponse(BaseModel):
-    """POST /api/v1/remote-inference/clear-local-override — shape authority:
-    remote_inference.handle_clear_local_override."""
-
-    success: bool
-    removed: bool  # False when the file was already absent
-    path: str  # config.DRTC_LOCAL_ENV_PATH, always echoed
 
 
 class SessionCoachingBody(BaseModel):

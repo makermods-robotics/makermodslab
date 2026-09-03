@@ -55,6 +55,7 @@ from . import (
     record as record_state,
     rollout as rollout_state,
     session_events,
+    sfu,
 )
 
 # Import our custom calibration functionality
@@ -148,7 +149,6 @@ from .record import (
 # to `_extra_missing()`), so importing it at server module scope cannot break a
 # no-extra install — and nothing under `makermodslab.drtc` is reached at boot.
 from .remote_inference import (
-    handle_clear_local_override,
     handle_remote_inference_status,
     handle_remote_inference_transport,
 )
@@ -219,7 +219,6 @@ from .schemas.nodes import (
     NodeRemoveResponse,
 )
 from .schemas.sessions import (
-    ClearLocalOverrideResponse,
     CoachingCommandResponse,
     CurrentSessionResponse,
     RemoteInferenceStatusResponse,
@@ -232,6 +231,7 @@ from .schemas.sessions import (
     SessionStartResponse,
     SessionStopResponse,
 )
+from .schemas.sfu import SfuTokenResponse
 from .schemas.system import (
     AvailableCamerasResponse,
     AvailablePortsResponse,
@@ -1144,7 +1144,9 @@ def coaching_command(session_id: str, body: SessionCoachingBody):
 # No start/stop verbs live here: a remote-inference session starts through
 # POST /api/v1/sessions with kind "remote_inference" and stops through
 # /sessions/{id}/stop, like every other robot-driving kind. What is left is two
-# reads and the one mutation that clears the local-SFU override.
+# reads. The third route this group used to carry — clear-local-override —
+# retired with the shell SFU scripts in S3.6: the Lab hosts the SFU itself now
+# (--sfu), so there is no dotenv file outliving a script to delete.
 
 
 @v1_router.get(
@@ -1186,10 +1188,14 @@ def get_remote_inference_transport():
     whether anything is answering on it. Read-only; touches no hardware and
     starts nothing.
 
-    Resolved through `drtc._env.read_env()`, never `load_env()`: load_env
-    stamps the local-SFU override into os.environ, and in a long-lived server
-    DELETING livekit.local.env could then never un-set it — the server would
-    keep dialing a dead ws://127.0.0.1:7880 until restarted.
+    Two transports, one shape. When this process runs the Lab's own SFU
+    (`makermodslab --sfu`) the url, room and credentials come from sfu.py
+    in-process and livekit.env is never read; the `sfu_*` block then carries
+    what the panel needs for the GPU side's command line — including the key
+    NAME and the file the secret lives in, never the secret. Otherwise the
+    LiveKit Cloud credentials are resolved through `drtc._env.read_env()`,
+    never `load_env()`: load_env writes os.environ, and a server that has
+    stamped a url into its own environment can never re-resolve it.
 
     `endpoint_reachable` / `operator_present` come from one `list_participants`
     call behind remote_inference._probe_room, bounded at 3s, and are null when
@@ -1207,33 +1213,8 @@ def get_remote_inference_transport():
     return handle_remote_inference_transport()
 
 
-@v1_router.post(
-    "/remote-inference/clear-local-override",
-    response_model=ClearLocalOverrideResponse,
-    tags=["sessions"],
-)
-def clear_remote_inference_override():
-    """Delete livekit.local.env, sending the robot side back to LiveKit Cloud.
-
-    The ONE mutation the transport surface gets, and it earns it: that file is
-    written by tools/drtc/local_sfu*.sh and OUTLIVES the script, so after a
-    Ctrl-C the robot keeps dialing a dead ws://127.0.0.1:7880 — the documented
-    top footgun of the local-SFU path. Deleting a file the Lab's own config
-    module already names is the cheapest possible fix.
-
-    Idempotent: an absent file is a 200 with `removed=false`, not a 404. The
-    local SFU's own config (livekit.local.yaml, which holds the key/secret) is
-    NOT touched — deleting that rotates the SFU's credentials, which is a
-    different and more destructive act.
-
-    Deliberately NOT guarded by `_held_by()`: deleting a dotenv touches no
-    hardware, and a live child resolved its transport at spawn.
-    """
-    return handle_clear_local_override()
-
-
 @router.get("/health", response_model=HealthResponse, tags=["system"])
-def health_check():
+def health_check(request: Request):
     """Node identity + capability document.
 
     Doubles as the node-registry verify handshake: a discovered peer is
@@ -1252,7 +1233,69 @@ def health_check():
             # Present only when the torch probe sees an accelerator — an
             # absent key means none/unknown, never guess (see HealthResponse).
             **({"gpu": gpu} if (gpu := probe_gpu()) else {}),
+            # Present only when this process runs (or fronts) a LiveKit SFU
+            # (--sfu): the signalling URL as reachable from the caller's
+            # side. Absent = no SFU here; a peer wanting one asks another
+            # node. Same absent-means-unknown rule as gpu.
+            **(
+                {"sfu": {"url": sfu.sfu_url(request.url.hostname or "localhost")}}
+                if sfu.sfu_enabled()
+                else {}
+            ),
         },
+    }
+
+
+# --- SFU token broker (v1-only surface; see v1_router note above) ---
+
+
+class SfuTokenBody(BaseModel):
+    """Request for a LiveKit room token (sfu.py). Every field is optional:
+    the server picks a unique identity and the station's default room, and
+    `operator` is the role a laptop or a policy worker wants. `robot` is for
+    the one participant that publishes cameras/state (normally this station
+    itself, in a later phase); `viewer` subscribes only."""
+
+    identity: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    room: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    role: Literal["robot", "operator", "viewer"] = "operator"
+    ttl_seconds: int = Field(sfu.DEFAULT_TTL_SECONDS, ge=sfu.MIN_TTL_SECONDS, le=sfu.MAX_TTL_SECONDS)
+
+
+@v1_router.post("/sfu/token", response_model=SfuTokenResponse, tags=["sfu"])
+def issue_sfu_token(body: SfuTokenBody, request: Request):
+    """Sign a short-lived, role-scoped LiveKit room token.
+
+    The station is the only party holding the SFU secret, so participants
+    (a laptop's makermodslab, a Modal worker, a browser) get their JWT here
+    instead of carrying the secret. The URL is built from the host the
+    caller reached THIS API on — the one address known to be routable from
+    where they sit. 409 sfu.disabled when the launcher wasn't started with
+    --sfu: the remedy is a restart with the flag, not a retry."""
+    if not sfu.sfu_enabled():
+        raise ApiError(
+            409,
+            "No LiveKit SFU is configured on this node. Start it with `makermodslab --sfu`.",
+            code=ErrorCode.SFU_DISABLED,
+        )
+    api_key, api_secret = sfu.api_keys()
+    identity = body.identity or sfu.default_identity(body.role)
+    room = body.room or sfu.default_room(get_instance_id())
+    token, expires_at = sfu.mint_token(
+        api_key=api_key,
+        api_secret=api_secret,
+        identity=identity,
+        room=room,
+        role=body.role,
+        ttl_seconds=body.ttl_seconds,
+    )
+    return {
+        "url": sfu.sfu_url(request.url.hostname or "localhost"),
+        "token": token,
+        "room": room,
+        "identity": identity,
+        "role": body.role,
+        "expires_at": expires_at,
     }
 
 
@@ -1265,7 +1308,7 @@ class AddNodeBody(BaseModel):
 
 
 @v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
-def list_nodes(force: bool = False):
+def list_nodes(request: Request, force: bool = False):
     """All known nodes: this server first (is_self=true, built from the same
     health fields the handshake reads, so clients render one uniform list),
     then every registered peer. Peers whose last probe is older than the TTL
@@ -1276,7 +1319,7 @@ def list_nodes(force: bool = False):
     pass bypasses the TTL — discovery runs now and every known entry is
     probed now — so a refresh button answers with the world as it is, not as
     it was up to TTL seconds ago."""
-    health = health_check()
+    health = health_check(request)
     self_entry = {
         "url": None,  # a server doesn't know its own external address
         "instance_id": health["instance_id"],

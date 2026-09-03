@@ -2,7 +2,7 @@
 """Transport probe: verify a LiveKit path carries the DRTC loop, with NO robot
 and NO GPU — a synthetic robot on one machine and an echo operator on another.
 
-    # machine A (the robot station; SFU runs here, see tools/drtc/local_sfu*.sh)
+    # machine A (the robot station; the SFU runs here — `makermodslab --sfu`)
     python makermodslab/drtc/transport_probe.py robot --url ws://127.0.0.1:7880 \
         --api-key <key> --api-secret <secret>
 

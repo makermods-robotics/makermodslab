@@ -47,7 +47,9 @@ export default {
     noRoomYet: "尚未解析出房间 — 请先在下方重新检查传输，然后再复制命令。",
     // <0> 是字面占位符，<1> 是字面路径，二者都是标识符，保持拉丁字符。
     secretsHint:
-      "请把每个 <0>{{placeholder}}</0> 替换为 <1>{{path}}</1> 中的 key 和 secret — 本地 SFU 脚本启动时也会在横幅里打印它们。MakerMods Lab 永远不会暴露这两个值。",
+      "请把 <0>{{placeholder}}</0> 替换为 <1>{{path}}</1> 中该 key id 对应的 secret。命令中的 key id 是真实值；MakerMods Lab 的接口从不返回 secret。",
+    noTailnetUrl:
+      "没有 tailnet 地址，命令中也就没有可供 GPU 端拨号的 URL。请在本机登录 Tailscale，然后重新检查传输。",
   },
   transport: {
     title: "传输",
@@ -57,9 +59,8 @@ export default {
     unresolved: "未设置",
     sourceLabel: "读取自",
     source: {
+      sfu: "MakerMods Lab 自带的 SFU",
       cloud: "livekit.env（LiveKit Cloud）",
-      local_override: "livekit.local.env（本地 SFU）",
-      cwd: "工作目录中的 .env",
       process_env: "本进程的环境变量",
       none: "无来源 — 尚未配置任何内容",
     },
@@ -77,16 +78,18 @@ export default {
     operatorAbsent: "不在房间中",
     extraMissing:
       "未安装可选的 drtc 附加依赖，因此无法进行任何检查。请在主检出目录中安装 — 在 worktree 中执行可编辑安装会让其他所有会话都指向该目录。",
-    overrideActive:
-      "本地 SFU 覆盖正在生效。该文件会比写入它的脚本活得更久，所以本地 SFU 停止后，机器人仍会继续拨向一个无人应答的地址。",
-    clearOverride: "删除该覆盖",
-    clearing: "删除中…",
-    clearOverrideHint:
-      "只删除这一个文件，并让机器人回到 LiveKit Cloud。本地 SFU 自己的配置（保存着它的 key 和 secret）不会被动。",
-    sfuConfigPresent: "本地 SFU 的配置仍在 — 上面命令里的 key 和 secret 就来自它。",
-    clearedTitle: "覆盖已删除",
-    alreadyClearTitle: "没有可删除的覆盖",
-    clearFailedTitle: "删除覆盖失败",
+    sfuRunningTitle: "本机的 LiveKit 服务器",
+    sfuModalUrlLabel: "供 GPU 使用的地址",
+    sfuNoTailnet: "没有 tailnet 地址",
+    sfuKeyIdLabel: "Key id",
+    sfuKeyFileLabel: "Secret 位于",
+    sfuExternalIpLabel: "对外媒体地址",
+    sfuExternalIpOn: "已公布",
+    sfuExternalIpOff: "未公布",
+    sfuExternalIpHint:
+      "不公布的话，远端 GPU 能连上本服务器打个招呼，却无法发送视频或动作。请用下面的参数重启 MakerMods Lab 来开启它。",
+    sfuNotRunning:
+      "本 MakerMods Lab 未运行 LiveKit 服务器。可以用下面的参数启动它，也可以保持关闭并改用 livekit.env 里的 LiveKit Cloud 凭据。",
   },
   phase: {
     idle: "未运行",

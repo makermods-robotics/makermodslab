@@ -1,8 +1,7 @@
-import React, { useState } from "react";
+import React from "react";
 import { useTranslation } from "react-i18next";
 import { CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import type { UseRemoteInferenceTransport } from "@/hooks/useRemoteInferenceTransport";
 
@@ -15,17 +14,20 @@ import type { UseRemoteInferenceTransport } from "@/hooks/useRemoteInferenceTran
  *    means THE PROBE DID NOT RUN (no `[drtc]` extra, or no credentials). That
  *    is a third state, and collapsing it into "false" would tell an operator
  *    the SFU is down when nothing ever asked it.
- *  - `source` distinguishes "livekit.env says so" from "your shell exported
- *    LIVEKIT_URL" — different problems with different remedies.
- *  - the clear-override button. `livekit.local.env` is written by the local-SFU
- *    script and OUTLIVES it, so after a Ctrl-C the robot keeps dialing a dead
- *    ws://127.0.0.1:7880 forever. Deleting that one file is the documented fix
- *    for the top footgun of the local path. It is idempotent and touches
- *    nothing else — livekit.local.yaml, which holds the SFU's own credentials,
- *    is deliberately left alone.
+ *  - `source` distinguishes the Lab's OWN SFU from LiveKit Cloud, and within
+ *    Cloud, "livekit.env says so" from "your shell exported LIVEKIT_URL" —
+ *    three different problems with three different remedies.
+ *  - the SFU block. When the Lab hosts the server, everything the GPU side
+ *    needs is minted here: the key ID, the file its secret is in, and the
+ *    TAILNET url a Modal container can actually dial. That block is what makes
+ *    the generated `modal run` line above complete.
  *
- * Every value rendered here (url, room, variable names, error codes, the
- * backend's message) is data and appears verbatim.
+ * There is no clear-override button any more. It deleted a dotenv file the
+ * retired `tools/drtc/local_sfu*.sh` scripts wrote; with the Lab hosting the
+ * SFU there is no file outliving a script to clear.
+ *
+ * Every value rendered here (url, room, key id, paths, variable names, error
+ * codes, the backend's message and install hint) is data and appears verbatim.
  */
 const Row: React.FC<{ label: string; children: React.ReactNode }> = ({
   label,
@@ -62,32 +64,7 @@ const TransportSection: React.FC<{
   transportState: UseRemoteInferenceTransport;
 }> = ({ transportState }) => {
   const { t } = useTranslation();
-  const { toast } = useToast();
-  const { transport, loading, error, refresh, clearLocalOverride } =
-    transportState;
-  const [clearing, setClearing] = useState(false);
-
-  const onClear = async () => {
-    setClearing(true);
-    try {
-      const result = await clearLocalOverride();
-      toast({
-        title: result.removed
-          ? t("remoteInference.transport.clearedTitle")
-          : t("remoteInference.transport.alreadyClearTitle"),
-        // The path is data — echoed exactly as the backend reported it.
-        description: result.path,
-      });
-    } catch (e) {
-      toast({
-        title: t("remoteInference.transport.clearFailedTitle"),
-        description: e instanceof Error ? e.message : String(e),
-        variant: "destructive",
-      });
-    } finally {
-      setClearing(false);
-    }
-  };
+  const { transport, loading, error, refresh } = transportState;
 
   return (
     <div className="space-y-2 rounded-lg border border-border p-3">
@@ -201,40 +178,66 @@ const TransportSection: React.FC<{
             </p>
           ) : null}
 
-          {transport.local_env_exists ? (
-            <div className="space-y-1.5 rounded-md border border-warn/40 p-2">
-              <p className="text-xs leading-relaxed text-warn">
-                {t("remoteInference.transport.overrideActive")}
+          {transport.sfu_enabled ? (
+            <div className="space-y-1.5 rounded-md border border-border p-2">
+              <p className="text-xs font-semibold text-foreground">
+                {t("remoteInference.transport.sfuRunningTitle")}
               </p>
-              {/* The path — data. */}
-              <p className="font-mono text-[11px] break-all text-muted-foreground">
-                {transport.local_env_path}
-              </p>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => void onClear()}
-                disabled={clearing}
-                className="h-7 px-2 text-xs"
-              >
-                {clearing
-                  ? t("remoteInference.transport.clearing")
-                  : t("remoteInference.transport.clearOverride")}
-              </Button>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                {t("remoteInference.transport.clearOverrideHint")}
-              </p>
-              {transport.sfu_config_exists ? (
-                // Says where the GPU side's --livekit-api-key/-secret come
-                // from. Deleting THIS file would rotate the SFU's own
-                // credentials, so the button above never touches it.
+              <Row label={t("remoteInference.transport.sfuModalUrlLabel")}>
+                {transport.sfu_modal_url ? (
+                  <span className="font-mono">{transport.sfu_modal_url}</span>
+                ) : (
+                  <span className="text-warn">
+                    {t("remoteInference.transport.sfuNoTailnet")}
+                  </span>
+                )}
+              </Row>
+              <Row label={t("remoteInference.transport.sfuKeyIdLabel")}>
+                {/* The key NAME. The secret is never sent here — the file
+                    below is where a human reads it. */}
+                <span className="font-mono">
+                  {transport.sfu_key_id ??
+                    t("remoteInference.transport.unresolved")}
+                </span>
+              </Row>
+              {transport.sfu_key_file ? (
+                <Row label={t("remoteInference.transport.sfuKeyFileLabel")}>
+                  <span className="font-mono">{transport.sfu_key_file}</span>
+                </Row>
+              ) : null}
+              <Row label={t("remoteInference.transport.sfuExternalIpLabel")}>
+                <Verdict
+                  state={transport.sfu_external_ip}
+                  label={
+                    transport.sfu_external_ip
+                      ? t("remoteInference.transport.sfuExternalIpOn")
+                      : t("remoteInference.transport.sfuExternalIpOff")
+                  }
+                />
+              </Row>
+              {!transport.sfu_external_ip ? (
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  {t("remoteInference.transport.sfuConfigPresent")}
+                  {t("remoteInference.transport.sfuExternalIpHint")}
                 </p>
               ) : null}
             </div>
-          ) : null}
+          ) : (
+            <div className="space-y-1.5 rounded-md border border-border p-2">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("remoteInference.transport.sfuNotRunning")}
+              </p>
+              {/* The start command is DATA — a shell line, shown verbatim. */}
+              <pre className="overflow-x-auto rounded bg-muted/60 p-2 font-mono text-[11px] break-words whitespace-pre-wrap">
+                makermodslab --sfu --sfu-external-ip
+              </pre>
+              {transport.sfu_install_hint ? (
+                // The backend's per-OS install line, shown as raised.
+                <p className="text-[11px] leading-relaxed text-warn">
+                  {transport.sfu_install_hint}
+                </p>
+              ) : null}
+            </div>
+          )}
         </div>
       )}
     </div>

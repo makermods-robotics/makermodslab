@@ -3,11 +3,13 @@
 Pure-helper test: no LiveKit, no hardware. `_env` is deliberately importable
 without the `drtc` extra (it needs only python-dotenv) so this runs in CI.
 
-Why it exists: the source repo read `.env.local` from the SCRIPT's directory,
-and the port moved the local-SFU override to the Lab's state dir. Two live
-runs on 2026-09-02 failed with "connection refused" because the override was
-being read from a directory the robot was not started in. These pin down which
-file wins from where.
+Since S3.6 there are two rungs, not five: `livekit.env` and the process
+environment, which wins. The three that are gone — a cwd `.env`, a cwd
+`.env.local`, and the `livekit.local.env` override the retired
+`tools/drtc/local_sfu*.sh` scripts wrote — were cwd-relative or `override=True`,
+and both properties were bugs in a long-lived server. The Lab hosts the SFU
+itself now (`makermodslab --sfu`) and the session pins the child's transport on
+its command line, so no file has to describe "the current SFU" at all.
 
 Every precedence case is parametrized over BOTH entry points — `load_env`
 (mutates `os.environ`, for the CLI entrypoints) and `read_env` (resolves onto a
@@ -50,20 +52,23 @@ def clean_env():
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    """Point every source at tmp_path and run from a fresh cwd there."""
+    """Point the saved-credentials file at tmp_path and run from a fresh cwd.
+
+    The `chdir` is not decoration: it is what proves the cwd no longer matters.
+    A developer running pytest from a checkout carrying a `.env` must get the
+    same answer CI does.
+    """
     saved = tmp_path / "livekit.env"
-    local = tmp_path / "livekit.local.env"
     monkeypatch.setattr(_env, "DRTC_ENV_PATH", str(saved))
-    monkeypatch.setattr(_env, "DRTC_LOCAL_ENV_PATH", str(local))
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
-    return {"saved": saved, "local": local, "cwd": cwd}
+    return {"saved": saved, "cwd": cwd}
 
 
 @pytest.fixture(params=["load_env", "read_env"])
 def resolve(request, clean_env):
-    """Resolve the four sources and hand back the effective mapping.
+    """Resolve the sources and hand back the effective mapping.
 
     Both entry points must agree on every precedence rule; only their SIDE
     EFFECT differs, which is what the `read_env`-specific tests below cover."""
@@ -94,70 +99,35 @@ def test_process_environment_beats_the_saved_file(resolve, paths, monkeypatch):
     assert resolve()["LIVEKIT_URL"] == "wss://from-shell"
 
 
-def test_local_sfu_override_beats_saved_and_process_environment(resolve, paths, monkeypatch):
-    """The override is 'the current transport', so it must win even over the shell."""
-    paths["saved"].write_text("LIVEKIT_URL=wss://cloud\nLIVEKIT_ROOM=r\n")
-    paths["local"].write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
-    monkeypatch.setenv("LIVEKIT_URL", "wss://from-shell")
+def test_a_missing_saved_file_is_not_an_error(resolve, paths):
+    """A station running the Lab's own SFU never writes one, and starting a
+    remote run there must not depend on a file nothing creates."""
+    assert not paths["saved"].exists()
 
-    env = resolve()
-
-    assert env["LIVEKIT_URL"] == "ws://127.0.0.1:7880"
-    assert env["LIVEKIT_ROOM"] == "r"  # room is NOT in the override; still from saved
+    assert "LIVEKIT_URL" not in resolve()
 
 
-def test_override_is_read_from_the_state_dir_not_the_cwd(resolve, paths):
-    """The regression the port fixes: the robot need not run from any directory."""
+@pytest.mark.parametrize("name", [".env", ".env.local"])
+def test_a_cwd_dotenv_is_no_longer_read(resolve, paths, name):
+    """RETIRED in S3.6. Both cwd rungs made the answer depend on where the Lab
+    happened to be started — the cause of two "connection refused" false starts
+    on 2026-09-02 — and `.env.local` did it with `override=True`, so it beat
+    even the process environment."""
+    (paths["cwd"] / name).write_text("LIVEKIT_URL=ws://from-cwd\n")
     paths["saved"].write_text("LIVEKIT_URL=wss://cloud\n")
-    paths["local"].write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
-    elsewhere = paths["cwd"].parent / "elsewhere"
-    elsewhere.mkdir()
-    os.chdir(elsewhere)
 
-    assert resolve()["LIVEKIT_URL"] == "ws://127.0.0.1:7880"
+    assert resolve()["LIVEKIT_URL"] == "wss://cloud"
 
 
-def test_cwd_dotenv_files_still_work_as_in_the_source_repo(resolve, paths):
-    (paths["cwd"] / ".env").write_text("LIVEKIT_URL=wss://cloud\nLIVEKIT_ROOM=r\n")
-    (paths["cwd"] / ".env.local").write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
-
-    env = resolve()
-
-    assert env["LIVEKIT_URL"] == "ws://127.0.0.1:7880"
-    assert env["LIVEKIT_ROOM"] == "r"
-
-
-def test_the_saved_file_wins_over_a_cwd_dotenv(resolve, paths):
-    """Among the two non-override sources the EARLIER one wins (dotenv's own
-    `override=False` rule applied in order), which is what makes the saved
-    credentials authoritative for a server started from an arbitrary cwd."""
-    paths["saved"].write_text("LIVEKIT_ROOM=saved\n")
-    (paths["cwd"] / ".env").write_text("LIVEKIT_ROOM=cwd\n")
-
-    assert resolve()["LIVEKIT_ROOM"] == "saved"
-
-
-def test_the_cwd_env_local_wins_over_the_state_dir_override(resolve, paths):
-    """Among the two override sources the LATER one wins."""
-    paths["local"].write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
-    (paths["cwd"] / ".env.local").write_text("LIVEKIT_URL=ws://from-env-local\n")
-
-    assert resolve()["LIVEKIT_URL"] == "ws://from-env-local"
-
-
-def test_deleting_the_override_returns_to_the_saved_credentials(clean_env, paths):
-    """`load_env` needs the variable unset by hand — that is exactly the bug
-    `read_env` exists to sidestep (see the next test)."""
+def test_the_local_sfu_override_file_is_no_longer_read(resolve, paths, tmp_path):
+    """RETIRED in S3.6 with the scripts that wrote it. It loaded with
+    `override=True`, so once a long-lived server had read it, deleting the file
+    could never un-set what it stamped into `os.environ` — the server kept
+    dialing a dead `ws://127.0.0.1:7880` until it restarted."""
+    (tmp_path / "livekit.local.env").write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
     paths["saved"].write_text("LIVEKIT_URL=wss://cloud\n")
-    paths["local"].write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
-    _env.load_env()
-    assert os.environ["LIVEKIT_URL"] == "ws://127.0.0.1:7880"
 
-    paths["local"].unlink()
-    del os.environ["LIVEKIT_URL"]
-    _env.load_env()
-
-    assert os.environ["LIVEKIT_URL"] == "wss://cloud"
+    assert resolve()["LIVEKIT_URL"] == "wss://cloud"
 
 
 # --- what read_env is FOR ---------------------------------------------------
@@ -165,28 +135,23 @@ def test_deleting_the_override_returns_to_the_saved_credentials(clean_env, paths
 
 def test_read_env_does_not_mutate_the_process_environment(clean_env, paths):
     paths["saved"].write_text("LIVEKIT_URL=wss://cloud\n")
-    paths["local"].write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
 
     env = _env.read_env()
 
-    assert env["LIVEKIT_URL"] == "ws://127.0.0.1:7880"
+    assert env["LIVEKIT_URL"] == "wss://cloud"
     assert "LIVEKIT_URL" not in os.environ
 
 
-def test_read_env_sees_a_deleted_override_without_a_restart(clean_env, paths):
-    """The whole reason it exists.
-
-    `load_env`'s `override=True` stamps the local-SFU URL into `os.environ`;
-    in a long-lived FastAPI process nothing can un-set it, so deleting
-    `livekit.local.env` leaves the server dialing a dead `ws://127.0.0.1:7880`
-    until it restarts. `read_env` re-resolves from disk every call."""
+def test_read_env_sees_an_edited_file_without_a_restart(clean_env, paths):
+    """The whole reason it exists. With no override rung left it can no longer
+    disagree with `load_env` about a deleted file, but it is still the only
+    correct call from a server that must re-resolve on every request."""
     paths["saved"].write_text("LIVEKIT_URL=wss://cloud\n")
-    paths["local"].write_text("LIVEKIT_URL=ws://127.0.0.1:7880\n")
-    assert _env.read_env()["LIVEKIT_URL"] == "ws://127.0.0.1:7880"
-
-    paths["local"].unlink()
-
     assert _env.read_env()["LIVEKIT_URL"] == "wss://cloud"
+
+    paths["saved"].write_text("LIVEKIT_URL=wss://other\n")
+
+    assert _env.read_env()["LIVEKIT_URL"] == "wss://other"
 
 
 def test_read_env_carries_the_rest_of_the_process_environment_through(clean_env, paths):
@@ -200,11 +165,13 @@ def test_read_env_carries_the_rest_of_the_process_environment_through(clean_env,
 
 def test_a_bare_key_line_is_skipped_rather_than_read_as_empty(clean_env, paths):
     """Mirrors dotenv's own `set_as_environment_variables`: a `KEY` with no `=`
-    has value None and must not overwrite anything with ""."""
-    paths["saved"].write_text("LIVEKIT_URL=wss://cloud\n")
-    paths["local"].write_text("LIVEKIT_URL\n")
+    has value None and must not be written as ""."""
+    paths["saved"].write_text("LIVEKIT_URL\nLIVEKIT_ROOM=r\n")
 
-    assert _env.read_env()["LIVEKIT_URL"] == "wss://cloud"
+    env = _env.read_env()
+
+    assert "LIVEKIT_URL" not in env
+    assert env["LIVEKIT_ROOM"] == "r"
 
 
 def test_required_env_names_the_missing_variable(clean_env):

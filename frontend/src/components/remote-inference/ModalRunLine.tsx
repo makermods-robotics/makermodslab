@@ -7,19 +7,23 @@ import type { RemoteInferenceTransportStatus } from "@/hooks/useRemoteInferenceT
 import {
   buildModalRunLine,
   LOCAL_SECRET_PLACEHOLDER,
-  LOCAL_SFU_CONFIG_PATH,
+  LOCAL_SFU_KEY_FILE,
 } from "./modalCommand";
 import type { RemoteRunConfig } from "./remoteRunConfig";
 
 /**
  * The command the operator runs in the OTHER terminal.
  *
- * The Lab owns only the robot side (docs/drtc/SLICE3.md §2, lifecycle A): it
- * verifies the SFU and that an operator is present, and it never launches the
- * GPU. So the single most useful thing this panel can do is hand over a line
- * that is guaranteed to agree with what the robot side is about to start with
- * — same horizon, same fps, same codec, same room — because a disagreement
- * there is invisible by construction.
+ * The Lab owns the robot side and, since S3.6, the SFU (`makermodslab --sfu`);
+ * it still never launches the GPU. So the single most useful thing this panel
+ * can do is hand over a line that is guaranteed to agree with what the robot
+ * side is about to start with — same horizon, same fps, same codec, same room
+ * — because a disagreement there is invisible by construction.
+ *
+ * Under the Lab's own SFU the line also carries the whole transport: the
+ * TAILNET url (`sfu_modal_url` — never the loopback one a local child dials,
+ * which a Modal container has no route to), the real key ID, and a placeholder
+ * for the secret the API deliberately never returns.
  *
  * The command text itself is DATA: never translated, never reflowed, never
  * case-folded. Only the prose around it is localized.
@@ -47,8 +51,12 @@ const ModalRunLine: React.FC<{
     videoCodec: config.videoCodec,
     sMin: config.sMin,
     room: transport?.room ?? "",
-    url: transport?.url ?? "",
+    // The url a CONTAINER dials, which is not the one this machine's child
+    // dials. Empty when tailscale reported no address — the line then omits
+    // --livekit-url rather than offering a loopback one that cannot work.
+    url: transport?.sfu_modal_url ?? "",
     source: transport?.source ?? "none",
+    sfuKeyId: transport?.sfu_key_id ?? "",
   });
 
   const copy = async () => {
@@ -94,23 +102,30 @@ const ModalRunLine: React.FC<{
           {t("remoteInference.modalRun.noRoomYet")}
         </p>
       ) : null}
-      {transport?.source === "local_override" ? (
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          {/* <0> and <1> hold a literal placeholder and a literal path —
-              identifiers, so they stay in the Latin script inside whatever
-              sentence a translator writes around them. */}
-          <Trans
-            i18nKey="remoteInference.modalRun.secretsHint"
-            values={{
-              placeholder: LOCAL_SECRET_PLACEHOLDER,
-              path: LOCAL_SFU_CONFIG_PATH,
-            }}
-            components={[
-              <code key="0" className="font-mono" />,
-              <code key="1" className="font-mono" />,
-            ]}
-          />
-        </p>
+      {transport?.source === "sfu" ? (
+        <>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {/* <0> and <1> hold a literal placeholder and a literal path —
+                identifiers, so they stay in the Latin script inside whatever
+                sentence a translator writes around them. */}
+            <Trans
+              i18nKey="remoteInference.modalRun.secretsHint"
+              values={{
+                placeholder: LOCAL_SECRET_PLACEHOLDER,
+                path: transport.sfu_key_file ?? LOCAL_SFU_KEY_FILE,
+              }}
+              components={[
+                <code key="0" className="font-mono" />,
+                <code key="1" className="font-mono" />,
+              ]}
+            />
+          </p>
+          {!transport.sfu_modal_url ? (
+            <p className="text-xs text-warn">
+              {t("remoteInference.modalRun.noTailnetUrl")}
+            </p>
+          ) : null}
+        </>
       ) : null}
     </div>
   );

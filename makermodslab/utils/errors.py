@@ -113,20 +113,20 @@ def classify_outcome(work_completed: bool, error_text: str | None) -> str:
 # prose the preflight appends to its message. Kept here, beside friendly_hint,
 # because it is the same job — a plain-language, actionable headline — and
 # because it must stay PURE: the one branch that depends on the machine's state
-# (is a local-SFU override in effect?) is passed IN rather than read here, so
+# (is the Lab's own SFU the transport?) is passed IN rather than read here, so
 # the wording is unit-testable without touching the filesystem.
 _TRANSPORT_ENV_FILE = "~/.cache/huggingface/lerobot/livekit.env"
-_TRANSPORT_LOCAL_ENV_FILE = "~/.cache/huggingface/lerobot/livekit.local.env"
 
 
-def transport_hint(code: str, *, local_override: bool = False, room: str = "") -> str:
+def transport_hint(code: str, *, sfu: bool = False, room: str = "") -> str:
     """What to do about a `transport.*` refusal. Always a non-empty sentence.
 
-    `local_override` is whether `livekit.local.env` is currently redirecting
-    this machine at a local SFU — the documented top footgun of the local-SFU
-    scripts is that this file OUTLIVES the script, so after a Ctrl-C the robot
-    keeps dialing a dead `ws://127.0.0.1:7880`. An "unreachable" that does not
-    say so sends the operator to check their internet connection instead.
+    `sfu` is whether the transport in force is the Lab's OWN SFU
+    (`makermodslab --sfu`) rather than LiveKit Cloud. The two have disjoint
+    remedies — one is a process on this machine, the other a file of
+    credentials — and an "unreachable" that does not say which sends the
+    operator to check their internet connection when the answer was a flag
+    they did not pass.
     """
     code = str(code)
     if code.endswith("extra_missing"):
@@ -144,23 +144,23 @@ def transport_hint(code: str, *, local_override: bool = False, room: str = "") -
             f"{_TRANSPORT_ENV_FILE} (see docs/drtc/livekit.env.example)."
         )
     if code.endswith("unreachable"):
-        if local_override:
+        if sfu:
             return (
-                f"{_TRANSPORT_LOCAL_ENV_FILE} is pointing this machine at a LOCAL SFU and nothing "
-                "is answering there — is tools/drtc/local_sfu_ts.sh still running? That file "
-                "outlives the script, so delete it to go back to LiveKit Cloud."
+                "The Lab's SFU isn't answering — was the Lab started with `--sfu`? It runs as a "
+                "child of the launcher, so it stops with the Lab and a reload does not bring it "
+                "back on its own."
             )
         return (
-            "Check the URL and this machine's network. If the address should be a local SFU, "
-            f"start it with tools/drtc/local_sfu_ts.sh; if it should be LiveKit Cloud, check "
-            f"LIVEKIT_URL in {_TRANSPORT_ENV_FILE}."
+            "Check the URL and this machine's network. If the address should be a LiveKit Cloud "
+            f"project, check LIVEKIT_URL in {_TRANSPORT_ENV_FILE}; if it should be a local SFU, "
+            "start the Lab with `makermodslab --sfu` and it will mint its own."
         )
     if code.endswith("unauthorized"):
         return (
             f"LIVEKIT_API_KEY and LIVEKIT_API_SECRET in {_TRANSPORT_ENV_FILE} must be the pair "
-            "this server issued. A local SFU mints its own on first run, so a key left over from "
-            f"LiveKit Cloud (or from a rotated local config) will be rejected — and "
-            f"{_TRANSPORT_LOCAL_ENV_FILE}, if present, overrides them both."
+            "the LiveKit Cloud project issued. (Under the Lab's own SFU nothing reads that file: "
+            "the key pair is minted once into ~/.cache/huggingface/lerobot/livekit_keys.yaml and "
+            "the server signs with it directly.)"
         )
     if code.endswith("no_policy"):
         where = f" '{room}'" if room else ""

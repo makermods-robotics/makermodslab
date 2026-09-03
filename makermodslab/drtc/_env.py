@@ -1,38 +1,39 @@
-"""LiveKit credential loading for remote inference — no LiveKit dependency.
+"""LiveKit CLOUD credential loading for remote inference — no LiveKit dependency.
 
 Split out of `_common` so the precedence rules can be unit-tested without the
 `drtc` extra installed (`_common` imports `livekit.api` for token minting).
 
-Precedence, lowest first; a later source overrides an earlier one only where
-marked `override`:
+This is the FALLBACK path. When the Lab runs its own SFU (`makermodslab --sfu`,
+see `makermodslab/sfu.py`) the session resolves url, room and token in-process
+and passes them to the child on the command line, so nothing here is consulted
+at all. What is left is the LiveKit Cloud case, and it has exactly two rungs:
 
   1. `DRTC_ENV_PATH` (`~/.cache/huggingface/lerobot/livekit.env`) — the saved
      credentials, beside the rest of the Lab's persistent state.
-  2. `.env` in the current directory.
-  3. `DRTC_LOCAL_ENV_PATH` (`~/.cache/huggingface/lerobot/livekit.local.env`),
-     override — written by `tools/drtc/local_sfu*.sh` while a local SFU runs.
-  4. `.env.local` in the current directory, override — the source repo's
-     convention, kept so an existing `livekit-drtc` checkout still works as a
-     working directory.
+  2. The process environment, which wins (dotenv's own `override=False` rule).
 
-Process environment wins over 1 and 2 (dotenv's own `override=False` rule) and
-loses to 3 and 4, exactly as it lost to `.env.local` in the source repo.
+Three rungs were RETIRED in S3.6 along with the `tools/drtc/local_sfu*.sh`
+scripts they existed for: a cwd `.env`, a cwd `.env.local`, and
+`livekit.local.env`. All three were `override=True` or cwd-relative, and both
+properties were bugs in a long-lived server — a cwd-relative source makes the
+answer depend on where the Lab was started (two "connection refused" false
+starts on 2026-09-02), and an override the process cannot un-set is a transport
+that survives the deletion of the file naming it. The Lab-owned SFU replaces
+what they were for.
 
 Two entry points, ONE precedence implementation:
 
-  * :func:`read_env` RESOLVES the four sources over a copy of the process
+  * :func:`read_env` RESOLVES the sources over a copy of the process
     environment and hands the result back. Nothing is mutated, so it is safe to
     call repeatedly from the long-lived FastAPI process.
   * :func:`load_env` is `read_env` plus a write into `os.environ`, for the CLI
     entrypoints whose downstream code (`_common.mint_token`, `policy.py`) reads
     credentials from the environment.
 
-The split exists because `load_env`'s `override=True` on sources 3 and 4 is a
-latent bug in a long-lived process: once the server has loaded a local-SFU
-override, DELETING `livekit.local.env` can never un-set what it stamped into
-`os.environ`, so the server keeps dialing a dead `ws://127.0.0.1:7880` until it
-is restarted. A status endpoint that wants "what would a child resolve right
-now?" must ask `read_env`, never `load_env`.
+With no override rung left the two can no longer disagree about a deleted file,
+but the split stays: `read_env` is still the only correct call from a server
+that must re-resolve on every request, and `load_env` is still what a child
+process needs before `required_env`.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from __future__ import annotations
 import os
 import pathlib
 
-from ..utils.config import DRTC_ENV_PATH, DRTC_LOCAL_ENV_PATH
+from ..utils.config import DRTC_ENV_PATH
 
 _EXTRA_HINT = "remote inference needs the optional 'drtc' extra: uv pip install -e '.[drtc]'"
 
@@ -57,11 +58,10 @@ def _apply(env: dict[str, str], path: pathlib.Path, override: bool) -> None:
     line with no `=`) is skipped rather than written as an empty string, and
     with `override=False` an existing key is left alone.
 
-    One deliberate narrowing versus chaining `load_dotenv` calls: `${VAR}`
-    interpolation inside these files resolves against the PROCESS environment
-    only, not against values a previous source in this chain contributed. These
-    are four-line credential files; nothing in the shipped
-    `livekit.env.example` or the local-SFU scripts interpolates."""
+    One deliberate narrowing versus `load_dotenv`: `${VAR}` interpolation
+    inside the file resolves against the PROCESS environment only. It is a
+    four-line credential file; nothing in the shipped `livekit.env.example`
+    interpolates."""
     for key, value in dotenv_values(path).items():
         if value is None:
             continue
@@ -71,31 +71,24 @@ def _apply(env: dict[str, str], path: pathlib.Path, override: bool) -> None:
 
 
 def read_env(search_from: pathlib.Path | None = None) -> dict[str, str]:
-    """Resolve the four sources over the process environment, WITHOUT mutating it.
+    """Resolve the saved credentials over the process environment, WITHOUT
+    mutating it.
 
     Returns the environment a freshly-started child would see: a copy of
-    `os.environ` with the four sources layered on in the order the module
-    docstring describes. Callers want `result["LIVEKIT_URL"]` and friends; the
-    rest of the environment rides along because "what `load_env` would have
-    produced" is the only definition that cannot drift from `load_env` itself.
+    `os.environ` with `livekit.env` layered UNDER it. Callers want
+    `result["LIVEKIT_URL"]` and friends; the rest of the environment rides
+    along because "what `load_env` would have produced" is the only definition
+    that cannot drift from `load_env` itself.
+
+    `search_from` is accepted and ignored. It named the cwd the two dotenv
+    rungs were resolved against, and both are gone; the parameter stays so the
+    two entrypoints' `load_env()` call sites and the tests keep one signature
+    while the Cloud path is still reachable.
     """
     env = dict(os.environ)
-    start = search_from or pathlib.Path.cwd()
-
     saved = pathlib.Path(DRTC_ENV_PATH)
     if saved.exists():
         _apply(env, saved, override=False)
-    dotenv = start / ".env"
-    if dotenv.exists():
-        _apply(env, dotenv, override=False)
-
-    local = pathlib.Path(DRTC_LOCAL_ENV_PATH)
-    if local.exists():
-        _apply(env, local, override=True)
-    env_local = start / ".env.local"
-    if env_local.exists():
-        _apply(env, env_local, override=True)
-
     return env
 
 
@@ -103,7 +96,9 @@ def load_env(search_from: pathlib.Path | None = None) -> None:
     """Load LiveKit credentials into `os.environ`; precedence per the docstring.
 
     For the CLI entrypoints only — see the module docstring for why a
-    long-lived process should call :func:`read_env` instead."""
+    long-lived process should call :func:`read_env` instead. A child the Lab
+    spawned under its own SFU has its url, room and token pinned on the command
+    line and does not depend on this having found anything."""
     for key, value in read_env(search_from).items():
         if os.environ.get(key) != value:
             os.environ[key] = value

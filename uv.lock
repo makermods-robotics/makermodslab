@@ -1024,6 +1024,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi", extra = ["standard"] },
     { name = "lerobot", extra = ["core-scripts", "damiao", "feetech", "maker", "rebot", "training"] },
+    { name = "livekit-api" },
     { name = "psutil" },
     { name = "pygrabber", marker = "sys_platform == 'win32'" },
     { name = "uvicorn" },
@@ -1039,7 +1040,6 @@ dev = [
     { name = "ruff" },
 ]
 drtc = [
-    { name = "livekit-api" },
     { name = "livekit-portal" },
     { name = "python-dotenv" },
 ]
@@ -1054,7 +1054,7 @@ requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
     { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "damiao", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=eaab69339120787948776e4354dcee09f501fd16" },
-    { name = "livekit-api", marker = "extra == 'drtc'", specifier = ">=0.7" },
+    { name = "livekit-api", specifier = ">=1.0" },
     { name = "livekit-portal", marker = "extra == 'drtc'", specifier = "==0.2.4" },
     { name = "makermodslab", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },

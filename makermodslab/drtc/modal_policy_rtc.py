@@ -433,10 +433,10 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
 
     # Optional per-run LiveKit override: point this run at a different SFU than
     # the LiveKit-cloud secret — e.g. the LOCAL SFU exposed through a Cloudflare
-    # quick tunnel (`tools/drtc/local_sfu.sh` prints the exact flags; see
-    # docs/drtc/README.md "Local SFU"). Quick-tunnel URLs are ephemeral, so this
-    # rides per-run CLI args rather than a Modal secret. Unset flags fall through
-    # to the secret.
+    # Lab's own SFU (`makermodslab --sfu`), whose url/key/secret the Deploy
+    # panel prints as a ready-made line (see docs/drtc/README.md "Local SFU").
+    # They ride per-run CLI args rather than a Modal secret because they are
+    # per-station, not per-account. Unset flags fall through to the secret.
     if livekit_url:
         os.environ["LIVEKIT_URL"] = livekit_url
     if livekit_api_key:
@@ -456,7 +456,7 @@ def _serve_impl(  # nosec B107 — the empty `*_secret` defaults are "flag not p
     # Tailscale hybrid: join the tailnet, stand up the loopback->SOCKS5 relay,
     # and point LIVEKIT_URL at the relay instead of the tailnet address. Media
     # and data channels are untouched — they still hole-punch straight to the
-    # Mac's public IP on UDP 7882. `tools/drtc/local_sfu_ts.sh` prints the matching flags.
+    # Mac's public IP on UDP 7882 (which is what `--sfu-external-ip` advertises).
     if tailscale:
         target = livekit_url or os.environ.get("LIVEKIT_URL", "")
         if not target:

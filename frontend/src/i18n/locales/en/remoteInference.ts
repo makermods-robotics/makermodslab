@@ -50,10 +50,12 @@ export default {
     copyFailedBody: "Select the command and copy it by hand.",
     noRoomYet:
       "No room resolved yet — re-check the transport below, then copy the command again.",
-    // <0> is the literal placeholder text and <1> the literal config path.
+    // <0> is the literal placeholder text and <1> the literal key-file path.
     // Both are identifiers and stay in the Latin script.
     secretsHint:
-      "Replace each <0>{{placeholder}}</0> with the key and secret from <1>{{path}}</1> — the local SFU script prints them in its startup banner too. The Lab never exposes them.",
+      "Replace <0>{{placeholder}}</0> with the secret beside that key id in <1>{{path}}</1>. The key id in the line is real; the Lab never sends the secret over its own API.",
+    noTailnetUrl:
+      "No tailnet address, so the command has no URL for the GPU side to dial. Sign in to Tailscale on this machine and re-check the transport.",
   },
   transport: {
     title: "Transport",
@@ -63,9 +65,8 @@ export default {
     unresolved: "not set",
     sourceLabel: "Read from",
     source: {
+      sfu: "the Lab's own SFU",
       cloud: "livekit.env (LiveKit Cloud)",
-      local_override: "livekit.local.env (local SFU)",
-      cwd: ".env in the working directory",
       process_env: "this process's environment",
       none: "nowhere — nothing is configured",
     },
@@ -84,17 +85,18 @@ export default {
     operatorAbsent: "not in the room",
     extraMissing:
       "The optional drtc extra isn't installed, so nothing could be checked. Install it from the primary checkout — an editable install run from a worktree re-points every other session.",
-    overrideActive:
-      "A local-SFU override is in force. This file outlives the script that wrote it, so after the local SFU stops the robot keeps dialing an address nothing answers on.",
-    clearOverride: "Delete the override",
-    clearing: "Deleting…",
-    clearOverrideHint:
-      "Deletes only that one file and sends the robot back to LiveKit Cloud. The local SFU's own config, which holds its key and secret, is left alone.",
-    sfuConfigPresent:
-      "The local SFU's config is still here — that is where the key and secret in the command above come from.",
-    clearedTitle: "Override deleted",
-    alreadyClearTitle: "No override to delete",
-    clearFailedTitle: "Couldn't delete the override",
+    sfuRunningTitle: "This machine's LiveKit server",
+    sfuModalUrlLabel: "Address for the GPU",
+    sfuNoTailnet: "no tailnet address",
+    sfuKeyIdLabel: "Key id",
+    sfuKeyFileLabel: "Secret is in",
+    sfuExternalIpLabel: "Public media address",
+    sfuExternalIpOn: "advertised",
+    sfuExternalIpOff: "not advertised",
+    sfuExternalIpHint:
+      "Without it a remote GPU can reach this server to say hello but has no way to send video or actions. Restart the Lab with the flag below to turn it on.",
+    sfuNotRunning:
+      "This Lab isn't running a LiveKit server. Start it with the flags below, or leave it off and use LiveKit Cloud credentials from livekit.env.",
   },
   // Backend phase values. Matched on, never displayed raw — the raw value is
   // the fallback for a phase a newer server introduces.

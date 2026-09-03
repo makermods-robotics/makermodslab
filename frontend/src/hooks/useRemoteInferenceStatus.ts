@@ -3,6 +3,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { apiRequest } from "@/lib/apiClient";
 import type { Fetcher } from "@/lib/apiClient";
 import { useSessionEvent } from "@/hooks/useActiveSession";
+import type { TransportSource } from "@/hooks/useRemoteInferenceTransport";
 
 /**
  * Live telemetry of the remote-inference (DRTC) session.
@@ -54,13 +55,12 @@ export interface RemoteInferenceStats {
 }
 
 /** The transport the RUNNING session actually resolved — the child's READY
- * echo, not what the parent believed it passed. `source` is narrower than the
- * transport ROUTE's field of the same name on purpose (see
- * useRemoteInferenceTransport). */
+ * echo, not what the parent believed it passed. Since S3.6 `source` is the SAME
+ * set the transport ROUTE reports (see useRemoteInferenceTransport). */
 export interface RemoteInferenceRunTransport {
   url: string;
   room: string;
-  source: "cloud" | "local_override" | "cwd";
+  source: TransportSource;
   operator_present: boolean;
 }
 

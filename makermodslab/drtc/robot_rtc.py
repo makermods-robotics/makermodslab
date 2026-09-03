@@ -151,6 +151,7 @@ from ._session_glue import (
     emit,
     emit_stats,
     livekit_room_field,
+    livekit_token_field,
     livekit_url_field,
     note_first_operator,
     or_none,
@@ -275,6 +276,7 @@ class RobotSideRTCConfig:
     # drift on the flags a supervising parent passes both of them.
     livekit_url: str = livekit_url_field()
     livekit_room: str = livekit_room_field()
+    livekit_token: str = livekit_token_field()
     return_to_rest: bool = return_to_rest_field()
     ease_in: bool = ease_in_field()
 
@@ -291,7 +293,11 @@ async def run(cfg: RobotSideRTCConfig) -> None:
     # passed — are what READY reports and what we dial.
     url = cfg.livekit_url or required_env("LIVEKIT_URL")
     room = cfg.livekit_room or required_env("LIVEKIT_ROOM")
-    token = mint_token(IDENTITY, room)
+    # A token handed to us is already scoped to this room and identity and was
+    # signed by whoever owns the SFU's secret (the Lab, under `--sfu`). Minting
+    # our own is the LiveKit Cloud path, and needs the API secret in this
+    # process's environment.
+    token = cfg.livekit_token or mint_token(IDENTITY, room)
     # Emitted BEFORE the bus is opened, so a parent that spots a transport
     # mismatch can kill the child before anything is energized.
     emit(EVENT_READY, format_ready(url, room))

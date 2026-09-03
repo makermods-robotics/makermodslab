@@ -18,7 +18,7 @@ needed to run remote inference any more:
 | Parent↔child line protocol                               | `makermodslab/drtc_protocol.py`                                                            |
 | Start-pose capture / ease-in / return-to-rest             | `makermodslab/drtc/_pose.py`                                                               |
 | Supervised-session glue shared by BOTH entrypoints        | `makermodslab/drtc/_session_glue.py`                                                       |
-| Local SFU scripts                                         | `tools/drtc/local_sfu.sh`, `tools/drtc/local_sfu_ts.sh`                                    |
+| The SFU itself (`makermodslab --sfu`)                     | `makermodslab/sfu.py`, `makermodslab/scripts/makermodslab.py`                              |
 | Transport-only probe (no robot, no GPU)                   | `makermodslab/drtc/transport_probe.py`                                                     |
 | Design record                                             | `docs/drtc/ANALYSIS.md`, `SWEEP.md`, `SYNC_RESULTS.md` (verbatim from the source repo)     |
 
@@ -37,7 +37,9 @@ doing it inside a worktree silently re-points every other session's
 `makermodslab` (and `frontend`) at that worktree. If it happens, the repair is
 `uv pip install -e <primary-checkout> --no-deps`.
 
-The extra is `livekit-portal==0.2.4`, `livekit-api>=0.7`, `python-dotenv>=1`.
+The extra is `livekit-portal==0.2.4` and `python-dotenv>=1`. (`livekit-api` used
+to be here too; since the bundled SFU landed it is a CORE dependency — the
+`/api/v1/sfu/token` route signs with it, and so does this session's room probe.)
 `livekit-portal` is pinned **exactly** and must match the pin in the two Modal
 wrappers' images. Portal fingerprints the wire schema and _silently drops_
 packets whose fingerprint differs on the two peers, so a mismatch does not
@@ -52,56 +54,89 @@ never load the Portal dylib), `_pose` (lerobot's motors, a hard dependency), and
 take the portal object as an argument and only call methods on it).
 Everything else in `makermodslab/drtc/` imports `livekit.portal` at module top.
 
-## Credentials
+## Transport
 
-`LIVEKIT_URL`, `LIVEKIT_ROOM`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` are read
-by `_env.load_env()` from four sources. Lowest precedence first; sources 3 and 4
-are loaded with `override=True`, so they beat both the earlier files **and** the
-process environment:
+Two, and the Lab picks between them with no configuration:
+
+### The Lab's own SFU (`makermodslab --sfu`) — the normal path
+
+The Lab runs `livekit-server` itself, as a child of the launcher (not of the
+app — `uvicorn --reload` restarts the app on every save and the SFU must
+outlive that). When it is up, a remote-inference session takes **everything**
+from it in-process and reads no credential file at all:
+
+- the url the child dials — `ws://127.0.0.1:7880` (`sfu.local_url()`);
+- the room — `mml-<instance id prefix>` (`sfu.default_room`), one per station;
+- the child's **token**, signed here with the key file's secret and passed on
+  its argv as `--livekit_token`. The child therefore never holds an API secret;
+  the secret lives only in `~/.cache/huggingface/lerobot/livekit_keys.yaml`
+  (mode 0600, minted on the first `--sfu` run — delete it to rotate).
+
+```bash
+makermodslab --dev --sfu --bind <tailnet-ip> --sfu-external-ip   # or without --dev
+```
+
+Three flags, three jobs:
+
+- `--sfu` runs the server. Missing binary ⇒ a one-line exit with the per-OS
+  install hint (`brew install livekit` on macOS).
+- `--bind <tailnet-ip>` puts **signalling** on an address a Modal container can
+  reach. Without it the SFU binds loopback and nothing outside this machine can
+  say hello. **In `--dev` mode `--bind` applies to the SFU alone** — Vite serves
+  localhost only and uvicorn follows it, but the SFU is not a web server for
+  your browser, and a loopback bind is what used to make a dev session
+  LiveKit-Cloud-only.
+- `--sfu-external-ip` lets the SFU STUN-discover this machine's public IP and
+  advertise `<public>:7882` as an ICE candidate, instead of pinning the bound
+  address. **Media is a separate problem from signalling**: a container reaches
+  signalling over the tailnet but has to hole-punch for the video and action
+  streams, and it has no route to a tailnet address. Without this flag you get
+  a session that connects and receives nothing. It costs a STUN round trip at
+  startup (so it is off by default — it stalls a station with no internet) and
+  needs UDP 7882 reachable here; forward it if your NAT defeats hole punching.
+
+The Deploy panel's transport section reports all of it — whether the SFU is
+running, the key ID, the file its secret is in, whether the public media
+address is advertised, and the **tailnet** URL a container should dial — and
+folds them into the `modal run` line it generates. Copy that line; the only
+thing to fill in by hand is the secret.
+
+### LiveKit Cloud — the fallback
+
+With no local SFU, `LIVEKIT_URL`, `LIVEKIT_ROOM`, `LIVEKIT_API_KEY` and
+`LIVEKIT_API_SECRET` are read by `_env.read_env()` from **two** sources:
 
 1. `~/.cache/huggingface/lerobot/livekit.env` (`config.DRTC_ENV_PATH`) — the
    saved credentials, beside the rest of the Lab's persistent state, so a wheel
    install and a source checkout read the same file. Start from
    [`livekit.env.example`](livekit.env.example).
-2. `.env` in the current directory.
-3. `~/.cache/huggingface/lerobot/livekit.local.env` (`config.DRTC_LOCAL_ENV_PATH`),
-   **override** — written by `tools/drtc/local_sfu*.sh` while a local SFU is
-   running. Delete it to go back to LiveKit Cloud.
-4. `.env.local` in the current directory, **override** — the source repo's
-   convention, kept so an existing `livekit-drtc` checkout still works as a
-   working directory.
+2. The process environment, which wins.
 
-The process environment wins over 1 and 2 and loses to 3 and 4 — exactly as it
-lost to `.env.local` in the source repo.
-
-Source 3 is the one behavioural change from the source repo, which read the
-local-SFU override from the **script's own directory**. Two live runs on
-2026-09-02 failed with "connection refused" because the robot was started from
-a different directory. `tests/test_drtc_env.py` pins the whole order down.
+Three rungs were **retired in S3.6** with the shell SFU scripts: a cwd `.env`, a
+cwd `.env.local`, and `livekit.local.env`. All three were cwd-relative or
+`override=True`; a cwd-relative source makes the answer depend on where the Lab
+was started (two "connection refused" false starts on 2026-09-02), and an
+override a long-lived process cannot un-set is a transport that survives the
+deletion of the file naming it.
 
 ### `read_env` vs `load_env`
 
 Two entry points, one precedence implementation:
 
-- **`load_env()`** resolves the four sources and writes them into `os.environ`.
-  For the CLI entrypoints, whose downstream code (`_common.mint_token`,
-  `policy.py`) reads credentials from the environment.
-- **`read_env() -> dict`** resolves the same four sources onto a **copy** of the
+- **`load_env()`** resolves the sources and writes them into `os.environ`. For
+  the CLI entrypoints, whose downstream code (`_common.mint_token`, `policy.py`)
+  reads credentials from the environment.
+- **`read_env() -> dict`** resolves the same sources onto a **copy** of the
   process environment and hands it back, mutating nothing. `load_env` is
   implemented on top of it.
 
-Use `read_env` from anything long-lived. `load_env`'s `override=True` on
-sources 3 and 4 is a latent bug in a server process: once it has stamped a
-local-SFU URL into `os.environ`, **deleting `livekit.local.env` can never
-un-set it**, so the server keeps dialing a dead `ws://127.0.0.1:7880` until it
-restarts. `read_env` re-resolves from disk on every call, so a deleted override
-takes effect immediately. Both entry points are parametrized over the same
-precedence cases in `tests/test_drtc_env.py`.
+Use `read_env` from anything long-lived: it re-resolves from disk on every call,
+so an edited file takes effect without a restart. Both are parametrized over the
+same cases in `tests/test_drtc_env.py`.
 
-One deliberate narrowing: `${VAR}` interpolation inside these files resolves
-against the process environment only, not against a value contributed by an
-earlier source in the same chain. Nothing in `livekit.env.example` or the
-local-SFU scripts interpolates.
+One deliberate narrowing: `${VAR}` interpolation inside the file resolves
+against the process environment only. Nothing in `livekit.env.example`
+interpolates.
 
 ## GPU side, on Modal
 
@@ -233,6 +268,7 @@ docstrings claimed since the port, has never worked. Same for `--align`,
 | `--return_to_rest` | on      | Capture the pose the arm starts in (right after `connect()`, **gripper excluded**) and drive it back there before torque is released, on every exit path. Emits `RETURNING`. |
 | `--livekit_url`    | (env)   | Pin the SFU URL instead of taking it from the credential files. Echoed back in `READY`.                                                                                      |
 | `--livekit_room`   | (env)   | Pin the room. Same rationale; pairs with `--livekit-room` on the Modal wrappers.                                                                                             |
+| `--livekit_token`  | (mint)  | Join with a token the parent already signed, instead of minting one from `LIVEKIT_API_KEY`/`SECRET`. What the Lab passes under `--sfu`, so the child holds no API secret.    |
 
 The gripper is excluded from the captured pose for the same reason teleoperation
 and recording exclude it: the policy may have left it holding something, and
@@ -333,36 +369,6 @@ absent. Two different values put the in-painting mask on a different boundary
 than the guidance. Both default to 4, and the panel emits `--s-min` into the
 generated `modal run` line from the same field the session is started with.
 
-## Local SFU (`tools/drtc/`)
-
-Both scripts run a LiveKit server on this machine and expose only its
-**signaling** endpoint to Modal; WebRTC media and data channels always
-hole-punch straight to this machine's public IP on UDP 7882. If your NAT defeats
-hole punching, forward UDP 7882 here.
-
-```bash
-tools/drtc/local_sfu.sh      # signaling over a Cloudflare quick tunnel
-tools/drtc/local_sfu_ts.sh   # signaling over your tailnet (stable URL, private)
-```
-
-Both write their state beside the rest of the Lab's persistent state, **not**
-next to the script, so the robot can be started from any directory:
-
-- `~/.cache/huggingface/lerobot/livekit.local.yaml` — the SFU config with a
-  random local API key/secret (generated once; delete to rotate).
-- `~/.cache/huggingface/lerobot/livekit.local.env` — the robot-side override
-  (source 3 above). **Delete it to return to LiveKit Cloud.** It outlives the
-  script: after Ctrl-C the robot keeps dialing `ws://127.0.0.1:7880` and gets
-  "connection refused" until the script is restarted or the file removed.
-- `~/.cache/huggingface/lerobot/logs/drtc/` — `livekit-server` / `cloudflared`
-  logs.
-
-Each script prints the exact `modal run ... --livekit-url ... --livekit-api-key
-... --livekit-api-secret ...` line to paste. The Cloudflare quick tunnel gets a
-**new random hostname every launch**, so those flags must be re-copied each
-time; the tailnet URL is stable. The tailnet variant also needs the
-`tailscale-auth` Modal secret and Tailscale logged in on this machine.
-
 ## Transport probe
 
 `transport_probe.py` verifies that a LiveKit path can carry the loop with **no
@@ -381,7 +387,7 @@ python makermodslab/drtc/transport_probe.py operator --url ws://100.x.y.z:7880 \
 
 It is deliberately self-contained (no imports from this package), so the far end
 needs only that one file plus
-`pip install "livekit-portal==0.2.4" "livekit-api>=0.7" numpy`.
+`pip install "livekit-portal==0.2.4" "livekit-api>=1.0" numpy`.
 
 ## Tests
 
@@ -395,8 +401,9 @@ pytest tests/test_drtc_schedule.py tests/test_drtc_env.py \
   last-write-wins merging, single-source prefix extraction, and the
   Jacobson-Karels estimator. It is the port of what used to be `_rtc.py`'s
   `__main__` self-test block.
-- `tests/test_drtc_env.py` — credential precedence (the four sources above),
-  parametrized over both `load_env` and `read_env`.
+- `tests/test_drtc_env.py` — credential precedence (the two sources above, and
+  that the three retired ones are no longer read), parametrized over both
+  `load_env` and `read_env`.
 - `tests/test_drtc_protocol.py` — the line protocol: round-trip,
   prefix-anywhere, compact-JSON survival of the whitespace collapse, the
   always-present STATS key set, and the two-STOP rule.
@@ -426,6 +433,25 @@ python -m makermodslab.drtc._sync_player
 ## Done since the port
 
 The design record is [`SLICE3.md`](SLICE3.md).
+
+### S3.6 (2026-09-03) — the Lab-owned SFU
+
+- **`makermodslab --sfu` is the local-SFU story**, merged from
+  `feat/livekit-sfu`: `sfu.py` (binary lookup, config rendering, the token
+  broker) plus `POST /api/v1/sfu/token`. The two shell scripts under
+  `tools/drtc/` are deleted.
+- **The session adopts it.** With the SFU up it takes the url, the room and the
+  child's TOKEN in-process and reads no credential file; the child gets
+  `--livekit_token` and never holds an API secret. The Portal identities stay
+  exactly `robot` and `policy` — the room probe looks for the latter by name.
+- **`--sfu-external-ip`** (new, default off): the SFU advertises its
+  STUN-discovered public IP instead of the pinned bind address, which is the
+  only way a Modal container can hole-punch media to this machine.
+- **The transport surface reshaped.** `source` is now
+  `sfu | cloud | process_env | none`, the panel reports the SFU's state and the
+  tailnet URL a container should dial, and the `modal run` line carries the
+  whole transport. `clear-local-override` and the three retired credential
+  rungs are gone.
 
 ### S3.5 (2026-09-03) — the RTC regime becomes an engine
 
@@ -467,9 +493,10 @@ What that slice landed, `robot_sync` only (all of it is now shared):
   fall-through, the `_dispatch_stop` arm the lease's expiry watchdog routes
   through, and `_held_by`), added `RemoteInferenceOptions` plus the exact
   status/transport response models to `schemas/sessions.py`, and registered
-  three v1-only routes: `GET /api/v1/remote-inference-status`,
-  `GET /api/v1/remote-inference/transport` and
-  `POST /api/v1/remote-inference/clear-local-override`. Start and stop ride
+  two v1-only routes: `GET /api/v1/remote-inference-status` and
+  `GET /api/v1/remote-inference/transport` (a third, `POST
+/api/v1/remote-inference/clear-local-override`, retired in S3.6 with the
+  scripts whose dotenv override it deleted). Start and stop ride
   `POST /api/v1/sessions` (kind `remote_inference`) and
   `POST /api/v1/sessions/{id}/stop` like every other robot-driving kind, so no
   new start/stop verbs exist and the flat surface did not grow.
@@ -481,7 +508,7 @@ What that slice landed, `robot_sync` only (all of it is now shared):
   Portal's schema fingerprint turns into a silently dropped stream — and shows
   a live status panel (phase ladder, operator, chunks, the lead-vs-margin
   bar, DEGRADE, chunk age, e2e p50/p95, rtt, and `holds` as a RATE) plus the
-  transport read-out with the clear-local-override button. Everything lives in
+  transport read-out. Everything lives in
   `frontend/src/components/remote-inference/`; the shared studio files carry
   only a run-mode entry, two guard flags and one mount point.
   Since the studio-panels rework merged, that block sits inside the Deploy
@@ -489,13 +516,14 @@ What that slice landed, `robot_sync` only (all of it is now shared):
   so a run started from another tab or through the API shows its status and
   its Stop as soon as this panel renders. (Before the rework it was gated on
   a policy being selected here, and was invisible until one was.)
-- **The Lab still does not launch Modal, and does not supervise the SFU.**
-  Lifecycle option A: a human runs `modal run
-makermodslab/drtc/modal_policy.py` in one terminal and (optionally)
-  `tools/drtc/local_sfu_ts.sh` in another; the session VERIFIES both before it
-  energizes anything and refuses with a coded `transport.*` otherwise. Option B
-  (the Lab launches the GPU side) is S3.5; option C (a supervised local SFU) is
-  S3.6, and only if earned.
+- **The Lab owns the SFU now, but still does not launch Modal.** S3.6 adopted
+  the bundled `livekit-server` (`makermodslab --sfu`) and its token broker, so
+  lifecycle option C is done: the SFU is a launcher child, not a session, and
+  the session mints the robot's token from it. What is left of option A is the
+  GPU half — a human runs `modal run makermodslab/drtc/modal_policy.py` in
+  another terminal, and the session VERIFIES an operator is in the room before
+  it energizes anything, refusing with a coded `transport.*` otherwise. The Lab
+  launching the GPU side is now S3.8.
 - **No CAN-arm support here, and none planned in this slice.** `maker_follower`
   / `metal_follower` are not registered with draccus in either entrypoint, so
   `--robot.type=maker_follower` fails at CLI-parse time inside the child —
