@@ -52,6 +52,15 @@ dev = [
     "ruff>=0.6",
     "pre-commit>=3.0",
 ]
+# Remote teleoperation / inference over LiveKit: the Portal lerobot plugins
+# (remote_host.py / remote_teleoperate.py import them lazily and refuse with
+# system.extra_missing when absent). Opt-in because livekit-portal's PyPI
+# wheels are tagged cp312 + Linux x86_64/aarch64 + Apple Silicon only — a
+# packaging artifact (the lib is a ctypes cdylib), to be fixed in our fork.
+remote = [
+    "lerobot-teleoperator-livekit>=0.2.5",
+    "lerobot-robot-livekit>=0.2.5",
+]
 test = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",

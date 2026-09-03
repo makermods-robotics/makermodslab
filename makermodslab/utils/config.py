@@ -415,6 +415,22 @@ def setup_calibration_files(leader_config: str, follower_config: str, arm_type: 
     return leader_config_name, follower_config_name
 
 
+def setup_leader_calibration_file(leader_config: str, arm_type: object = DEFAULT_ARM_TYPE) -> str:
+    """Leader twin of setup_follower_calibration_file (remote teleoperation
+    opens ONLY the leader). Validates the assigned config exists in the arm
+    type's leader library and returns its stem — lerobot's `id`."""
+    _require_assigned_config(leader_config, "leader")
+    leader_config_name = os.path.splitext(leader_config)[0]
+    leader_library = leader_config_path_for(arm_type)
+    target = os.path.join(leader_library, f"{leader_config_name}.json")
+    if not os.path.exists(target):
+        raise FileNotFoundError(
+            f"Leader calibration file not found: {target}. Calibrate the leader arm "
+            "(or assign an existing calibration) before starting."
+        )
+    return leader_config_name
+
+
 def setup_follower_calibration_file(follower_config: str, arm_type: object = DEFAULT_ARM_TYPE):
     """Setup follower calibration file in the correct location for replay functionality"""
     _require_assigned_config(follower_config, "follower")
@@ -932,10 +948,14 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     - "follower" — follower side only (inference, replay never open the leader
       bus, so an unassigned leader port / missing leader calibration must not
       block them; bimanual = both followers, still no leaders).
+    - "leader"   — leader side only (remote teleoperation drives a STATION's
+      follower with this node's leader; a laptop record with no follower at
+      all is exactly the expected shape).
     """
     if not record:
         return False
     follower_only = arms == "follower"
+    leader_only = arms == "leader"
 
     # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
     # stored value that still carries the extension (defensive).
@@ -947,6 +967,8 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     required_fields = _SINGLE_CONFIG_FIELDS + (_BIMANUAL_CONFIG_FIELDS if bimanual else ())
     if follower_only:
         required_fields = tuple(f for f in required_fields if "follower" in f)
+    elif leader_only:
+        required_fields = tuple(f for f in required_fields if "leader" in f)
     for field in required_fields:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
@@ -959,13 +981,14 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     follower_library = follower_config_path_for(record.get("arm_type"))
     leader_library = leader_config_path_for(record.get("arm_type"))
 
-    config_files = [
-        _file_for(follower_library, record["follower_config"]),
-    ]
+    config_files = []
+    if not leader_only:
+        config_files.append(_file_for(follower_library, record["follower_config"]))
     if not follower_only:
         config_files.append(_file_for(leader_library, record["leader_config"]))
     if bimanual:
-        config_files.append(_file_for(follower_library, record["right_follower_config"]))
+        if not leader_only:
+            config_files.append(_file_for(follower_library, record["right_follower_config"]))
         if not follower_only:
             config_files.append(_file_for(leader_library, record["right_leader_config"]))
     return all(os.path.exists(p) for p in config_files)
@@ -1088,6 +1111,21 @@ def stage_bimanual_calibrations(
         "follower",
     )
     return leader_staging, follower_staging, base
+
+
+def stage_bimanual_leader_calibrations(
+    base: str,
+    leader_left: str,
+    leader_right: str,
+    arm_type: object = DEFAULT_ARM_TYPE,
+) -> tuple[str, str]:
+    """Leader twin of stage_bimanual_follower_calibrations (remote
+    teleoperation opens only the leaders). Returns (leader_staging_dir, base)."""
+    leader_staging = _bimanual_leader_staging_dir(base)
+    _stage_one_side(
+        leader_config_path_for(arm_type), leader_staging, base, leader_left, leader_right, "leader"
+    )
+    return leader_staging, base
 
 
 def stage_bimanual_follower_calibrations(

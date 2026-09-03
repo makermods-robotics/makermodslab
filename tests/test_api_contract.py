@@ -262,6 +262,15 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # secret signs short-lived, role-scoped room tokens for Portal
         # participants. Born versioned; 409 sfu.disabled without --sfu.
         "POST /api/v1/sfu/token",
+        # Remote teleoperation (remote_host.py / remote_teleoperate.py): the
+        # station's hosting descriptor, the operator's status + camera
+        # re-stream, and the `remote` extra's install trio. Born versioned.
+        "GET /api/v1/hosting",
+        "GET /api/v1/remote-teleoperation",
+        "GET /api/v1/remote-teleoperation/camera/{name}",
+        "GET /api/v1/system/remote-extra",
+        "POST /api/v1/system/remote-extra/install",
+        "GET /api/v1/system/remote-extra/install-status",
         "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
         "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Environment proxies: the peer's own policy-extra status / install /
@@ -334,6 +343,8 @@ RESPONSE_MODEL_EXEMPT: frozenset[str] = frozenset(
         "GET /api/v1/calibration-configs/{device_type}/{config_name}/download",
         # StreamingResponse: MJPEG camera preview stream.
         "GET /api/v1/camera-preview/{index}",
+        # StreamingResponse: MJPEG re-stream of a remote station's camera.
+        "GET /api/v1/remote-teleoperation/camera/{name}",
         # FileResponse: episode MP4 (Range-request video playback).
         "GET /api/v1/datasets/episode-video",
         # Raw Response: checkpoint zip served as an attachment download.

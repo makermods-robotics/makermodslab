@@ -3109,6 +3109,8 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        remote_host as _remote_host,
+        remote_teleoperate as _remote_teleoperate,
         replay as _replay,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
@@ -3169,6 +3171,20 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                 "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+            }
+        if _remote_host.hosting_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                "code": ErrorCode.ROBOT_BUSY_HOSTING,
+            }
+        if _remote_teleoperate.remote_teleoperation_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote teleoperation is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
             }
         if _replay.replay_active:
             return {

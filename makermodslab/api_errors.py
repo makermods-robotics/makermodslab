@@ -57,6 +57,14 @@ class ErrorCode(StrEnum):
     ROBOT_BUSY_AUTO_CALIBRATION = "robot.busy.auto_calibration"
     ROBOT_BUSY_WIGGLE = "robot.busy.wiggle"
     ROBOT_BUSY_RELEASING = "robot.busy.releasing"
+    # The remote pair (remote_host.py / remote_teleoperate.py): `hosting`
+    # holds the follower + cameras for a LiveKit room; `remote_teleoperation`
+    # holds the leader while driving a remote station's follower.
+    ROBOT_BUSY_HOSTING = "robot.busy.hosting"
+    ROBOT_BUSY_REMOTE_TELEOPERATION = "robot.busy.remote_teleoperation"
+    # The operator's leader and the station's follower disagree on the motor
+    # set (or arm family) — Portal would silently drop every packet.
+    ROBOT_SCHEMA_MISMATCH = "robot.schema_mismatch"
     # A live LOCAL training run holds the machine (GPU + the arms' USB bus).
     # The reverse direction never refuses: a submit made while a feature runs
     # QUEUES instead (jobs.JobRegistry._robot_busy).
@@ -115,6 +123,9 @@ class ErrorCode(StrEnum):
     NODE_UNREACHABLE = "node.unreachable"
     NODE_DUPLICATE = "node.duplicate"
     NODE_SELF = "node.self"
+    # The station answered but has no hosting session up: the user there has
+    # to press "Available for remote teleop" first.
+    NODE_NOT_HOSTING = "node.not_hosting"
 
     # session.* — the /api/v1/sessions surface (sessions.py). `held`: another
     # session holds the hardware (details name the holder). `not_found`: a
@@ -136,6 +147,9 @@ class ErrorCode(StrEnum):
     # would orphan a live pip subprocess mid-write — retry once it finishes.
     SYSTEM_RESTART_UNSUPPORTED = "system.restart_unsupported"
     SYSTEM_INSTALL_IN_PROGRESS = "system.install_in_progress"
+    # An optional extra the flow needs is not importable (the `remote` extra
+    # for the LiveKit Portal plugins) — install it, then retry.
+    SYSTEM_EXTRA_MISSING = "system.extra_missing"
 
     # sfu.* — the bundled LiveKit server (sfu.py). `disabled`: this process
     # was started without --sfu (or an external SFU configured), so there is

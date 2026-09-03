@@ -283,6 +283,8 @@ class CalibrationManager:
                 from . import (
                     auto_calibrate as _auto_calibrate,
                     record as _record,
+                    remote_host as _remote_host,
+                    remote_teleoperate as _remote_teleoperate,
                     replay as _replay,
                     rollout as _rollout,
                     teleoperate as _teleoperate,
@@ -318,6 +320,18 @@ class CalibrationManager:
                         "success": False,
                         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
                         "code": ErrorCode.ROBOT_BUSY_WIGGLE,
+                    }
+                if _remote_host.hosting_active:
+                    return {
+                        "success": False,
+                        "message": "This robot is hosted for remote teleoperation. Stop hosting first.",
+                        "code": ErrorCode.ROBOT_BUSY_HOSTING,
+                    }
+                if _remote_teleoperate.remote_teleoperation_active:
+                    return {
+                        "success": False,
+                        "message": "Remote teleoperation is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_REMOTE_TELEOPERATION,
                     }
                 if _replay.replay_active:
                     return {

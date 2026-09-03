@@ -53,6 +53,8 @@ from . import (
     datasets as dataset_browser,
     models as model_browser,
     record as record_state,
+    remote_host,
+    remote_teleoperate,
     rollout as rollout_state,
     session_events,
     sfu,
@@ -209,6 +211,7 @@ from .schemas.nodes import (
     NodeListResponse,
     NodeRemoveResponse,
 )
+from .schemas.remote import HostingStatusResponse, RemoteTeleoperationStatusResponse
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
@@ -303,10 +306,13 @@ from .utils.hf_auth import (
 )
 from .utils.system import (
     handle_get_policy_extra,
+    handle_get_remote_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
     handle_install_policy_extra,
     handle_install_policy_extra_status,
+    handle_install_remote_extra,
+    handle_install_remote_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
     handle_install_wandb_extra,
@@ -1157,8 +1163,19 @@ def health_check(request: Request):
                 if sfu.sfu_enabled()
                 else {}
             ),
+            # Present only while a hosting session is live — the robot this
+            # station offers for remote teleoperation. A laptop's station
+            # picker filters on it. Same absent-means-none rule.
+            **_hosting_capability(),
         },
     }
+
+
+def _hosting_capability() -> dict:
+    descriptor = remote_host.current_descriptor
+    if not remote_host.hosting_active or not descriptor:
+        return {}
+    return {"hosting": {"robot": descriptor["robot"], "arm_type": descriptor["arm_type"]}}
 
 
 # --- SFU token broker (v1-only surface; see v1_router note above) ---
@@ -1212,6 +1229,55 @@ def issue_sfu_token(body: SfuTokenBody, request: Request):
         "role": body.role,
         "expires_at": expires_at,
     }
+
+
+# --- Remote teleoperation (v1-only surface; see v1_router note above) ---
+
+
+@v1_router.get("/hosting", response_model=HostingStatusResponse, tags=["remote"])
+def get_hosting_status(request: Request):
+    """The station's hosting descriptor + status (remote_host.py). An
+    operator node reads this (through its registry) to learn the room, the
+    codec/fps, and the motor/camera schema before joining; the URL is
+    derived from the host the caller reached this API on."""
+    return remote_host.handle_hosting_status(request.url.hostname or "localhost")
+
+
+@v1_router.get("/remote-teleoperation", response_model=RemoteTeleoperationStatusResponse, tags=["remote"])
+def get_remote_teleoperation_status():
+    """The operator side's status (remote_teleoperate.py): which station,
+    which room, the remote cameras being re-streamed, Portal RTT metrics."""
+    return remote_teleoperate.handle_remote_teleoperation_status()
+
+
+@v1_router.get("/remote-teleoperation/camera/{name}", tags=["remote"])
+def get_remote_teleoperation_camera(name: str):
+    """MJPEG re-stream of one remote camera during a remote teleoperation
+    session, from the frames Portal delivers — the existing camera tiles
+    consume it unchanged. 404 when no session (or no such camera)."""
+    if not remote_teleoperate.remote_teleoperation_active or name not in remote_teleoperate.current_cameras:
+        raise ApiError(404, f"No remote camera named {name!r} is streaming.", code=ErrorCode.ROBOT_NOT_FOUND)
+    return StreamingResponse(
+        remote_teleoperate.camera_stream(name), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+@v1_router.get("/system/remote-extra", response_model=ExtraStatus, tags=["system"])
+def get_remote_extra():
+    """Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable."""
+    return handle_get_remote_extra()
+
+
+@v1_router.post("/system/remote-extra/install", response_model=InstallStartResponse, tags=["system"])
+def install_remote_extra():
+    """Spawn `pip install makermodslab[remote]` as a background subprocess. No-op if already running."""
+    return handle_install_remote_extra()
+
+
+@v1_router.get("/system/remote-extra/install-status", response_model=InstallStatusResponse, tags=["system"])
+def install_remote_extra_status():
+    """Current install state plus any pending log lines (drained on read)."""
+    return handle_install_remote_extra_status()
 
 
 # --- Node registry (v1-only surface; see v1_router note above) ---

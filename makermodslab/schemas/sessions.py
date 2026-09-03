@@ -88,6 +88,33 @@ class TeleoperationOptions(BaseModel):
     skip_identity_check: bool = False
 
 
+class HostingOptions(BaseModel):
+    """Station side of remote teleoperation (remote_host.py): publish this
+    robot's follower + cameras into the node's LiveKit room and execute the
+    active operator's actions. `fps` paces the whole loop (frames, state and
+    action application — one knob); `video_codec` is the wire transport for
+    frames and MUST match what the operator will request, so it is published
+    in the hosting descriptor and the operator copies it from there."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fps: int = Field(30, ge=5, le=60)
+    video_codec: Literal["H264", "MJPEG", "PNG", "RAW"] = "H264"
+    skip_identity_check: bool = False
+
+
+class RemoteTeleoperationOptions(BaseModel):
+    """Operator side (remote_teleoperate.py): drive a STATION's follower with
+    this node's leader. `station` is the peer's instance id from the node
+    registry; everything else (room, codec, fps, motors, cameras) comes from
+    the station's live hosting descriptor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    station: str = Field(min_length=1, max_length=64)
+    skip_identity_check: bool = False
+
+
 class RecordingOptions(BaseModel):
     """Dataset-shaped fields of record.py's RecordingRequest. Cameras are NOT
     here: they resolve server-side from the robot record, as they already do
@@ -226,7 +253,16 @@ class SessionStartBody(BaseModel):
     is no lease and no timeout-stop. Both fields' shape checks live in the
     handler (see the constants above)."""
 
-    kind: Literal["teleoperation", "recording", "inference", "replay", "calibration", "auto_calibration"]
+    kind: Literal[
+        "teleoperation",
+        "recording",
+        "inference",
+        "replay",
+        "calibration",
+        "auto_calibration",
+        "hosting",
+        "remote_teleoperation",
+    ]
     robot: str
     owner: str | None = None
     # None → the per-kind default (LEASE_TIMEOUT_AUTO_CALIBRATION_S for

@@ -71,6 +71,10 @@ SFU_UDP_PORT = 7882
 # infer from the request).
 ENV_KEY_FILE = "MAKERMODSLAB_SFU_KEY_FILE"
 ENV_PORT = "MAKERMODSLAB_SFU_PORT"
+# The host THIS process can reach its own SFU on (the bind host, or loopback
+# for the wildcard) — for in-process participants (the hosting worker), which
+# have no request to derive a host from.
+ENV_HOST = "MAKERMODSLAB_SFU_HOST"
 ENV_URL = "MAKERMODSLAB_SFU_URL"
 ENV_BIN = "MAKERMODSLAB_LIVEKIT_BIN"
 
@@ -212,6 +216,19 @@ def sfu_url(request_host: str, env: Mapping[str, str] | None = None) -> str:
         return override
     port = env.get(ENV_PORT) or str(SFU_HTTP_PORT)
     host = f"[{request_host}]" if ":" in request_host else request_host
+    return f"ws://{host}:{port}"
+
+
+def local_url(env: Mapping[str, str] | None = None) -> str:
+    """The signalling URL for a participant running INSIDE this process
+    (remote_host's worker): MAKERMODSLAB_SFU_URL if set, else the bind host
+    the launcher exported (loopback for the wildcard bind) plus the port."""
+    env = os.environ if env is None else env
+    override = env.get(ENV_URL)
+    if override:
+        return override
+    host = env.get(ENV_HOST) or "127.0.0.1"
+    port = env.get(ENV_PORT) or str(SFU_HTTP_PORT)
     return f"ws://{host}:{port}"
 
 

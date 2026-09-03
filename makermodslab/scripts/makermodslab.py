@@ -369,6 +369,9 @@ def _start_sfu(binary: str, host: str) -> subprocess.Popen:
         sys.exit(1)
     os.environ[sfu.ENV_KEY_FILE] = key_file
     os.environ[sfu.ENV_PORT] = str(sfu.SFU_HTTP_PORT)
+    # In-process participants (a hosting session) dial the SFU on the bind
+    # host; the wildcard bind is reachable on loopback.
+    os.environ[sfu.ENV_HOST] = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
     logger.info(
         "   SFU ports: %d/tcp (signalling), %d/tcp + %d/udp (media) — open these for remote peers",
         sfu.SFU_HTTP_PORT,

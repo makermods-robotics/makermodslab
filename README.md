@@ -113,6 +113,12 @@ It needs the `livekit-server` binary on your PATH — `brew install livekit` on 
 hint if it is missing. Peers fetch short-lived room tokens from `POST /api/v1/sfu/token`; the signing
 secret stays in a 0600 file on the station. Open `7880/tcp`, `7881/tcp` and `7882/udp` for remote peers.
 
+**Remote teleoperation.** With the SFU up on the station, press **Available for remote teleop** on the
+station's robot (its follower and cameras join the room). On your laptop, plug in the leader arm, pick the
+station in **Remote**, and drive: the station's cameras and the real follower's pose show up in the same
+teleop view. Both machines need the `remote` extra (`uv pip install 'makermodslab[remote]'`, Python 3.12;
+Linux x86_64/aarch64 or Apple Silicon), and the station must be a registered peer node.
+
 **Peer nodes are verified, not trusted.** A node is only added once its `/api/v1/health` identity
 document checks out, and a discovered peer gets re-verified every time.
 

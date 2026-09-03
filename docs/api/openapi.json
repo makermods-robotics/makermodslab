@@ -1328,6 +1328,198 @@
         "title": "HfLoginResponse",
         "type": "object"
       },
+      "HostingCamera": {
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "width",
+          "height"
+        ],
+        "title": "HostingCamera",
+        "type": "object"
+      },
+      "HostingDescriptor": {
+        "description": "What an operator needs to join this station's room and agree on the\nwire contract (remote_host.build_descriptor). `motors` are the bare\nmotor names (bimanual: `left_`/`right_` prefixed) — Portal's state and\naction schema; both peers must declare the same set in the same order.\n`joint_ranges_deg` is the SO-101 follower's calibrated full travel per\nbody joint, so the OPERATOR can render the remote arm on the URDF viewer\nwithout holding the station's calibration file; absent for the CAN\narms, whose angles are already degrees.",
+        "properties": {
+          "active_operator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Operator"
+          },
+          "arm_type": {
+            "title": "Arm Type",
+            "type": "string"
+          },
+          "cameras": {
+            "items": {
+              "$ref": "#/components/schemas/HostingCamera"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "fps": {
+            "title": "Fps",
+            "type": "integer"
+          },
+          "joint_ranges_deg": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Ranges Deg",
+            "type": "object"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "motors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Motors",
+            "type": "array"
+          },
+          "robot": {
+            "title": "Robot",
+            "type": "string"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "video_codec": {
+            "enum": [
+              "H264",
+              "MJPEG",
+              "PNG",
+              "RAW"
+            ],
+            "title": "Video Codec",
+            "type": "string"
+          }
+        },
+        "required": [
+          "robot",
+          "arm_type",
+          "mode",
+          "room",
+          "url",
+          "fps",
+          "video_codec",
+          "motors",
+          "cameras",
+          "joint_ranges_deg",
+          "active_operator"
+        ],
+        "title": "HostingDescriptor",
+        "type": "object"
+      },
+      "HostingStatusResponse": {
+        "description": "remote_host.handle_hosting_status — the descriptor rides only while a\nhosting session is live (null otherwise); the rest mirrors the\nteleoperation status payload's post-session fields.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "hosting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostingDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hosting_active": {
+            "title": "Hosting Active",
+            "type": "boolean"
+          },
+          "last_cleanup_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup Error"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "releasing": {
+            "title": "Releasing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "hosting_active",
+          "hosting",
+          "releasing",
+          "last_cleanup_error",
+          "outcome",
+          "error",
+          "hint",
+          "message"
+        ],
+        "title": "HostingStatusResponse",
+        "type": "object"
+      },
       "HubJobDismissResponse": {
         "description": "server.py dismiss_hub_job — job_id is the stripped id that was persisted\nto the dismissal file, not necessarily the caller's raw input.",
         "properties": {
@@ -3688,6 +3880,200 @@
         "title": "ReleaseCanTorqueResponse",
         "type": "object"
       },
+      "RemoteStation": {
+        "properties": {
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_id",
+          "name",
+          "url"
+        ],
+        "title": "RemoteStation",
+        "type": "object"
+      },
+      "RemoteTeleoperationMetrics": {
+        "description": "Portal transport metrics, in ms (None until the first sample).",
+        "properties": {
+          "observations": {
+            "title": "Observations",
+            "type": "integer"
+          },
+          "rtt_ms_last": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms Last"
+          },
+          "rtt_ms_mean": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms Mean"
+          },
+          "rtt_ms_p95": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Ms P95"
+          },
+          "states_dropped": {
+            "title": "States Dropped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rtt_ms_last",
+          "rtt_ms_mean",
+          "rtt_ms_p95",
+          "observations",
+          "states_dropped"
+        ],
+        "title": "RemoteTeleoperationMetrics",
+        "type": "object"
+      },
+      "RemoteTeleoperationStatusResponse": {
+        "description": "remote_teleoperate.handle_remote_teleoperation_status.",
+        "properties": {
+          "cameras": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cameras",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "last_cleanup_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup Error"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "metrics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteTeleoperationMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "remote_teleoperation_active": {
+            "title": "Remote Teleoperation Active",
+            "type": "boolean"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          },
+          "station": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteStation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "remote_teleoperation_active",
+          "station",
+          "room",
+          "cameras",
+          "metrics",
+          "last_cleanup_error",
+          "outcome",
+          "error",
+          "hint",
+          "message"
+        ],
+        "title": "RemoteTeleoperationStatusResponse",
+        "type": "object"
+      },
       "RenameJobBody": {
         "properties": {
           "new_name": {
@@ -4097,7 +4483,9 @@
               "inference",
               "replay",
               "calibration",
-              "auto_calibration"
+              "auto_calibration",
+              "hosting",
+              "remote_teleoperation"
             ],
             "title": "Kind",
             "type": "string"
@@ -7144,6 +7532,28 @@
         ]
       }
     },
+    "/api/v1/hosting": {
+      "get": {
+        "description": "The station's hosting descriptor + status (remote_host.py). An\noperator node reads this (through its registry) to learn the room, the\ncodec/fps, and the motor/camera schema before joining; the URL is\nderived from the host the caller reached this API on.",
+        "operationId": "get_hosting_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostingStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Hosting Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
     "/api/v1/identify-arm": {
       "post": {
         "description": "The inverse of /wiggle: the user swings an arm's base (shoulder pan) by\nhand and we report which port saw the motion. Read-only — no motor writes.",
@@ -9361,6 +9771,69 @@
         "summary": "Recording Status"
       }
     },
+    "/api/v1/remote-teleoperation": {
+      "get": {
+        "description": "The operator side's status (remote_teleoperate.py): which station,\nwhich room, the remote cameras being re-streamed, Portal RTT metrics.",
+        "operationId": "get_remote_teleoperation_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteTeleoperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Teleoperation Status",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/camera/{name}": {
+      "get": {
+        "description": "MJPEG re-stream of one remote camera during a remote teleoperation\nsession, from the frames Portal delivers — the existing camera tiles\nconsume it unchanged. 404 when no session (or no such camera).",
+        "operationId": "get_remote_teleoperation_camera",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Remote Teleoperation Camera",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
     "/api/v1/replay-status": {
       "get": {
         "operationId": "replay_status",
@@ -10428,6 +10901,72 @@
           }
         },
         "summary": "Install Policy Extra Status",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra": {
+      "get": {
+        "description": "Whether the `remote` extra (LiveKit Portal's lerobot plugins) is importable.",
+        "operationId": "get_remote_extra",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtraStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Extra",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra/install": {
+      "post": {
+        "description": "Spawn `pip install makermodslab[remote]` as a background subprocess. No-op if already running.",
+        "operationId": "install_remote_extra",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Remote Extra",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/v1/system/remote-extra/install-status": {
+      "get": {
+        "description": "Current install state plus any pending log lines (drained on read).",
+        "operationId": "install_remote_extra_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Install Remote Extra Status",
         "tags": [
           "system"
         ]

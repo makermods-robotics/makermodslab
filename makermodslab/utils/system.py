@@ -228,6 +228,16 @@ class InstallManager:
 
 training_install_manager = InstallManager("accelerate")
 wandb_install_manager = InstallManager("wandb")
+# The LiveKit Portal lerobot plugins (remote teleoperation / inference).
+# Installed as makermodslab's own `remote` extra so the pins live in one
+# place (pyproject.toml); probed by the module remote_host.py imports.
+REMOTE_PROBE_MODULE = "lerobot_teleoperator_livekit"
+REMOTE_INSTALL_TARGET = "makermodslab[remote]"
+REMOTE_INSTALL_HINT = (
+    "Remote teleoperation needs the LiveKit Portal plugins: "
+    "`uv pip install 'makermodslab[remote]'` (Python 3.12; Linux x86_64/aarch64 or Apple Silicon), then restart."
+)
+remote_install_manager = InstallManager(REMOTE_INSTALL_TARGET)
 
 
 def handle_get_training_extra() -> dict[str, Any]:
@@ -243,6 +253,21 @@ def handle_install_training_extra() -> dict[str, Any]:
 
 def handle_install_training_extra_status() -> dict[str, Any]:
     return training_install_manager.get_status()
+
+
+def handle_get_remote_extra() -> dict[str, Any]:
+    return {
+        "available": _extra_available(REMOTE_PROBE_MODULE),
+        "install_hint": REMOTE_INSTALL_HINT,
+    }
+
+
+def handle_install_remote_extra() -> dict[str, Any]:
+    return remote_install_manager.start()
+
+
+def handle_install_remote_extra_status() -> dict[str, Any]:
+    return remote_install_manager.get_status()
 
 
 def handle_get_wandb_extra() -> dict[str, Any]:
