@@ -26,14 +26,14 @@ Generic exporter joint names, base → wrist, one per Maker motor. The
 motor → joint map and each joint's sign/offset live in
 `makermodslab/teleoperate.py` `_MAKER_URDF_JOINTS`:
 
-| URDF joint | Maker motor |
-|---|---|
-| `link_002_joint` | `shoulder_pan` |
+| URDF joint       | Maker motor     |
+| ---------------- | --------------- |
+| `link_002_joint` | `shoulder_pan`  |
 | `link_003_joint` | `shoulder_lift` |
-| `link_004_joint` | `elbow_flex` |
-| `link_005_joint` | `wrist_flex` |
-| `link_006_joint` | `wrist_yaw` |
-| `link_007_joint` | `wrist_roll` |
+| `link_004_joint` | `elbow_flex`    |
+| `link_005_joint` | `wrist_flex`    |
+| `link_006_joint` | `wrist_yaw`     |
+| `link_007_joint` | `wrist_roll`    |
 
 There is no gripper joint — the gripper geometry is rigid on `link_007`. The
 gripper angle is still broadcast under `joints_deg` for the numeric value.
