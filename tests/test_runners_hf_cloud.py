@@ -114,6 +114,39 @@ def test_resolve_wandb_api_key_returns_none_when_password_is_empty(
     assert resolve_wandb_api_key() is None
 
 
+def test_cloud_run_forwards_the_wandb_key_as_a_job_secret(tmp_path, monkeypatch) -> None:
+    """The one place the key is read for its VALUE rather than its presence.
+
+    It must ride `secrets` (like HF_TOKEN), never `env`: HF Jobs redacts
+    secrets from the job's environment inspection and logs, so a W&B key in
+    `env` would be readable by anyone who can see the job."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.get_token", lambda: "hf-token")
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.cached_whoami", lambda: {"name": "alice"})
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.resolve_wandb_api_key", lambda: "wandb-key")
+
+    runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "t4-small")
+    api = MagicMock()
+    api.run_job.return_value = MagicMock(id="hfjob-1", url="https://hf/jobs/1")
+    runner._api = api
+    monkeypatch.setattr(runner, "_ensure_dataset_on_hub", lambda repo_id: None)
+    monkeypatch.setattr(runner, "_start_worker_threads", lambda label: None)
+
+    config = TrainingRequest(dataset_repo_id="user/ds", wandb_enable=True, wandb_project="proj")
+    runner.start("child_run", config, "/host/out")
+
+    kwargs = api.run_job.call_args.kwargs
+    assert kwargs["secrets"]["WANDB_API_KEY"] == "wandb-key"
+    assert kwargs["secrets"]["HF_TOKEN"] == "hf-token"
+    # Never in `env` — that channel is not redacted.
+    assert "WANDB_API_KEY" not in (kwargs.get("env") or {})
+
+
 # -- pinned-lerobot spec derivation (version-skew fix) --
 
 

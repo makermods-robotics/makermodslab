@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
@@ -16,8 +16,6 @@ import {
   RESUME_INHERITED_NOTE,
   RESUME_INHERITED_SHORT,
 } from "../types";
-import WandbInstallDialog from "../WandbInstallDialog";
-import { useApi } from "@/contexts/ApiContext";
 
 /** The run's headline settings — steps, batch size, name, and W&B logging.
  * Flat: each control carries its own <Label> and the section has no eyebrow
@@ -27,46 +25,20 @@ import { useApi } from "@/contexts/ApiContext";
  * On a resume, `steps` stays editable (the resume branch passes --steps, and
  * raising it is the whole point of a continuation) while `batch_size` does not
  * — lerobot takes it from the checkpoint's train_config.json. The whole W&B
- * group is locked for the same reason: the resume branch emits no --wandb.*, so
- * lerobot logs (or doesn't) exactly as the parent run's config said. The one
- * live effect the toggle keeps is a bad one — HfCloudJobRunner reads
- * `wandb_enable` when assembling job secrets and 400s on a missing
- * WANDB_API_KEY, so leaving it enabled could only ever block a launch without
- * turning any logging on. */
+ * group is locked for a stronger reason: lerobot re-opens the PARENT's W&B run
+ * (`wandb.init(resume="must")` with the run id stored in the checkpoint), so a
+ * continuation cannot log anywhere else. JobRegistry.start inherits
+ * enable/project/entity from the parent record and ignores what the form sends;
+ * the values shown are the parent's, which is what the run really uses.
+ *
+ * On a FRESH run the toggle defaults ON once the backend reports a resolvable
+ * W&B API key (see TrainingConfigurator); with no key it stays off, and a run
+ * that enables it anyway is refused at submit time with the reason. */
 const EssentialsCard: React.FC<ConfigComponentProps> = ({
   config,
   updateConfig,
   resumeLocked,
 }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
-  const [wandbDialogOpen, setWandbDialogOpen] = useState(false);
-  const [wandbInstallHint, setWandbInstallHint] = useState("pip install wandb");
-
-  const handleWandbToggle = async (checked: boolean) => {
-    if (!checked) {
-      updateConfig("wandb_enable", false);
-      return;
-    }
-    // Check availability before flipping the switch on. If wandb isn't
-    // importable in this MakerMods Lab process, surface the same install flow used
-    // for the training extra (accelerate) instead of letting the user start
-    // a run that will fail.
-    try {
-      const r = await fetchWithHeaders(`${baseUrl}/system/wandb-extra`);
-      const data: { available: boolean; install_hint: string } = await r.json();
-      if (data.available) {
-        updateConfig("wandb_enable", true);
-      } else {
-        setWandbInstallHint(data.install_hint);
-        setWandbDialogOpen(true);
-      }
-    } catch {
-      // Backend unreachable — let the user proceed; training start will
-      // surface the real error if wandb is genuinely missing.
-      updateConfig("wandb_enable", true);
-    }
-  };
-
   // The step this continuation starts FROM, beside the name it continues.
   // Requested here specifically: the name is what the user recognises the run
   // by, and the starting step is the one number that says which attempt this
@@ -156,44 +128,47 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
           <Switch
             id="wandb_enable"
             checked={config.wandb_enable}
-            onCheckedChange={handleWandbToggle}
+            onCheckedChange={(checked) => updateConfig("wandb_enable", checked)}
             disabled={resumeLocked}
             className="data-[state=checked]:bg-primary"
           />
           <Label htmlFor="wandb_enable">Log to Weights &amp; Biases</Label>
         </div>
 
-        <WandbInstallDialog
-          open={wandbDialogOpen}
-          onOpenChange={setWandbDialogOpen}
-          installHint={wandbInstallHint}
-        />
-
         {config.wandb_enable && (
           <div className="space-y-4 border-l-2 border-border pl-4">
             <div className="space-y-2">
-              <Label htmlFor="wandb_project">W&amp;B project name</Label>
+              <Label htmlFor="wandb_project">Project</Label>
               <Input
                 id="wandb_project"
                 value={config.wandb_project || ""}
                 onChange={(e) =>
                   updateConfig("wandb_project", e.target.value || undefined)
                 }
-                placeholder="my-robotics-project"
+                placeholder="lerobot (default)"
                 disabled={resumeLocked}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="wandb_entity">W&amp;B entity (optional)</Label>
+              <Label htmlFor="wandb_entity">Entity</Label>
               <Input
                 id="wandb_entity"
                 value={config.wandb_entity || ""}
                 onChange={(e) =>
                   updateConfig("wandb_entity", e.target.value || undefined)
                 }
-                placeholder="your-username"
+                placeholder="your-username or team"
                 disabled={resumeLocked}
               />
+              {/* The 403 trap, stated as what the field IS rather than as a
+                  warning: W&B rejects a run aimed at an entity you aren't a
+                  member of, and it rejects it at run start, long after Start
+                  was clicked. Naming "a team you belong to" is what stops
+                  someone typing a placeholder word into it. */}
+              <p className="text-xs text-muted-foreground">
+                Your W&amp;B username or a team you belong to. Blank = your
+                personal account.
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="wandb_notes">W&amp;B notes (optional)</Label>
@@ -234,7 +209,9 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
                 disabled={resumeLocked}
                 className="data-[state=checked]:bg-primary"
               />
-              <Label htmlFor="wandb_disable_artifact">Disable artifacts</Label>
+              <Label htmlFor="wandb_disable_artifact">
+                Don't upload checkpoints to W&amp;B
+              </Label>
             </div>
           </div>
         )}

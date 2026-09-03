@@ -277,9 +277,14 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     resume_from_checkpoint_job_id: resumeSeed?.checkpointJobId,
     finetune_from_job_id: finetuneSeed?.jobId,
     finetune_from_step: finetuneSeed?.step ?? undefined,
+    // Off here, and switched on by the credentials probe below once a key is
+    // confirmed — an initial value can't wait on an async answer. A RESUME is
+    // never defaulted: its W&B state is inherited server-side.
     wandb_enable: false,
     wandb_mode: "online",
-    wandb_disable_artifact: false,
+    // TRUE = artifacts off. Per-checkpoint model uploads to W&B are opt-in,
+    // not a side effect of turning logging on.
+    wandb_disable_artifact: true,
     policy_device: resumeSeed?.policyDevice ?? "auto",
     // A resume prefills the parent run's own AMP setting (it may not match
     // today's per-policy default); a fresh run gets the per-policy default.
@@ -299,6 +304,12 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // stays editable so the user can raise it for a longer tail.
     hf_job_timeout: resumeSeed?.hfJobTimeout,
   });
+
+  // Whether the user has touched the W&B toggle, and whether the credentials
+  // probe has already had its one say. Refs, not state: nothing renders from
+  // them, and the default-on effect below must not re-run when they change.
+  const wandbEnableTouched = useRef(false);
+  const wandbDefaultApplied = useRef(false);
 
   // The config the form actually reads: internal state overlaid with the
   // controlled policy type + dataset. Keeps EssentialsCard's frozen dataset
@@ -395,6 +406,46 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
       .finally(() => setHardwareLoading(false));
   }, [baseUrl, fetchWithHeaders, auth.status]);
 
+  // Default W&B logging ON once the backend confirms it can resolve an API key.
+  // A UI-level default only: the backend's `TrainingRequest.wandb_enable` still
+  // defaults false, so non-UI callers keep opt-in semantics and the submit-time
+  // preflight still protects them.
+  //
+  // Three guards, each earning its place:
+  //   * `resumeSeed` — a continuation's W&B state is inherited from its parent
+  //     server-side, never defaulted; enabling it here could only contradict
+  //     what JobRegistry.start is about to write.
+  //   * `wandbDefaultApplied` — fires at most once per mounted form, so a
+  //     re-render or a re-answered probe can't re-assert the default after the
+  //     user has moved on.
+  //   * `wandbEnableTouched` — an explicit decision always wins, including one
+  //     made while the probe was still in flight. The probe answers
+  //     asynchronously, so without this a late "yes, there's a key" would flip
+  //     the toggle back on under someone who had just switched it off.
+  //
+  // A failed probe leaves `available` false and changes nothing: not evidence a
+  // key exists, so it must not turn logging on.
+  useEffect(() => {
+    if (resumeSeed || wandbDefaultApplied.current) return;
+    let cancelled = false;
+    fetchWithHeaders(`${baseUrl}/system/wandb-credentials`)
+      .then((r) => r.json())
+      .then((data: { available: boolean }) => {
+        if (cancelled || !data.available) return;
+        wandbDefaultApplied.current = true;
+        if (wandbEnableTouched.current) return;
+        setTrainingConfig((prev) =>
+          prev.wandb_enable ? prev : { ...prev, wandb_enable: true },
+        );
+      })
+      .catch(() => {
+        /* older backend / transport blip — leave the default off */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl, fetchWithHeaders, resumeSeed]);
+
   const updateConfig = <T extends keyof TrainingConfig>(
     key: T,
     value: TrainingConfig[T],
@@ -408,6 +459,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     }
     if (key === "dataset_repo_id") return;
     if (key === "policy_use_amp") ampTouchedRef.current = true;
+    if (key === "wandb_enable") wandbEnableTouched.current = true;
     setTrainingConfig((prev) => ({ ...prev, [key]: value }));
   };
 
