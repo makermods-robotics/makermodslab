@@ -1,11 +1,12 @@
 # Calibration start-pose photos
 
-Start-pose stills for the SO-101 calibration panel in
+Start-pose stills for the calibration panel in
 `components/dialogs/RobotConfigDialog.tsx`.
 
-| file                          | shown for                                |
-| ----------------------------- | ---------------------------------------- |
-| `so101-manual-start-pose.jpg` | Calibrate manually — the middle position |
+| file                                | shown for                                       |
+| ----------------------------------- | ----------------------------------------------- |
+| `so101-manual-start-pose.jpg`       | SO-101 manual calibration — the middle position |
+| `star-arm-102-leader-zero-pose.jpg` | Maker and Metal leader zero-pose calibration    |
 
 The AUTO-calibration start pose is not here: it is the SO-101's folded resting
 pose, which `assets/arms/so101.jpg` already shows, so that file is reused
