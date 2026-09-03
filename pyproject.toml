@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "MakerModsLab"
 version = "0.1.0"
-description = "LeRobot Lab - A web interface for robotics with lerobot integration"
+description = "A web UI interface for policy development. Maker Arm, Metal Arm and SO-101, single or bimanual"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -19,9 +19,9 @@ dependencies = [
     "websockets>=15.0.1",
     "uvicorn>=0.24.0",
     "psutil>=5.9.0",
-    # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (b968c0c01), the
+    # Pinned to makermods-robotics/lerobot @ arm/makermods-combined (eaab69339), the
     # two-parent merge of robot/makermods-maker-arm (af9072a8c — the previous pin,
-    # via the Maker-Mods org) and arm/makermods-metal (2503a5d7a). Upstream v0.6.2
+    # via the Maker-Mods org) and arm/makermods-metal (85a3000d4). Upstream v0.6.2
     # base; a strict superset of the Maker-only pin, adding the Metal arm's
     # MetalFollower/BiMetalFollower (7-DOF Damiao CAN) and metal_leader stack.
     # Pinned by SHA, not branch name — a moving pin makes every unrelated failure
@@ -33,7 +33,7 @@ dependencies = [
     # Star Arm 102 leader speaks. NEVER the fork's `metal` extra here — it
     # drags in Pinocchio (`pin`, no Windows wheels) that only the
     # not-yet-integrated gravity leader needs.
-    "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@b968c0c015e16699a225070f677dc644543707f0",
+    "lerobot[core_scripts,feetech,training,maker,damiao,rebot] @ git+https://github.com/makermods-robotics/lerobot.git@eaab69339120787948776e4354dcee09f501fd16",
     # Windows-only: real DirectShow camera names for /available-cameras so the
     # frontend can match a camera to its browser deviceId (issues #12, #16).
     # Guarded by try/except at the call site, so its absence degrades gracefully.
@@ -136,8 +136,9 @@ files.extend-exclude = [
 # short and justified — a blanket ignore defeats the point of running typos.
 [tool.typos.default]
 extend-ignore-re = [
-    # Hyphenated "mis-" prefix (mis-group, mis-bind) reads as a misspelt "miss".
-    'mis-[a-z]+',
+    # Hyphenated "mis-" prefix (mis-group, mis-bind, "Mis-stamped" at the start
+    # of a sentence) reads as a misspelt "miss".
+    '[Mm]is-[a-z]+',
     # Regex fragment inside a pytest.raises(match=...), not prose.
     '\[Ff\]ine-tun',
     # Short lambda params in a test stub: le = leader, fo = follower.

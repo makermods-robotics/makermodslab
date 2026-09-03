@@ -46,3 +46,40 @@ export function isCanArmType(armType: ArmType | undefined): boolean {
 export function jointsPerArm(armType: ArmType | undefined): number {
   return isCanArmType(armType) ? 7 : 6;
 }
+
+/**
+ * Best-effort arm family for a dataset's / checkpoint's raw `robot_type` string
+ * (lerobot writes the robot's `.name`: "so101_follower", "bi_maker_follower",
+ * …; datasets recorded elsewhere carry anything). The client mirror of
+ * `arm_capabilities.arm_type_from_robot_type`.
+ *
+ * Returns null — NOT a default — when the string is missing or unrecognized:
+ * the cross-arm warnings that call this must stay silent when the arm can't be
+ * established rather than raise a false alarm.
+ */
+export function armTypeFromRobotType(
+  robotType: string | null | undefined,
+): ArmType | null {
+  if (!robotType) return null;
+  const text = robotType.trim().toLowerCase();
+  if (!text) return null;
+  if (text.includes("maker")) return "maker";
+  if (text.includes("metal")) return "metal";
+  if (
+    text.includes("so100") ||
+    text.includes("so101") ||
+    text.includes("so-100") ||
+    text.includes("so-101") ||
+    text.includes("so_follower") ||
+    text.includes("so_leader")
+  )
+    return "so101";
+  return null;
+}
+
+/** Human-readable name per arm type, for the cross-arm warning prose. */
+export const ARM_TYPE_LABEL: Record<ArmType, string> = {
+  so101: "SO-101",
+  maker: "Maker",
+  metal: "Metal",
+};

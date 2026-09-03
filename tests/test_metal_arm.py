@@ -248,7 +248,9 @@ def test_zero_calibration_builds_metal_ranges_with_the_send_can_id() -> None:
 
 
 def test_zero_pose_instructions_differ_per_arm_type() -> None:
-    """The user is being asked to do something physical, and the two poses are
+    """Follower zero poses are family-specific and opposite on the gripper.
+
+    The user is being asked to do something physical, and the two poses are
     OPPOSITES on the gripper (Maker: fully open; Metal: closed). Showing the
     Maker text to a Metal user zeroes the gripper at the wrong end of travel."""
     from makermodslab.zero_calibrate import zero_pose_instructions
@@ -258,6 +260,17 @@ def test_zero_pose_instructions_differ_per_arm_type() -> None:
     assert maker_text != metal_text
     assert "open" in maker_text
     assert "upright" in metal_text and "closed" in metal_text
+
+
+def test_zero_pose_instructions_share_star_leader_pose() -> None:
+    """Maker and Metal rigs use the same physical Star Arm 102 leader."""
+    from makermodslab.zero_calibrate import zero_pose_instructions
+
+    maker_text = zero_pose_instructions("maker", "teleop")
+    metal_text = zero_pose_instructions("metal", "teleop")
+    assert maker_text == metal_text
+    assert "Star Arm 102" in maker_text
+    assert "folded" in maker_text and "closed" in maker_text
 
 
 # ---------------------------------------------------------------------------

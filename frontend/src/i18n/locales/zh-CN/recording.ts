@@ -13,7 +13,7 @@ export default {
     indexLabel: "索引 {{index}}",
     alreadyAddedSuffix: " · 已添加",
     alreadyUsedSuffix: " · 已占用",
-    nameLabel: "摄像头名称",
+    nameLabel: "名称",
     namePlaceholder: "选择一个名称",
     customNameOption: "自定义名称…",
     customNamePlaceholder: "例如 workspace_cam",

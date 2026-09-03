@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from makermodslab import session_events, sessions
-from makermodslab.api_errors import ErrorCode
+from makermodslab.api_errors import ApiError, ErrorCode
 from makermodslab.session_events import notify_session_changed
 
 
@@ -101,6 +101,17 @@ def test_unsubscribe_and_duplicate_subscribe(_quiet_notifier) -> None:
     notify_session_changed("replay", False)
     assert len(seen) == 1
     session_events.unsubscribe(seen.append)  # unknown callable: ignored
+
+
+def sessions_rollout():
+    """The `rollout` module `handle_coaching_command_for_session` imports.
+
+    Imported lazily inside that function (to keep the sessions/rollout import
+    cycle broken), so the patch has to target the real module rather than an
+    attribute on `sessions`."""
+    from makermodslab import rollout
+
+    return rollout
 
 
 # --- tracker lifecycle, driven purely through the seam -----------------------
@@ -934,3 +945,96 @@ def test_stop_of_a_wiggle_is_refused(client) -> None:
     resp = client.post(f"/api/v1/sessions/{live_id}/stop")
     assert resp.status_code == 409
     assert resp.json()["code"] == "robot.busy.wiggle"
+
+
+# --- the session-scoped coaching command -------------------------------------
+#
+# Every assertion here exists because a restack silently deleted the thing it
+# checks. The route, its handler, its schemas and its frontend caller all went
+# at once, and the branch kept building and kept passing — the flat
+# `/coaching-*` verbs were still there to fall back to, so nothing failed until
+# an operator drove a robot with a dialog that could no longer say WHICH
+# session it was commanding.
+
+
+def test_a_coaching_command_reaches_the_session_it_names(monkeypatch) -> None:
+    sent = []
+    monkeypatch.setattr(
+        sessions_rollout(), "handle_coaching_command", lambda c: sent.append(c) or {"success": True}
+    )
+    notify_session_changed("inference", True, phase="watching")
+    session_id = sessions.tracker.current()["id"]
+
+    result = sessions.handle_coaching_command_for_session(session_id, "takeover")
+
+    assert sent == ["takeover"]
+    assert result == {"result": {"success": True}}
+
+
+def test_a_command_for_a_session_that_is_no_longer_running_is_refused(monkeypatch) -> None:
+    """THE reason the id is in the URL. A dialog left open across a session
+    change must fail loudly rather than take over an arm in a session the
+    operator has stopped looking at — which is exactly what the flat verb it
+    was reverted to would have done."""
+    called = []
+    monkeypatch.setattr(
+        sessions_rollout(), "handle_coaching_command", lambda c: called.append(c) or {"success": True}
+    )
+    notify_session_changed("inference", True, phase="watching")
+
+    with pytest.raises(ApiError) as excinfo:
+        sessions.handle_coaching_command_for_session("a-stale-id", "takeover")
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == ErrorCode.SESSION_NOT_FOUND
+    # And it never reached the runner.
+    assert called == []
+
+
+def test_a_command_with_no_session_at_all_is_refused(monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(
+        sessions_rollout(), "handle_coaching_command", lambda c: called.append(c) or {"success": True}
+    )
+    with pytest.raises(ApiError) as excinfo:
+        sessions.handle_coaching_command_for_session("anything", "takeover")
+    assert excinfo.value.status_code == 404
+    assert called == []
+
+
+def test_the_runners_refusal_is_passed_through_with_its_own_status(monkeypatch) -> None:
+    """A plain (non-coaching) inference session answers 409 from the runner.
+    That verdict is the runner's to make — this layer must not flatten it into
+    a 500, and must not duplicate a phase check the runner already owns."""
+    monkeypatch.setattr(
+        sessions_rollout(),
+        "handle_coaching_command",
+        lambda c: {"success": False, "status_code": 409, "message": "No coaching session is active"},
+    )
+    notify_session_changed("inference", True, phase="running")
+    session_id = sessions.tracker.current()["id"]
+
+    with pytest.raises(ApiError) as excinfo:
+        sessions.handle_coaching_command_for_session(session_id, "takeover")
+    assert excinfo.value.status_code == 409
+
+
+# --- a coaching session is NOT follower-only ---------------------------------
+
+
+def test_a_coaching_session_reserves_the_leader_arm_too() -> None:
+    """Coaching is the one inference flow that DRIVES the leader arm — the
+    operator takes over through it and the runner puts it under torque for the
+    handover glide. So it needs the same all-arms readiness the non-follower-only
+    kinds get, and it lost that in the restack: `arms` fell back to "follower"
+    for every inference session, leaving the leader neither verified present nor
+    held against another feature grabbing its port."""
+    assert "inference" in sessions._FOLLOWER_ONLY_KINDS
+
+    def arms_for(options):
+        follower_only = "inference" in sessions._FOLLOWER_ONLY_KINDS and not (bool(options.get("coaching")))
+        return "follower" if follower_only else "all"
+
+    assert arms_for({}) == "follower"
+    assert arms_for({"coaching": False}) == "follower"
+    assert arms_for({"coaching": True}) == "all"

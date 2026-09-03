@@ -12,10 +12,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  FOUNDATION_BASE_REPO_IDS,
   JOB_STATE_LABELS,
   JobRecord,
+  RunKind,
+  formatBaseModel,
   jobDisplayName,
   renameJob,
+  splitCheckpointRef,
 } from "@/lib/jobsApi";
 import { jobRunStamp, runTaskTitle } from "@/lib/modelNames";
 import {
@@ -39,8 +43,10 @@ import {
   Upload,
 } from "lucide-react";
 import MetaRows from "@/components/library/MetaRows";
+import RunKindChip from "@/components/jobs/RunKindChip";
 import NodeLocationChip from "@/components/jobs/NodeLocationChip";
 import DisplayName from "@/components/library/DisplayName";
+import { useJobsData } from "@/components/jobs/JobsDataContext";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
@@ -52,7 +58,6 @@ import {
   resumableCheckpoints,
 } from "./resumeSeed";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import { useJobsData } from "./JobsDataContext";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
 interface Props {
@@ -154,12 +159,52 @@ const JobCard: React.FC<Props> = ({
   // Queue plumbing comes from the shared provider (this card is only ever
   // mounted under it): the uncapped queue list is what the up/down controls
   // reorder against, and cancelQueued carries the expect_state precondition.
-  const { queue, cancelQueued, moveQueued } = useJobsData();
+  // `jobs` is only to put a NAME on a fine-tune's source run; the lineage this
+  // card renders still comes from the `ancestors` prop.
+  const { jobs, queue, cancelQueued, moveQueued } = useJobsData();
   const present = statePresentation[job.state];
   const Icon = present.Icon;
   const isRunning = job.state === "running";
   const isQueued = job.state === "queued";
   const isImported = job.runner === "imported";
+
+  // What this run started FROM, and what to call it.
+  //
+  // Read straight off the run's own config — the local registry already knows,
+  // so unlike the Hub card there is nothing to parse. The kind mirrors
+  // _hub_job_provenance's so the two cards classify identically: a base that is
+  // one of the VLA foundation checkpoints was DEFAULTED there by jobs.py when
+  // the user chose no starting point, and is not a fine-tune.
+  const runKind: RunKind = job.config?.resume
+    ? "resume"
+    : job.config?.finetune_from_job_id
+      ? "finetune"
+      : job.config?.policy_pretrained_path
+        ? FOUNDATION_BASE_REPO_IDS.has(job.config.policy_pretrained_path)
+          ? "foundation"
+          : "finetune"
+        : "scratch";
+  // A fine-tune of a run this machine still has is named by that run — its
+  // display alias when it has one, since that is what the user calls it
+  // everywhere else. Falls back to the job id, which is readable by
+  // construction ("act_cube_2026-08-01_12-00-00").
+  const sourceRecord = job.config?.finetune_from_job_id
+    ? jobs.find((j) => j.id === job.config.finetune_from_job_id)
+    : undefined;
+  const baseModel = isImported
+    ? null
+    : job.config?.finetune_from_job_id
+      ? formatBaseModel({
+          base_job_id:
+            sourceRecord?.display_name ??
+            sourceRecord?.name ??
+            job.config.finetune_from_job_id,
+          base_step:
+            job.config.finetune_from_step != null
+              ? String(job.config.finetune_from_step)
+              : null,
+        })
+      : formatBaseModel(splitCheckpointRef(job.config?.policy_pretrained_path));
   // A Hub-backed import (vs a local-folder import) — provenance stays visible
   // after an untracked Hub repo is unified into a tracked imported card.
   const isHubImport = isImported && !!job.hf_repo_id;
@@ -531,7 +576,7 @@ const JobCard: React.FC<Props> = ({
     !isRunning && lineageCheckpoints.length > 0 && selectedStep != null;
 
   // No dialog and no route jump: fine-tuning opens the Train panel's
-  // "Start a new training" form with the base skill (and the dropdown's
+  // "Start a new training" form with the base policy (and the dropdown's
   // checkpoint step) prefilled.
   const handleFinetune = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -615,6 +660,8 @@ const JobCard: React.FC<Props> = ({
   // Only the LABELS are translated; every value beside them is data (policy
   // type, dataset repo id) or a pre-formatted number left exactly as it was.
   const metaRows: Array<[string, string]> = [];
+  if (baseModel)
+    metaRows.push([t("jobs.meta.base"), baseModel]);
   if (job.config?.policy_type)
     metaRows.push([t("jobs.meta.policy"), job.config.policy_type]);
   // Imported pseudo-jobs carry the "(imported)" sentinel, not a real dataset.
@@ -677,6 +724,9 @@ const JobCard: React.FC<Props> = ({
                 </div>
               )
             ) : null}
+            {/* What the run IS, beside where it runs. An import has no starting
+                point of its own — its weights came from elsewhere entirely. */}
+            {!isImported ? <RunKindChip kind={runKind} /> : null}
             {isHubImport ? (
               <div
                 className="flex items-center gap-1 text-[11px] font-medium text-info"
@@ -803,6 +853,27 @@ const JobCard: React.FC<Props> = ({
               full={displayName}
               className="min-w-0 text-foreground font-semibold"
             />
+            {/* Continuation marker. A resume hides the parent and shows the
+                successor in its place, which reads as "my run vanished and a
+                new card appeared" unless the new card says what it is. Naming
+                the parent's number makes the chain legible, and explains why
+                the row the user was watching is no longer in the list.
+                `ancestors` is nearest-parent-first. */}
+            {ancestors.length > 0 && ancestors[0].job_number > 0 ? (
+              <span
+                className="shrink-0 whitespace-nowrap font-mono text-[11px] text-muted-foreground"
+                title={t("jobs.jobCard.continuesTitle", {
+                  chain: ancestors
+                    .filter((a) => a.job_number > 0)
+                    .map((a) => `#${a.job_number}`)
+                    .join(" ← "),
+                })}
+              >
+                {t("jobs.jobCard.continues", {
+                  parent: `#${ancestors[0].job_number}`,
+                })}
+              </span>
+            ) : null}
           </div>
           {/* When aliased, keep the true identity visible: the run id for
               trainings (imported models already show their repo id / path in

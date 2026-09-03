@@ -1736,7 +1736,7 @@ def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch
     from makermodslab.record import UploadManager, UploadRequest
 
     ds = _fake_dataset()
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     invalidated: list[str] = []
     # The push invalidates the cached Hub facts from inside push_dataset_to_hub
     # (the single push home), not from this call site — see its docstring.
@@ -1775,7 +1775,7 @@ def test_upload_manager_qualifies_bare_repo_id_with_namespace(monkeypatch: pytes
     from makermodslab.record import UploadManager, UploadRequest
 
     ds = _fake_dataset()
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
     monkeypatch.setattr("makermodslab.datasets.cached_whoami", lambda: {"name": "makermods", "orgs": []})
 
@@ -1802,7 +1802,7 @@ def test_upload_manager_bare_repo_id_unauthenticated_errors(monkeypatch: pytest.
     from makermodslab.record import UploadManager, UploadRequest
 
     ds = _fake_dataset()
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
     monkeypatch.setattr("makermodslab.datasets.cached_whoami", lambda: None)
 
@@ -1832,7 +1832,7 @@ def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch
         raise RuntimeError("401 Client Error: you must be authenticated")
 
     ds = _fake_dataset(push=_raise_401)
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
 
     mgr = UploadManager()
@@ -1853,7 +1853,7 @@ def test_upload_manager_error_generic_message(monkeypatch: pytest.MonkeyPatch) -
         raise RuntimeError("disk exploded")
 
     ds = _fake_dataset(push=_boom)
-    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id, **kwargs: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
 
     mgr = UploadManager()
@@ -2667,6 +2667,63 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
     # terminal status silently reported nothing saved even though 2 episodes
     # were recorded.
     assert status["saved_episodes"] == 2
+
+
+def test_worker_invalidates_dataset_listing_after_saving_episodes(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A session that saved episodes must drop the cached /datasets listing so
+    the new dataset appears on the next fetch instead of after the 45s TTL. The
+    happy path used to skip this — only the discard / zero-episode branches
+    invalidated — so a dataset recorded right after a listing load stayed
+    invisible until the TTL lapsed or an unrelated mutation cleared the cache."""
+    import time
+
+    import makermodslab.datasets as datasets
+    import makermodslab.record as record
+
+    class _FakeDataset:
+        num_episodes = 1
+
+    def _clean_work(cfg, events, **kwargs):
+        record.current_phase = "completed"
+        record.saved_episodes = 1
+        return _FakeDataset()
+
+    with datasets._listing_cache_lock:
+        datasets._listing_cache = {"at": time.monotonic(), "value": [{"repo_id": "old/ds"}]}
+
+    _start_session_with_fake_work(monkeypatch, _clean_work)
+
+    with datasets._listing_cache_lock:
+        assert datasets._listing_cache is None
+
+
+def test_worker_leaves_the_listing_cache_alone_when_the_session_created_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A session that failed before saving anything created no dataset, so the
+    listing did not change — dropping its cache would only force the next
+    /datasets to re-fan-out to the Hub for no reason. (A zero-episode session
+    that DID leave a directory is cleaned up by _discard_empty_dataset, which
+    invalidates on its own.)"""
+    import time
+
+    import makermodslab.datasets as datasets
+    import makermodslab.record as record
+
+    def _boom_connecting(cfg, events, **kwargs):
+        record.current_phase = "connecting_follower"
+        raise RuntimeError("Failed to connect to follower on COM_FOLLOWER")
+
+    sentinel = {"at": time.monotonic(), "value": [{"repo_id": "old/ds"}]}
+    with datasets._listing_cache_lock:
+        datasets._listing_cache = sentinel
+
+    _start_session_with_fake_work(monkeypatch, _boom_connecting)
+
+    with datasets._listing_cache_lock:
+        assert datasets._listing_cache is sentinel
 
 
 # ---------------------------------------------------------------------------

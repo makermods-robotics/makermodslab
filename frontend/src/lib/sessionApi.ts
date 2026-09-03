@@ -89,6 +89,21 @@ export interface InferenceSessionOptions {
   inference_engine?: "sync" | "rtc";
   temporal_ensemble_coeff?: number;
   skip_identity_check?: boolean;
+  // COACHING (DAgger) mode — the third session shape. The policy drives while
+  // the operator watches; each takeover through the leader arm is recorded as
+  // one episode of a new dataset. Mutually exclusive with `eval_episodes > 1`
+  // (400) and refused alongside `inference_engine: "rtc"` (400). The LEADER
+  // arms it needs are NOT sent from here: like the followers, they resolve
+  // server-side from the named robot record.
+  coaching?: boolean;
+  // How many corrections to collect before the session ends on its own.
+  // Clamped server-side to [1, 100].
+  target_corrections?: number;
+  // Dataset name for the corrections, WITHOUT the mandatory `rollout_` prefix
+  // (applied server-side). lerobot then appends its own timestamp, so the name
+  // on disk is NOT predictable from here — read `coaching_dataset` off the
+  // status payload once the session reports it.
+  coaching_dataset_name?: string;
 }
 
 export interface ReplaySessionOptions {
@@ -213,6 +228,44 @@ export async function stopSession(
     fetcher,
     `/api/v1/sessions/${encodeURIComponent(sessionId)}/stop`,
     { method: "POST", action: "Stop session" }
+  );
+}
+
+export type CoachingCommand =
+  | "takeover"
+  | "handback"
+  | "cancel"
+  | "hold"
+  | "resume"
+  | "reset"
+  | "recovered"
+  | "drop_last";
+
+/** One coaching (DAgger) command for the current inference session, by id.
+ *
+ * Session-scoped and never owner-gated, exactly like `stopSession` — a
+ * physical arm must stay controllable by whoever can reach the API. 404 once
+ * the session is gone; the runner returns a 409 for a plain (non-coaching)
+ * inference session or one that is still starting up. The verb is NOT
+ * phase-checked client-side: the runner's phase is authoritative and the
+ * browser only holds a copy that is one poll stale, so a mistimed command is a
+ * harmless no-op the runner logs.
+ *
+ * The id is the whole point, and it is what a restack quietly dropped: without
+ * it the dialog posts to a session-agnostic verb, so a dialog left open across
+ * a session change commands whichever session happens to be current rather
+ * than failing with a 404 the UI can report. */
+export async function sendCoachingCommand(
+  baseUrl: string,
+  fetcher: Fetcher,
+  sessionId: string,
+  command: CoachingCommand
+): Promise<{ result: Record<string, unknown> }> {
+  return apiRequest(
+    baseUrl,
+    fetcher,
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/coaching`,
+    { method: "POST", body: { command }, action: "Coaching command" }
   );
 }
 

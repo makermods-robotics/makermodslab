@@ -30,7 +30,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-import { getModels, ModelItem } from "@/lib/modelsApi";
+import { ModelItem } from "@/lib/modelsApi";
+import { useModels } from "@/hooks/useModels";
 import { JobRecord, getJob, importModel, jobDisplayName } from "@/lib/jobsApi";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import {
@@ -122,6 +123,18 @@ const DatasetResultRow: React.FC<{
           {t("studio.train.dataset.row.episodes", { episodes })}
         </span>
       ) : null}
+      {/* A weighted merge and its unweighted sibling are otherwise
+          indistinguishable here, and picking the wrong one silently trains the
+          wrong mix. `=== true` on purpose: the flag is absent (unknown), not
+          false, for Hub-only rows. */}
+      {item.weighted === true ? (
+        <span
+          className="shrink-0 font-mono text-xs text-info"
+          title={t("studio.train.dataset.row.weightedTitle")}
+        >
+          {t("studio.train.dataset.row.weighted")}
+        </span>
+      ) : null}
       {item.source === "hub" ? (
         <span className="shrink-0 text-xs text-muted-foreground">
           {t("studio.train.dataset.row.hub")}
@@ -197,7 +210,12 @@ const TrainPanel: React.FC = () => {
   const [actionsEl, setActionsEl] = useState<HTMLDivElement | null>(null);
 
   // ── Starting point (fine-tune base) ───────────────────────────────────────
-  const [models, setModels] = useState<ModelItem[]>([]);
+  // Shared with the Deploy picker and the launchpad slider (ModelsDataContext),
+  // so the three cannot drift apart. Note this list is a WIDER population than
+  // the Deploy picker's: a foundation checkpoint is a legitimate fine-tune base
+  // and not a deployable skill. They read one endpoint today; if that ever
+  // splits, this is the call site that keeps `/models`.
+  const { models } = useModels();
   const [baseModelId, setBaseModelId] = useState<string>(NONE);
   const [finetuneSeed, setFinetuneSeed] = useState<FinetuneSeed | null>(null);
   const [resolvingBase, setResolvingBase] = useState(false);
@@ -221,22 +239,8 @@ const TrainPanel: React.FC = () => {
     if (!open) setResumeSeed(null);
   };
 
-  useEffect(() => {
-    let cancelled = false;
-    getModels(baseUrl, fetchWithHeaders)
-      .then((m) => {
-        if (!cancelled) setModels(m);
-      })
-      .catch(() => {
-        /* the starting point is optional — leave the list empty */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [baseUrl, fetchWithHeaders]);
-
   // ── Policy ────────────────────────────────────────────────────────────────
-  // Chosen inside Run configuration (EssentialsCard's select); a base-skill or
+  // Chosen inside Run configuration (EssentialsCard's select); a base-policy or
   // prefill choice re-targets it so the fine-tune trains the matching policy.
   const [policyType, setPolicyType] = useState<string>("act");
 
@@ -246,7 +250,7 @@ const TrainPanel: React.FC = () => {
   // proven lazy-import path), then its latest checkpoint step seeds the run.
   // Sequence guard: only the LATEST resolution may write state — a slower,
   // older import/checkpoint lookup finishing last must not overwrite a newer
-  // base-skill choice.
+  // base-policy choice.
   const resolveSeqRef = useRef(0);
   const resolveFinetune = useCallback(
     async (opts: {
@@ -274,7 +278,7 @@ const TrainPanel: React.FC = () => {
           // prefill, a local model row) carries no policy type, so read it off
           // the registry record — the same value the import branch above gets.
           // Without this the policy stays on the "act" default while the form
-          // LOCKS the picker ("set by the base skill"), and the run silently
+          // LOCKS the picker ("set by the base policy"), and the run silently
           // trains ACT from e.g. smolvla weights: lerobot loads a checkpoint
           // non-strictly, so the mismatch never surfaces at runtime.
           const rec = await getJob(baseUrl, fetchWithHeaders, jobId).catch(
@@ -370,7 +374,7 @@ const TrainPanel: React.FC = () => {
 
   // Apply a studio prefill (fine-tune base / preselected dataset) once, then
   // clear it so reopening the studio fresh doesn't re-apply a stale one.
-  // Local skills arrive as baseJobId (a job registry id), Hub skills as
+  // Local policies arrive as baseJobId (a job registry id), Hub policies as
   // baseModelRepoId — a job id must never be sent through the Hub import path.
   // A prefill is an intent to configure a run, so it slides the form open too.
   useEffect(() => {
@@ -695,7 +699,7 @@ const TrainPanel: React.FC = () => {
                     {/* A prefilled base (job card's Fine-tune) may not exist as
                       an item in the models listing — render the resolved
                       seed's name so the trigger is never blank (same pattern
-                      as the Run panel's skill picker). */}
+                      as the Run panel's policy picker). */}
                     {baseModelId !== NONE && finetuneSeed ? (
                       <span className="truncate">{finetuneSeed.name}</span>
                     ) : (
@@ -753,14 +757,31 @@ const TrainPanel: React.FC = () => {
                 belt-and-braces; the fine-tune half is live, since ModelCard's
                 history selector really can re-fire at a different step. */}
             <TrainingConfigurator
+              // The fine-tune STEP is deliberately absent from this key. It
+              // used to be here so mount-derived values refreshed, but the
+              // checkpoint picker edits that step — remounting on every pick
+              // discarded whatever had already been typed into the form, and
+              // (worse) reset the pick itself back to the source's latest. The
+              // configurator now reads the fine-tune step live off the seed, so
+              // it needs no remount to see a change. The resume half keeps its
+              // step: resume is not step-selectable, so it only varies when the
+              // user really did arrive from a different checkpoint.
               key={`${resumeSeed?.jobId ?? ""}@${resumeSeed?.step ?? ""}@${
                 resumeSeed?.checkpointJobId ?? ""
-              }::${finetuneSeed?.jobId ?? "fresh"}@${finetuneSeed?.step ?? ""}`}
+              }::${finetuneSeed?.jobId ?? "fresh"}`}
               policyType={policyType}
               onPolicyTypeChange={setPolicyType}
               datasetRepoId={trainingDatasetRepoId}
               episodeIndices={trainingEpisodeIndices}
               finetuneSeed={finetuneSeed}
+              // The seed owns the chosen base checkpoint, so the pick survives
+              // a remount of the form below. `checkpointSource` moves with it:
+              // it decides whether a cloud run must stage the weights first.
+              onFinetuneCheckpointChange={(c) =>
+                setFinetuneSeed((prev) =>
+                  prev ? { ...prev, step: c.step, checkpointSource: c.source } : prev,
+                )
+              }
               resumeSeed={resumeSeed}
               // Launch opens the monitor dialog over this panel (via
               // openJobMonitor in the configurator); fold the form back so

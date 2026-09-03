@@ -1,7 +1,7 @@
 export default {
   header: {
     myLibrary: "我的库",
-    openStudio: "打开技能工作室",
+    openStudio: "打开策略工作室",
   },
   hero: {
     words: {
@@ -10,14 +10,14 @@ export default {
       share: "分享",
     },
     // Chinese keeps the verb first, so the slot placement carries over.
-    slogan: "<0/>机器人技能",
+    slogan: "<0/>机器人策略",
     searchPlaceholder: "整理我的桌面…",
-    searchLabel: "搜索技能",
+    searchLabel: "搜索策略",
   },
-  newSkill: {
-    title: "＋ 新建技能",
+  newPolicy: {
+    title: "＋ 新建策略",
     subtitle: "采集、训练、部署 — 无需离开此页面。",
-    aria: "打开技能工作室 — 采集、训练并部署新技能",
+    aria: "打开策略工作室 — 采集、训练并部署新策略",
     steps: {
       collect: {
         label: "1 · 采集",
@@ -29,16 +29,16 @@ export default {
       },
       deploy: {
         label: "3 · 部署",
-        sub: "在机器人上运行技能",
+        sub: "在机器人上运行策略",
       },
     },
   },
-  skills: {
-    sectionLabel: "技能",
-    previous: "上一批技能",
-    next: "下一批技能",
-    empty: "没有符合搜索条件的技能。",
-    open: "打开技能 {{title}}",
+  policies: {
+    sectionLabel: "策略",
+    previous: "上一批策略",
+    next: "下一批策略",
+    empty: "没有符合搜索条件的策略。",
+    open: "打开策略 {{title}}",
     previewAlt: "{{title}} 运行预览",
     previewPlaceholder: "运行预览",
     comingSoon: "即将推出",
@@ -46,7 +46,7 @@ export default {
     steps: "{{steps}} 步",
     private: "私有",
   },
-  skillNames: {
+  policyNames: {
     sortingSocks: "整理袜子",
     openingBottleCaps: "拧开瓶盖",
     foldingTowels: "折叠毛巾",

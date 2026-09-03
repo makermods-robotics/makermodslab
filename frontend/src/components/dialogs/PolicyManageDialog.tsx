@@ -29,25 +29,25 @@ import {
 import { resolveDeleteAction } from "@/lib/deleteSemantics";
 import ModelInfoCard from "@/components/landing/ModelInfoCard";
 
-export interface SkillManageDialogProps {
+export interface PolicyManageDialogProps {
   model: ModelItem | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Refresh the models listing after upload / download / delete. */
   onChanged: () => void;
-  /** Run this skill on the corner robot (→ Deploy panel, prefilled). */
+  /** Run this policy on the corner robot (→ Deploy panel, prefilled). */
   onRun: (model: ModelItem) => void;
 }
 
 /**
- * Manage one of MY skills — wraps the existing ModelInfoCard (unmodified) in a
+ * Manage one of MY policies — wraps the existing ModelInfoCard (unmodified) in a
  * dialog so the model-library management surface survives the Layout D
  * redesign: Hub upload, checkpoint download, rename-adjacent metadata, and the
  * unified delete pipeline (local delete / local-copy removal / unpin / hide via
  * resolveDeleteAction — the Hub repo itself is never touched). Ported from the
  * old ModelsPanel's confirm pipeline.
  */
-const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
+const PolicyManageDialog: React.FC<PolicyManageDialogProps> = ({
   model,
   open,
   onOpenChange,
@@ -75,13 +75,13 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
         await removeCustomModel(baseUrl, fetchWithHeaders, item.id);
         // The model name is data — it stays the toast's verbatim description.
         toast({
-          title: t("dialogs.skillManage.toast.removedFromList"),
+          title: t("dialogs.policyManage.toast.removedFromList"),
           description: item.name,
         });
       } else if (resolution.action === "hide") {
         await hideModel(baseUrl, fetchWithHeaders, item.hf_repo_id ?? item.id);
         toast({
-          title: t("dialogs.skillManage.toast.removedFromList"),
+          title: t("dialogs.policyManage.toast.removedFromList"),
           description: item.name,
         });
       } else {
@@ -90,8 +90,8 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
         toast({
           title:
             resolution.action === "delete-local-copy"
-              ? t("dialogs.skillManage.toast.localCopyRemoved")
-              : t("dialogs.skillManage.toast.modelDeleted"),
+              ? t("dialogs.policyManage.toast.localCopyRemoved")
+              : t("dialogs.policyManage.toast.modelDeleted"),
           description: item.name,
         });
       }
@@ -101,8 +101,8 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
       toast({
         title:
           resolution.action === "delete-local"
-            ? t("dialogs.skillManage.toast.deleteFailed")
-            : t("dialogs.skillManage.toast.removeFailed"),
+            ? t("dialogs.policyManage.toast.deleteFailed")
+            : t("dialogs.policyManage.toast.removeFailed"),
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -134,7 +134,7 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
 
           <Button onClick={() => onRun(model)} className="w-full gap-2">
             <Play className="h-4 w-4" />
-            {t("dialogs.skillManage.runOnRobot")}
+            {t("dialogs.policyManage.runOnRobot")}
           </Button>
         </DialogContent>
       </Dialog>
@@ -170,4 +170,4 @@ const SkillManageDialog: React.FC<SkillManageDialogProps> = ({
   );
 };
 
-export default SkillManageDialog;
+export default PolicyManageDialog;

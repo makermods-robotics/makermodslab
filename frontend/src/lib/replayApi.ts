@@ -11,6 +11,10 @@ export interface DatasetItem {
    * their own namespace, no local copy). Such a row is "removed" by unpinning
    * (removeCustomDataset), never a destructive delete. */
   saved_custom?: boolean;
+  /** Carries per-episode sampling weights (a weighted merge). Present for
+   * datasets with a local copy; absent for Hub-only rows, where it is unknown
+   * rather than false — so read it as `weighted === true`, never `!weighted`. */
+  weighted?: boolean;
 }
 
 export async function listDatasets(
@@ -145,6 +149,9 @@ export interface DatasetInfo {
   tasks: DatasetTask[];
   /** On-disk size for a local dataset; null for a Hub summary (not on disk). */
   size_bytes: number | null;
+  /** Carries per-episode sampling weights. Local datasets only; absent means
+   * unknown (Hub-only), not false. */
+  weighted?: boolean;
   /** "local" = full detail from the local cache; "hub" = the meta/info.json
    * summary of a not-yet-downloaded Hub dataset (no tasks/size; rename not
    * applicable). Treat absent as "local". */
@@ -173,6 +180,11 @@ export interface EpisodeSummary {
   length: number;
   duration: number;
   tasks: string[];
+  /** How often this episode is sampled during training, relative to a weight of
+   * 1. Written at merge time (see makermodslab/merge.py); absent from an older
+   * backend's response, and absent means 1 — so read it as `sampling_weight ??
+   * 1`, never as a bare number. */
+  sampling_weight?: number;
   /** Per-camera {from, to} seconds locating this episode's slice WITHIN its
    * (possibly shared) video file — v3.0 packs consecutive episodes into the
    * same mp4 per camera, so playback must seek to `from` and stop at `to`
@@ -472,16 +484,57 @@ export interface MergeStatus {
   logs: { timestamp: number; message: string }[];
 }
 
+/** Largest per-source weight the backend accepts (mirrors
+ * `MAX_SOURCE_WEIGHT` in makermodslab/merge.py — keep the two in step). */
+export const MAX_SOURCE_WEIGHT = 20;
+
+export interface MergeStartResult {
+  started: boolean;
+  message: string;
+  // Present (and `started` false) when the sources differ ONLY by a column the
+  // merge is willing to drop — in practice the `intervention` flag a coaching
+  // dataset carries and a recorded one doesn't. Not an error: re-submit with
+  // `dropFeatures` set to these names once the user has agreed. See
+  // DROPPABLE_FEATURES in makermodslab/merge.py for why dropping it is lossless.
+  droppable_features?: string[];
+  // Present (and `started` false) when the sources span more than one arm
+  // family — an advisory the user confirms rather than a hard block. Re-submit
+  // with `acknowledgeWarnings: true` to proceed.
+  warnings?: string[];
+}
+
+/** Start a merge. `sourceWeights` is a per-source integer repeat count,
+ * positionally aligned with `sourceRepoIds`; omit it (or pass all 1s) for an
+ * unweighted merge. A source with weight 3 contributes its episodes three
+ * times, so training samples them three times as often.
+ *
+ * When the sources differ only by a droppable column the merge is refused with
+ * `started: false` and `droppable_features`; re-call with `dropFeatures` set to
+ * those names. When the sources span more than one arm family it is refused
+ * with `started: false` and a non-empty `warnings`; re-call with
+ * `acknowledgeWarnings: true` to proceed. */
 export async function startDatasetMerge(
   baseUrl: string,
   fetcher: Fetcher,
   sourceRepoIds: string[],
   outputRepoId: string,
-): Promise<{ started: boolean; message: string }> {
+  sourceWeights?: number[],
+  dropFeatures: string[] = [],
+  acknowledgeWarnings?: boolean,
+): Promise<MergeStartResult> {
+  // Only send weights when at least one is non-default, so an ordinary merge
+  // keeps the exact request body it had before weights existed.
+  const weighted = sourceWeights?.some((w) => w !== 1) ?? false;
   // apiRequest JSON.stringifies `body` itself — pass a raw object, not a string.
   return apiRequest(baseUrl, fetcher, "/api/v1/datasets/merge", {
     method: "POST",
-    body: { source_repo_ids: sourceRepoIds, output_repo_id: outputRepoId },
+    body: {
+      source_repo_ids: sourceRepoIds,
+      output_repo_id: outputRepoId,
+      ...(weighted ? { source_weights: sourceWeights } : {}),
+      drop_features: dropFeatures,
+      ...(acknowledgeWarnings ? { acknowledge_warnings: true } : {}),
+    },
     action: "Merge datasets",
   });
 }

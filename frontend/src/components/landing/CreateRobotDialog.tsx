@@ -14,6 +14,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArmType, RobotMode } from "@/hooks/useRobots";
 import { cn } from "@/lib/utils";
+import makerArmPhoto from "@/assets/arms/maker.jpg";
+import metalArmPhoto from "@/assets/arms/metal.jpg";
+import so101ArmPhoto from "@/assets/arms/so101.jpg";
+import ArmTypePhoto from "./ArmTypePhoto";
 
 interface CreateRobotDialogProps {
   open: boolean;
@@ -62,33 +66,32 @@ const MODE_OPTIONS: {
  * literal "so101"/"maker"/"metal"; the label/description halves hold catalog
  * KEYS.
  *
- * `icon` is deliberately empty for now — the slot is wired through to the
- * option button so a mark can be dropped in later without touching layout.
- * Rendering is skipped entirely while it is null, so nothing reserves space.
+ * `image` is the card's product photo. ArmTypePhoto retains a same-sized
+ * placeholder fallback so a future hardware family can land before its photo.
  */
 const ARM_TYPE_OPTIONS: {
   value: ArmType;
   labelKey: string;
   descriptionKey: string;
-  icon: React.ReactNode | null;
+  image: string | null;
 }[] = [
   {
     value: "so101",
     labelKey: "landing.createRobot.armTypes.so101.label",
     descriptionKey: "landing.createRobot.armTypes.so101.description",
-    icon: null,
+    image: so101ArmPhoto,
   },
   {
     value: "maker",
     labelKey: "landing.createRobot.armTypes.maker.label",
     descriptionKey: "landing.createRobot.armTypes.maker.description",
-    icon: null,
+    image: makerArmPhoto,
   },
   {
     value: "metal",
     labelKey: "landing.createRobot.armTypes.metal.label",
     descriptionKey: "landing.createRobot.armTypes.metal.description",
-    icon: null,
+    image: metalArmPhoto,
   },
 ];
 
@@ -161,7 +164,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         }
       }}
     >
-      <DialogContent className="bg-popover border-border sm:max-w-md">
+      <DialogContent className="bg-popover border-border sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{t("landing.createRobot.title")}</DialogTitle>
           <DialogDescription className="text-muted-foreground">
@@ -201,10 +204,14 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
             <div
               role="radiogroup"
               aria-label={t("landing.createRobot.armTypeLabel")}
-              className="mt-1 grid grid-cols-2 gap-2"
+              // Three across at EVERY width: the cards are small, and letting
+              // them stack turns each 4:3 photo into a full-width block that
+              // overflows the dialog past the viewport.
+              className="mt-1 grid grid-cols-3 gap-2"
             >
               {ARM_TYPE_OPTIONS.map((opt) => {
                 const selected = newArmType === opt.value;
+                const label = t(opt.labelKey as never);
                 return (
                   <button
                     key={opt.value}
@@ -213,26 +220,22 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                     aria-checked={selected}
                     onClick={() => setNewArmType(opt.value)}
                     className={cn(
-                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      "rounded-md border p-2 text-left transition-colors",
                       selected
                         ? "border-primary bg-accent"
                         : "border-border bg-card hover:bg-accent"
                     )}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="flex min-w-0 items-center gap-2">
-                        {/* Icon slot — empty for now; nothing is rendered (and
-                            so nothing is reserved) until one is supplied. */}
-                        {opt.icon}
-                        <span className="truncate text-sm font-medium text-foreground">
-                          {t(opt.labelKey as never)}
-                        </span>
+                    <ArmTypePhoto src={opt.image} alt={label} />
+                    <div className="mt-2 flex items-start justify-between gap-1">
+                      <span className="text-sm font-medium leading-tight text-foreground">
+                        {label}
                       </span>
                       {selected && (
-                        <Check className="h-4 w-4 shrink-0 text-primary" />
+                        <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
                       )}
                     </div>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
+                    <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
                       {t(opt.descriptionKey as never)}
                     </p>
                   </button>

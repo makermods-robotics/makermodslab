@@ -99,7 +99,11 @@ class JobMetricsHistoryResponse(BaseModel):
 
 class JobCheckpointsResponse(BaseModel):
     """server.py get_job_checkpoints — JobRegistry.list_checkpoints, ascending
-    by step."""
+    by step.
+
+    ``?lineage=true`` serves the same shape from list_chain_checkpoints (the
+    whole resume chain); those rows are the ones that carry JobCheckpoint's
+    owner_* stamps, which a single-run listing leaves null."""
 
     checkpoints: list[JobCheckpoint]
 
@@ -116,13 +120,17 @@ class CheckpointPolicyConfigResponse(BaseModel):
     """jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice
     of a checkpoint's pretrained_model/config.json. policy_type passes through
     from the file's "type" key (null when absent); state_dim/action_dim are
-    null when the checkpoint omits the feature."""
+    null when the checkpoint omits the feature. trained_on_robot_type is the
+    raw lerobot robot_type of the checkpoint's training dataset (recovered via
+    train_config.json), null when it can't be established — the fine-tune
+    panel compares it against the selected dataset's arm."""
 
     policy_type: str | None
     image_features: dict[str, CheckpointImageFeature]
     requires_task: bool
     state_dim: int | None
     action_dim: int | None
+    trained_on_robot_type: str | None
 
 
 class HubJobStatus(BaseModel):
@@ -139,13 +147,19 @@ class HubJobItem(BaseModel):
     and space_id are mutually exclusive on the Hub side, status/owner can be
     absent objects → null, name is _hub_job_run_name's best effort).
 
-    The trailing four are the run's identity, recovered from the job's own argv
-    by _hub_job_identity so a run launched on another machine reads like a
-    tracked one. Each is independently nullable and for a real reason: a RESUMED
-    cloud run carries `--config_path` instead of `--policy.type` /
-    `--dataset.repo_id`, so it reports a repo and a step target with no policy
-    or dataset. They are decoration on a listing — never identity — so a row
-    that answers none of them still renders."""
+    `policy_type` / `dataset` / `total_steps` / `hf_repo_id` are the run's
+    identity, recovered from the job's own argv by _hub_job_identity so a run
+    launched on another machine reads like a tracked one. Each is independently
+    nullable and for a real reason: a RESUMED cloud run carries `--config_path`
+    instead of `--policy.type` / `--dataset.repo_id`, so it reports a repo and a
+    step target with no policy or dataset.
+
+    `kind` and the `base_*` / `dataset_repo_id` / `steps` fields are what the run
+    started FROM, parsed by _hub_job_provenance off the same argv (kind chip +
+    base-checkpoint row on the card). `kind` is always one of
+    scratch/foundation/finetune/resume; the rest are null when the argv doesn't
+    answer them. All of it is decoration on a listing — never identity — so a
+    row that answers none of them still renders."""
 
     id: str
     name: str | None
@@ -160,6 +174,13 @@ class HubJobItem(BaseModel):
     dataset: str | None
     total_steps: int | None
     hf_repo_id: str | None
+    kind: Literal["scratch", "foundation", "finetune", "resume"] | None = None
+    base_ref: str | None = None
+    base_repo: str | None = None
+    base_step: str | None = None
+    base_job_id: str | None = None
+    dataset_repo_id: str | None = None
+    steps: str | None = None
 
 
 class HubModelItem(BaseModel):
