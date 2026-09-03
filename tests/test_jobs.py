@@ -6516,6 +6516,53 @@ def test_cloud_resume_without_a_wandb_key_is_refused_before_any_record(tmp_path)
     assert list(reg._records) == ["P"]
 
 
+def test_deferred_local_to_cloud_resume_refuses_before_spawning_the_upload(tmp_path) -> None:
+    """The F7 local→cloud path answers the caller immediately and pushes the
+    parent's checkpoint on a thread, so a credential problem discovered later
+    would surface as a FAILED JOB rather than as a message on the button the
+    user just pressed. The check therefore has to fire before that thread —
+    and before the GBs it would move — exists.
+
+    A first-class path, not an edge case: W&B is supported locally, so a
+    W&B-enabled LOCAL parent is an ordinary run, and continuing it on cloud
+    compute is where its inherited W&B state meets an upload that costs real
+    bytes."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    reg = JobRegistry(tmp_path / "root")
+    _wandb_parent(reg, wandb_enable=True, runner="local")
+
+    def _upload_must_not_run(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("the checkpoint upload thread must not be spawned")
+
+    with (
+        # Stands in for the real checkpoint resolution + upload planning; the
+        # ordering under test is "refusal before the thread", not the plan.
+        patch.object(
+            JobRegistry,
+            "_resolve_upload_resume",
+            lambda self, source, config: ((Path("/ckpt/004000"), "user/staging", "004000")),
+        ),
+        patch.object(JobRegistry, "_upload_resume_then_start", _upload_must_not_run),
+        patch("makermodslab.runners.hf_cloud.resolve_wandb_api_key", return_value=None),
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        pytest.raises(ValueError, match="Weights & Biases API key"),
+    ):
+        reg.start(
+            _wandb_resume_request(upload_resume_checkpoint=True),
+            JobTarget(runner="hf_cloud", flavor="a10g-small"),
+        )
+
+    # No record, and no preparing thread: the refusal left nothing behind.
+    assert list(reg._records) == ["P"]
+    assert reg._prepare_threads == {}
+
+
 def test_local_run_without_a_wandb_key_is_refused_before_the_subprocess(tmp_path) -> None:
     """A local trainer is a non-tty subprocess: `wandb.init` cannot prompt for a
     login, so it dies uselessly AFTER the record already says `running`. Refuse
