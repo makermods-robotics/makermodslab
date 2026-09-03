@@ -22,6 +22,13 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
+# Camera identity resolution. Imported as a MODULE, not as bound names: the
+# enumeration is a live query against the host's devices, and the module
+# attribute is the seam every caller (and every test) patches. camera_identity
+# imports nothing from this package (stdlib + PyObjC only), so this is not a
+# cycle.
+from .. import camera_identity
+
 logger = logging.getLogger(__name__)
 
 RobotSide = Literal["leader", "follower"]
@@ -777,6 +784,85 @@ def record_cameras_by_name(cameras: list) -> dict[str, dict]:
     return by_name
 
 
+def reanchor_camera_indices(cameras: dict[str, dict]) -> dict[str, dict]:
+    """Re-point each session camera's `camera_index` at the device its stored
+    `unique_id` names, for THIS session only.
+
+    A stored cv2 index is not a device: it is a POSITION in AVFoundation's
+    uniqueID-sorted device list, so unplugging, replugging or adding any camera
+    renumbers the others (see makermodslab/camera_identity.py). The saved index
+    then opens a different physical camera under the same label — wrist and
+    front crossed, or the built-in webcam recorded as "wrist" — and nothing in
+    the session reveals it, because the preview endpoint already re-anchors
+    (server.camera_preview_stream) while the session did not. So the tiles look
+    right and the dataset is wrong.
+
+    The record's `unique_id` is the stable half of the pair (for USB cameras
+    Apple composes it from locationID+VID+PID, so it names the physical port),
+    and it is what every camera-opening path must resolve first. Three cases:
+
+    - identity resolvable → the enumerated index replaces the stored one, in
+      the returned dict only. The record on disk is never rewritten: a session
+      is not the place to decide the user's saved index was wrong, and a rig
+      that is re-cabled between runs would rewrite it on every start.
+    - identity UNAVAILABLE (non-macOS, PyObjC missing, enumeration failed) or
+      the entry has no `unique_id` → the stored index is kept and a warning
+      names the camera. Linux has no AVFoundation at all, so refusing here
+      would ground every non-macOS rig for a macOS-only failure mode.
+    - identity verifiably ABSENT (the enumeration answered, and this device is
+      not in it) → refuse the session. Opening the stale index would silently
+      record the wrong camera, which is worse than not starting.
+
+    The enumeration is the IN-PROCESS one, and that is deliberate even for
+    inference, which opens its cameras in a fresh subprocess: server startup
+    pumps the main thread's runloop (camera_identity.pump_avfoundation_runloop),
+    which keeps this process's device list live, so it agrees with what a
+    process starting now would see. Adding a second, fresh-subprocess
+    enumeration for the rollout path would cost ~0.5s and could only disagree.
+    """
+    if not cameras:
+        return cameras
+    enumeration = camera_identity.list_cameras_in_process()
+    device_names = {cam.get("unique_id"): cam.get("name") for cam in enumeration or []}
+    for label, config in cameras.items():
+        stored_index = config.get("camera_index", 0)
+        unique_id = config.get("unique_id")
+        if not unique_id:
+            logger.warning(
+                "Camera '%s' has no saved device identity — opening cv2 index %s unverified. "
+                "Re-select it in Robot settings so the session can confirm which device it opens.",
+                label,
+                stored_index,
+            )
+            continue
+        if enumeration is None:
+            logger.warning(
+                "Camera identity is unavailable on this platform — camera '%s' opens at its "
+                "stored cv2 index %s unverified (saved device %s).",
+                label,
+                stored_index,
+                unique_id,
+            )
+            continue
+        resolved = camera_identity.resolve_in_enumeration(enumeration, unique_id, stored_index)
+        if resolved is None:
+            raise CameraResolutionError(
+                f"Camera '{label}' is not connected. The camera saved for it (USB port identity "
+                f"{unique_id}) is not among the cameras attached to this machine, so starting now "
+                "would open a different camera under that name. Plug it back into the same USB "
+                "port, or re-select the camera in Robot settings."
+            )
+        config["camera_index"] = resolved
+        logger.info(
+            "Session camera '%s' -> cv2 index %s (device %s, %s)",
+            label,
+            resolved,
+            unique_id,
+            device_names.get(unique_id) or "unknown device",
+        )
+    return cameras
+
+
 def load_robot_cameras(robot_name: str) -> dict[str, dict]:
     """The named robot record's cameras, keyed by camera name.
 
@@ -784,6 +870,12 @@ def load_robot_cameras(robot_name: str) -> dict[str, dict]:
     is legitimate. A NON-blank name that doesn't resolve to a record on disk
     raises: recording camera-less because the robot name was wrong is a silent
     data loss (a whole session with no video), so it must fail loudly.
+
+    This is THE seam where a session's camera dict is produced — recording
+    calls it directly, inference reaches it through `bind_robot_cameras` — so
+    it is where stored indices are re-anchored to their device identities
+    (`reanchor_camera_indices`). Teleoperation and replay open no cameras at
+    all, so those two flows have nothing to re-anchor.
     """
     name = (robot_name or "").strip()
     if not name:
@@ -794,7 +886,7 @@ def load_robot_cameras(robot_name: str) -> dict[str, dict]:
             f"No saved configuration found for robot '{name}'. "
             "Select an existing robot (or save this one in Robot settings) before starting."
         )
-    return record_cameras_by_name(record.get("cameras") or [])
+    return reanchor_camera_indices(record_cameras_by_name(record.get("cameras") or []))
 
 
 def _positive_int(value: object) -> int | None:

@@ -811,34 +811,38 @@ def test_rollout_cli_args_forwards_the_engine_to_both_front_ends() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _robot_record_with_cam(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+def _robot_record_with_cam(
+    tmp_lerobot_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    unique_id: str | None = None,
+) -> None:
     """Write a one-camera robot record into a redirected ROBOTS_PATH.
 
     ROBOTS_PATH is a module-level constant not covered by `tmp_lerobot_home`
-    (same pattern as tests/test_utils_config.py's autouse fixture)."""
+    (same pattern as tests/test_utils_config.py's autouse fixture).
+
+    `unique_id` is the camera's AVFoundation device identity. Omitted by
+    default so most tests read the record's stored index unchanged; supply it
+    (with an injected enumeration) to exercise the re-anchoring seam."""
     from makermodslab.utils import config as cfg
 
     robots_dir = tmp_lerobot_home / "robots"
     robots_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
-    cfg.save_robot_record(
-        name,
-        {
-            "cameras": [
-                {
-                    "id": "camera_1",
-                    "name": "wrist",
-                    "type": "opencv",
-                    "camera_index": 0,
-                    "device_id": "browser-device-id",
-                    "width": 640,
-                    "height": 480,
-                    "fps": 30,
-                }
-            ]
-        },
-        allow_create=True,
-    )
+    camera = {
+        "id": "camera_1",
+        "name": "wrist",
+        "type": "opencv",
+        "camera_index": 0,
+        "device_id": "browser-device-id",
+        "width": 640,
+        "height": 480,
+        "fps": 30,
+    }
+    if unique_id is not None:
+        camera["unique_id"] = unique_id
+    cfg.save_robot_record(name, {"cameras": [camera]}, allow_create=True)
 
 
 def _bimanual_request():
@@ -888,10 +892,78 @@ def test_single_robot_args_appends_bound_record_cameras(
     assert "index_or_path: 0" in cam_arg
     assert "width: 640" in cam_arg
     # Record-keeping keys never reach lerobot's config parser, and neither does
-    # the record's own device identity (lerobot has no `unique_id` field).
+    # the record's own device identity (lerobot has no `unique_id` field) — it
+    # is consumed upstream, where it re-anchors the index (see the next test).
     assert "device_id" not in cam_arg
     assert "id:" not in cam_arg
     assert "unique_id" not in cam_arg
+
+
+def test_single_robot_args_carries_the_reanchored_camera_index(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index baked into `--robot.cameras=` is the one the recorded DEVICE
+    now sits at, not the one the record stored.
+
+    A cv2 index is a position in AVFoundation's device list, so a replug
+    renumbers it and the rollout subprocess would open a different camera under
+    the policy's own camera name — invisible in the preview, which re-anchors
+    already. Resolution happens at the session seam (utils/config), so this
+    path needs no plumbing of its own; only the enumeration is injected here."""
+    from makermodslab import camera_identity
+    from makermodslab.rollout import InferenceRequest, _single_robot_args
+
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo", unique_id="uid-wrist")
+    # The record says index 0; the device it names now enumerates at 1.
+    monkeypatch.setattr(
+        camera_identity,
+        "list_cameras_in_process",
+        lambda: [
+            {"index": 0, "name": "FaceTime HD Camera", "unique_id": "uid-builtin"},
+            {"index": 1, "name": "Robot Cam", "unique_id": "uid-wrist"},
+        ],
+    )
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        robot_name="solo",
+        camera_bindings={"front": "wrist"},
+    )
+
+    cam_arg = next(a for a in _single_robot_args(req, "robot_a") if a.startswith("--robot.cameras="))
+
+    assert "index_or_path: 1" in cam_arg
+    assert "unique_id" not in cam_arg
+
+
+def test_single_robot_args_refuses_a_camera_that_is_not_attached(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorded device is absent from an enumeration that answered: opening
+    the stale index would run the policy on the wrong camera. handle_start_
+    inference turns this CameraResolutionError into a 400 before the session
+    starts."""
+    from makermodslab import camera_identity
+    from makermodslab.rollout import InferenceRequest, _single_robot_args
+    from makermodslab.utils.config import CameraResolutionError
+
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo", unique_id="uid-wrist")
+    monkeypatch.setattr(
+        camera_identity,
+        "list_cameras_in_process",
+        lambda: [{"index": 0, "name": "FaceTime HD Camera", "unique_id": "uid-builtin"}],
+    )
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        robot_name="solo",
+        camera_bindings={"front": "wrist"},
+    )
+
+    with pytest.raises(CameraResolutionError, match="wrist"):
+        _single_robot_args(req, "robot_a")
 
 
 def test_single_robot_args_captures_at_the_checkpoints_resolution(

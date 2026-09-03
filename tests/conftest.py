@@ -129,6 +129,31 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return cache
 
 
+@pytest.fixture(autouse=True)
+def _no_host_camera_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never ask the HOST's AVFoundation for its camera list.
+
+    `camera_identity.list_cameras_in_process()` is a real query against this
+    machine's devices, and code under test reaches it without any camera being
+    opened (`utils/config.reanchor_camera_indices` runs on every session camera
+    dict). Left unpatched, a suite run on the developer's Mac would depend on
+    which cameras happen to be plugged in — and on whether the shell has camera
+    permission, since a process without it enumerates only built-ins, which
+    would make every recorded `unique_id` look "verifiably absent" and turn
+    green tests red. Returning None is the documented "identity unavailable"
+    answer: callers fall back to the stored index, exactly as they do on the
+    Linux CI runner.
+
+    Tests that exercise identity patch `list_cameras_in_process` themselves
+    (their monkeypatch is applied after this one and wins); tests/
+    test_camera_identity.py drives the real function through its own faked
+    PyObjC layer and imports it by name, so it is unaffected either way.
+    """
+    import makermodslab.camera_identity as camera_identity
+
+    monkeypatch.setattr(camera_identity, "list_cameras_in_process", lambda: None)
+
+
 def _reset_module_caches() -> None:
     """Drop every process-lived, module-global cache/singleton state that could
     leak Hub answers (or a real-machine cache read) from one test into the next.

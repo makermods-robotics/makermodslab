@@ -1985,6 +1985,12 @@ def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     on the physical device (see makermodslab/camera_identity.py), and lerobot's
     OpenCVCameraConfig would reject it as an unknown field.
 
+    Dropping it is safe only because the index has ALREADY been re-anchored to
+    that identity upstream (utils/config.reanchor_camera_indices, at the
+    load_robot_cameras seam every session camera dict comes through): the
+    number baked into these args is the one the fresh rollout subprocess's cv2
+    opens for the recorded device, not the possibly-stale one from the record.
+
     Like recording (`record._build_camera_configs`), opencv cameras default to
     MJPG when the record doesn't pin a fourcc: without it, Linux/V4L2
     negotiates raw YUYV and a 3-camera rig exhausts the USB bus at STREAMON —
