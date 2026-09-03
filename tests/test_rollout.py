@@ -3789,6 +3789,32 @@ def test_coaching_terminal_payload_keeps_the_dataset_and_tally(monkeypatch) -> N
     assert result["coaching_dataset"] == "rollout_shirt_fixes_20260818_120000"
 
 
+def test_coaching_finalise_invalidates_the_dataset_listing(monkeypatch) -> None:
+    """A coaching session leaves a corrections dataset on disk (or removes an
+    empty one). Either way the /datasets listing changed, so its cache must be
+    dropped — nothing on the coaching teardown path did this, so the corrections
+    dataset stayed invisible until the 45s TTL lapsed."""
+    import time
+
+    from makermodslab import datasets, rollout
+
+    for aborted in (False, True):
+        session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+        session.corrections_saved = 3
+        session.dataset_repo_id = "rollout_shirt_fixes_20260818_120000"
+        monkeypatch.setattr(rollout, "inference_active", True)
+        monkeypatch.setattr(rollout, "_coach_session", session)
+        monkeypatch.setattr(rollout, "_inference_meta", {})
+        with datasets._listing_cache_lock:
+            datasets._listing_cache = {"at": time.monotonic(), "value": [{"repo_id": "old/ds"}]}
+
+        with rollout._state_lock:
+            rollout._finalise_coaching_locked(0 if not aborted else None, session, aborted=aborted)
+
+        with datasets._listing_cache_lock:
+            assert datasets._listing_cache is None, f"aborted={aborted}"
+
+
 def test_coaching_stop_reports_aborted_but_keeps_the_partial_tally(monkeypatch) -> None:
     """Unlike an aborted EVAL — which must not claim an accuracy it never
     measured — a stopped coaching session loses nothing by reporting its count.
