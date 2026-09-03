@@ -12,7 +12,6 @@ import NewPolicyBanner from "@/components/launchpad/NewPolicyBanner";
 import ActivityStrip from "@/components/launchpad/ActivityStrip";
 import LibrarySheet from "@/components/launchpad/LibrarySheet";
 import RobotCorner from "@/components/launchpad/RobotCorner";
-import CollectHandoff from "@/components/studio/CollectHandoff";
 import CoachHandoff from "@/components/studio/CoachHandoff";
 import StudioOverlay from "@/components/studio/StudioOverlay";
 import { useStudio } from "@/contexts/StudioContext";
@@ -76,7 +75,11 @@ const Launchpad = () => {
       {/* justify-center holds the whole stack (hero → banner) in the middle
           of the viewport rather than hugging the header. */}
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col items-center justify-center gap-10 px-4 py-8 sm:px-6">
-        <CollectHandoff />
+        {/* No CollectHandoff here. It moved into the studio's Collect panel
+            when a finished recording session stopped closing the studio and
+            navigating home — there is no longer a router-state payload for a
+            Launchpad-level banner to read. CoachHandoff still works that way:
+            an inference session does return here. */}
         <CoachHandoff />
         <Hero search={search} onSearchChange={setSearch} />
         <PolicySlider search={search} />
