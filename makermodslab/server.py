@@ -55,6 +55,7 @@ from . import (
     record as record_state,
     rollout as rollout_state,
     session_events,
+    sfu,
 )
 
 # Import our custom calibration functionality
@@ -219,6 +220,7 @@ from .schemas.sessions import (
     SessionStartResponse,
     SessionStopResponse,
 )
+from .schemas.sfu import SfuTokenResponse
 from .schemas.system import (
     AvailableCamerasResponse,
     AvailablePortsResponse,
@@ -1127,7 +1129,7 @@ def coaching_command(session_id: str, body: SessionCoachingBody):
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
-def health_check():
+def health_check(request: Request):
     """Node identity + capability document.
 
     Doubles as the node-registry verify handshake: a discovered peer is
@@ -1146,7 +1148,69 @@ def health_check():
             # Present only when the torch probe sees an accelerator — an
             # absent key means none/unknown, never guess (see HealthResponse).
             **({"gpu": gpu} if (gpu := probe_gpu()) else {}),
+            # Present only when this process runs (or fronts) a LiveKit SFU
+            # (--sfu): the signalling URL as reachable from the caller's
+            # side. Absent = no SFU here; a peer wanting one asks another
+            # node. Same absent-means-unknown rule as gpu.
+            **(
+                {"sfu": {"url": sfu.sfu_url(request.url.hostname or "localhost")}}
+                if sfu.sfu_enabled()
+                else {}
+            ),
         },
+    }
+
+
+# --- SFU token broker (v1-only surface; see v1_router note above) ---
+
+
+class SfuTokenBody(BaseModel):
+    """Request for a LiveKit room token (sfu.py). Every field is optional:
+    the server picks a unique identity and the station's default room, and
+    `operator` is the role a laptop or a policy worker wants. `robot` is for
+    the one participant that publishes cameras/state (normally this station
+    itself, in a later phase); `viewer` subscribes only."""
+
+    identity: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    room: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] | None = None
+    role: Literal["robot", "operator", "viewer"] = "operator"
+    ttl_seconds: int = Field(sfu.DEFAULT_TTL_SECONDS, ge=sfu.MIN_TTL_SECONDS, le=sfu.MAX_TTL_SECONDS)
+
+
+@v1_router.post("/sfu/token", response_model=SfuTokenResponse, tags=["sfu"])
+def issue_sfu_token(body: SfuTokenBody, request: Request):
+    """Sign a short-lived, role-scoped LiveKit room token.
+
+    The station is the only party holding the SFU secret, so participants
+    (a laptop's makermodslab, a Modal worker, a browser) get their JWT here
+    instead of carrying the secret. The URL is built from the host the
+    caller reached THIS API on — the one address known to be routable from
+    where they sit. 409 sfu.disabled when the launcher wasn't started with
+    --sfu: the remedy is a restart with the flag, not a retry."""
+    if not sfu.sfu_enabled():
+        raise ApiError(
+            409,
+            "No LiveKit SFU is configured on this node. Start it with `makermodslab --sfu`.",
+            code=ErrorCode.SFU_DISABLED,
+        )
+    api_key, api_secret = sfu.api_keys()
+    identity = body.identity or sfu.default_identity(body.role)
+    room = body.room or sfu.default_room(get_instance_id())
+    token, expires_at = sfu.mint_token(
+        api_key=api_key,
+        api_secret=api_secret,
+        identity=identity,
+        room=room,
+        role=body.role,
+        ttl_seconds=body.ttl_seconds,
+    )
+    return {
+        "url": sfu.sfu_url(request.url.hostname or "localhost"),
+        "token": token,
+        "room": room,
+        "identity": identity,
+        "role": body.role,
+        "expires_at": expires_at,
     }
 
 
@@ -1159,7 +1223,7 @@ class AddNodeBody(BaseModel):
 
 
 @v1_router.get("/nodes", response_model=NodeListResponse, tags=["nodes"])
-def list_nodes(force: bool = False):
+def list_nodes(request: Request, force: bool = False):
     """All known nodes: this server first (is_self=true, built from the same
     health fields the handshake reads, so clients render one uniform list),
     then every registered peer. Peers whose last probe is older than the TTL
@@ -1170,7 +1234,7 @@ def list_nodes(force: bool = False):
     pass bypasses the TTL — discovery runs now and every known entry is
     probed now — so a refresh button answers with the world as it is, not as
     it was up to TTL seconds ago."""
-    health = health_check()
+    health = health_check(request)
     self_entry = {
         "url": None,  # a server doesn't know its own external address
         "instance_id": health["instance_id"],

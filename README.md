@@ -99,10 +99,19 @@ makermodslab --lan                    # bind 0.0.0.0, no browser, serve the whol
 makermodslab --bind tailscale0        # or bind one interface, tailnet only
 makermodslab --no-ui                  # pure API node, no frontend
 makermodslab --discover-tailscale     # find peer nodes over Tailscale
+makermodslab --sfu                    # also run a LiveKit SFU for remote teleop / inference peers
 ```
 
 Once a station is up, any client on the same tailnet can drive it from a browser, and any node can
 hand a training job to any other.
+
+**`--sfu` runs LiveKit next to the API.** Remote teleoperation and remote inference stream cameras,
+joint state and actions through a [LiveKit](https://github.com/livekit/livekit) server, and `--sfu`
+runs one alongside, bound wherever the API is bound (so `--sfu --bind tailscale0` serves the tailnet).
+It needs the `livekit-server` binary on your PATH — `brew install livekit` on macOS,
+`curl -sSL https://get.livekit.io | bash` on Linux, the release zip on Windows — and exits with that
+hint if it is missing. Peers fetch short-lived room tokens from `POST /api/v1/sfu/token`; the signing
+secret stays in a 0600 file on the station. Open `7880/tcp`, `7881/tcp` and `7882/udp` for remote peers.
 
 **Peer nodes are verified, not trusted.** A node is only added once its `/api/v1/health` identity
 document checks out, and a discovered peer gets re-verified every time.

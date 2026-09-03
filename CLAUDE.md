@@ -97,6 +97,8 @@ Two deliberate gaps: **no Maker or Metal URDF ships**, so a CAN-arm teleop sessi
 - [nodes.py](makermodslab/nodes.py) — peer-node registry (static/manual source for now): verify-on-add against a peer's `/api/v1/health` identity document, TTL liveness with an injected clock, `nodes.json` persistence. Discovered peers are hints — always re-verified, never trusted.
 - [runners/lan_node.py](makermodslab/runners/lan_node.py) — `runner: "lan_node"`: offloads a training job to another node by driving that peer's own v1 jobs API; tolerates network blips (120s peer-lost grace), relays the peer's terminal verdict so a remote stop never classifies as failure. Datasets travel via the Hub ([runners/\_dataset.py](makermodslab/runners/_dataset.py)) — a LAN peer can no more see this machine's LeRobot cache than an HF pod can.
 
+- [sfu.py](makermodslab/sfu.py) — the bundled LiveKit SFU (`makermodslab --sfu`): the transport remote teleoperation and remote inference will ride (via LiveKit Portal on the participants; nothing in this repo speaks WebRTC). The server is the stock `livekit-server` Go binary, resolved from PATH only (LiveKit publishes no macOS release asset and no PyPI package, so the per-OS install hint IS the fallback), **spawned and reaped by the launcher, never the app** — `uvicorn --reload` restarts the app process on every save. The launcher hands the app a 0600 key file (`utils/config.LIVEKIT_KEY_FILE`) through the environment, and `POST /api/v1/sfu/token` is the ONLY signer: every LiveKit join needs a JWT signed with that secret, so participants (a laptop, a Modal worker, a browser) get short-lived, role-scoped tokens here instead of holding the secret. The token's URL is derived from the host the caller reached the API on; `/health` advertises it under `capabilities.sfu`. A specific `--bind` address is also pinned as `rtc.node_ip` so ICE candidates advertise the tailnet IP peers actually reach.
+
 **utils/:**
 
 - [utils/config.py](makermodslab/utils/config.py) — shared paths and persistence. **Import shared constants from here, do not hardcode paths in feature modules.**
@@ -132,6 +134,7 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makermod
 - `makermodslab_biso/` — bimanual calibration staging
 - `ports/{leader,follower}_port.txt` — last-used serial ports
 - `dismissed_hub_jobs.json`, `saved_custom_{datasets,models}.json`, `hidden_{datasets,models}.json` — UI-level bookkeeping
+- `livekit_keys.yaml` (0600) — the bundled SFU's API key/secret, minted on the first `--sfu` run; `livekit_config.yaml` — the livekit-server config re-rendered on every `--sfu` start
 - `instance_id.txt` — this install's stable node identity (32-hex, minted on first read; how peers recognize this machine across restarts and address changes)
 - `nodes.json` — saved peer nodes (url + name only; identity is re-verified on load, never trusted from disk)
 
