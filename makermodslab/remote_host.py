@@ -78,13 +78,12 @@ from .utils.robot_factory import build_follower_config
 
 logger = logging.getLogger(__name__)
 
-# Portal's lerobot plugin is the `remote` extra; this is the module we probe
-# and the install target the UI offers.
-REMOTE_EXTRA_PROBE_MODULE = "lerobot_teleoperator_livekit"
-REMOTE_EXTRA_INSTALL_TARGET = "makermodslab[remote]"
+# Portal's lerobot plugin is the `remote` extra; the probe module and the
+# install target are utils/system.py's (one place for the pins).
+from .utils.system import REMOTE_INSTALL_HINT, REMOTE_PROBE_MODULE as REMOTE_EXTRA_PROBE_MODULE  # noqa: E402
+
 REMOTE_EXTRA_HINT = (
-    "The `remote` extra (LiveKit Portal's lerobot plugins) is not installed. "
-    "Install it from Settings → Optional extras, or `uv pip install 'makermodslab[remote]'`, then restart."
+    "The `remote` extra (LiveKit Portal's lerobot plugins) is not installed. " + REMOTE_INSTALL_HINT
 )
 
 # Identity the station joins its own room with. One Robot per room (Portal's

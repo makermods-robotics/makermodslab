@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel
@@ -96,8 +97,11 @@ def _find_uv() -> str | None:
     return None
 
 
-def _build_install_cmd(package: str) -> list[str]:
+def _build_install_cmd(package: str | Sequence[str]) -> list[str]:
     """Pick the best installer for the running Python.
+
+    ``package`` is one requirement or several (each its own argv token —
+    never a space-joined string, which pip would read as one bogus name).
 
     Venvs created with `uv venv` don't ship pip, so `python -m pip` fails with
     `No module named pip`. Find uv (PATH, then the standard install
@@ -105,10 +109,11 @@ def _build_install_cmd(package: str) -> list[str]:
     install lands in this Python's site-packages. Otherwise fall back to
     `python -m pip`.
     """
+    packages = [package] if isinstance(package, str) else list(package)
     uv = _find_uv()
     if uv:
-        return [uv, "pip", "install", "--python", sys.executable, package]
-    return [sys.executable, "-m", "pip", "install", package]
+        return [uv, "pip", "install", "--python", sys.executable, *packages]
+    return [sys.executable, "-m", "pip", "install", *packages]
 
 
 class ExtraStatus(BaseModel):
@@ -228,14 +233,19 @@ class InstallManager:
 
 training_install_manager = InstallManager("accelerate")
 wandb_install_manager = InstallManager("wandb")
-# The LiveKit Portal lerobot plugins (remote teleoperation / inference).
-# Installed as makermodslab's own `remote` extra so the pins live in one
-# place (pyproject.toml); probed by the module remote_host.py imports.
+# The LiveKit Portal lerobot plugins (remote teleoperation / inference) —
+# the packages of pyproject's `remote` extra, installed BY NAME. Not
+# `makermodslab[remote]`: a bare package name makes uv treat the lerobot git
+# pin inside makermodslab as a transitive URL dependency and refuse to
+# resolve ("URL dependencies must be expressed as direct requirements"), and
+# pip would go looking for a `makermodslab` on PyPI instead. Keep these pins
+# in step with pyproject.toml's extra.
 REMOTE_PROBE_MODULE = "lerobot_teleoperator_livekit"
-REMOTE_INSTALL_TARGET = "makermodslab[remote]"
+REMOTE_INSTALL_TARGET = ("lerobot-teleoperator-livekit>=0.2.5", "lerobot-robot-livekit>=0.2.5")
 REMOTE_INSTALL_HINT = (
-    "Remote teleoperation needs the LiveKit Portal plugins: "
-    "`uv pip install 'makermodslab[remote]'` (Python 3.12; Linux x86_64/aarch64 or Apple Silicon), then restart."
+    "Remote teleoperation needs the LiveKit Portal plugins (Python 3.12; Linux x86_64/aarch64 or Apple Silicon). "
+    "From a checkout: `uv pip install -e '.[remote]'`; for a `uv tool` install: "
+    "`uv tool install 'makermodslab[remote] @ git+https://github.com/makermods-robotics/makermodslab'`. Then restart."
 )
 remote_install_manager = InstallManager(REMOTE_INSTALL_TARGET)
 

@@ -1270,7 +1270,7 @@ def get_remote_extra():
 
 @v1_router.post("/system/remote-extra/install", response_model=InstallStartResponse, tags=["system"])
 def install_remote_extra():
-    """Spawn `pip install makermodslab[remote]` as a background subprocess. No-op if already running."""
+    """Spawn the Portal plugins' pip install as a background subprocess. No-op if already running."""
     return handle_install_remote_extra()
 
 

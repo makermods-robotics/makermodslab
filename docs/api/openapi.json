@@ -10930,7 +10930,7 @@
     },
     "/api/v1/system/remote-extra/install": {
       "post": {
-        "description": "Spawn `pip install makermodslab[remote]` as a background subprocess. No-op if already running.",
+        "description": "Spawn the Portal plugins' pip install as a background subprocess. No-op if already running.",
         "operationId": "install_remote_extra",
         "responses": {
           "200": {
