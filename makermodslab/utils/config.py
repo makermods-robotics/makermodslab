@@ -527,6 +527,17 @@ _BIMANUAL_CONFIG_FIELDS = (
     "right_follower_config",
 )
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
+
+# Which arm SIDES this machine has plugged in — the record's layout, which is
+# a UI-and-readiness hint, not a hardware fact the sessions branch on (each
+# session kind gates on the arm scope it actually drives, see
+# is_robot_record_clean). "both" is a local leader/follower pair (every record
+# written before the remote kinds existed reads back as this); "follower" is a
+# station that only hosts / runs policies / replays; "leader" is a controller
+# that only drives a REMOTE follower. Bimanual composes with it (two leaders,
+# two followers, or both pairs).
+ROBOT_ARMS = ("both", "follower", "leader")
+_DEFAULT_ARMS = "both"
 _ROBOT_LIST_FIELDS = ("cameras",)
 
 # Auto-calibration drive torque, as a percentage of full torque. Threaded into
@@ -601,6 +612,7 @@ def _empty_record(name: str) -> dict:
     record: dict = {
         "name": name,
         "mode": _DEFAULT_MODE,
+        "arms": _DEFAULT_ARMS,
         "arm_type": DEFAULT_ARM_TYPE,
         "motor_power": DEFAULT_MOTOR_POWER,
     }
@@ -636,6 +648,10 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
+    # Records written before the remote kinds existed carry no layout; they
+    # are local pairs by definition.
+    if record.get("arms") not in ROBOT_ARMS:
+        record["arms"] = _DEFAULT_ARMS
     # Records written before the Maker arm existed carry no arm_type; they are
     # SO-101s by definition, which is exactly what normalize_arm_type returns.
     record["arm_type"] = normalize_arm_type(record.get("arm_type"))
@@ -699,6 +715,9 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
+    if data.get("arms") in ROBOT_ARMS:
+        record["arms"] = data["arms"]
+    record.setdefault("arms", _DEFAULT_ARMS)
     # Switching arm type invalidates every hardware-bound field on the record.
     # The ports name physically different adapters (a Feetech USB-serial bridge
     # vs a CANable + a FashionStar UART bridge) and the calibration names point

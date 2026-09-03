@@ -136,7 +136,7 @@ server.py defines a single `ConnectionManager` with a background `_broadcast_wor
 All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makermodslab/utils/config.py); writes are atomic):
 
 - `calibration/teleoperators/so_leader/*.json`, `calibration/robots/so_follower/*.json` — named calibrations (leader = "teleop", follower = "robot")
-- `robots/*.json` — per-robot records: arm layout (`mode: single|bimanual` with right-arm fields), ports, cameras, calibration names, `motor_power`
+- `robots/*.json` — per-robot records: arm layout (`mode: single|bimanual` with right-arm fields; `arms: both|follower|leader` — which SIDES this machine has, a UI/readiness hint: a station is `follower`, a remote controller is `leader`, old records read as `both`), ports, cameras, calibration names, `motor_power`
 - `makermodslab_biso/` — bimanual calibration staging
 - `ports/{leader,follower}_port.txt` — last-used serial ports
 - `dismissed_hub_jobs.json`, `saved_custom_{datasets,models}.json`, `hidden_{datasets,models}.json` — UI-level bookkeeping

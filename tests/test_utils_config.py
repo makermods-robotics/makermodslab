@@ -1119,3 +1119,48 @@ def test_bind_robot_cameras_copies_so_callers_cant_alias_the_record(
 
     assert bound["left"] is not bound["right"]
     assert bound["left"] == bound["right"]
+
+
+# --- record layout (`arms`) ----------------------------------------------------
+
+
+def test_record_arms_defaults_to_both_for_old_and_new_records(tmp_lerobot_home) -> None:
+    """A record written before the remote kinds existed carries no layout and
+    reads back as a local pair; a fresh record starts the same way."""
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("fresh", {})
+    assert cfg.get_robot_record("fresh")["arms"] == "both"
+    # Simulate a pre-layout file on disk.
+    path = cfg._robot_record_path("old")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps({"name": "old", "follower_port": "/dev/f"}))
+    assert cfg.get_robot_record("old")["arms"] == "both"
+
+
+@pytest.mark.parametrize("arms", ["follower", "leader", "both"])
+def test_record_arms_round_trips_and_ignores_unknown_values(tmp_lerobot_home, arms: str) -> None:
+    from makermodslab.utils import config as cfg
+
+    cfg.save_robot_record("station", {"arms": arms})
+    assert cfg.get_robot_record("station")["arms"] == arms
+    cfg.save_robot_record("station", {"arms": "wings"})  # unknown: keeps the existing layout
+    assert cfg.get_robot_record("station")["arms"] == arms
+    cfg.save_robot_record("station", {"follower_port": "/dev/f"})  # unrelated patch: preserved
+    assert cfg.get_robot_record("station")["arms"] == arms
+
+
+def test_robots_listing_reports_leader_ready(client, tmp_lerobot_home) -> None:
+    """The listing exposes all three readiness scopes; a leader-only record is
+    leader_ready and nothing else."""
+    from makermodslab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "LC.json").write_text("{}")
+    cfg.save_robot_record("controller", {"arms": "leader", "leader_port": "/dev/l", "leader_config": "LC"})
+    robot = next(r for r in client.get("/api/v1/robots").json()["robots"] if r["name"] == "controller")
+    assert (robot["arms"], robot["leader_ready"], robot["follower_ready"], robot["is_clean"]) == (
+        "leader",
+        True,
+        False,
+        False,
+    )

@@ -4397,12 +4397,15 @@ def _record_with_clean(record: dict) -> dict:
 
     `is_clean` folds every arm of the mode (gates teleop/record, which drive
     leaders AND followers); `follower_ready` scopes to the follower side so
-    follower-only activities (inference, replay) aren't blocked by a leader arm
-    they never touch."""
+    follower-only activities (inference, replay, hosting) aren't blocked by a
+    leader arm they never touch; `leader_ready` is the mirror for remote
+    teleoperation, which drives a STATION's follower with this node's leader.
+    The record's `arms` layout says which of these the UI should even show."""
     return {
         **record,
         "is_clean": is_robot_record_clean(record),
         "follower_ready": is_robot_record_clean(record, arms="follower"),
+        "leader_ready": is_robot_record_clean(record, arms="leader"),
     }
 
 
