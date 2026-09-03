@@ -37,7 +37,10 @@ export interface URDFViewerElement extends HTMLElement {
  */
 export function createUrdfViewer(
   container: HTMLDivElement,
-  isDarkMode: boolean
+  isDarkMode: boolean,
+  /** Which model axis points up. The SO-101 URDF is Z-up; the Maker export
+   * is Y-up, and mounting it in a Z-up scene lays it on its side. */
+  up: string = "Z"
 ): URDFViewerElement {
   // Clear any existing content
   container.innerHTML = "";
@@ -50,7 +53,7 @@ export function createUrdfViewer(
   container.appendChild(viewer);
 
   // Set initial viewer properties
-  viewer.setAttribute("up", "Z");
+  viewer.setAttribute("up", up);
   setViewerColor(viewer, isDarkMode ? "#2c2b3a" : "#eff4ff");
   viewer.setAttribute("highlight-color", isDarkMode ? "#df6dd4" : "#b05ffe");
   viewer.setAttribute("auto-redraw", "true");

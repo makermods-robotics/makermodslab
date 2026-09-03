@@ -18,6 +18,11 @@ describe("URDF_CONFIGS", () => {
     );
     expect(URDF_CONFIGS.maker?.urdfPath).toBe("/maker-urdf/robot.urdf");
   });
+
+  it("carries each URDF's up-axis — Z for the SO-101, Y for the Maker export", () => {
+    expect(URDF_CONFIGS.so101?.up).toBe("Z");
+    expect(URDF_CONFIGS.maker?.up).toBe("+Y");
+  });
 });
 
 describe("urdfConfigFor", () => {

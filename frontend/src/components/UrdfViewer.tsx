@@ -137,7 +137,11 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({
     if (!webglOk || !containerRef.current) return;
 
     // Create and configure the URDF viewer element
-    const viewer = createUrdfViewer(containerRef.current, variant === "dark");
+    const viewer = createUrdfViewer(
+      containerRef.current,
+      variant === "dark",
+      urdfConfig.up
+    );
     viewerRef.current = viewer; // Store reference to the viewer
 
     // Setup mesh loading function with appropriate URL modifier
