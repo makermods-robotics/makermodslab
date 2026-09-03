@@ -106,6 +106,13 @@ class StoppedSession(SdkModel):
     result: dict[str, Any]
 
 
+class SessionCoaching(SdkModel):
+    """POST /api/v1/sessions/{id}/coaching response — ``result`` is the
+    coaching runner's ``{success, message}`` answer verbatim."""
+
+    result: dict[str, Any]
+
+
 class _HeartbeatEnvelope(SdkModel):
     session: SessionInfo
 
@@ -293,6 +300,19 @@ class ActiveSession:
         while not self._stop_event.wait(self.heartbeat_interval_s):
             if self._tick() in ("stopped", "gone", "lost"):
                 return
+
+    def coaching_command(self, command: str) -> SessionCoaching:
+        """Send a coaching (DAgger) verb to THIS session — ``"takeover"``,
+        ``"handback"``, ``"cancel"``, ``"hold"``, ``"resume"``, ``"reset"``,
+        ``"recovered"``, ``"drop_last"``. Only meaningful for a run started
+        with ``infer(..., coaching=True)``; on anything else the runner
+        answers ``result["success"] == False`` with the reason.
+
+        Example:
+            >>> s.coaching_command("takeover").result["success"]
+            True
+        """
+        return self._sessions.coaching_command(self.id, command)
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -497,6 +517,36 @@ class SessionsResource(Resource):
             )
         )
 
+    @operation("coaching_command")
+    def coaching_command(self, session_id: str, command: str) -> SessionCoaching:
+        """One operator verb for a running coaching (DAgger) inference session.
+
+        ``command`` is one of ``"takeover"`` (leader takes the arm, correction
+        recording starts), ``"handback"`` (save the correction, policy
+        resumes), ``"cancel"`` (abandon the correction unsaved), ``"hold"`` /
+        ``"resume"`` (pause/unpause the policy), ``"reset"`` / ``"recovered"``
+        (scene reset between attempts), ``"drop_last"`` (discard the last
+        saved correction). The 404 session.not_found means the id no longer
+        names the live session. ``result`` carries the runner's
+        ``{success, message}`` verbatim — ``success=False`` with the reason
+        in ``message`` (e.g. the session isn't a coaching run).
+
+        Prefer the ActiveSession helper when you started the run yourself:
+        ``s.coaching_command("takeover")``.
+
+        Example:
+            >>> client.sessions.coaching_command(s.id, "takeover").result["success"]
+            True
+        """
+        return SessionCoaching.model_validate(
+            self._transport.request(
+                "POST",
+                f"/api/v1/sessions/{quote(session_id, safe='')}/coaching",
+                json={"command": command},
+                action=f"Coaching command {command!r}",
+            )
+        )
+
     def stop_current(self) -> StoppedSession | None:
         """Stop whatever session is live right now; None when the robot is idle.
 
@@ -631,6 +681,9 @@ class SessionsResource(Resource):
         eval_episodes: int | None = None,
         inference_engine: str | None = None,
         temporal_ensemble_coeff: float | None = None,
+        coaching: bool | None = None,
+        target_corrections: int | None = None,
+        coaching_dataset_name: str | None = None,
         skip_identity_check: bool | None = None,
         owner: str | None = None,
         lease_timeout_s: float | None = None,
@@ -641,6 +694,13 @@ class SessionsResource(Resource):
         record's camera names (the devices themselves come from the record);
         ``camera_dims`` values are ``{"width": ..., "height": ...}``.
         ``inference_engine`` is ``"sync"`` (server default) or ``"rtc"``.
+
+        ``coaching=True`` starts a DAgger coaching run instead of a plain
+        rollout: the LEADER arm stands armed for takeover (so unlike plain
+        inference this is NOT follower-only), and each takeover→handback
+        correction records an episode into ``coaching_dataset_name`` until
+        ``target_corrections`` are collected. Drive the run with
+        ``s.coaching_command("takeover")`` / ``"handback"`` / … while it runs.
 
         Example:
             >>> with client.sessions.infer("bench", policy_ref="me/act-pick", task="pick the cube") as s:
@@ -659,6 +719,9 @@ class SessionsResource(Resource):
                 eval_episodes=eval_episodes,
                 inference_engine=inference_engine,
                 temporal_ensemble_coeff=temporal_ensemble_coeff,
+                coaching=coaching,
+                target_corrections=target_corrections,
+                coaching_dataset_name=coaching_dataset_name,
                 skip_identity_check=skip_identity_check,
             ),
             owner,

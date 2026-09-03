@@ -42,6 +42,12 @@ teleoperation, dataset recording, training, inference, replay, calibration).
 - NEVER WRITE POLLING LOOPS. Long-running work has blocking waiters:
   client.jobs.wait(job_id), client.datasets.wait_for_download(repo_id), ...
   All take timeout=; on timeout the error says how to keep waiting.
+- COACHING (DAgger): infer(robot, policy_ref=..., coaching=True,
+  coaching_dataset_name=...) runs the policy with the LEADER armed for
+  takeover; drive it with s.coaching_command("takeover"/"handback"/"hold"/
+  "resume"/"reset"/"recovered"/"cancel"/"drop_last") — corrections record
+  as episodes until target_corrections. client.inference.* are the same
+  verbs unscoped. success=False + message = soft refusal, not an error.
 - FULL BACKEND POWER, wider than the web UI. create_training(...) accepts
   EVERY server training knob as a kwarg (help(makermodslab_sdk.TrainingOptions)
   is the catalog: wandb_*, optimizer_*, resume/fine-tune lineage, eval,

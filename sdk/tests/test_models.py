@@ -217,3 +217,38 @@ def test_wait_for_download_failure_raises_with_server_error():
 def test_download_status_end_to_end(sdk_client):
     """The poll endpoint is pure local state — safe to hit for real."""
     assert sdk_client.models.download_status().state in {"idle", "running", "done", "error"}
+
+
+def test_skills_listing_shapes():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/skills"
+        return httpx.Response(
+            200,
+            json={
+                "skills": [
+                    {
+                        "id": "job-1",
+                        "name": "pick-place v2",
+                        "policy_type": "act",
+                        "dataset": "u/pick",
+                        "steps": 20000,
+                        "path": "outputs/train/job-1",
+                        "last_modified": "2026-09-01T10:00:00",
+                        "hf_repo_id": None,
+                        "source": "local",
+                        "origin": "trained",
+                        "weights": "local",
+                        "superseded_by": None,
+                        "deployable": True,
+                        "job_id": "job-1",
+                    }
+                ],
+                "hub": {"ok": True, "authenticated": True, "degraded": False, "stale_rows": False},
+            },
+        )
+
+    with mock_client(handler) as client:
+        skills = client.models.skills()
+    assert skills.hub.ok is True
+    assert skills.skills[0].deployable is True
+    assert skills.skills[0].name == "pick-place v2"

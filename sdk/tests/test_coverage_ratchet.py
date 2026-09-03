@@ -23,6 +23,7 @@ HTTP_METHODS = {"get", "post", "put", "delete", "patch"}
 
 PLANNED: dict[str, frozenset[str]] = {
     "datasets": frozenset(),
+    "inference": frozenset(),
     "jobs": frozenset(),
     "models": frozenset(),
     "nodes": frozenset(),

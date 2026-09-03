@@ -107,6 +107,18 @@ class ModelsResource(Resource):
         ['act_pick_place']
     """
 
+    @operation("skills_list")
+    def skills(self) -> Skills:
+        """The skills view: every deployable policy across local jobs and the
+        Hub, with lineage (``superseded_by``) and per-row deployability —
+        the "what can this robot do right now?" listing.
+
+        Example:
+            >>> [s.name for s in client.models.skills().skills if s.deployable]
+            ['pick-place v2']
+        """
+        return Skills.model_validate(self._transport.request("GET", "/api/v1/skills", action="List skills"))
+
     @operation("models_list")
     def list(self) -> list[ModelListItem]:
         """Every model the server can see — local runs, downloaded checkpoints,
@@ -305,3 +317,48 @@ class ModelsResource(Resource):
             poll_interval=poll_interval,
             sleep_fn=sleep_fn,
         )
+
+
+class SkillsHubStatus(SdkModel):
+    """How trustworthy the Hub half of the skills listing is right now."""
+
+    ok: bool
+    authenticated: bool
+    degraded: bool
+    stale_rows: bool
+
+
+class Skill(SdkModel):
+    """One deployable policy ("skill"): a trained checkpoint viewed as a
+    capability — where its weights live (``weights``/``source``), what it was
+    trained on, and whether it is ``deployable`` right now. ``superseded_by``
+    points at a newer skill trained from this one."""
+
+    id: str
+    name: str
+    policy_type: str | None = None
+    dataset: str | None = None
+    dataset_episodes: list[int] | None = None
+    steps: int | None = None
+    target_steps: int | None = None
+    path: str | None = None
+    last_modified: str | None = None
+    hf_repo_id: str | None = None
+    repo_id: str | None = None
+    source: str = ""
+    origin: str = ""
+    weights: str = ""
+    state: str | None = None
+    stale: bool | None = None
+    private: bool | None = None
+    saved_custom: bool | None = None
+    superseded_by: str | None = None
+    deployable: bool
+    job_id: str | None = None
+
+
+class Skills(SdkModel):
+    """GET /api/v1/skills — the skills view over models + jobs."""
+
+    skills: list[Skill]
+    hub: SkillsHubStatus
