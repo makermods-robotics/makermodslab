@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router-dom";
 import { Check, GitMerge, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +21,7 @@ import { useStudio } from "@/contexts/StudioContext";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import type { MergeStatus } from "@/lib/replayApi";
 import RecordingForm from "@/components/studio/RecordingForm";
+import CollectHandoff from "@/components/studio/CollectHandoff";
 import RecordingSessionDialog, {
   RecordedInfo,
   RecordingConfig,
@@ -62,7 +62,6 @@ const CollectPanel: React.FC = () => {
   const { selectedRecord } = useRobots();
   const { datasets, loading: datasetsLoading, refresh } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
-  const navigate = useNavigate();
   const { toast } = useToast();
 
   // The recording-form draft lives in StudioContext so filled-in parameters
@@ -70,10 +69,11 @@ const CollectPanel: React.FC = () => {
   const {
     collectForm,
     updateCollectForm,
-    closeStudio,
     mergePrefill,
     clearMergePrefill,
     openStudio,
+    lastRecorded,
+    setLastRecorded,
   } = useStudio();
   const {
     formOpen,
@@ -240,27 +240,31 @@ const CollectPanel: React.FC = () => {
   };
 
   // Every exit path of the session dialog lands here. A `recorded` payload
-  // (clean finish / "keep episodes") closes the studio and stamps the router
-  // state the CollectHandoff banner reads — same contract the old /recording
-  // page fulfilled by navigating home.
+  // (clean finish / "keep episodes") hands the session off to the banner at the
+  // top of this panel.
+  //
+  // The studio deliberately stays OPEN. This used to closeStudio() and
+  // navigate("/") — the contract the old /recording page fulfilled by going
+  // home — which dropped the user on the Launchpad after every session, away
+  // from the library and Train panel that are the actual next steps. The
+  // payload moved to StudioContext at the same time, because with no
+  // navigation there is no router state to stamp.
   const handleRecordingExit = useCallback(
     (recorded?: RecordedInfo) => {
       setActiveRecording(null);
       setSessionCount((n) => n + 1);
       if (recorded) {
-        // A dataset was saved: fold the record-new form so the next studio
-        // visit opens onto the library (with the fresh dataset preselected by
-        // CollectHandoff). A discarded (empty) session keeps the form + draft
-        // open for a retry.
+        // A dataset was saved: fold the record-new form so the panel opens onto
+        // the library (with the fresh dataset preselected by CollectHandoff). A
+        // discarded (empty) session keeps the form + draft open for a retry.
         if (!recorded.discarded_empty) {
           updateCollectForm({ formOpen: false });
           setLibraryOpen(true);
         }
-        closeStudio();
-        navigate("/", { state: { recorded } });
+        setLastRecorded(recorded);
       }
     },
-    [closeStudio, navigate, updateCollectForm],
+    [setLastRecorded, updateCollectForm],
   );
 
   // Gate for the pinned Start button: robot ready + every required parameter
@@ -277,6 +281,14 @@ const CollectPanel: React.FC = () => {
         step="1"
         title={t("studio.collect.title")}
         dataTour="studio-collect"
+      />
+
+      {/* Post-session handoff. Renders nothing until a session saves something,
+          but stays mounted so its Hub auto-push and dataset preselection are
+          not conditional on the user looking at this panel. */}
+      <CollectHandoff
+        recorded={lastRecorded}
+        onDismiss={() => setLastRecorded(null)}
       />
 
       {/* Record new dataset — the form slides open in place (no dialog). */}

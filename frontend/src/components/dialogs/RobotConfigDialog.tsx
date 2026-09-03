@@ -79,6 +79,7 @@ import so101ManualStartPose from "@/assets/calibration/so101-manual-start-pose.j
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
+import { readCamerasActive, writeCamerasActive } from "@/lib/cameraPrefs";
 import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
 import {
   Collapsible,
@@ -754,7 +755,16 @@ const RobotConfigWindow = ({
   // Off by default so merely opening the settings window never grabs a camera.
   // The user explicitly starts a scan, which is when cameras are turned on,
   // enumerated, and the browser permission prompt is requested.
-  const [camerasActive, setCamerasActive] = useState(false);
+  //
+  // Once they HAVE turned it on for this robot, that answer is remembered and
+  // replayed on the next open (see lib/cameraPrefs): the window mounts fresh
+  // every time, so without this the switch snapped back to off and previews
+  // had to be re-opened by hand after every visit. A robot the user has never
+  // switched on still reads false, so the "never grabs a camera on its own"
+  // property holds for the case it was written for.
+  const [camerasActive, setCamerasActive] = useState(() =>
+    readCamerasActive(robotName),
+  );
 
   // No releaseStreamsRef call here, on purpose. CameraConfiguration stays
   // mounted and drops its own streams when `active` goes false — that is what
@@ -763,6 +773,10 @@ const RobotConfigWindow = ({
   // would never come back.
   const handleCamerasActiveChange = (active: boolean) => {
     setCamerasActive(active);
+    // Persist on the user's gesture only. Writing from an effect on
+    // `camerasActive` would also persist states the code sets for its own
+    // reasons, which is not the same thing as what the user chose.
+    writeCamerasActive(robotName, active);
   };
 
   useEffect(() => {
