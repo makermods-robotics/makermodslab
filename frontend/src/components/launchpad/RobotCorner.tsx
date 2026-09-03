@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   Gamepad2,
   Plus,
+  Radio,
   Settings,
   ChevronDown,
   Loader2,
@@ -45,12 +46,17 @@ import {
 } from "@/components/ui/tooltip";
 import CreateRobotDialog from "@/components/landing/CreateRobotDialog";
 import TeleopDialog from "@/components/dialogs/TeleopDialog";
+import HostingDialog from "@/components/dialogs/HostingDialog";
+import RemoteTeleopDialog from "@/components/dialogs/RemoteTeleopDialog";
+import RemoteExtraInstallDialog from "@/components/dialogs/RemoteExtraInstallDialog";
+import { ToastAction } from "@/components/ui/toast";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots, RobotRecord, RobotMode, ArmType } from "@/hooks/useRobots";
 import { ApiError } from "@/lib/apiClient";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
+import { formatRemoteRefusal } from "@/lib/remoteApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { formatRobotSetupGap } from "@/lib/robotSetupGap";
 import { useLanguage } from "@/contexts/LanguageContext";
@@ -107,6 +113,14 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   // Session identity from POST /api/v1/sessions — TeleopDialog heartbeats it
   // and stops it by id.
   const [teleopSessionId, setTeleopSessionId] = useState<string | null>(null);
+  // Remote teleoperation, both sides: hosting this robot's follower for an
+  // operator elsewhere (HostingDialog, by session id), and driving a hosting
+  // station with this robot's leader (RemoteTeleopDialog owns its own start).
+  const [hostStarting, setHostStarting] = useState(false);
+  const [hostOpen, setHostOpen] = useState(false);
+  const [hostSessionId, setHostSessionId] = useState<string | null>(null);
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const [remoteInstallOpen, setRemoteInstallOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -222,6 +236,91 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
       setTeleopStarting(false);
     }
   };
+
+  // Host this robot for remote teleoperation: same sessions surface, kind
+  // `hosting`. Fixed defaults for the loop pace and wire codec (both data —
+  // the codec id is what the operator's side copies from the descriptor).
+  const handleHost = async (robot: RobotRecord) => {
+    setHostStarting(true);
+    try {
+      const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
+        kind: "hosting",
+        robot: robot.name,
+        owner: tabOwnerId(),
+        options: { fps: 30, video_codec: "H264" },
+      });
+      setHostSessionId(session.id);
+      if (warnings?.length) {
+        toast({
+          title: t("robot.hosting.startedWarningTitle"),
+          description: warnings.join(" "),
+          duration: 10000,
+        });
+      } else {
+        toast({
+          title: t("robot.hosting.startedTitle"),
+          description: t("robot.hosting.startedFallback", { name: robot.name }),
+        });
+      }
+      setHostOpen(true);
+    } catch (e) {
+      // Coded refusals (session.held, sfu.disabled, system.extra_missing)
+      // render their localized line; the extra-missing one offers the
+      // install flow. Anything else shows the server's own prose.
+      const refusal = formatRemoteRefusal(t, e, t("robot.hosting.failedFallback"));
+      if (refusal) {
+        toast({
+          title: t("robot.hosting.failedTitle"),
+          description: refusal.message,
+          variant: "destructive",
+          action: refusal.needsInstall ? (
+            <ToastAction
+              altText={t("robot.remote.installAction")}
+              onClick={() => setRemoteInstallOpen(true)}
+            >
+              {t("robot.remote.installAction")}
+            </ToastAction>
+          ) : undefined,
+        });
+      } else {
+        toast({
+          title: t("common.connectionError.title"),
+          description: t("common.connectionError.description"),
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setHostStarting(false);
+    }
+  };
+
+  // Hosting drives the follower(s) only — gate on follower_ready, like
+  // inference and replay, so a missing leader can't block it.
+  const hostDisabledReason = !selectedRecord
+    ? t("robot.corner.selectFirst")
+    : !selectedRecord.follower_ready
+      ? t("robot.hosting.disabledReason", {
+          name: selectedRecord.name,
+          gap: formatRobotSetupGap(t, selectedRecord, "follower"),
+        })
+      : null;
+
+  // Remote teleoperation drives with the LEADER only — a record with no
+  // follower is fine. The record carries no leader-side readiness flag, so
+  // gate on the leader slot(s) having a port and a calibration assigned; a
+  // stale calibration file is the server's refusal (robot.not_ready) to make.
+  const leaderReady =
+    !!selectedRecord &&
+    !!selectedRecord.leader_port?.trim() &&
+    !!selectedRecord.leader_config?.trim() &&
+    (selectedRecord.mode !== "bimanual" ||
+      (!!selectedRecord.right_leader_port?.trim() &&
+        !!selectedRecord.right_leader_config?.trim()));
+  const remoteDisabledReason = !selectedRecord
+    ? t("robot.corner.selectFirst")
+    : !leaderReady
+      ? t("robot.remote.disabledReason", { name: selectedRecord.name })
+      : null;
 
   const teleopDisabledReason = !selectedRecord
     ? t("robot.corner.selectFirst")
@@ -405,6 +504,56 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         )}
       </Tooltip>
 
+      <DropdownMenu>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-7 gap-1.5 rounded-full px-2.5"
+                disabled={!selectedRecord || hostStarting}
+              >
+                {hostStarting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Radio className="h-3.5 w-3.5" />
+                )}
+                {t("robot.corner.remote")}
+                <ChevronDown className="h-3 w-3 text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            {selectedRecord
+              ? t("robot.corner.remoteTooltip")
+              : t("robot.corner.selectFirst")}
+          </TooltipContent>
+        </Tooltip>
+        <DropdownMenuContent align="end" className="w-80">
+          <DropdownMenuItem
+            disabled={!!hostDisabledReason || hostStarting}
+            onSelect={() => selectedRecord && handleHost(selectedRecord)}
+            className="flex-col items-start gap-0.5"
+          >
+            <span>{t("robot.corner.hostItem")}</span>
+            <span className="text-xs text-muted-foreground">
+              {hostDisabledReason ?? t("robot.corner.hostItemSub")}
+            </span>
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={!!remoteDisabledReason}
+            onSelect={() => setRemoteOpen(true)}
+            className="flex-col items-start gap-0.5"
+          >
+            <span>{t("robot.corner.remoteItem")}</span>
+            <span className="text-xs text-muted-foreground">
+              {remoteDisabledReason ?? t("robot.corner.remoteItemSub")}
+            </span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
       <CreateRobotDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
@@ -417,6 +566,24 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         open={teleopOpen}
         onOpenChange={setTeleopOpen}
         sessionId={teleopSessionId}
+      />
+
+      <HostingDialog
+        open={hostOpen}
+        onOpenChange={setHostOpen}
+        sessionId={hostSessionId}
+      />
+
+      <RemoteTeleopDialog
+        open={remoteOpen}
+        onOpenChange={setRemoteOpen}
+        robot={selectedRecord ?? null}
+        onInstallRequested={() => setRemoteInstallOpen(true)}
+      />
+
+      <RemoteExtraInstallDialog
+        open={remoteInstallOpen}
+        onOpenChange={setRemoteInstallOpen}
       />
 
       <RobotConfigDialog

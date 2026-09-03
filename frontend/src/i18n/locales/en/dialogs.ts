@@ -172,4 +172,83 @@ export default {
       disconnected: "The arm was disconnected cleanly.",
     },
   },
+  // Station side of remote teleoperation — the floating viewer while this
+  // robot is hosted. Robot names, operator identities and room names are data.
+  hosting: {
+    title: "Hosting for remote teleop",
+    titleWithRobot: "Hosting {{robot}} for remote teleop",
+    stop: "Stop",
+    releaseNow: "Release now",
+    releasingBanner:
+      "Returning the arm to rest before releasing torque. Press Release now to skip the return.",
+    operatorLabel: "Operator",
+    waitingOperator: "Waiting for an operator…",
+    roomLabel: "Room",
+    leftArm: "Left arm",
+    rightArm: "Right arm",
+    endedWithWarning: "Hosting ended with a cleanup warning",
+    failed: "Hosting failed",
+    toast: {
+      stoppedCheckArm: "Hosting stopped — check the arm",
+      stopped: "Hosting stopped",
+      releasing: "The arm returns to its starting position, then goes limp.",
+      checkArm: "Check the arm",
+      disconnected: "The arm was disconnected cleanly.",
+    },
+  },
+  // Operator side — the station picker, then the live viewer. Station names,
+  // hosted robot names, camera names and instance ids are data.
+  remoteTeleop: {
+    title: "Remote teleoperation",
+    titleWithRobot: "Remote teleoperation — {{robot}}",
+    stationsHeading: "Stations",
+    refreshStations: "Refresh stations",
+    stationsLoading: "Looking for stations…",
+    stationsEmpty:
+      "No station is hosting right now. On the station, press “Available for remote teleop”, then refresh.",
+    // {{robot}} is the hosted robot's name.
+    hostingRobot: "Hosting {{robot}}",
+    start: "Start",
+    starting: "Starting…",
+    stop: "Stop",
+    stationLabel: "Station",
+    roomLabel: "Room",
+    cameras: "Cameras",
+    noCameras: "The station publishes no cameras.",
+    // {{name}} is the camera's name.
+    cameraAlt: "Remote camera {{name}}",
+    cameraFailed: "Stream unavailable",
+    latency: "Round trip",
+    latencyLast: "last",
+    latencyMean: "mean",
+    latencyP95: "p95",
+    latencyWaiting: "Waiting for the first sample…",
+    observations: "observations",
+    dropped: "dropped",
+    leftArm: "Left arm",
+    rightArm: "Right arm",
+    endedWithWarning: "Remote teleoperation ended with a cleanup warning",
+    failed: "Remote teleoperation failed",
+    toast: {
+      startedTitle: "Remote teleoperation started",
+      // {{station}} is the station's display name.
+      startedFallback: "Driving {{station}}.",
+      startedWarningTitle: "Started with a warning",
+      stoppedCheckArm: "Remote teleoperation stopped — check the arm",
+      stopped: "Remote teleoperation stopped",
+      checkArm: "Check the arm",
+      disconnected: "The leader arm was disconnected cleanly.",
+    },
+  },
+  // Install flow for the `remote` optional extra (mirrors the training and
+  // W&B install dialogs; the generic install copy lives in training.install).
+  remoteExtra: {
+    title: "Remote teleoperation extra not installed",
+    srDescription: "Install the remote extra to enable remote teleoperation.",
+    // <0> is the extra's name — a pip identifier, rendered verbatim.
+    description:
+      "Remote teleoperation needs the <0>remote</0> extra, which isn't installed in this environment. Install it to host a robot or drive one over the network.",
+    ready:
+      "Install complete — remote teleoperation is available immediately, no restart needed. Start again.",
+  },
 } as const;

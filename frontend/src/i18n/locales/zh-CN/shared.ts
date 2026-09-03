@@ -14,6 +14,8 @@ export default {
       calibration: "标定",
       auto_calibration: "自动标定",
       wiggle: "夹爪摆动",
+      hosting: "远程遥操作托管",
+      remote_teleoperation: "远程遥操作",
     },
   },
   update: {

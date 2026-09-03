@@ -24,7 +24,9 @@ export type StartableSessionKind =
   | "inference"
   | "replay"
   | "calibration"
-  | "auto_calibration";
+  | "auto_calibration"
+  | "hosting"
+  | "remote_teleoperation";
 
 export interface SessionLeaseInfo {
   owner: string;
@@ -142,8 +144,31 @@ export interface AutoCalibrationSessionOptions {
   overwrite?: boolean;
 }
 
+/** Station side of remote teleoperation: publish this robot's follower and
+ * cameras into the node's LiveKit room and execute the active operator's
+ * actions. Follower-only readiness (like inference/replay). `video_codec` is
+ * a wire identifier — data, never a display label. */
+export interface HostingSessionOptions {
+  /** Paces the whole loop (frames, state, action application); 5-60. */
+  fps?: number;
+  video_codec?: "H264" | "MJPEG" | "PNG" | "RAW";
+  skip_identity_check?: boolean;
+}
+
+/** Operator side: drive a STATION's follower with this robot's leader.
+ * Leader-only readiness — a record with no follower is fine. */
+export interface RemoteTeleoperationSessionOptions {
+  /** The station's instance id from the node registry (data). Everything
+   * else — room, codec, fps, motors, cameras — comes from the station's live
+   * hosting descriptor. */
+  station: string;
+  skip_identity_check?: boolean;
+}
+
 export type SessionOptions =
   | TeleoperationSessionOptions
+  | HostingSessionOptions
+  | RemoteTeleoperationSessionOptions
   | RecordingSessionOptions
   | InferenceSessionOptions
   | ReplaySessionOptions
@@ -291,6 +316,8 @@ const HOLDER_ACTIVITY_KEYS: Record<string, string> = {
   calibration: "shared.sessionBusy.activity.calibration",
   auto_calibration: "shared.sessionBusy.activity.auto_calibration",
   wiggle: "shared.sessionBusy.activity.wiggle",
+  hosting: "shared.sessionBusy.activity.hosting",
+  remote_teleoperation: "shared.sessionBusy.activity.remote_teleoperation",
 };
 
 /**

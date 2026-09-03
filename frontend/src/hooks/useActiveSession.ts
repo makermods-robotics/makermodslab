@@ -2,9 +2,11 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
 
 /**
- * The seven robot-driving features of the backend's mutual-exclusion state
- * model (CLAUDE.md "State model & mutual exclusion") — the `kind` vocabulary
- * of the `session_changed` event (makermodslab/session_events.py).
+ * The robot-driving features of the backend's mutual-exclusion state model
+ * (CLAUDE.md "State model & mutual exclusion") — the `kind` vocabulary of the
+ * `session_changed` event (makermodslab/session_events.py). `hosting` is the
+ * station side of remote teleoperation (holds the follower like teleop),
+ * `remote_teleoperation` the operator side (holds the leader only).
  */
 export type SessionKind =
   | "teleoperation"
@@ -13,7 +15,9 @@ export type SessionKind =
   | "replay"
   | "calibration"
   | "auto_calibration"
-  | "wiggle";
+  | "wiggle"
+  | "hosting"
+  | "remote_teleoperation";
 
 /** The latest `session_changed` hint seen on the shared WS channel. */
 export interface SessionChangedEvent {

@@ -19,6 +19,8 @@ export default {
       calibration: "a calibration",
       auto_calibration: "an auto-calibration",
       wiggle: "a gripper wiggle",
+      hosting: "remote-teleop hosting",
+      remote_teleoperation: "remote teleoperation",
     },
   },
   update: {

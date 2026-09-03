@@ -32,6 +32,16 @@ export default {
     renameItem: "Rename robot…",
     deleteItem: "Delete robot…",
     teleop: "Teleop",
+    // The remote-teleoperation menu beside Teleop: host this robot for an
+    // operator elsewhere, or drive a station's robot with this leader.
+    remote: "Remote",
+    remoteTooltip: "Remote teleoperation over the network",
+    hostItem: "Available for remote teleop",
+    hostItemSub:
+      "Publish this robot's follower and cameras for an operator on another node.",
+    remoteItem: "Drive a remote robot…",
+    remoteItemSub:
+      "Use this robot's leader arm to teleoperate a station that is hosting.",
   },
   rename: {
     title: "Rename robot",
@@ -57,6 +67,40 @@ export default {
     failedFallback: "Failed to start.",
     // {{gap}} is the rendered setup-gap phrase below.
     disabledReason: "{{name}} {{gap}} — open Robot settings",
+  },
+  // Station side of remote teleoperation (session kind `hosting`).
+  hosting: {
+    startedTitle: "Hosting started",
+    startedFallback: "{{name}} is available for remote teleoperation.",
+    startedWarningTitle: "Hosting started with a warning",
+    failedTitle: "Couldn't start hosting",
+    failedFallback: "Failed to start.",
+    // {{gap}} is the rendered follower-side setup-gap phrase.
+    disabledReason: "{{name}} {{gap}} — open Robot settings",
+  },
+  // Operator side (session kind `remote_teleoperation`). The refusal lines
+  // are display twins of the backend's error codes — matched on the code,
+  // never on the prose. `makermodslab --sfu` is a CLI literal.
+  remote: {
+    failedTitle: "Couldn't start remote teleoperation",
+    failedFallback: "Failed to start.",
+    disabledReason:
+      "{{name}} needs its leader arm set up (port and calibration) — open Robot settings",
+    installAction: "Install",
+    refusal: {
+      notHosting:
+        "That station isn't hosting. Ask for “Available for remote teleop” to be pressed there first.",
+      nodeNotFound:
+        "That station is no longer in the node registry. Refresh the list and pick it again.",
+      nodeUnreachable:
+        "That station didn't answer. Check that it is online and reachable from this machine.",
+      schemaMismatch:
+        "This robot doesn't match the hosted one — the arm family or motor set differs.",
+      sfuDisabled:
+        "This node isn't running the LiveKit SFU. Restart it with makermodslab --sfu.",
+      extraMissing:
+        "The remote-teleoperation extra isn't installed on this node.",
+    },
   },
   // Setup-gap rendering. `robotSetupGaps()` (hooks/useRobots) returns structure;
   // these turn it into a sentence. English output must stay byte-identical to
