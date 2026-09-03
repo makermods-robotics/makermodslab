@@ -173,7 +173,6 @@ export default {
       error: "无法加载策略。请检查服务器后重试。",
       hubDegraded: "无法连接 Hub — 正在显示本地策略和上次的 Hub 列表。",
       import: "导入策略",
-      hint: "选择一个已训练的检查点，或已从 Hub 导入的策略，在机器人上运行。",
     },
     source: {
       hub: "hub",
@@ -193,10 +192,10 @@ export default {
     // 标识符 — 只有这些标签会被翻译。
     runMode: {
       label: "你想用这个技能做什么？",
-      // 每一行在被选中之前就先说明它要你付出什么：这三者并不是可以随手互换的
+      // 每一行在被选中之前就先说明它要你付出什么：它们并不是可以随手互换的
       // 菜单项，而选错往往要等到人站在机械臂前才发现。
       single: {
-        title: "直接跑一次",
+        title: "运行",
         what: "尝试一次，然后停止。",
         commitment: "无需上手",
       },
@@ -211,9 +210,9 @@ export default {
         commitment: "需要在另一个终端里运行 GPU 侧",
       },
       coach: {
-        title: "指导它",
+        title: "人在回路",
         what: "在它快要失败时接管。每次挽救都会保存为可用于微调的训练数据。",
-        commitment: "需要上手 — 整个会话你都要握着主臂",
+        commitment: "当它快要失败时，用主臂接管从臂并采集数据",
       },
     },
     // 仅在运行模式为 “指导” 时显示的参数。
@@ -289,6 +288,9 @@ export default {
         "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
       rtcHint:
         "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
+      // 当所选检查点的架构无法运行 RTC（服务端会拒绝）时显示在选择器下方，
+      // 同时该选项也会被禁用。
+      rtcUnavailable: "该检查点的策略不支持 Real-Time Chunking。",
       // 指导模式固定使用 sync，因此显示这句话来代替引擎选择器。
       coachingNote:
         "指导始终使用 Sync 引擎。Real-Time Chunking 会让策略恢复时机械臂朝纠正前的姿态弹回，手就在旁边时这并不安全。",
@@ -330,17 +332,18 @@ export default {
     // 操作行：每个动词都在一次按下中同时选定模式并启动。
     runVerbs: {
       groupLabel: "开始一次运行",
-      single: "直接跑一次",
+      single: "运行",
       // {{count}} 是片段数 / 纠正次数目标，是数字，因此没有复数形式。
       eval: "打分 · {{count}}",
-      coach: "指导 · {{count}}",
+      coach: "人在回路 · {{count}}",
+      // 远程运行只跑一次，和 `single` 一样，因此没有计数。
       remote: "远程运行",
     },
     // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
     blocked: {
       noRobot: "请先在上方选择一台机器人。",
       followerNotReady: "这台机器人的从臂尚未就绪。",
-      noCheckpoint: "请选择一个技能和一个检查点。",
+      noCheckpoint: "请选择一个策略和一个检查点。",
       armMismatch: "该检查点与这台机器人的机械臂数量不匹配。",
       camerasUnbound: "请为检查点所需的每个摄像头完成绑定。",
       temporalEnsemble: "请先修正时间集成设置。",

@@ -240,14 +240,15 @@ export default {
     },
     // The CAN arms' zero-pose calibration. It has no range sweep — the arm's
     // joint limits are fixed constants — so the whole flow is: torque off,
-    // pose the arm by hand, confirm. The two families' POSES are opposites on
-    // the gripper (Maker: fully open; Metal: closed), so each gets its own
-    // instructions key — showing one family's text to the other would zero
-    // the gripper at the wrong end of its travel. Wording mirrors the
-    // server's zero_pose_instructions() in makermodslab/zero_calibrate.py.
+    // pose the arm by hand, confirm. Follower poses are family-specific and
+    // opposite on the gripper (Maker: fully open; Metal: closed). The shared
+    // Star Arm 102 leader has one folded, closed-gripper pose on both rigs.
+    // Wording mirrors the server's zero_pose_instructions().
     zeroPose: {
       instructions:
         "Move the arm by hand to match the pose above: folded against the base, gripper fully open. Torque is off, so the arm moves freely.",
+      instructionsLeader:
+        "Move the Star Arm 102 leader by hand to match the pose above: folded against the base, gripper closed. Its joints are unpowered, so the arm moves freely.",
       instructionsMetal:
         "Move the arm by hand to match the pose above: standing upright, all joints at 0°, gripper closed. Torque is off, so the arm moves freely.",
       liveAngles: "Live joint angles",
@@ -255,9 +256,10 @@ export default {
       confirm: "Set zero and save",
       saving: "Setting zero and saving the calibration…",
       // Caption on the reference-pose slot. The picture is what the user
-      // matches the real arm against, so each family names its own: the two
-      // zero poses are opposites at the gripper.
+      // matches the real arm against, so followers name their family-specific
+      // pose and the shared Star leader names its own.
       poseImage: "Zero pose: folded, gripper open",
+      poseImageLeader: "Star Arm 102 leader zero pose: folded, gripper closed",
       poseImageMetal: "Zero pose: upright, gripper closed",
     },
     cancel: "Cancel calibration",
@@ -296,10 +298,15 @@ export default {
       "Each arm moves on its own to find its joint limits. Keep the area clear.",
     zeroNote:
       "Put the arm in the position shown above, then set zero. Torque stays off, so it moves freely.",
-    // Placeholder labels for media not shot yet.
     videoAuto: "Auto-calibration demo",
     poseMiddle: "Start pose: middle position",
     poseAutoStart: "Start pose for auto-calibration",
+    // Captions under the two start-pose photos. They carry the one thing the
+    // picture cannot: that the arm has to be put there BEFORE Start.
+    restingPoseCaption:
+      "This is the SO-101's resting position — the pose auto-calibration starts from. Put the arm in it before you press Start.",
+    middlePoseCaption:
+      "Put the arm in this middle position — every joint near the centre of its range — before you press Start.",
     videoUnsupported: "Your browser does not support the video tag.",
     videoLink: "Click here to view the calibration video",
     toast: {

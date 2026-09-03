@@ -327,7 +327,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -373,6 +373,17 @@
             ],
             "title": "State Dim"
           },
+          "supports_rtc": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Rtc"
+          },
           "trained_on_robot_type": {
             "anyOf": [
               {
@@ -389,6 +400,7 @@
           "policy_type",
           "image_features",
           "requires_task",
+          "supports_rtc",
           "state_dim",
           "action_dim",
           "trained_on_robot_type"

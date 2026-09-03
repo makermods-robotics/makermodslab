@@ -251,35 +251,37 @@ const RUN_MODES: {
   // `${stem}.title` / `.what` / `.commitment`.
   stem: string;
   handsOn?: boolean;
+  // Renders across both grid columns. Only the remote verb sets it — see the
+  // grid comment below for why the row is shaped local-pair-then-remote.
+  wide?: boolean;
 }[] = [
   { value: "single", stem: "single" },
-  // NOT "hands off". Eval parks after every episode and waits for the operator
-  // to rearrange the scene and call the outcome — see rollout.py's reset phase
-  // and POST /inference-next-episode; there is no timer. An operator who read
-  // "hands off" and walked away came back to a run stalled on episode 2.
-  { value: "eval", stem: "eval", handsOn: true },
+  // Eval ("Score it") is deliberately NOT offered here. The scored-evaluation
+  // engine still exists and the mode is still a valid `RunMode` — it is just
+  // not one of the things this panel asks the operator to choose between.
   { value: "coach", stem: "coach", handsOn: true },
   // Hands off in the same sense "single" is — but it needs a second terminal
   // running the GPU side, which its own commitment line says.
-  { value: "remote", stem: "remote" },
+  { value: "remote", stem: "remote", wide: true },
 ];
 
 /**
- * The three things you can do with a trained skill, as the panel's action row.
+ * The three things you can do with a trained policy, as the panel's action row.
  *
  * This replaces a chooser-plus-Start pair. A chooser is a control you set and
- * then forget you set: the operator picks "Score it", gets distracted by the
+ * then forget you set: the operator picks a mode, gets distracted by the
  * camera bindings, comes back and presses a button that says Start — and the
  * button's own label is the only thing telling them which of three quite
- * different sessions is about to begin. One of those sessions asks them to
- * stand at the robot holding a leader arm for an hour.
+ * different sessions is about to begin. One of them asks them to stand at the
+ * robot holding a leader arm for an hour; another needs a GPU process running
+ * somewhere else.
  *
  * So the verb IS the button. Pressing one selects that mode and launches it in
  * the same gesture; there is nothing left in a position to be wrong about.
  * Each verb still states its own commitment, and a verb that cannot run right
  * now says why on itself rather than greying out the whole panel — a missing
  * leader arm blocks coaching, and should say so on the coaching button, not
- * disable "Just run it".
+ * disable "Run".
  *
  * `onArm` fires on focus/hover so the options above follow the verb the
  * operator is considering, which keeps the old chooser's one real virtue: you
@@ -306,11 +308,13 @@ export const RunVerbs: React.FC<{
   const blocked = blockedReason(active);
   return (
     <div className="flex flex-col gap-2">
-      {/* Two columns, not four: the studio panel is a third of the overlay
-          wide, and a fourth verb squeezed onto one row shrank every label to
-          two words on a wrap. A 2x2 grid keeps each verb's commitment line
-          readable, which is the whole reason the commitment travels with the
-          verb. */}
+      {/* Two columns, not three: the studio panel is a third of the overlay
+          wide, and a third verb squeezed onto one row shrank every label to
+          two words on a wrap. So the two LOCAL verbs keep the side-by-side row
+          they were designed as, and the remote verb spans both columns beneath
+          them — which is also the honest grouping, since it is the one verb
+          that needs a second machine. Each commitment line stays readable,
+          which is the whole reason the commitment travels with the verb. */}
       <div
         className="grid grid-cols-2 gap-2"
         role="group"
@@ -339,7 +343,10 @@ export const RunVerbs: React.FC<{
           // guarded below.
           const blockedHere = !ready || busy || reason !== null;
           return (
-            <div key={m.value} className="relative">
+            <div
+              key={m.value}
+              className={cn("relative", m.wide && "col-span-2")}
+            >
               <Button
                 onClick={() => (blockedHere ? onArm(m.value) : onLaunch(m.value))}
                 onMouseEnter={() => onArm(m.value)}
@@ -980,6 +987,28 @@ const DeployPanel: React.FC = () => {
   // (No binding effects: the pairing is derived by name in `cameraBindings`
   // above, so there is no stored selection to seed, prune, or keep in step
   // with the robot record.)
+
+  // Real-Time Chunking is an ARCHITECTURE capability, not a per-run taste: the
+  // server refuses `inference_engine: "rtc"` with a 400 for a checkpoint whose
+  // policy type can't run guided chunk prediction (ACT, diffusion, pi0_fast,
+  // tdmpc, vqbet…), before any slot or hardware is held. `supports_rtc: null`
+  // means the server doesn't KNOW the type — a policy newer than its table — so
+  // it stays on offer and the subprocess decides, same fail-open discipline.
+  //
+  // This is the LOCAL rollout's engine. The remote (DRTC) run asks the same
+  // question of `rtcSupported` above, off the policy type via the frontend's
+  // own table, because that choice is read by the GPU side rather than by
+  // handle_start_inference. The two answers agree wherever the server has an
+  // opinion; only the local engine can be refused by this gate.
+  const rtcAvailable = policyConfig?.supports_rtc !== false;
+
+  // Picking a checkpoint that can't run RTC drops a stale "rtc" selection back
+  // to the server default. Runs on the config that just landed (the fetch above
+  // swaps policyConfig in one setState), so the reset is a single render behind
+  // the checkpoint change and the launch below can't carry "rtc" for it.
+  useEffect(() => {
+    if (!rtcAvailable) setInferenceEngine("sync");
+  }, [rtcAvailable]);
 
   // Poll inference status while visible so the guards reflect a live rollout.
   useEffect(() => {
@@ -1805,16 +1834,13 @@ const DeployPanel: React.FC = () => {
                 <div className="rounded-lg border border-border bg-muted/40 p-3">
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     <span className="font-semibold text-foreground">
-                      Coaching pays off once the skill already works sometimes.
+                      Coaching pays off once the policy already works sometimes.
                     </span>{" "}
                     It learns from rescuing the policy's own mistakes, so it
                     needs the policy to get far enough to make interesting ones —
                     roughly a 1-in-10 success rate. If it fails immediately every
                     time, record more demonstrations first; that's faster than
-                    correcting your way there.{" "}
-                    <span className="whitespace-nowrap">
-                      Score it above to check.
-                    </span>
+                    correcting your way there.
                   </p>
                 </div>
                 <div className="space-y-2">
@@ -1928,7 +1954,9 @@ const DeployPanel: React.FC = () => {
                     <SelectItem value="sync">
                       {t("studio.deploy.engine.sync")}
                     </SelectItem>
-                    <SelectItem value="rtc">
+                    {/* Disabled rather than hidden: a checkpoint that can't
+                        run RTC should say so, not silently offer one engine. */}
+                    <SelectItem value="rtc" disabled={!rtcAvailable}>
                       {t("studio.deploy.engine.rtc")}
                     </SelectItem>
                   </SelectContent>
@@ -1938,6 +1966,11 @@ const DeployPanel: React.FC = () => {
                     ? t("studio.deploy.engine.rtcHint")
                     : t("studio.deploy.engine.syncHint")}
                 </p>
+                {rtcAvailable ? null : (
+                  <p className="text-xs text-muted-foreground">
+                    {t("studio.deploy.engine.rtcUnavailable")}
+                  </p>
+                )}
               </div>
             ) : runMode === "coach" ? (
               <p className="text-xs text-muted-foreground">

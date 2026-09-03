@@ -808,3 +808,62 @@ Nothing was smuggled in, and nothing the UI needs was unrepresentable.
   Deliberately NOT under `studio.deploy.engine.*` — that namespace already
   belongs to the LOCAL rollout's own sync/rtc picker (`inference_engine` on
   `InferenceOptions`), and they are different things.
+
+## After the staging sync (128974b8, 2026-09-03)
+
+Merging `origin/staging` into this branch conflicted in four files
+(`DeployPanel.tsx`, both `studio` catalogs, `uv.lock`). What moved:
+
+### The verb row is now three verbs, not four
+
+Staging's `731ab8b` ("two rollout verbs, Run and Human in the loop") retired
+**Score it** from `RUN_MODES` and relabelled the other two: `single` is now
+**Run** (was "Just run it") and `coach` is **Human in the loop** (was "Coach
+it"), with a commitment line that says what the operator actually does. The
+eval MODE is untouched — it is still a valid `RunMode` and the scored-evaluation
+engine still runs; it is simply no longer offered as a verb here.
+
+S3.4's **Run it remotely** survives that unchanged, so the row is
+`single` / `coach` / `remote`. The grid stays `grid-cols-2` (staging's shape for
+two verbs): the two LOCAL verbs keep their side-by-side row and the remote verb
+carries a new `wide` flag in `RUN_MODES` that renders it `col-span-2` beneath
+them — the honest grouping, since it is the one verb that needs a second
+machine. Nothing else about the remote mode moved: the guards (including
+`remoteEngineSupported`), `useRemoteInferenceStatus` /
+`useRemoteInferenceTransport`, the heartbeat, `open={formOpen || remoteActive}`,
+the hidden-for-remote local controls, `RemoteInferenceBlock` inside the run
+form, the engine / `s_min` fields and the start fork are all as S3.5 left them.
+
+`RunVerbs.test.tsx` (staging's rewrite) enumerates the row, so it was extended:
+three buttons, no "Score it", and the remote verb asserted `col-span-2`. Its
+`/^Run/i` matcher had to change — "Run" is a prefix of "Run it remotely", and a
+verb's accessible name is its label and commitment concatenated with no
+separator ("Runhands off"), so the plain-run verb is now matched by
+`/^Run(?! it remotely)/i`.
+
+### #113's server-side RTC gate composes with the remote engine choice
+
+Staging's `1581e5dc` added `supports_rtc` to `GET /policy-config` and a 400 from
+`handle_start_inference` for an architecture that cannot run Real-Time Chunking.
+Its frontend half — `rtcAvailable = policyConfig?.supports_rtc !== false`, the
+stale-selection reset, the disabled `rtc` option and the `engine.rtcUnavailable`
+line — was re-applied onto the reworked panel. It gates the **local** rollout's
+`inference_engine` only. The remote run keeps asking `policySupportsRtc(policy_type)`
+(`rtcSupported`, the frontend's own table) because that choice is read by the
+GPU side, not by `handle_start_inference`. The two agree wherever the server has
+an opinion; unifying them on `supports_rtc` is a cheap follow-up, not done here.
+
+Also ported: the coaching note's last "skill" wording and its "Score it above to
+check." tail (gone with the verb).
+
+### Everything else
+
+`uv.lock` was regenerated with `uv lock` rather than hand-merged; against
+staging's lock it is additive only — the `[drtc]` extra's five packages
+(`livekit-portal` 0.2.4, `livekit-api`, `livekit-protocol`, `pyjwt`,
+`types-protobuf`) plus `provides-extras`. `docs/api/openapi.json` was
+regenerated and was already up to date. The lerobot pin moved to `eaab69339`,
+whose only change over `b968c0c01` is the Star-leader unwrap-window fix
+(`rebot_102_leader`) — nothing the DRTC child imports — but the backend suite
+ran against the OLD pin still installed in the venv, so the bump itself has to
+be exercised on the bench.

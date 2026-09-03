@@ -54,8 +54,9 @@ DEFAULT_ARM_TYPE = "so101"
 # (`rebot_102_leader_maker` / `rebot_102_leader_metal`) are config-only
 # variants of the one RebotArm102Leader class, and the class name is what
 # picks the directory. That sharing is why default_slot_config_name below
-# mints per-arm-type ids — the two presets' zero POSES are different, so a
-# name collision would silently reuse the wrong zero.
+# mints per-arm-type ids — the two presets carry different direction and range
+# mappings even though the physical leader zero pose is shared, so a name
+# collision would silently reuse calibration metadata for the wrong follower.
 MAKER_LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "rebot_102_leader")
 MAKER_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "maker_follower")
 METAL_FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "metal_follower")

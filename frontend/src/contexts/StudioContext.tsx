@@ -9,6 +9,17 @@ import type { ResumeSeed } from "@/components/training/TrainingConfigurator";
 
 export type StudioPanel = "collect" | "train" | "deploy";
 
+/** What a finished recording session leaves behind for the Collect panel's
+ * handoff banner. Mirrors RecordingSessionDialog's RecordedInfo; declared here
+ * rather than imported so the provider doesn't depend on a dialog module. */
+export interface RecordedInfo {
+  repo_id: string;
+  saved_episodes?: number;
+  /** The session saved zero episodes and the backend discarded the (empty)
+   * dataset directory — nothing is on disk to train on or upload. */
+  discarded_empty?: boolean;
+}
+
 /** The Collect panel's recording-form draft. Lives in this provider (mounted
  * above the router) so filled-in parameters survive navigating to /recording
  * and back — the panel itself unmounts with the Launchpad route. */
@@ -137,6 +148,12 @@ interface StudioContextValue {
   /** Collect's recording-form draft — see CollectFormState. */
   collectForm: CollectFormState;
   updateCollectForm: (patch: Partial<CollectFormState>) => void;
+  /** The most recent finished recording session, or null once handled. Drives
+   * the Collect panel's handoff banner. Lives here rather than in router state
+   * because a session no longer sends the user back to the Launchpad — the
+   * studio stays open, so there is no navigation to hang the payload on. */
+  lastRecorded: RecordedInfo | null;
+  setLastRecorded: (recorded: RecordedInfo | null) => void;
 }
 
 const StudioContext = createContext<StudioContextValue | null>(null);
@@ -153,6 +170,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
   const [mergePrefill, setMergePrefill] = useState<MergePrefill | null>(null);
   const [collectForm, setCollectForm] =
     useState<CollectFormState>(DEFAULT_COLLECT_FORM);
+  const [lastRecorded, setLastRecorded] = useState<RecordedInfo | null>(null);
 
   const updateCollectForm = useCallback(
     (patch: Partial<CollectFormState>) =>
@@ -206,6 +224,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
       clearMergePrefill,
       collectForm,
       updateCollectForm,
+      lastRecorded,
+      setLastRecorded,
     }),
     [
       open,
@@ -223,6 +243,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
       clearMergePrefill,
       collectForm,
       updateCollectForm,
+      lastRecorded,
     ],
   );
 

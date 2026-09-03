@@ -20,6 +20,13 @@ export interface PolicyConfigSummary {
   policy_type: string | null;
   image_features: Record<string, { height: number; width: number }>;
   requires_task: boolean;
+  /** Whether this checkpoint's ARCHITECTURE can run the Real-Time Chunking
+   * inference engine. `false` means the server refuses `inference_engine:
+   * "rtc"` for it with a 400 before any hardware is claimed, so the dialogs
+   * take the option off the menu. `null` means "not established" — a policy
+   * type newer than the server's table — and must be read as "offer it and let
+   * the server decide", never as "no". */
+  supports_rtc: boolean | null;
   // Flat proprioceptive state / action widths from the checkpoint. For an
   // SO-101 arm this is 6 (one per joint); a bimanual-trained checkpoint carries
   // 12 (two arms). The inference modal compares state_dim against the selected

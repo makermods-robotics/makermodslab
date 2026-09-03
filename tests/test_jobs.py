@@ -4765,6 +4765,40 @@ def test_policy_config_summary_arm_is_none_when_unrecoverable(
     assert reg.get_policy_config_summary(rec.id, 0)["trained_on_robot_type"] is None
 
 
+@pytest.mark.parametrize(
+    ("policy_type", "expected"),
+    [("act", False), ("smolvla", True), ("some_future_policy", None)],
+)
+def test_policy_config_summary_reports_rtc_support(tmp_path, tmp_lerobot_home, policy_type, expected) -> None:
+    """The launch UI gates its inference-engine choice on this, so the key is
+    always present — null meaning "unknown type", not "no"."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(_json.dumps({"type": policy_type}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert "supports_rtc" in summary
+    assert summary["supports_rtc"] is expected
+
+
+def test_policy_config_summary_rtc_is_none_when_the_type_is_unreadable(tmp_path, tmp_lerobot_home) -> None:
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(_json.dumps({"input_features": {}}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["policy_type"] is None
+    assert summary["supports_rtc"] is None
+
+
 # --- Deliberate stop vs genuine failure -------------------------------------
 #
 # Regression cover for the defect where every press of Stop landed in run

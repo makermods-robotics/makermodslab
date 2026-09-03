@@ -65,15 +65,21 @@ import {
 } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
-// The same two product photos the "Create a new robot" arm cards use. One per
-// FAMILY: the two zero poses are opposites at the gripper, so showing one
-// family's picture to the other would zero the gripper at the wrong end of its
-// travel.
+// Followers use the same family-specific product photos as the "Create a new
+// robot" arm cards. Both CAN families use the same physical Star Arm 102
+// leader, so its calibration gets one dedicated, shared zero-pose reference.
 import makerArmPhoto from "@/assets/arms/maker.jpg";
 import metalArmPhoto from "@/assets/arms/metal.jpg";
+import starArm102LeaderZeroPose from "@/assets/calibration/star-arm-102-leader-zero-pose.jpg";
+// The SO-101's auto-calibration start pose IS the folded resting pose, which
+// is exactly what the arm card's product photo already shows — so it is the
+// same file, not a second copy of the same picture.
+import so101ArmPhoto from "@/assets/arms/so101.jpg";
+import so101ManualStartPose from "@/assets/calibration/so101-manual-start-pose.jpg";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
+import { readCamerasActive, writeCamerasActive } from "@/lib/cameraPrefs";
 import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
 import {
   Collapsible,
@@ -358,6 +364,76 @@ interface BatchAutoCalStatus {
   failed: number;
   logs: string[];
 }
+
+// Served straight out of `public/` (see CalibrationClip). Absolute paths: the
+// dialog opens from every route, so a relative one would resolve differently
+// depending on where the user happened to be.
+const AUTO_CAL_CLIP = "/media/calibration/autocal-so101.mp4";
+const AUTO_CAL_POSTER = "/media/calibration/autocal-so101.jpg";
+const MANUAL_CAL_CLIP = "/media/calibration/manualcal-so101.mp4";
+const MANUAL_CAL_POSTER = "/media/calibration/manualcal-so101.jpg";
+
+/**
+ * A calibration demo clip: it starts by itself and loops like a GIF, but it is
+ * an h264 MP4 with native controls so the scrub slider can be dragged back to
+ * the part the user actually needs. A real GIF of a minute of 30fps footage is
+ * tens of megabytes and offers no way to seek at all, which is the whole
+ * reason this is a <video> and not an <img>.
+ *
+ * `muted` is what makes `autoPlay` legal — every browser blocks autoplay with
+ * sound — so the two attributes travel together; the sources are encoded
+ * without an audio track anyway. `playsInline` keeps iOS Safari from hijacking
+ * the dialog into its fullscreen player the moment playback starts.
+ *
+ * Sources live in `public/media/calibration/` rather than `src/assets/`: Vite
+ * inlines and hashes imported assets, and a multi-megabyte video has no
+ * business in the module graph.
+ */
+const CalibrationClip = ({
+  src,
+  poster,
+  label,
+  unsupported,
+  linkLabel,
+  clipRef,
+}: {
+  src: string;
+  poster: string;
+  label: string;
+  unsupported: string;
+  linkLabel: string;
+  clipRef?: React.Ref<HTMLDivElement>;
+}) => (
+  <div ref={clipRef} className="overflow-hidden rounded-md bg-muted">
+    <video
+      className="aspect-video h-auto w-full"
+      poster={poster}
+      aria-label={label}
+      autoPlay
+      loop
+      muted
+      playsInline
+      controls
+      controlsList="nodownload noplaybackrate"
+      disablePictureInPicture
+      preload="metadata"
+    >
+      <source src={src} type="video/mp4" />
+      <p className="py-4 text-center text-sm text-muted-foreground">
+        {unsupported}
+        <br />
+        <a
+          href={src}
+          className="underline"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {linkLabel}
+        </a>
+      </p>
+    </video>
+  </div>
+);
 
 export interface RobotConfigDialogProps {
   open: boolean;
@@ -679,7 +755,16 @@ const RobotConfigWindow = ({
   // Off by default so merely opening the settings window never grabs a camera.
   // The user explicitly starts a scan, which is when cameras are turned on,
   // enumerated, and the browser permission prompt is requested.
-  const [camerasActive, setCamerasActive] = useState(false);
+  //
+  // Once they HAVE turned it on for this robot, that answer is remembered and
+  // replayed on the next open (see lib/cameraPrefs): the window mounts fresh
+  // every time, so without this the switch snapped back to off and previews
+  // had to be re-opened by hand after every visit. A robot the user has never
+  // switched on still reads false, so the "never grabs a camera on its own"
+  // property holds for the case it was written for.
+  const [camerasActive, setCamerasActive] = useState(() =>
+    readCamerasActive(robotName),
+  );
 
   // No releaseStreamsRef call here, on purpose. CameraConfiguration stays
   // mounted and drops its own streams when `active` goes false — that is what
@@ -688,6 +773,10 @@ const RobotConfigWindow = ({
   // would never come back.
   const handleCamerasActiveChange = (active: boolean) => {
     setCamerasActive(active);
+    // Persist on the user's gesture only. Writing from an effect on
+    // `camerasActive` would also persist states the code sets for its own
+    // reasons, which is not the same thing as what the user chose.
+    writeCamerasActive(robotName, active);
   };
 
   useEffect(() => {
@@ -2007,19 +2096,31 @@ const RobotConfigWindow = ({
 
     // The pose the user has to put the arm in. Shown BEFORE Start (so the arm
     // can be posed while reading) and again while awaiting zero (so it is on
-    // screen at the moment it is matched). One photo per FAMILY: the two zero
-    // poses are opposites at the gripper, so showing one family's picture to
-    // the other would zero the gripper at the wrong end of its travel.
+    // screen at the moment it is matched). Followers get one photo per family:
+    // their two zero poses are opposites at the gripper, so showing one family's
+    // picture to the other would zero the gripper at the wrong end of its
+    // travel. The Star Arm 102 leader is identical on Maker and Metal rigs, so
+    // both leader rows deliberately share the photographed reference pose.
     //
-    // object-cover, not contain: the sources are 4:3 on white with the arm in
-    // the middle band, so a 16:9 centre crop trims background, not hardware.
+    // object-cover, not contain: the follower sources are 4:3 on white with the
+    // arm in the middle band, so a 16:9 centre crop trims background, not
+    // hardware. The dedicated leader reference is already 16:9.
+    const isLeaderZeroPose = deviceType === "teleop";
     const zeroPoseImage = (
       <img
-        src={isMetalArm ? metalArmPhoto : makerArmPhoto}
+        src={
+          isLeaderZeroPose
+            ? starArm102LeaderZeroPose
+            : isMetalArm
+              ? metalArmPhoto
+              : makerArmPhoto
+        }
         alt={
-          isMetalArm
-            ? t("robotConfig.calib.zeroPose.poseImageMetal")
-            : t("robotConfig.calib.zeroPose.poseImage")
+          isLeaderZeroPose
+            ? t("robotConfig.calib.zeroPose.poseImageLeader")
+            : isMetalArm
+              ? t("robotConfig.calib.zeroPose.poseImageMetal")
+              : t("robotConfig.calib.zeroPose.poseImage")
         }
         loading="lazy"
         className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
@@ -2028,14 +2129,30 @@ const RobotConfigWindow = ({
 
     const autoPreamble = (
       <>
-        <div
-          className="media-slot aspect-video w-full"
-          data-label={t("robotConfig.calib.videoAuto")}
+        <CalibrationClip
+          src={AUTO_CAL_CLIP}
+          poster={AUTO_CAL_POSTER}
+          label={t("robotConfig.calib.videoAuto")}
+          unsupported={t("robotConfig.calib.videoUnsupported")}
+          linkLabel={t("robotConfig.calib.videoLink")}
         />
-        <div
-          className="media-slot aspect-video w-full"
-          data-label={t("robotConfig.calib.poseAutoStart")}
-        />
+        {/* The auto-calibration start pose. The SO-101's is its folded
+            RESTING pose, so this is the arm card's product photo — one file,
+            not a second shot of the same thing. The caption says in words
+            what the picture cannot: that the arm has to be put there BEFORE
+            Start, because auto-calibration drives from wherever it finds the
+            arm and a mid-air start swings it into the bench. */}
+        <figure className="space-y-2">
+          <img
+            src={so101ArmPhoto}
+            alt={t("robotConfig.calib.poseAutoStart")}
+            loading="lazy"
+            className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
+          />
+          <figcaption className="text-xs text-muted-foreground">
+            {t("robotConfig.calib.restingPoseCaption")}
+          </figcaption>
+        </figure>
         <Alert className="border-info/40 bg-info/10 text-info">
           <Activity className="h-4 w-4" />
           <AlertDescription>
@@ -2170,33 +2287,25 @@ const RobotConfigWindow = ({
             advanced parameters, Start. One column, in that order. */}
         {preStart && mode === "manual" && (
           <>
-            <div
-              ref={demoVideoRef}
-              className="overflow-hidden rounded-md bg-muted"
-            >
-              <video className="h-auto w-full" controls preload="auto" muted>
-                <source
-                  src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                  type="video/mp4"
-                />
-                <p className="py-4 text-center text-sm text-muted-foreground">
-                  {t("robotConfig.calib.videoUnsupported")}
-                  <br />
-                  <a
-                    href="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                    className="underline"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    {t("robotConfig.calib.videoLink")}
-                  </a>
-                </p>
-              </video>
-            </div>
-            <div
-              className="media-slot aspect-video w-full"
-              data-label={t("robotConfig.calib.poseMiddle")}
+            <CalibrationClip
+              clipRef={demoVideoRef}
+              src={MANUAL_CAL_CLIP}
+              poster={MANUAL_CAL_POSTER}
+              label={t("robotConfig.calib.demoTitle")}
+              unsupported={t("robotConfig.calib.videoUnsupported")}
+              linkLabel={t("robotConfig.calib.videoLink")}
             />
+            <figure className="space-y-2">
+              <img
+                src={so101ManualStartPose}
+                alt={t("robotConfig.calib.poseMiddle")}
+                loading="lazy"
+                className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
+              />
+              <figcaption className="text-xs text-muted-foreground">
+                {t("robotConfig.calib.middlePoseCaption")}
+              </figcaption>
+            </figure>
             {/* No Advanced parameters here on purpose. The only thing it
                 holds is the auto-calibration drive torque, and that value
                 is read exclusively by the auto-calibration subprocess:
@@ -2287,9 +2396,11 @@ const RobotConfigWindow = ({
             <Alert className="border-info/40 bg-info/10 text-info">
               <Activity className="h-4 w-4" />
               <AlertDescription>
-                {isMetalArm
-                  ? t("robotConfig.calib.zeroPose.instructionsMetal")
-                  : t("robotConfig.calib.zeroPose.instructions")}
+                {isLeaderZeroPose
+                  ? t("robotConfig.calib.zeroPose.instructionsLeader")
+                  : isMetalArm
+                    ? t("robotConfig.calib.zeroPose.instructionsMetal")
+                    : t("robotConfig.calib.zeroPose.instructions")}
               </AlertDescription>
             </Alert>
 

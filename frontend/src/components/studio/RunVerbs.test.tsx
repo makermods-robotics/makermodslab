@@ -23,7 +23,16 @@ const setup = (over: Partial<Props> = {}) => {
   return { onArm, onLaunch };
 };
 
-const coachButton = () => screen.getByRole("button", { name: /Coach it/i });
+const coachButton = () =>
+  screen.getByRole("button", { name: /Human in the loop/i });
+
+// "Run" is a PREFIX of "Run it remotely", so /^Run/ on its own matches two of
+// the three verbs and getByRole throws. Excluding the remote label is what
+// makes it a single match — and it survives a rewording of the commitment
+// line, which the accessible name also carries (label and commitment are
+// concatenated with no separator: "Runhands off").
+const runButton = () =>
+  screen.getByRole("button", { name: /^Run(?! it remotely)/i });
 
 describe("a blocked run verb can still be armed", () => {
   // THE deadlock. Coaching is blocked while the task is empty, but the task
@@ -65,7 +74,7 @@ describe("a blocked run verb can still be armed", () => {
 
   it("leaves unblocked verbs launchable", () => {
     const { onLaunch } = setup({ blockedReason: blockedCoach });
-    fireEvent.click(screen.getByRole("button", { name: /Just run it/i }));
+    fireEvent.click(runButton());
     expect(onLaunch).toHaveBeenCalledWith("single");
   });
 });
@@ -89,47 +98,31 @@ describe("armed state is exposed to assistive tech", () => {
   it("marks the active verb pressed and the others not", () => {
     setup({ active: "coach" });
     expect(coachButton()).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: /Just run it/i })).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
+    expect(runButton()).toHaveAttribute("aria-pressed", "false");
   });
 });
 
-describe("Score it is a normal verb", () => {
-  // The scored-evaluation engine it launches shipped in #63; the verb is just
-  // the launch control for it. It carries no WIP badge, no shield, and no
-  // tab-out — same as the other two.
-  const evalButton = () => screen.getByRole("button", { name: /Score it/i });
-
-  it("wears no WIP badge", () => {
+describe("the panel offers exactly three run verbs", () => {
+  // "Score it" was retired from this row: the operator chooses between running
+  // the policy locally, standing at the arm to correct it, and running it
+  // against a remote GPU — and nothing else. The eval mode itself still exists
+  // — this asserts only that it is not a verb.
+  it("shows Run, Human in the loop and Run it remotely, and no Score it", () => {
     setup();
-    expect(evalButton()).not.toHaveTextContent("WIP");
+    expect(screen.getAllByRole("button")).toHaveLength(3);
+    expect(runButton()).toBeInTheDocument();
+    expect(coachButton()).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Run it remotely/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Score it/i })).toBeNull();
   });
 
-  it("has no shield over it", () => {
+  // The remote verb is the one that needs a second machine, so it sits on its
+  // own full-width row under the two local verbs rather than in the pair.
+  it("gives the remote verb the full row", () => {
     setup();
-    expect(screen.queryByTestId("wip-shield")).toBeNull();
-  });
-
-  it("stays in the tab order", () => {
-    setup();
-    expect(evalButton()).not.toHaveAttribute("tabindex");
-  });
-
-  it("launches on click when nothing blocks it", () => {
-    const { onLaunch } = setup();
-    fireEvent.click(evalButton());
-    expect(onLaunch).toHaveBeenCalledWith("eval");
-  });
-
-  it("arms rather than launches while blocked", () => {
-    const { onArm, onLaunch } = setup({
-      blockedReason: (m) =>
-        m === "eval" ? "Bind every camera the checkpoint expects." : null,
-    });
-    fireEvent.click(evalButton());
-    expect(onLaunch).not.toHaveBeenCalled();
-    expect(onArm).toHaveBeenCalledWith("eval");
+    const remote = screen.getByRole("button", { name: /Run it remotely/i });
+    expect(remote.parentElement).toHaveClass("col-span-2");
   });
 });
