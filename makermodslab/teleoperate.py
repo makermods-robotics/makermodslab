@@ -925,6 +925,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        remote_inference as _remote_inference,
         replay as _replay,
         rollout as _rollout,
         wiggle as _wiggle,
@@ -963,6 +964,12 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 "success": False,
                 "message": "Inference is currently active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+            }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
             }
         if _calibrate.calibration_is_active():
             return {

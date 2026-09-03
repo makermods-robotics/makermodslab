@@ -283,6 +283,7 @@ class CalibrationManager:
                 from . import (
                     auto_calibrate as _auto_calibrate,
                     record as _record,
+                    remote_inference as _remote_inference,
                     replay as _replay,
                     rollout as _rollout,
                     teleoperate as _teleoperate,
@@ -306,6 +307,12 @@ class CalibrationManager:
                         "success": False,
                         "message": "Inference is currently active. Stop it first.",
                         "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                    }
+                if _remote_inference.remote_inference_is_active():
+                    return {
+                        "success": False,
+                        "message": "Remote inference is currently active. Stop it first.",
+                        "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
                     }
                 if _auto_calibrate.auto_calibration_is_active():
                     return {

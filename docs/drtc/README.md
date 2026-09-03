@@ -388,11 +388,19 @@ landed, `robot_sync` only.
 
 ## Not yet done
 
-- **No API surface.** There is no session kind, no route, no mutex entry and no
-  `session_events` emission. Nothing starts these entrypoints but a human at a
-  shell. A robot-driving feature must add reciprocal checks against every
-  existing feature, emit at its transitions, and join `STARTABLE_KINDS` — see
-  the state-model section of the root `CLAUDE.md`. That is S3.2/S3.3.
+- **No HTTP surface yet — but the feature module is in.** S3.2 landed
+  `makermodslab/remote_inference.py`: the `remote_inference` session kind, the
+  `robot.busy.remote_inference` discriminant, the `transport.*` error domain,
+  `arm_capabilities.supports_remote_inference`, reciprocal guards in all seven
+  peers plus `jobs._robot_busy`, the preflight ladder (extra → credentials →
+  room probe → arm type → arm count/cameras), the STOP-on-stdin stop machine
+  and the two empty-room watchdogs. What is still missing is the way in:
+  `sessions.py` does not know the kind yet (`STARTABLE_KINDS`,
+  `_FOLLOWER_ONLY_KINDS`, `_OPTIONS_MODELS`, `_REQUEST_BUILDERS`,
+  `_dispatch_start`/`_dispatch_stop`), there is no `RemoteInferenceOptions`
+  schema and no `/api/v1/remote-inference-status` or
+  `/api/v1/remote-inference/transport` route. Until those land, nothing starts
+  these entrypoints but a human at a shell. That is S3.3.
 - **No frontend.** S3.4, after the studio rework merges.
 - **`robot_rtc` is untouched.** It still calls `robot.disconnect()` straight out
   of its control loop, with no ease-in, no stdin protocol and no
@@ -401,10 +409,10 @@ landed, `robot_sync` only.
 - **No CAN-arm support here, and none planned in this slice.** `maker_follower`
   / `metal_follower` are not registered with draccus in either entrypoint, so
   `--robot.type=maker_follower` fails at CLI-parse time inside the child —
-  after a parent would have claimed and preflighted the arm. S3.2 must refuse
-  CAN arms synchronously and pre-claim (`supports_remote_inference` in
-  `arm_capabilities.py`). Bimanual SO-101 gets the return but not the ease-in,
-  so it should be refused for now too.
+  after a parent would have claimed and preflighted the arm. S3.2 refuses both
+  CAN arms and bimanual SO-101 synchronously and pre-spawn, via
+  `arm_capabilities.supports_remote_inference` (bimanual gets the return but
+  not the ease-in, so its first move would be a full-speed snap).
 - **No `max_relative_target`.** The ease-in covers the entry jump; per-tick
   relative clamping during the run is still absent (as it is in
   `lerobot-rollout`, whose `max_relative_target` also defaults to `None`).

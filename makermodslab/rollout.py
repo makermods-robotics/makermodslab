@@ -3109,6 +3109,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         auto_calibrate as _auto_calibrate,
         calibrate as _calibrate,
         record as _record,
+        remote_inference as _remote_inference,
         replay as _replay,
         teleoperate as _teleoperate,
         wiggle as _wiggle,
@@ -3135,6 +3136,13 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "Inference is already active. Stop it first.",
                 "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+            }
+        if _remote_inference.remote_inference_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Remote inference is currently active. Stop it first.",
+                "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
             }
         if _inference_startup_thread is not None and _inference_startup_thread.is_alive():
             # A previous session was stopped while its startup worker was

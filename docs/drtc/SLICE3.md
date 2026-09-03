@@ -373,3 +373,93 @@ _Gates:_ `npm run lint`; `npx tsc --noEmit -p tsconfig.app.json` **and** `-p tsc
 **S3.5 — (later) Lifecycle option B.** Lab launches Modal: `--livekit-room` on both wrappers, `modal` CLI discovery mirroring `_find_uv`, pre-claim GPU launch with room polling, robot-first stop ordering.
 
 **S3.6 — (later, only if earned) Lifecycle option C.** A supervised local SFU as a `system.*` feature, not a session.
+
+---
+
+## S3.2 as built (2026-09-03)
+
+Only the deviations from the design above; everything not listed here landed as
+written. Nothing in `sessions.py`, `schemas/`, `server.py`, `docs/api/` or
+`frontend/` was touched — that is S3.3/S3.4.
+
+- **The `_terminate_tree`/`_signal_group` lift did not happen, and is not
+  needed.** §3 says "import them from `rollout`, or lift them into a shared
+  module — do not copy them", and the import turned out to be enough: there is
+  no import cycle to break. `rollout` reaches `remote_inference` through the
+  same FUNCTION-LOCAL import block it already uses for its six other reciprocal
+  guards (as do `record`, `replay`, `calibrate`, `auto_calibrate`, `wiggle`,
+  `jobs._robot_busy` and `sessions._held_by`), so `remote_inference` can import
+  `rollout` at module top. Lifting them would have meant a ~60-line delete in
+  `rollout.py`, a file two open PRs (#113, #112) are also editing; the guard
+  hunk there is now one import line plus one six-line block. The lift remains a
+  clean follow-up refactor if `procs.py` is wanted for its own sake.
+- **Reciprocal guards RETURN a refusal dict; they do not raise `ApiError`.**
+  That is what all seven existing guards do in every peer (the route layer
+  converts `{"success": False, "status_code", "message", "code"}`), and the
+  instruction to keep these hunks trivially mergeable outranks introducing a
+  second style beside them.
+- **Phase name `easing`, not `easing_in`.** The contract note above calls
+  `easing_in` "the natural phase name for the parent"; the implementation
+  brief's phase list said `easing`. One constant
+  (`remote_inference.PHASE_EASING`), no consumers yet — trivially flipped
+  before the frontend keys off it.
+- **The EASING phase arrives AFTER `warming_up`, not before.** The design lists
+  the vocabulary as connecting → easing → warming_up → running, but the child
+  emits `EASING` when it begins ramping into the FIRST CHUNK, which is
+  necessarily after it joined the room. The causal order is therefore
+  connecting (READY) → warming_up (CONNECTED) → easing (EASING) → running
+  (first STATS with `chunks > 0`). The vocabulary itself is unchanged.
+- **`_prepare_robot` is reached through a small adapter.** It and
+  `_session_cameras` take an `InferenceRequest`, so `_robot_request()` builds
+  one from the `RemoteInferenceRequest` rather than relying on the two models
+  happening to share attribute names (they do not: `_prepare_robot` reads
+  `.coaching` first thing). The adapter is pure and pinned by a test.
+- **The watchdogs are not a thread.** They are one function
+  (`_check_watchdogs`) called from the stdout pump on every line and from the
+  status handler on every poll. The child logs at 1 Hz for as long as its
+  control loop runs — which it does in BOTH empty-room failure modes — so there
+  is nothing to watch that does not already wake one of those two. The verdict
+  half (`_watchdog_failure_locked`) is split out and reads the injected
+  `_clock`, so both are tested with a FakeClock and no sleeps. When one fires it
+  WRITES STOP and returns rather than calling the stop handler: calling it from
+  the pump would block the very thread that has to drain the child's stdout for
+  the return-to-rest to finish.
+- **The four `[drtc]` packages are one guarded top-level import.**
+  `python-dotenv` is in the extra too, so `drtc._env` cannot be a hard import in
+  a module the server loads at boot. `aiohttp`, `dotenv`, `livekit.api` and
+  `drtc._env` are imported together in one `try/except ImportError` that sets
+  all four to `None`; `_extra_missing()` reads that plus
+  `importlib.util.find_spec("livekit.portal")` (never an import — it is the FFI
+  dylib). Verified by importing the module with those packages blocked.
+- **`transport_hint()` lives in `utils/errors.py` and is PURE.** The
+  local-override branch §5 asks for takes `local_override: bool` as an argument
+  rather than stat-ing `DRTC_LOCAL_ENV_PATH` itself, so the wording is testable
+  without a filesystem. The handler passes
+  `_transport_source(url) == "local_override"`. Hints are appended to the
+  refusal `message` rather than carried as a new dict key, because the
+  dict→HTTPException conversion the route layer performs only knows
+  `message`/`code`.
+- **`remote_inference_transport()` was added** (a pure read of `read_env` +
+  provenance, no network) so S3.3's `GET /api/v1/remote-inference/transport` has
+  something to call. Its shape is a suggestion, not a contract — no test pins
+  it beyond the provenance helper.
+- **Status-dict keys are pinned by an equality assertion** in
+  `tests/test_remote_inference.py::STATUS_KEYS`, and the live, terminal and idle
+  payloads all come from one builder. S3.3's `response_model` must describe
+  exactly that set — `response_model` silently FILTERS undeclared fields.
+
+### S3.1 leftovers closed here
+
+- **Teardown is interrupt-shielded.** `contextlib.suppress(Exception)` does not
+  cover `KeyboardInterrupt`, so a third Ctrl-C could unwind `run()`'s `finally`
+  and skip `robot.disconnect()` — the call that releases torque — leaving the
+  arm energized with no `BYE`. Every teardown step now goes through
+  `robot_sync.shielded` (retry-once on an interrupt, `reraise=True` for the
+  disconnect so a genuine failure still ends the process non-zero, as before).
+  A source-level test pins that no teardown step is called bare.
+- **`motor_power.reset_torque_limit(robot, FOLLOWER)` runs right after
+  `robot.connect()`** on Feetech buses. `Torque_Limit` is RAM and survives
+  between sessions on one power-up, so the bench record's `motor_power=38`
+  would otherwise have throttled every hand-run `robot_sync` to 38% torque —
+  sluggish, healthy-looking, and unexplainable from the logs. Every other Lab
+  session already does this at start; this entrypoint was the one that did not.

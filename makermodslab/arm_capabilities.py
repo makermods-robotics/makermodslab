@@ -122,6 +122,36 @@ def supports_dagger(arm_type: object) -> bool:
     return normalize_arm_type(arm_type) == "so101"
 
 
+def supports_remote_inference(arm_type: object, mode: object = "single") -> bool:
+    """True when this arm type + layout can run a REMOTE inference session.
+
+    Single-arm SO-101 only, and — unlike ``supports_dagger`` above — both
+    halves of that are WIRING limits, not hardware ones. Nothing about a Maker
+    or Metal arm makes it unable to play action chunks from a remote policy;
+    the entrypoint simply has not been wired for it:
+
+    * **CAN arms.** ``makermodslab/drtc/robot_sync.py`` registers
+      ``so_follower``, ``bi_so_follower``, ``koch_follower`` and
+      ``omx_follower`` with draccus and nothing else, so
+      ``--robot.type=maker_follower`` fails at CLI-PARSE time inside the child
+      — after a session has claimed the arm and preflighted it. And its
+      return-to-rest goes through ``rest_pose`` (Feetech ticks), with no
+      ``maker_rest_pose`` call site, so a CAN arm would also have no safe stop.
+    * **Bimanual.** The first-action ease-in is single-Feetech-bus only: a BiSO
+      robot's action keys are ``left_``/``right_`` prefixed while each sub-arm's
+      ``bus.motors`` are bare, so the action→bus mapping matches nothing and
+      the ease refuses rather than guessing (see ``drtc/_pose.ease_to_action``).
+      Without it the arm's FIRST move is a full-speed snap from wherever it is
+      to the policy's first pose. The return-to-rest works fine per bus — it is
+      only the entry that is unsafe.
+
+    Both are removable with work, which is exactly why this reads as a
+    capability rather than as an ``arm_type == "so101"`` literal at the refusal
+    site: when the wiring lands, one function changes.
+    """
+    return normalize_arm_type(arm_type) == "so101" and mode != "bimanual"
+
+
 # lerobot `RobotConfig` choice-registry keys, mapped to the arm type they
 # describe. Kept as REGISTERED type strings rather than an isinstance check
 # so this module never has to import the device classes (which would drag the

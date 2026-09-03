@@ -56,6 +56,12 @@ class ErrorCode(StrEnum):
     ROBOT_BUSY_CALIBRATION = "robot.busy.calibration"
     ROBOT_BUSY_AUTO_CALIBRATION = "robot.busy.auto_calibration"
     ROBOT_BUSY_WIGGLE = "robot.busy.wiggle"
+    # Remote inference (makermodslab/remote_inference.py): a policy on a remote
+    # GPU driving this machine's follower over LiveKit. Its own discriminant
+    # rather than `inference` because the two are different sessions with
+    # different stop machinery — a client refused by one and pointed at the
+    # other's Stop button would get an endpoint that reports idle.
+    ROBOT_BUSY_REMOTE_INFERENCE = "robot.busy.remote_inference"
     ROBOT_BUSY_RELEASING = "robot.busy.releasing"
     # A live LOCAL training run holds the machine (GPU + the arms' USB bus).
     # The reverse direction never refuses: a submit made while a feature runs
@@ -128,6 +134,18 @@ class ErrorCode(StrEnum):
     SESSION_NOT_OWNER = "session.not_owner"
     SESSION_LEASE_EXPIRED = "session.lease_expired"
     SESSION_NOT_FOUND = "session.not_found"
+
+    # transport.* — the LiveKit path remote inference runs over (the SFU and
+    # the room), an external service this node depends on. Its own domain for
+    # the same reason `hub` has one: folding it into `hardware.connect_failed`
+    # would lie (that is the serial bus) and so would `system.*` (it is not
+    # this process). `no_policy` is the empty-room case — the room answers but
+    # no GPU-side operator is in it, caught BEFORE the arm is energized.
+    TRANSPORT_EXTRA_MISSING = "transport.extra_missing"
+    TRANSPORT_NOT_CONFIGURED = "transport.not_configured"
+    TRANSPORT_UNREACHABLE = "transport.unreachable"
+    TRANSPORT_UNAUTHORIZED = "transport.unauthorized"
+    TRANSPORT_NO_POLICY = "transport.no_policy"
 
     # system.* — the server process itself. `restart_unsupported`: this
     # process cannot safely re-exec (a dev reload worker, or a launch whose

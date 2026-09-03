@@ -37,15 +37,17 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-# The seven robot-driving features of the mutual-exclusion state model (see
+# The eight robot-driving features of the mutual-exclusion state model (see
 # CLAUDE.md "State model & mutual exclusion"), matching the `robot.busy.*`
 # error-code discriminants minus `releasing` — releasing is a transitional
-# *phase* of a session, not a session kind of its own.
+# *phase* of a session, not a session kind of its own — and minus `training`,
+# which holds the machine but is not a robot session.
 SESSION_KINDS = frozenset(
     {
         "teleoperation",
         "recording",
         "inference",
+        "remote_inference",
         "replay",
         "calibration",
         "auto_calibration",

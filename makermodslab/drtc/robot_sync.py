@@ -97,14 +97,15 @@ the arm to its captured start pose and exits 0; a SECOND `STOP` cuts that
 return short; `QUIT` skips it entirely. Ctrl-C takes the same path as `STOP` —
 a hand-run bench session gets the same safe teardown a supervised one does.
 Progress goes out on stdout as `MAKERMODSLAB-DRTC` events, including a 1 Hz
-`STATS` line beside the human `[robot]` one.
+`STATS` line beside the human `[robot]` one. Teardown is interrupt-shielded
+(see `shielded`): once the arm is energized, NOTHING short of SIGKILL is
+allowed to skip `robot.disconnect()`.
 
 NOTE: no `from __future__ import annotations` here — it would stringize the
 `main(cfg: RobotSideConfig)` signature and break draccus's config-type lookup.
 """
 
 import asyncio
-import contextlib
 import sys
 import threading
 import time
@@ -149,9 +150,16 @@ from ..drtc_protocol import (
     format_stats,
     pump_commands,
 )
+from ..motor_power import FOLLOWER, reset_torque_limit
 from ._common import fmt_us, load_env, mint_token, required_env
 from ._latency import JKLatencyEstimator
-from ._pose import capture_start_poses, ease_to_action, ensure_uncapped, return_to_start_poses
+from ._pose import (
+    capture_start_poses,
+    ease_to_action,
+    ensure_uncapped,
+    feetech_buses,
+    return_to_start_poses,
+)
 from ._schema import CHUNK_NAME, robot_wire_schema
 from ._sync_player import AdaptiveBlockPlayer
 
@@ -170,6 +178,41 @@ def _emit(event: str, payload: str = "") -> None:
     per-second STATS) until 4-8 KB of unrelated lerobot log had accumulated
     behind it, which is most of a short run."""
     print(format_event(event, payload), flush=True)
+
+
+def shielded(what: str, fn, *args, attempts: int = 2, reraise: bool = False, **kwargs):
+    """Run one TEARDOWN step so that no interrupt can skip the steps after it.
+
+    `contextlib.suppress(Exception)` does NOT cover `KeyboardInterrupt` — it
+    derives from BaseException — so a Ctrl-C landing inside the return-to-rest,
+    or inside the transport teardown, propagates straight out of the `finally`
+    block and skips `robot.disconnect()`: the call that RELEASES TORQUE. The
+    arm is then left energized, holding the policy's last command, with no BYE
+    for a supervising parent to read. That is the worst outcome available on
+    the one path whose entire job is to make the arm safe.
+
+    So every teardown step is individually shielded, and one that was
+    interrupted is retried once — by then the abort event is set (see the call
+    sites), so the retry unwinds immediately instead of resuming a long move.
+    Returns the step's value, or None when it failed or was given up on.
+
+    `reraise=True` shields the step from INTERRUPTS only and lets a genuine
+    exception propagate, which is what the torque release itself wants: an arm
+    that could not be disconnected is a failed run and the process should exit
+    saying so, exactly as it did before this shield existed.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except KeyboardInterrupt:
+            remaining = attempts - attempt
+            print(f"[robot] Ctrl-C during {what}; {'retrying' if remaining else 'giving up on it'}")
+        except Exception as exc:
+            print(f"[robot] {what} failed: {exc}")
+            if reraise:
+                raise
+            return None
+    return None
 
 
 def _or_none(value):
@@ -341,6 +384,21 @@ async def run(cfg: RobotSideConfig) -> None:
 
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
+
+    # Un-throttle the servos before anything commands them. `Torque_Limit` is a
+    # RAM register that SURVIVES between sessions on one power-up, so a cap an
+    # earlier auto-calibration left behind (the bench robot's record carries
+    # motor_power=38, i.e. 38% torque) would silently throttle this whole run:
+    # the arm tracks the policy sluggishly, everything looks healthy, and
+    # nothing anywhere says why. Every Lab session does this at start
+    # (`rollout._preflight_motor_registers`, teleop, record); a hand-run
+    # `robot_sync` did not, so it was the one entrypoint that inherited the cap.
+    # Feetech-only, like the register itself — `feetech_buses` is empty for the
+    # Koch/OMX arms this entrypoint also registers, and reset_torque_limit
+    # never raises (per-motor failures come back as warnings).
+    if feetech_buses(robot):
+        for warning in reset_torque_limit(robot, FOLLOWER):
+            print(f"[robot] WARNING: {warning}")
 
     # Only now is it safe to read stdin: SOFollower.calibrate() prompts with
     # input() during connect() on an uncalibrated arm, reading the very same
@@ -634,30 +692,57 @@ async def run(cfg: RobotSideConfig) -> None:
         # robot.disconnect() that releases it. QUIT is the one path that skips
         # the return — it means "stop now", and the caller has accepted that
         # the arm stays where it is.
+        #
+        # EVERY step here is `shielded`: a Ctrl-C is most likely precisely
+        # while this is running (that is usually what got us here), and an
+        # unshielded one would unwind the whole block and skip the release. The
+        # second Ctrl-C during the return is the second STOP press — cut it
+        # short and release where the arm is, nearer rest than it started —
+        # which is what setting `abort_event` before the retry does.
         if start_poses and not quit_event.is_set():
             _emit(EVENT_RETURNING)
             print("[robot] returning to the start pose ...")
-            try:
-                return_to_start_poses(start_poses, abort_event=abort_event)
-            except KeyboardInterrupt:
-                # A second Ctrl-C during the return is the second STOP press:
-                # cut it short and release where the arm is — nearer rest than
-                # it started — rather than leaving it energized indefinitely.
-                abort_event.set()
-                print("[robot] return cut short by a second Ctrl-C")
+
+            def _return_or_cut_short() -> None:
+                """One attempt at the return; a Ctrl-C cuts the RETRY short."""
+                if abort_event.is_set():
+                    return
+                try:
+                    return_to_start_poses(start_poses, abort_event=abort_event)
+                except KeyboardInterrupt:
+                    abort_event.set()
+                    raise
+
+            shielded("the return to the start pose", _return_or_cut_short)
         print("[robot] disconnecting...")
         # `portal` is None when the failure landed before it was built (a bad
         # codec name, a camera that would not open) — the arm is connected and
         # energized by then, so the return above and this release still have to
-        # run. Suppressed individually so a transport teardown error can never
-        # cost the arm its torque release.
+        # run. Shielded individually so a transport teardown error (or an
+        # interrupt inside it) can never cost the arm its torque release.
         if portal is not None:
-            with contextlib.suppress(Exception):
-                await portal.disconnect()
-            with contextlib.suppress(Exception):
-                portal.close()
-        robot.disconnect()
-        _emit(EVENT_BYE)
+            await _shielded_disconnect(portal)
+            shielded("closing the transport", portal.close, attempts=1)
+        # `reraise`: a disconnect that genuinely FAILS still ends the process
+        # non-zero and without a BYE, exactly as it did before — the parent
+        # reads that as the child dying, which is the truth. Only the interrupt
+        # is swallowed.
+        shielded("the torque release (robot.disconnect)", robot.disconnect, reraise=True)
+        shielded("the BYE event", _emit, EVENT_BYE, attempts=1)
+
+
+async def _shielded_disconnect(portal) -> None:
+    """`await portal.disconnect()`, swallowing errors AND interrupts.
+
+    The async twin of :func:`shielded` — one step, not retried: a transport
+    that would not close is not going to close on a second ask, and the arm's
+    torque release is waiting behind it."""
+    try:
+        await portal.disconnect()
+    except KeyboardInterrupt:
+        print("[robot] Ctrl-C during the transport disconnect; continuing to the torque release")
+    except Exception as exc:
+        print(f"[robot] transport disconnect failed: {exc}")
 
 
 @draccus.wrap()

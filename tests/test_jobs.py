@@ -8274,6 +8274,12 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
     [
         ("record", "recording_active", True, "a recording session"),
         ("rollout", "inference_active", True, "an inference session"),
+        (
+            "remote_inference",
+            "remote_inference_active",
+            True,
+            "a remote inference session",
+        ),
         ("teleoperate", "teleoperation_active", True, "teleoperation"),
         ("replay", "replay_active", True, "a replay"),
         ("calibrate", "calibration_is_active", lambda: True, "calibration"),
@@ -8284,7 +8290,7 @@ def test_each_feature_refuses_to_start_while_training_runs(monkeypatch) -> None:
 def test_every_robot_activity_holds_the_queue(
     monkeypatch, tmp_path, module_name, attr, busy_value, label
 ) -> None:
-    """`_robot_busy`'s seven legs, one case each — the queue side of the mutex.
+    """`_robot_busy`'s eight legs, one case each — the queue side of the mutex.
 
     Only the `recording_active` leg was exercised; the other four could be
     deleted outright with a green suite, which matters because they are read from

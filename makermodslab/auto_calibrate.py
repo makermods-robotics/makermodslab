@@ -227,6 +227,7 @@ class _AutoCalArmRunner:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_inference as _remote_inference,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -250,6 +251,12 @@ class _AutoCalArmRunner:
                     "success": False,
                     "message": "Inference is currently active. Stop it first.",
                     "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                }
+            if _remote_inference.remote_inference_is_active():
+                return {
+                    "success": False,
+                    "message": "Remote inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
                 }
             if _calibrate.calibration_is_active():
                 return {
@@ -641,6 +648,7 @@ class AutoCalibrationBatchManager:
             from . import (
                 calibrate as _calibrate,
                 record as _record,
+                remote_inference as _remote_inference,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -664,6 +672,12 @@ class AutoCalibrationBatchManager:
                     "success": False,
                     "message": "Inference is currently active. Stop it first.",
                     "code": ErrorCode.ROBOT_BUSY_INFERENCE,
+                }
+            if _remote_inference.remote_inference_is_active():
+                return {
+                    "success": False,
+                    "message": "Remote inference is currently active. Stop it first.",
+                    "code": ErrorCode.ROBOT_BUSY_REMOTE_INFERENCE,
                 }
             if _calibrate.calibration_is_active():
                 return {

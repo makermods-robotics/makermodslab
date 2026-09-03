@@ -3592,7 +3592,7 @@ class JobRegistry:
             config.policy_pretrained_path = hub_ref
 
         # Asked BEFORE the lock, and for the same reason `_drain_queue` phase 1
-        # asks before its own: `_robot_busy` reads seven feature modules whose
+        # asks before its own: `_robot_busy` reads eight feature modules whose
         # `training_is_active()` calls take THIS lock from inside their own
         # `_state_lock`. Reading them while holding it closes the cycle and
         # deadlocks. Never move this inside.
@@ -5987,13 +5987,13 @@ class JobRegistry:
 
         Local training is bounded by this machine's GPU/USB (the premise
         `_local_slot_busy` is built on), and teleoperation, recording,
-        inference, replay, calibration, auto-calibration and wiggle are all
-        mutually exclusive with each other for exactly that reason — each
-        checks the other six before starting (CLAUDE.md: "New features that
-        drive the robot must add the same reciprocal checks against every
-        existing one"). Training never joined that set, which was survivable
-        while a training could only begin from an explicit user submit: the
-        user was present and knew what else they had running.
+        inference, remote inference, replay, calibration, auto-calibration and
+        wiggle are all mutually exclusive with each other for exactly that
+        reason — each checks the other seven before starting (CLAUDE.md: "New
+        features that drive the robot must add the same reciprocal checks
+        against every existing one"). Training never joined that set, which was
+        survivable while a training could only begin from an explicit user
+        submit: the user was present and knew what else they had running.
 
         The queue removes that. `_drain_queue` starts a trainer from a WATCHDOG
         THREAD, at an arbitrary moment, with nobody at the keyboard — several GB
@@ -6006,7 +6006,7 @@ class JobRegistry:
         globals, this is an advisory "is now a good moment" check rather than a
         mutex, and the cost of a stale read is one second's delay.
 
-        Never raises. These seven modules pull in cv2, av and the lerobot robot
+        Never raises. These eight modules pull in cv2, av and the lerobot robot
         backends, none of which `jobs` depended on before the queue existed, and
         this runs as the FIRST statement of `_drain_queue` — so an ImportError
         here (a headless install, a half-installed optional extra, a broken cv2)
@@ -6025,6 +6025,7 @@ class JobRegistry:
                 auto_calibrate as _auto_calibrate,
                 calibrate as _calibrate,
                 record as _record,
+                remote_inference as _remote_inference,
                 replay as _replay,
                 rollout as _rollout,
                 teleoperate as _teleoperate,
@@ -6035,6 +6036,8 @@ class JobRegistry:
                 return "a recording session"
             if _rollout.inference_active:
                 return "an inference session"
+            if _remote_inference.remote_inference_is_active():
+                return "a remote inference session"
             if _teleoperate.teleoperation_active:
                 return "teleoperation"
             if _replay.replay_active:
