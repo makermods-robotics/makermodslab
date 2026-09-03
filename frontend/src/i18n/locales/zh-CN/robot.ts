@@ -27,6 +27,8 @@ export default {
     renameItem: "重命名机器人…",
     deleteItem: "删除机器人…",
     teleop: "遥操作",
+    host: "托管",
+    drive: "远程驱动",
     remote: "远程",
     remoteTooltip: "通过网络进行远程遥操作",
     hostItem: "开放远程遥操作",
@@ -67,7 +69,7 @@ export default {
   remote: {
     failedTitle: "无法启动远程遥操作",
     failedFallback: "启动失败。",
-    disabledReason: "{{name}} 需要先设置主臂（端口和标定） — 请打开机器人设置",
+    disabledReason: "{{name}}{{gap}} — 请打开机器人设置",
     installAction: "安装",
     refusal: {
       notHosting: "该工作站尚未托管。请先在那里点击“开放远程遥操作”。",
@@ -77,6 +79,10 @@ export default {
       sfuDisabled: "此节点未运行 LiveKit SFU。请用 makermodslab --sfu 重新启动。",
       extraMissing: "此节点未安装远程遥操作扩展。",
     },
+  },
+  layout: {
+    followerOnly: "机器人（仅从臂）",
+    leaderOnly: "控制器（仅主臂）",
   },
   setupGap: {
     missingCalibration: "缺少{{arms}}的标定",

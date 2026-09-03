@@ -51,6 +51,7 @@ import RemoteTeleopDialog from "@/components/dialogs/RemoteTeleopDialog";
 import RemoteExtraInstallDialog from "@/components/dialogs/RemoteExtraInstallDialog";
 import { ToastAction } from "@/components/ui/toast";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
+import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots, RobotRecord, RobotMode, ArmType } from "@/hooks/useRobots";
@@ -58,7 +59,7 @@ import { ApiError } from "@/lib/apiClient";
 import { startSession, formatSessionHeld } from "@/lib/sessionApi";
 import { formatRemoteRefusal } from "@/lib/remoteApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
-import { formatRobotSetupGap } from "@/lib/robotSetupGap";
+import { formatRobotSetupGap, robotLayoutReady } from "@/lib/robotSetupGap";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
@@ -306,20 +307,15 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
       : null;
 
   // Remote teleoperation drives with the LEADER only — a record with no
-  // follower is fine. The record carries no leader-side readiness flag, so
-  // gate on the leader slot(s) having a port and a calibration assigned; a
-  // stale calibration file is the server's refusal (robot.not_ready) to make.
-  const leaderReady =
-    !!selectedRecord &&
-    !!selectedRecord.leader_port?.trim() &&
-    !!selectedRecord.leader_config?.trim() &&
-    (selectedRecord.mode !== "bimanual" ||
-      (!!selectedRecord.right_leader_port?.trim() &&
-        !!selectedRecord.right_leader_config?.trim()));
+  // follower is fine. Gate on leader_ready, the leader-side twin of
+  // follower_ready, and diagnose the gap in the same scope.
   const remoteDisabledReason = !selectedRecord
     ? t("robot.corner.selectFirst")
-    : !leaderReady
-      ? t("robot.remote.disabledReason", { name: selectedRecord.name })
+    : !selectedRecord.leader_ready
+      ? t("robot.remote.disabledReason", {
+          name: selectedRecord.name,
+          gap: formatRobotSetupGap(t, selectedRecord, "leader"),
+        })
       : null;
 
   const teleopDisabledReason = !selectedRecord
@@ -330,6 +326,51 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
           gap: formatRobotSetupGap(t, selectedRecord),
         })
       : null;
+
+  // The arm LAYOUT decides which actions exist at all. Local teleop needs a
+  // pair on this machine; hosting needs a follower; driving a remote robot
+  // needs a leader. An action the layout makes impossible is HIDDEN rather
+  // than disabled — a station has no leader to set up, so "needs its leader"
+  // would be a dead end, not a hint. The primary slot (Teleop's) goes to the
+  // one action a single-arm layout is for: Host on a station, Drive remote on
+  // a controller. The Remote menu then only exists for a pair, where both of
+  // its items are live; on a single-arm layout its one remaining item IS the
+  // primary button.
+  const arms = selectedRecord?.arms ?? "both";
+  const showTeleop = arms === "both";
+  const showHost = arms !== "leader";
+  const showRemote = arms !== "follower";
+  const showRemoteMenu = showTeleop;
+
+  /** One rounded secondary pill in the cluster's action position. */
+  const actionButton = (
+    label: string,
+    icon: React.ReactNode,
+    busy: boolean,
+    disabledReason: string | null,
+    onClick: () => void,
+    tooltip: string | null,
+  ) => (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="h-7 gap-1.5 rounded-full px-2.5"
+            disabled={!!disabledReason || busy}
+            onClick={onClick}
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : icon}
+            {label}
+          </Button>
+        </span>
+      </TooltipTrigger>
+      {(disabledReason ?? tooltip) && (
+        <TooltipContent side="bottom">{disabledReason ?? tooltip}</TooltipContent>
+      )}
+    </Tooltip>
+  );
 
   return (
     <div
@@ -392,13 +433,14 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : hasRobots && selectedRecord ? (
               <>
-                <StatusDot ready={selectedRecord.is_clean} />
+                <StatusDot ready={robotLayoutReady(selectedRecord)} />
                 <span className="max-w-[180px] truncate">
                   <span className="text-muted-foreground">
                     {t("robot.corner.activeLabel")}
                   </span>
                   {selectedRecord.name}
                 </span>
+                <RobotLayoutChip arms={selectedRecord.arms} />
               </>
             ) : hasRobots ? (
               <span>{t("robot.corner.selectRobot")}</span>
@@ -427,8 +469,9 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                     onSelect={() => selectRobot(name)}
                     className={cn("gap-2", selected && "bg-accent")}
                   >
-                    <StatusDot ready={rec.is_clean} />
+                    <StatusDot ready={robotLayoutReady(rec)} />
                     <span className="flex-1 truncate">{name}</span>
+                    <RobotLayoutChip arms={rec.arms} />
                     <span
                       className={cn(
                         "font-mono text-[10px] text-muted-foreground",
@@ -443,7 +486,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
                         ? t("robot.corner.mode.bimanual")
                         : t("robot.corner.mode.single")}
                       {" · "}
-                      {rec.is_clean
+                      {robotLayoutReady(rec)
                         ? t("robot.corner.status.ready")
                         : t("robot.corner.status.needsSetup")}
                     </span>
@@ -480,79 +523,88 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="h-7 gap-1.5 rounded-full px-2.5"
-              disabled={!!teleopDisabledReason || teleopStarting}
-              onClick={() => selectedRecord && handleTeleop(selectedRecord)}
-            >
-              {teleopStarting ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Gamepad2 className="h-3.5 w-3.5" />
-              )}
-              {t("robot.corner.teleop")}
-            </Button>
-          </span>
-        </TooltipTrigger>
-        {teleopDisabledReason && (
-          <TooltipContent side="bottom">{teleopDisabledReason}</TooltipContent>
-        )}
-      </Tooltip>
+      {showTeleop
+        ? actionButton(
+            t("robot.corner.teleop"),
+            <Gamepad2 className="h-3.5 w-3.5" />,
+            teleopStarting,
+            teleopDisabledReason,
+            () => selectedRecord && handleTeleop(selectedRecord),
+            null,
+          )
+        : arms === "follower"
+          ? actionButton(
+              t("robot.corner.host"),
+              <Radio className="h-3.5 w-3.5" />,
+              hostStarting,
+              hostDisabledReason,
+              () => selectedRecord && handleHost(selectedRecord),
+              t("robot.corner.hostItemSub"),
+            )
+          : actionButton(
+              t("robot.corner.drive"),
+              <Radio className="h-3.5 w-3.5" />,
+              false,
+              remoteDisabledReason,
+              () => setRemoteOpen(true),
+              t("robot.corner.remoteItemSub"),
+            )}
 
-      <DropdownMenu>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <DropdownMenuTrigger asChild>
-              <Button
-                size="sm"
-                variant="secondary"
-                className="h-7 gap-1.5 rounded-full px-2.5"
-                disabled={!selectedRecord || hostStarting}
+      {showRemoteMenu && (
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-7 gap-1.5 rounded-full px-2.5"
+                  disabled={!selectedRecord || hostStarting}
+                >
+                  {hostStarting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Radio className="h-3.5 w-3.5" />
+                  )}
+                  {t("robot.corner.remote")}
+                  <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {selectedRecord
+                ? t("robot.corner.remoteTooltip")
+                : t("robot.corner.selectFirst")}
+            </TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end" className="w-80">
+            {showHost && (
+              <DropdownMenuItem
+                disabled={!!hostDisabledReason || hostStarting}
+                onSelect={() => selectedRecord && handleHost(selectedRecord)}
+                className="flex-col items-start gap-0.5"
               >
-                {hostStarting ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Radio className="h-3.5 w-3.5" />
-                )}
-                {t("robot.corner.remote")}
-                <ChevronDown className="h-3 w-3 text-muted-foreground" />
-              </Button>
-            </DropdownMenuTrigger>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">
-            {selectedRecord
-              ? t("robot.corner.remoteTooltip")
-              : t("robot.corner.selectFirst")}
-          </TooltipContent>
-        </Tooltip>
-        <DropdownMenuContent align="end" className="w-80">
-          <DropdownMenuItem
-            disabled={!!hostDisabledReason || hostStarting}
-            onSelect={() => selectedRecord && handleHost(selectedRecord)}
-            className="flex-col items-start gap-0.5"
-          >
-            <span>{t("robot.corner.hostItem")}</span>
-            <span className="text-xs text-muted-foreground">
-              {hostDisabledReason ?? t("robot.corner.hostItemSub")}
-            </span>
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={!!remoteDisabledReason}
-            onSelect={() => setRemoteOpen(true)}
-            className="flex-col items-start gap-0.5"
-          >
-            <span>{t("robot.corner.remoteItem")}</span>
-            <span className="text-xs text-muted-foreground">
-              {remoteDisabledReason ?? t("robot.corner.remoteItemSub")}
-            </span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+                <span>{t("robot.corner.hostItem")}</span>
+                <span className="text-xs text-muted-foreground">
+                  {hostDisabledReason ?? t("robot.corner.hostItemSub")}
+                </span>
+              </DropdownMenuItem>
+            )}
+            {showRemote && (
+              <DropdownMenuItem
+                disabled={!!remoteDisabledReason}
+                onSelect={() => setRemoteOpen(true)}
+                className="flex-col items-start gap-0.5"
+              >
+                <span>{t("robot.corner.remoteItem")}</span>
+                <span className="text-xs text-muted-foreground">
+                  {remoteDisabledReason ?? t("robot.corner.remoteItemSub")}
+                </span>
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
       <CreateRobotDialog
         open={createOpen}

@@ -32,6 +32,12 @@ export default {
     renameItem: "Rename robot…",
     deleteItem: "Delete robot…",
     teleop: "Teleop",
+    // The primary button on a follower-only station (Teleop's slot): host
+    // this robot for an operator elsewhere.
+    host: "Host",
+    // The primary button on a leader-only controller (Teleop's slot): drive
+    // a station's robot with this leader.
+    drive: "Drive remote",
     // The remote-teleoperation menu beside Teleop: host this robot for an
     // operator elsewhere, or drive a station's robot with this leader.
     remote: "Remote",
@@ -84,8 +90,8 @@ export default {
   remote: {
     failedTitle: "Couldn't start remote teleoperation",
     failedFallback: "Failed to start.",
-    disabledReason:
-      "{{name}} needs its leader arm set up (port and calibration) — open Robot settings",
+    // {{gap}} is the rendered leader-side setup-gap phrase.
+    disabledReason: "{{name}} {{gap}} — open Robot settings",
     installAction: "Install",
     refusal: {
       notHosting:
@@ -101,6 +107,14 @@ export default {
       extraMissing:
         "The remote-teleoperation extra isn't installed on this node.",
     },
+  },
+  // Layout chips beside a record's name wherever it is listed. The VALUES
+  // ("both"/"follower"/"leader", the record's `arms` field) are data; a pair
+  // gets no chip at all. A leader-only record is not really a robot — it is a
+  // controller — so the chip says so.
+  layout: {
+    followerOnly: "Robot (follower only)",
+    leaderOnly: "Controller (leader only)",
   },
   // Setup-gap rendering. `robotSetupGaps()` (hooks/useRobots) returns structure;
   // these turn it into a sentence. English output must stay byte-identical to

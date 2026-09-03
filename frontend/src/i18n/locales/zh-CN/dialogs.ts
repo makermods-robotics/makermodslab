@@ -146,6 +146,7 @@ export default {
     stationsLoading: "正在查找工作站…",
     stationsEmpty: "目前没有工作站在托管。请在工作站上点击“开放远程遥操作”，然后刷新。",
     hostingRobot: "正在托管 {{robot}}",
+    armMismatch: "机械臂系列不同",
     start: "开始",
     starting: "正在启动…",
     stop: "停止",

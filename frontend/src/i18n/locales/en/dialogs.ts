@@ -208,6 +208,9 @@ export default {
       "No station is hosting right now. On the station, press “Available for remote teleop”, then refresh.",
     // {{robot}} is the hosted robot's name.
     hostingRobot: "Hosting {{robot}}",
+    // Why a station row is greyed out: its hosted arm's family differs from
+    // the local record's, which the server would refuse as a schema mismatch.
+    armMismatch: "Different arm family",
     start: "Start",
     starting: "Starting…",
     stop: "Stop",

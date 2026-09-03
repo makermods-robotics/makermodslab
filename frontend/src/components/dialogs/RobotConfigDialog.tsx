@@ -89,9 +89,13 @@ import {
 import { PanelHeader, SLIDE } from "@/components/studio/panel/primitives";
 import {
   RobotRecord,
+  RobotArms,
   formatRobotSetupGap,
   isCanArmType,
+  robotLayoutReady,
+  setupScopeForArms,
 } from "@/hooks/useRobots";
+import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { isCaselessScript } from "@/i18n/config";
 import { cn } from "@/lib/utils";
@@ -156,6 +160,14 @@ interface ArmSlot {
  * no handler ever sees it.
  */
 const NO_PORT = "__no_port__";
+
+// The layout selector's rows. Keys, not text: resolved with t() at render.
+// The `value` is the record's `arms` field — data, sent verbatim on Save.
+const LAYOUT_OPTIONS = [
+  { value: "both", labelKey: "robotConfig.layout.both" },
+  { value: "follower", labelKey: "robotConfig.layout.followerOnly" },
+  { value: "leader", labelKey: "robotConfig.layout.leaderOnly" },
+] as const satisfies readonly { value: RobotArms; labelKey: string }[];
 
 /**
  * One device in section 01: its label, status, port picker and actions in a
@@ -525,6 +537,16 @@ const RobotConfigWindow = ({
   const [abortPromptOpen, setAbortPromptOpen] = useState(false);
 
   const isBimanual = robot?.mode === "bimanual";
+  // The arm LAYOUT — what is plugged into THIS machine. Draft-until-Save like
+  // the ports: `armsDraft` overrides the baseline until saved. A follower-only
+  // station hides the leader slots; a leader-only controller hides the
+  // follower slots plus everything that only a follower uses (cameras, the
+  // auto-calibration torque). Hidden slots KEEP their fields — the backend
+  // merges only what Save sends, so switching back restores them.
+  const [armsDraft, setArmsDraft] = useState<RobotArms | null>(null);
+  const draftArms: RobotArms = armsDraft ?? robot?.arms ?? "both";
+  const showLeader = draftArms !== "follower";
+  const showFollower = draftArms !== "leader";
   // The hardware family this robot is. Gates three things in this window:
   // which calibration flow the Calibrate step runs (a CAN arm — Maker or
   // Metal — has no range sweep and no automatic calibration, only a zero
@@ -788,9 +810,10 @@ const RobotConfigWindow = ({
   // Arm slots the multi-arm auto-cal picker can offer. Bimanual exposes all
   // four (left/right × leader/follower); single-arm exposes the leader +
   // follower pair. Each maps to the record's config/port fields for prefill.
-  const armSlots: ArmSlot[] = useMemo(
-    () =>
-      isBimanual
+  // Slots the layout hides are dropped here, so section 01, the calibration
+  // rows and "Calibrate all" all agree on which arms this machine has.
+  const armSlots: ArmSlot[] = useMemo(() => {
+    const all: ArmSlot[] = isBimanual
         ? [
             {
               key: "teleop:left",
@@ -842,9 +865,11 @@ const RobotConfigWindow = ({
               cfgField: "follower_config",
               portField: "follower_port",
             },
-          ],
-    [isBimanual, t],
-  );
+          ];
+    return all.filter((slot) =>
+      slot.device === "teleop" ? showLeader : showFollower,
+    );
+  }, [isBimanual, showLeader, showFollower, t]);
 
   const fetchRobot = useCallback(async (): Promise<RobotRecord | null> => {
     if (!robotName) return null;
@@ -1896,13 +1921,15 @@ const RobotConfigWindow = ({
     [portDraft, robot],
   );
   const motorDirty = !!robot && motorPercent !== robot.motor_power;
-  const isDirty = camerasDirty || portsDirty || motorDirty;
+  const armsDirty = !!robot && draftArms !== (robot.arms ?? "both");
+  const isDirty = camerasDirty || portsDirty || motorDirty || armsDirty;
 
   const handleSave = useCallback(async () => {
     if (!robotName || !robot) return;
     const patch: Record<string, unknown> = {};
     if (camerasDirty) patch.cameras = cameras;
     if (motorDirty) patch.motor_power = motorPercent;
+    if (armsDirty) patch.arms = draftArms;
     if (portsDirty) {
       for (const [f, v] of Object.entries(portDraft)) {
         if ((v ?? "") !== ((robot[f as keyof RobotRecord] as string) || "")) {
@@ -1927,6 +1954,7 @@ const RobotConfigWindow = ({
         // powerDraft re-syncs via its effect when motor_power changes.
         setRobot(data.robot);
         setPortDraft({});
+        setArmsDraft(null);
         setCameras((data.robot as RobotRecord).cameras ?? []);
         setJustSaved(true);
         toast({ title: t("robotConfig.window.toast.saved") });
@@ -1954,6 +1982,8 @@ const RobotConfigWindow = ({
     camerasDirty,
     motorDirty,
     portsDirty,
+    armsDirty,
+    draftArms,
     cameras,
     motorPercent,
     portDraft,
@@ -2147,7 +2177,7 @@ const RobotConfigWindow = ({
             {t("robotConfig.calib.autoNote")}
           </AlertDescription>
         </Alert>
-        {robot && !isCanArm && (
+        {robot && !isCanArm && showFollower && (
           <Collapsible className="group space-y-3">
             <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
               <span className="text-left">
@@ -2757,8 +2787,9 @@ const RobotConfigWindow = ({
         {/* Window title bar */}
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
           <p className="eyebrow">{t("robotConfig.window.eyebrow")}</p>
-          <DialogTitle className="pt-1 text-base font-semibold">
+          <DialogTitle className="flex items-center gap-2 pt-1 text-base font-semibold">
             {t("robotConfig.window.title", { name: robotName })}
+            <RobotLayoutChip arms={robot?.arms} />
           </DialogTitle>
           <DialogDescription className="sr-only">
             {t("robotConfig.window.srDescription", { name: robotName })}
@@ -2790,6 +2821,56 @@ const RobotConfigWindow = ({
               </Button>
             </div>
 
+            {/* The arm layout. Three radio rows rather than a select: the
+                options are sentences, and which one is picked changes what
+                the rest of this window shows. The VALUE is the record's
+                `arms` field — data; only the labels localize. */}
+            <div
+              role="radiogroup"
+              aria-label={t("robotConfig.layout.question")}
+              className="space-y-1.5"
+            >
+              <p className="text-sm text-muted-foreground">
+                {t("robotConfig.layout.question")}
+              </p>
+              <div className="divide-y divide-border overflow-hidden rounded-md border border-border">
+                {LAYOUT_OPTIONS.map((option) => {
+                  const checked = draftArms === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={checked}
+                      disabled={hardwareBusy}
+                      onClick={() => setArmsDraft(option.value)}
+                      className={cn(
+                        "flex w-full items-center gap-2.5 bg-background px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+                        checked
+                          ? "bg-accent/60 text-foreground"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "relative h-3.5 w-3.5 shrink-0 rounded-full border",
+                          checked
+                            ? "border-primary"
+                            : "border-muted-foreground/60",
+                        )}
+                      >
+                        {checked ? (
+                          <span className="absolute inset-[2.5px] rounded-full bg-primary" />
+                        ) : null}
+                      </span>
+                      {t(option.labelKey)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* One row for a single robot, one row per side when bimanual. */}
             {(isBimanual
               ? (["left", "right"] as const)
@@ -2815,7 +2896,10 @@ const RobotConfigWindow = ({
                         ? "robotConfig.device.groupBimanual"
                         : "robotConfig.device.groupSingle",
                     )}
-                    className="grid grid-cols-2 gap-3"
+                    className={cn(
+                      "grid gap-3",
+                      rowSlots.length > 1 ? "grid-cols-2" : "grid-cols-1",
+                    )}
                   >
                     {rowSlots.map((slot) => (
                       <DeviceSlotCell
@@ -2915,28 +2999,32 @@ const RobotConfigWindow = ({
                     with rebot_102_leader SHARED by both CAN leaders), so a
                     single leader + follower pair covers single AND bimanual
                     modes (no per-slot duplication). */}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
-                    onClick={() => openCalibrationFolder("teleop")}
-                    aria-label={t("robotConfig.files.openLeaderFolder")}
-                    title={t("robotConfig.files.openLeaderFolder")}
-                  >
-                    <FolderOpen className="h-4 w-4" />
-                    {t("robotConfig.files.leader")}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
-                    onClick={() => openCalibrationFolder("robot")}
-                    aria-label={t("robotConfig.files.openFollowerFolder")}
-                    title={t("robotConfig.files.openFollowerFolder")}
-                  >
-                    <FolderOpen className="h-4 w-4" />
-                    {t("robotConfig.files.follower")}
-                  </Button>
+                  {showLeader && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      onClick={() => openCalibrationFolder("teleop")}
+                      aria-label={t("robotConfig.files.openLeaderFolder")}
+                      title={t("robotConfig.files.openLeaderFolder")}
+                    >
+                      <FolderOpen className="h-4 w-4" />
+                      {t("robotConfig.files.leader")}
+                    </Button>
+                  )}
+                  {showFollower && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      onClick={() => openCalibrationFolder("robot")}
+                      aria-label={t("robotConfig.files.openFollowerFolder")}
+                      title={t("robotConfig.files.openFollowerFolder")}
+                    >
+                      <FolderOpen className="h-4 w-4" />
+                      {t("robotConfig.files.follower")}
+                    </Button>
+                  )}
                 </div>
               </div>
               {(isBimanual
@@ -2977,150 +3065,158 @@ const RobotConfigWindow = ({
                       cfgField: "follower_config",
                     },
                   ] as const)
-              ).map((row) => {
-                const cfg = (robot[row.cfgField] as string) || "";
-                // The same config may drive both same-side slots only by
-                // mistake (one physical arm on two arms), so exclude the
-                // counterpart slot's config from this picker in bimanual mode.
-                const counterpartField =
-                  row.cfgField === "leader_config"
-                    ? "right_leader_config"
-                    : row.cfgField === "right_leader_config"
-                      ? "leader_config"
-                      : row.cfgField === "follower_config"
-                        ? "right_follower_config"
-                        : "follower_config";
-                const excludeConfig = isBimanual
-                  ? (robot[counterpartField] as string) || undefined
-                  : undefined;
-                // The counterpart slot's config field, so the library can
-                // SWAP assignments when the user picks its in-use config
-                // (this slot takes it; the counterpart takes this slot's).
-                const excludeConfigField = isBimanual
-                  ? counterpartField
-                  : undefined;
-                // Which physical arm this row's slot drives, for retargeting
-                // the calibration flow when its + button is clicked.
-                const rowArm: "left" | "right" = row.cfgField.startsWith(
-                  "right_",
+              )
+                // A row for an arm the layout hides is dropped, like its slot.
+                .filter((row) =>
+                  row.device === "teleop" ? showLeader : showFollower,
                 )
-                  ? "right"
-                  : "left";
-                // The arm slot this row stands for — rows and slots are 1:1 on
-                // cfgField in both modes, so the panel's "Auto-calibrate" can
-                // target this row's arm and nothing else.
-                const rowSlot = armSlots.find(
-                  (s) => s.cfgField === row.cfgField,
-                );
-                const isNewCalibOpen = newCalibFor === row.cfgField;
-                const rowLabel = t(row.labelKey);
-                return (
-                  // Keyed on the config field, not the label — the label is
-                  // localized and would remount the row on a language switch.
-                  <div key={row.cfgField}>
-                    <div className="flex items-center gap-2 text-sm">
-                      {cfg ? (
-                        <CheckCircle className="h-4 w-4 text-ok" />
-                      ) : (
-                        <Circle className="h-4 w-4 text-muted-foreground" />
-                      )}
-                      <span
-                        className={
-                          cfg ? "text-foreground" : "text-muted-foreground"
+                .map((row) => {
+                  const cfg = (robot[row.cfgField] as string) || "";
+                  // The same config may drive both same-side slots only by
+                  // mistake (one physical arm on two arms), so exclude the
+                  // counterpart slot's config from this picker in bimanual mode.
+                  const counterpartField =
+                    row.cfgField === "leader_config"
+                      ? "right_leader_config"
+                      : row.cfgField === "right_leader_config"
+                        ? "leader_config"
+                        : row.cfgField === "follower_config"
+                          ? "right_follower_config"
+                          : "follower_config";
+                  const excludeConfig = isBimanual
+                    ? (robot[counterpartField] as string) || undefined
+                    : undefined;
+                  // The counterpart slot's config field, so the library can
+                  // SWAP assignments when the user picks its in-use config
+                  // (this slot takes it; the counterpart takes this slot's).
+                  const excludeConfigField = isBimanual
+                    ? counterpartField
+                    : undefined;
+                  // Which physical arm this row's slot drives, for retargeting
+                  // the calibration flow when its + button is clicked.
+                  const rowArm: "left" | "right" = row.cfgField.startsWith(
+                    "right_",
+                  )
+                    ? "right"
+                    : "left";
+                  // The arm slot this row stands for — rows and slots are 1:1 on
+                  // cfgField in both modes, so the panel's "Auto-calibrate" can
+                  // target this row's arm and nothing else.
+                  const rowSlot = armSlots.find(
+                    (s) => s.cfgField === row.cfgField,
+                  );
+                  const isNewCalibOpen = newCalibFor === row.cfgField;
+                  const rowLabel = t(row.labelKey);
+                  return (
+                    // Keyed on the config field, not the label — the label is
+                    // localized and would remount the row on a language switch.
+                    <div key={row.cfgField}>
+                      <div className="flex items-center gap-2 text-sm">
+                        {cfg ? (
+                          <CheckCircle className="h-4 w-4 text-ok" />
+                        ) : (
+                          <Circle className="h-4 w-4 text-muted-foreground" />
+                        )}
+                        <span
+                          className={
+                            cfg ? "text-foreground" : "text-muted-foreground"
+                          }
+                        >
+                          {rowLabel}
+                        </span>
+                      </div>
+                      {/* Picker, Calibrate and the overflow menu are one welded
+                          control group rendered by CalibrationLibrary — the
+                          Calibrate segment used to be a separate outlined "+"
+                          button sitting outside its border. Pressing it expands
+                          the calibration flow (auto/manual, demo, advanced
+                          torque) right below this row, for this arm slot. */}
+                      <CalibrationLibrary
+                        armType={armType}
+                        device={row.device}
+                        assignedConfig={cfg}
+                        configField={row.cfgField}
+                        excludeConfig={excludeConfig}
+                        excludeConfigField={excludeConfigField}
+                        robotName={robotName}
+                        onAssigned={fetchRobot}
+                        onLibraryChanged={() => setCalibReloadToken((t) => t + 1)}
+                        reloadToken={calibReloadToken}
+                        onCalibrate={() =>
+                          toggleNewCalibration(row.cfgField, row.device, rowArm)
                         }
-                      >
-                        {rowLabel}
-                      </span>
+                        calibrateOpen={isNewCalibOpen}
+                      />
+                      {/* Slides open in place, like the studio's entry forms. */}
+                      <Collapsible open={isNewCalibOpen}>
+                        <CollapsibleContent className={SLIDE}>
+                          {newCalibrationPanel(rowLabel, rowSlot)}
+                        </CollapsibleContent>
+                      </Collapsible>
                     </div>
-                    {/* Picker, Calibrate and the overflow menu are one welded
-                        control group rendered by CalibrationLibrary — the
-                        Calibrate segment used to be a separate outlined "+"
-                        button sitting outside its border. Pressing it expands
-                        the calibration flow (auto/manual, demo, advanced
-                        torque) right below this row, for this arm slot. */}
-                    <CalibrationLibrary
-                      armType={armType}
-                      device={row.device}
-                      assignedConfig={cfg}
-                      configField={row.cfgField}
-                      excludeConfig={excludeConfig}
-                      excludeConfigField={excludeConfigField}
-                      robotName={robotName}
-                      onAssigned={fetchRobot}
-                      onLibraryChanged={() => setCalibReloadToken((t) => t + 1)}
-                      reloadToken={calibReloadToken}
-                      onCalibrate={() =>
-                        toggleNewCalibration(row.cfgField, row.device, rowArm)
-                      }
-                      calibrateOpen={isNewCalibOpen}
-                    />
-                    {/* Slides open in place, like the studio's entry forms. */}
-                    <Collapsible open={isNewCalibOpen}>
-                      <CollapsibleContent className={SLIDE}>
-                        {newCalibrationPanel(rowLabel, rowSlot)}
-                      </CollapsibleContent>
-                    </Collapsible>
-                  </div>
-                );
-              })}
+                  );
+                })}
             </section>
           )}
 
-          {/* 03 · Cameras */}
-          <section className="space-y-4 py-5">
-            <div className="flex items-center gap-2">
-              <PanelHeader step="03" title={t("robotConfig.cameras.step")} />
-              <div className="ml-auto flex items-center gap-2">
-                <Label
-                  htmlFor="cameras-toggle"
-                  className="cursor-pointer text-sm text-muted-foreground"
-                >
-                  {camerasActive
-                    ? t("robotConfig.cameras.on")
-                    : t("robotConfig.cameras.off")}
-                </Label>
-                <Switch
-                  id="cameras-toggle"
-                  checked={camerasActive}
-                  onCheckedChange={handleCamerasActiveChange}
-                  aria-label={t("robotConfig.cameras.toggleLabel")}
-                />
-              </div>
-            </div>
-            {/* Mounted whether the switch is on or off: it renders nothing
-                while off, so the camera picked before switching off is still
-                picked, and still previewing, when it comes back on. */}
-            <CameraConfiguration
-              active={camerasActive}
-              cameras={cameras}
-              onCamerasChange={handleCamerasChange}
-              releaseStreamsRef={releaseStreamsRef}
-            />
-            {!camerasActive && (
-              <div className="space-y-3 rounded-md border border-border bg-muted/30 p-6 text-center">
-                <Camera className="mx-auto h-10 w-10 text-muted-foreground" />
-                <div className="space-y-1">
-                  <p className="font-medium text-foreground">
-                    {t("robotConfig.cameras.offTitle")}
-                  </p>
-                  <p className="mx-auto max-w-md text-sm text-muted-foreground">
-                    {t("robotConfig.cameras.offDescription")}
-                  </p>
-                  {cameras.length > 0 && (
-                    <p className="pt-1 text-xs text-muted-foreground">
-                      {t("robotConfig.cameras.saved", {
-                        count: cameras.length,
-                      })}
-                    </p>
-                  )}
+          {/* 03 · Cameras — follower-side, so a leader-only controller has
+              none to configure. */}
+          {showFollower && (
+            <section className="space-y-4 py-5">
+              <div className="flex items-center gap-2">
+                <PanelHeader step="03" title={t("robotConfig.cameras.step")} />
+                <div className="ml-auto flex items-center gap-2">
+                  <Label
+                    htmlFor="cameras-toggle"
+                    className="cursor-pointer text-sm text-muted-foreground"
+                  >
+                    {camerasActive
+                      ? t("robotConfig.cameras.on")
+                      : t("robotConfig.cameras.off")}
+                  </Label>
+                  <Switch
+                    id="cameras-toggle"
+                    checked={camerasActive}
+                    onCheckedChange={handleCamerasActiveChange}
+                    aria-label={t("robotConfig.cameras.toggleLabel")}
+                  />
                 </div>
-                <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-                  <ShieldQuestion className="h-3.5 w-3.5" />
-                  {t("robotConfig.cameras.permissionHint")}
-                </p>
               </div>
-            )}
-          </section>
+              {/* Mounted whether the switch is on or off: it renders nothing
+                  while off, so the camera picked before switching off is still
+                  picked, and still previewing, when it comes back on. */}
+              <CameraConfiguration
+                active={camerasActive}
+                cameras={cameras}
+                onCamerasChange={handleCamerasChange}
+                releaseStreamsRef={releaseStreamsRef}
+              />
+              {!camerasActive && (
+                <div className="space-y-3 rounded-md border border-border bg-muted/30 p-6 text-center">
+                  <Camera className="mx-auto h-10 w-10 text-muted-foreground" />
+                  <div className="space-y-1">
+                    <p className="font-medium text-foreground">
+                      {t("robotConfig.cameras.offTitle")}
+                    </p>
+                    <p className="mx-auto max-w-md text-sm text-muted-foreground">
+                      {t("robotConfig.cameras.offDescription")}
+                    </p>
+                    {cameras.length > 0 && (
+                      <p className="pt-1 text-xs text-muted-foreground">
+                        {t("robotConfig.cameras.saved", {
+                          count: cameras.length,
+                        })}
+                      </p>
+                    )}
+                  </div>
+                  <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+                    <ShieldQuestion className="h-3.5 w-3.5" />
+                    {t("robotConfig.cameras.permissionHint")}
+                  </p>
+                </div>
+              )}
+            </section>
+          )}
         </div>
 
         {/* Window footer — Save is the ONLY path that writes the robot record;
@@ -3139,9 +3235,15 @@ const RobotConfigWindow = ({
           >
             {isDirty
               ? t("robotConfig.window.unsaved")
-              : robot && !robot.is_clean
+              : robot && !robotLayoutReady(robot)
                 ? t("robotConfig.window.savedWithGap", {
-                    gap: formatRobotSetupGap(t, robot),
+                    // The saved layout's own scope: a station reads as ready
+                    // once its follower is, a controller once its leader is.
+                    gap: formatRobotSetupGap(
+                      t,
+                      robot,
+                      setupScopeForArms(robot.arms),
+                    ),
                   })
                 : t("robotConfig.window.allSaved")}
           </span>

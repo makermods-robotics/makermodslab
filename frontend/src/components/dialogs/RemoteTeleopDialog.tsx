@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ToastAction } from "@/components/ui/toast";
 import UrdfViewer from "@/components/UrdfViewer";
 import JointAngleReadout from "@/components/control/JointAngleReadout";
+import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useEyebrowClass } from "@/hooks/useEyebrowClass";
@@ -88,22 +89,39 @@ const RemoteCameraTile: React.FC<{ name: string }> = ({ name }) => {
   );
 };
 
+/**
+ * Whether a station's hosted arm belongs to a different family than the
+ * local record's. The server refuses that pairing (robot.schema_mismatch),
+ * so the picker greys the row out instead of letting Start find out. Both
+ * ids are data, compared verbatim.
+ */
+const armFamilyDiffers = (node: NodeEntry, localArmType: ArmType | undefined) => {
+  const hosted = node.capabilities?.hosting;
+  return !!hosted && !!localArmType && hosted.arm_type !== localArmType;
+};
+
 /** The picker's station row — ComputeSelector's radio-row look. */
 const StationRow: React.FC<{
   node: NodeEntry;
   checked: boolean;
+  /** The local record's arm family; a station hosting another family is
+   * greyed out with the reason. */
+  localArmType: ArmType | undefined;
   onPick: () => void;
-}> = ({ node, checked, onPick }) => {
+}> = ({ node, checked, localArmType, onPick }) => {
   const { t } = useTranslation();
   const hosted = node.capabilities?.hosting;
+  const mismatch = armFamilyDiffers(node, localArmType);
   return (
     <button
       type="button"
       role="radio"
       aria-checked={checked}
+      aria-disabled={mismatch || undefined}
+      disabled={mismatch}
       onClick={onPick}
       className={cn(
-        "flex w-full items-center gap-2.5 bg-background px-3 py-2 text-left transition-colors",
+        "flex w-full items-center gap-2.5 bg-background px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50",
         checked ? "bg-accent/60" : "text-muted-foreground hover:text-foreground",
       )}
     >
@@ -131,6 +149,14 @@ const StationRow: React.FC<{
         {hosted ? (
           <span className="truncate text-xs text-muted-foreground">
             {t("dialogs.remoteTeleop.hostingRobot", { robot: hosted.robot })}
+            {mismatch ? (
+              <>
+                {" · "}
+                <span className="text-warn">
+                  {t("dialogs.remoteTeleop.armMismatch")}
+                </span>
+              </>
+            ) : null}
           </span>
         ) : null}
       </span>
@@ -185,15 +211,19 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
   const live = sessionId !== null;
 
   // The picked station, while it is still listed; its hosted arm type picks
-  // the viewer (the remote follower is what the broadcast shows).
+  // the viewer (the remote follower is what the broadcast shows). A station
+  // whose family stopped matching (it re-hosted another robot) can't be
+  // started against — the row is greyed out, and Start follows it.
   const station = stations.find((n) => n.instance_id === stationId) ?? null;
+  const stationMismatch =
+    !!station && armFamilyDiffers(station, robot?.arm_type);
   const [hostedArmType, setHostedArmType] = useState<ArmType | undefined>();
 
   useSessionHeartbeat(sessionId, tabOwnerId(), live && finished === null);
   useUnloadWarning(live && finished === null);
 
   const handleStart = async () => {
-    if (!robot || !stationId || !station) return;
+    if (!robot || !stationId || !station || stationMismatch) return;
     setStarting(true);
     try {
       const { session, warnings } = await startSession(baseUrl, fetchWithHeaders, {
@@ -372,6 +402,7 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
           <span className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
         ) : null}
         <span className="text-sm font-semibold text-foreground">{title}</span>
+        <RobotLayoutChip arms={robot?.arms} />
         {live ? (
           <Button
             size="sm"
@@ -428,6 +459,7 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
                   key={node.instance_id ?? node.url ?? nodeDisplayName(node)}
                   node={node}
                   checked={node.instance_id === stationId}
+                  localArmType={robot?.arm_type}
                   onPick={() => setStationId(node.instance_id)}
                 />
               ))
@@ -436,7 +468,7 @@ const RemoteTeleopDialogBody: React.FC<Omit<RemoteTeleopDialogProps, "open">> = 
           <div className="flex justify-end">
             <Button
               size="sm"
-              disabled={!robot || !station || starting}
+              disabled={!robot || !station || stationMismatch || starting}
               onClick={handleStart}
             >
               {starting ? (

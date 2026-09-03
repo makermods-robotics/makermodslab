@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import UrdfViewer from "@/components/UrdfViewer";
 import JointAngleReadout from "@/components/control/JointAngleReadout";
+import RobotLayoutChip from "@/components/launchpad/RobotLayoutChip";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
@@ -242,6 +243,12 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
     | undefined;
   const readoutOnly = isCanArmType(armType);
   const bimanual = (descriptor?.mode ?? selectedRecord?.mode) === "bimanual";
+  // The layout chip beside the name — from the local record, which is only
+  // the hosted robot while the descriptor names the same record.
+  const layoutArms =
+    selectedRecord && (!descriptor || descriptor.robot === selectedRecord.name)
+      ? selectedRecord.arms
+      : undefined;
   const title = robotName
     ? t("dialogs.hosting.titleWithRobot", { robot: robotName })
     : t("dialogs.hosting.title");
@@ -268,6 +275,7 @@ const HostingDialog: React.FC<HostingDialogProps> = ({
       <div className="flex items-center gap-2 border-b border-border px-4 py-2">
         <span className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
         <span className="text-sm font-semibold text-foreground">{title}</span>
+        <RobotLayoutChip arms={layoutArms} />
         <Button
           size="sm"
           onClick={handleStop}
