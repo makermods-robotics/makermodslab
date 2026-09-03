@@ -70,6 +70,7 @@ from .schemas.sessions import (
     CalibrationOptions,
     InferenceOptions,
     RecordingOptions,
+    RemoteInferenceOptions,
     ReplayOptions,
     SessionStartBody,
     TeleoperationOptions,
@@ -93,12 +94,15 @@ STARTABLE_KINDS = (
     "replay",
     "calibration",
     "auto_calibration",
+    "remote_inference",
 )
 
 # Kinds that never open the leader bus, mirroring the frontend's robotSetupGap
 # distinction: an unassigned leader port / missing leader calibration must not
-# block them (bimanual = both followers, still no leaders).
-_FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay"})
+# block them (bimanual = both followers, still no leaders). remote_inference is
+# in unconditionally — unlike inference it has no coaching exception, because a
+# remote session has no handover to a leader arm at all.
+_FOLLOWER_ONLY_KINDS = frozenset({"inference", "replay", "remote_inference"})
 
 # Setup kinds: calibration CREATES the record's calibrations (and writes the
 # port back on success), so the record-clean readiness gate the driving kinds
@@ -110,6 +114,7 @@ _OPTIONS_MODELS = {
     "teleoperation": TeleoperationOptions,
     "recording": RecordingOptions,
     "inference": InferenceOptions,
+    "remote_inference": RemoteInferenceOptions,
     "replay": ReplayOptions,
     "calibration": CalibrationOptions,
     "auto_calibration": AutoCalibrationOptions,
@@ -427,7 +432,16 @@ def _held_by() -> str | None:
     BEFORE robot resolution because exclusivity is a property of the node's
     one set of hardware, not of the robot named in the request (pinned by
     tests/test_api_errors.py::test_sessions_surface_uses_reserved_codes)."""
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, wiggle
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_inference,
+        replay,
+        rollout,
+        teleoperate,
+        wiggle,
+    )
 
     if teleoperate.teleoperation_active:
         return "teleoperation"
@@ -435,6 +449,8 @@ def _held_by() -> str | None:
         return "recording"
     if rollout.inference_active:
         return "inference"
+    if remote_inference.remote_inference_active:
+        return "remote_inference"
     if replay.replay_active:
         return "replay"
     if calibrate.calibration_is_active():
@@ -577,6 +593,45 @@ def _build_replay_request(record: dict, opts: ReplayOptions):
     )
 
 
+def _build_remote_inference_request(record: dict, opts: RemoteInferenceOptions):
+    from .remote_inference import RemoteInferenceRequest
+
+    # Follower-only, unconditionally: the GPU is the policy, and no leader arm
+    # is ever opened. Unlike inference there is no coaching exception — a
+    # remote session has no handover.
+    #
+    # There are no right_follower_* fields to forward: remote inference REFUSES
+    # bimanual outright (arm_capabilities.supports_remote_inference — the
+    # first-action ease-in is single-Feetech-bus only), so the request model
+    # carries no right half at all. `mode` still travels, because that refusal
+    # and rollout's arm-count guard are what read it.
+    #
+    # Cameras are NOT plumbed here: `robot_name` makes remote_inference resolve
+    # them from this same record via rollout's `_session_cameras` /
+    # `bind_robot_cameras`, exactly as recording and inference do. The two
+    # dicts below are the POLICY's side of that binding, nothing more —
+    # resolving a device here would be the one way to break Portal's schema
+    # fingerprint (a run that connects, looks healthy and gets zero chunks).
+    return RemoteInferenceRequest(
+        follower_port=record["follower_port"],
+        follower_config=record["follower_config"],
+        mode=record["mode"],
+        robot_name=record["name"],
+        arm_type=record["arm_type"],
+        policy_ref=opts.policy_ref,
+        policy_hub_id=opts.policy_hub_id,
+        task=opts.task,
+        camera_bindings=opts.camera_bindings,
+        camera_dims=opts.camera_dims,
+        checkpoint_state_dim=opts.checkpoint_state_dim,
+        duration_s=opts.duration_s,
+        horizon=opts.horizon,
+        fps=opts.fps,
+        video_codec=opts.video_codec,
+        skip_identity_check=opts.skip_identity_check,
+    )
+
+
 # --- the setup kinds: per-slot resolution --------------------------------------
 
 
@@ -695,6 +750,7 @@ _REQUEST_BUILDERS = {
     "teleoperation": _build_teleoperation_request,
     "recording": _build_recording_request,
     "inference": _build_inference_request,
+    "remote_inference": _build_remote_inference_request,
     "replay": _build_replay_request,
     "calibration": _build_calibration_request,
     "auto_calibration": _build_auto_calibration_request,
@@ -702,7 +758,16 @@ _REQUEST_BUILDERS = {
 
 
 def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_inference,
+        replay,
+        rollout,
+        teleoperate,
+        zero_calibrate,
+    )
 
     if kind == "teleoperation":
         return teleoperate.handle_start_teleoperation(request, websocket_manager)
@@ -720,6 +785,13 @@ def _dispatch_start(kind: str, request, websocket_manager) -> dict[str, Any]:
         return calibrate.calibration_manager.start_calibration(request)
     if kind == "auto_calibration":
         return auto_calibrate.auto_calibration_batch_manager.start(request)
+    if kind == "remote_inference":
+        # EXPLICIT, and it must stay above the fall-through: replay is this
+        # function's implicit default, so a kind added without its own branch
+        # silently replays somebody's dataset onto the arm instead. The handler
+        # takes the request alone — remote inference deliberately does not feed
+        # broadcast_joint_data_sync (its telemetry is the 1 Hz status poll).
+        return remote_inference.handle_start_remote_inference(request)
     return replay.handle_start_replay(request, websocket_manager)
 
 
@@ -923,7 +995,16 @@ def handle_heartbeat_session(session_id: str, owner: str) -> dict[str, Any]:
 
 
 def _dispatch_stop(kind: str) -> dict[str, Any]:
-    from . import auto_calibrate, calibrate, record, replay, rollout, teleoperate, zero_calibrate
+    from . import (
+        auto_calibrate,
+        calibrate,
+        record,
+        remote_inference,
+        replay,
+        rollout,
+        teleoperate,
+        zero_calibrate,
+    )
 
     if kind == "teleoperation":
         return teleoperate.handle_stop_teleoperation()
@@ -931,6 +1012,11 @@ def _dispatch_stop(kind: str) -> dict[str, Any]:
         return record.handle_stop_recording()
     if kind == "inference":
         return rollout.handle_stop_inference()
+    if kind == "remote_inference":
+        # The safety path: check_expiry routes an abandoned session through
+        # here, and this stop is a STOP on the child's stdin (return to the
+        # captured start pose, THEN release torque) — never a signal.
+        return remote_inference.handle_stop_remote_inference()
     if kind == "replay":
         return replay.handle_stop_replay()
     if kind == "calibration":

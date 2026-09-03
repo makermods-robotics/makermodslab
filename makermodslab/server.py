@@ -142,6 +142,16 @@ from .record import (
     handle_upload_status,
     stop_and_wait as stop_recording_and_wait,
 )
+
+# Remote inference (DRTC). The module guards its own optional-extra imports
+# (aiohttp / dotenv / livekit.api / drtc._env are one try/except that degrades
+# to `_extra_missing()`), so importing it at server module scope cannot break a
+# no-extra install — and nothing under `makermodslab.drtc` is reached at boot.
+from .remote_inference import (
+    handle_clear_local_override,
+    handle_remote_inference_status,
+    handle_remote_inference_transport,
+)
 from .replay import (
     ReplayRequest,
     handle_replay_status,
@@ -209,8 +219,11 @@ from .schemas.nodes import (
     NodeRemoveResponse,
 )
 from .schemas.sessions import (
+    ClearLocalOverrideResponse,
     CoachingCommandResponse,
     CurrentSessionResponse,
+    RemoteInferenceStatusResponse,
+    RemoteInferenceTransportStatusResponse,
     SessionCoachingBody,
     SessionCoachingResponse,
     SessionHeartbeatBody,
@@ -1039,9 +1052,9 @@ def start_session(body: SessionStartBody):
     fields and cameras resolve server-side from the saved robot record, and
     `options` carries only the kind-specific fields (see schemas/sessions.py).
 
-    Startable kinds: teleoperation, recording, inference, replay,
-    calibration, auto_calibration. Only wiggle still starts through its
-    legacy flow endpoint (seconds of open-loop motion, no stop handler) —
+    Startable kinds: teleoperation, recording, inference, remote_inference,
+    replay, calibration, auto_calibration. Only wiggle still starts through
+    its legacy flow endpoint (seconds of open-loop motion, no stop handler) —
     the identity tracker observes it all the same. Calibration's mid-session
     wizard controls (complete-calibration-step, the status polls) stay on
     their existing endpoints, like recording's pause/rerecord.
@@ -1124,6 +1137,99 @@ def coaching_command(session_id: str, body: SessionCoachingBody):
     change commands whichever session happens to be current instead of failing.
     """
     return handle_coaching_command_for_session(session_id, body.command)
+
+
+# --- Remote inference (DRTC): status + transport (v1-only surface) ---
+#
+# No start/stop verbs live here: a remote-inference session starts through
+# POST /api/v1/sessions with kind "remote_inference" and stops through
+# /sessions/{id}/stop, like every other robot-driving kind. What is left is two
+# reads and the one mutation that clears the local-SFU override.
+
+
+@v1_router.get(
+    "/remote-inference-status",
+    response_model=RemoteInferenceStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_status():
+    """Live telemetry of the remote-inference session: phase, elapsed/duration,
+    the child's 1 Hz STATS sample, and the transport it actually resolved.
+
+    Poll at 1 Hz — the rate the child emits at. Metrics are deliberately NOT
+    pushed on the websocket: `holds` climbing and `degrade` mean the run is
+    losing quality and the operator's response is "stop it", which is not a
+    millisecond decision; and a droppable hint channel drops under queue
+    pressure, which is exactly when a run is in trouble. Only real transitions
+    ride `session_changed`.
+
+    `stats` is null until the first sample lands (and stays null for a run that
+    never connected); every key WITHIN a sample is always present, null where
+    unknown — a dropped or malformed line degrades to "no sample this second",
+    never to a half-populated one the UI would render as real. No exclusion
+    mode: those nulls are meaningful (see RemoteInferenceStats).
+
+    Pollable unconditionally: when idle it answers
+    `remote_inference_active=false` with null stats/transport, mirroring
+    /inference-status.
+    """
+    return handle_remote_inference_status()
+
+
+@v1_router.get(
+    "/remote-inference/transport",
+    response_model=RemoteInferenceTransportStatusResponse,
+    tags=["sessions"],
+)
+def get_remote_inference_transport():
+    """What transport a remote-inference child would resolve RIGHT NOW, and
+    whether anything is answering on it. Read-only; touches no hardware and
+    starts nothing.
+
+    Resolved through `drtc._env.read_env()`, never `load_env()`: load_env
+    stamps the local-SFU override into os.environ, and in a long-lived server
+    DELETING livekit.local.env could then never un-set it — the server would
+    keep dialing a dead ws://127.0.0.1:7880 until restarted.
+
+    `endpoint_reachable` / `operator_present` come from one `list_participants`
+    call behind remote_inference._probe_room, bounded at 3s, and are null when
+    that probe did not run at all. A missing [drtc] extra is REPORTED here
+    rather than raised: the panel's job is to tell the user what to install,
+    and the install command must name the PRIMARY CHECKOUT — an editable
+    install run from a worktree silently re-points every other session's
+    makermodslab.
+
+    Deliberately NOT refused while a session is live. Unlike
+    /arms/release-torque this reads dotenv files and asks the SFU who is in a
+    room; it touches nothing the running child owns, and a live child already
+    pinned its transport at spawn (READY echoes the effective values).
+    """
+    return handle_remote_inference_transport()
+
+
+@v1_router.post(
+    "/remote-inference/clear-local-override",
+    response_model=ClearLocalOverrideResponse,
+    tags=["sessions"],
+)
+def clear_remote_inference_override():
+    """Delete livekit.local.env, sending the robot side back to LiveKit Cloud.
+
+    The ONE mutation the transport surface gets, and it earns it: that file is
+    written by tools/drtc/local_sfu*.sh and OUTLIVES the script, so after a
+    Ctrl-C the robot keeps dialing a dead ws://127.0.0.1:7880 — the documented
+    top footgun of the local-SFU path. Deleting a file the Lab's own config
+    module already names is the cheapest possible fix.
+
+    Idempotent: an absent file is a 200 with `removed=false`, not a 404. The
+    local SFU's own config (livekit.local.yaml, which holds the key/secret) is
+    NOT touched — deleting that rotates the SFU's credentials, which is a
+    different and more destructive act.
+
+    Deliberately NOT guarded by `_held_by()`: deleting a dotenv touches no
+    hardware, and a live child resolved its transport at spawn.
+    """
+    return handle_clear_local_override()
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])

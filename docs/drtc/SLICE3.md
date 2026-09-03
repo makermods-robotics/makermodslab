@@ -311,7 +311,7 @@ _(Grounded in direct reads of `sessionApi.ts`, `useActiveSession.ts`, `lib/robot
 | `UNTYPED_V1_ROUTES`                                                         | **must not grow** — every new route ships a `response_model`                                                                                                                                         |
 | `LEGACY_ROUTES`                                                             | **must not grow** — nothing on the flat mount                                                                                                                                                        |
 | `docs/api/openapi.json`                                                     | regenerate: `uv run python -m makermodslab.scripts.export_openapi`; `test_openapi_snapshot_is_fresh` enforces                                                                                        |
-| `test_v1_operation_ids_are_clean_and_unique`                                | handler names must be unique: `remote_inference_status`, `remote_inference_transport`, …                                                                                                             |
+| `test_v1_operation_ids_are_clean_and_unique`                                | handler names must be unique: `get_remote_inference_status`, `get_remote_inference_transport`, `clear_remote_inference_override`                                                                     |
 | Frontend                                                                    | `keyUsage.test.ts`, catalog key-parity (en+zh), `deployGuards.test.ts`                                                                                                                               |
 | Prose                                                                       | `CLAUDE.md` state-model + module-layout sections; `docs/drtc/README.md`'s "Not yet done" list                                                                                                        |
 
@@ -463,3 +463,57 @@ written. Nothing in `sessions.py`, `schemas/`, `server.py`, `docs/api/` or
   would otherwise have throttled every hand-run `robot_sync` to 38% torque —
   sluggish, healthy-looking, and unexplainable from the logs. Every other Lab
   session already does this at start; this entrypoint was the one that did not.
+
+---
+
+## S3.3 as built (2026-09-03)
+
+The API surface, and only the deviations from the design + the S3.3 plan.
+
+- **The request builder passes NO `right_follower_*`.** The plan (written
+  before S3.2 existed) had it forwarding the right half like
+  `_build_inference_request` does. `RemoteInferenceRequest` has no right half:
+  bimanual is refused outright by `supports_remote_inference`, so the fields
+  would have had nowhere to land. `mode` still travels — it is what that
+  refusal and rollout's `_arm_count_mismatch` read.
+- **`remote_inference_transport()` was renamed to
+  `handle_remote_inference_transport()` and reshaped.** S3.2 shipped it as an
+  explicitly non-binding suggestion (no test pinned it). It now returns the
+  exact `RemoteInferenceTransportStatusResponse` shape — every key always
+  present, with `endpoint_reachable` / `operator_present` / `error_code` /
+  `message` NULL when the probe did not run — and it runs the `_probe_room`
+  probe, which the S3.2 version did not. The rename also keeps the v1 operation
+  id free: operation ids are the ROUTE handlers' bare names, and the GET routes
+  are `get_remote_inference_status` / `get_remote_inference_transport` (the
+  `get_` prefix reads as the verb an SDK method wants, and keeps the route
+  handler distinct from the feature function it delegates to).
+- **That handler is SYNC, not `async def`.** The plan wrote it async.
+  `_probe_room` calls `asyncio.run` internally, which RAISES inside a running
+  loop — as a plain `def` the route is dispatched to FastAPI's threadpool,
+  which is exactly the contract `_probe_room`'s docstring states. An `async
+def` would have turned every configured call into a 500.
+- **`handle_clear_local_override()` is new here.** S3.2 did not write it
+  (SLICE3 assigned the routes to S3.3 and was silent on the handler bodies).
+  It lives in `remote_inference.py` beside the transport read; `server.py` stays
+  a thin delegation, like every other feature route.
+- **Two `source` fields, deliberately different widths.** The STATUS's
+  `transport.source` is `_transport_source`'s range (`cloud` /
+  `local_override` / `cwd`) — that function answers "which FILE names this
+  exact url" for a refusal message. The TRANSPORT route's `source` comes from
+  the new `_resolved_transport_source`, which walks `read_env`'s precedence
+  chain and can also say `process_env` and `none`. A pre-launch panel needs
+  that distinction ("your shell exported LIVEKIT_URL" and "livekit.env says so"
+  have different remedies); a running session does not.
+- **`_WINDING_DOWN_PHASES` needed no edit**, as the plan predicted — S3.2 kept
+  the phase at `stopping` through the return-to-rest. That is now pinned by
+  `test_expiry_during_a_remote_return_to_rest_is_not_double_dispatched`.
+- **Route tests redirect the `DRTC_*` paths themselves.** `tmp_lerobot_home`
+  patches `utils.config`'s robot/calibration constants only, and
+  `remote_inference` binds the DRTC paths by value at import; the tests patch
+  them on the MODULE, which is what keeps the clear-override test from
+  unlinking a real `livekit.local.env`. They also stub `_dotenv_values`, since
+  CI installs `.[test]` and never the `[drtc]` extra.
+
+Ratchets: `V1_ONLY_ROUTES` grew by exactly the three routes;
+`LEGACY_ROUTES`, `UNTYPED_V1_ROUTES` and `RESPONSE_MODEL_EXEMPT` are unchanged
+(all three routes ship typed, and none returns a file or a stream).

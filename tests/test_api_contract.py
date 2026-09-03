@@ -286,6 +286,13 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         # run is launched with. Read/replace only — never deletes an episode.
         "GET /api/v1/datasets/excluded-episodes",
         "PUT /api/v1/datasets/excluded-episodes",
+        # Remote inference (DRTC): read-only status + transport, plus the one
+        # mutation that clears the local-SFU override. Start/stop ride
+        # POST /api/v1/sessions and /sessions/{id}/stop — no new verbs. No flat
+        # mirror: the flat surface only ever shrinks.
+        "GET /api/v1/remote-inference-status",
+        "GET /api/v1/remote-inference/transport",
+        "POST /api/v1/remote-inference/clear-local-override",
     ]
 )
 

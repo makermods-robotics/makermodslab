@@ -283,6 +283,38 @@ def _fake_start(kind: str, captured: list, result: dict | None = None):
 
 
 _REPLAY_OPTIONS = {"repo_id": "u/d", "episode_index": 0}
+_REMOTE_OPTIONS = {"policy_ref": "job:1:step:1000"}
+
+
+@pytest.fixture
+def remote_preflight(monkeypatch):
+    """Make remote_inference's transport ladder pass without touching a network.
+
+    The rungs before the ARM checks are the extra, the credentials and one
+    `list_participants` call; a test that wants to reach the arm-type or
+    arm-count rung has to get past all three, and `_probe_room` is the single
+    seam that keeps this offline (livekit-api is aiohttp-based, so
+    httpx.MockTransport does not apply). `_read_env` is stubbed too — without
+    it the handler would read the developer's REAL ~/.cache livekit.env, which
+    the tmp_lerobot_home fixture does not redirect."""
+    from makermodslab import remote_inference as ri
+
+    monkeypatch.setattr(ri, "_extra_missing", lambda: False)
+    monkeypatch.setattr(
+        ri,
+        "_read_env",
+        lambda: {
+            "LIVEKIT_URL": "wss://x.livekit.cloud",
+            "LIVEKIT_ROOM": "portal-lerobot-inference",
+            "LIVEKIT_API_KEY": "key",
+            "LIVEKIT_API_SECRET": "secret",
+        },
+    )
+    monkeypatch.setattr(ri, "_transport_source", lambda url: "cloud")
+    monkeypatch.setattr(
+        ri, "_probe_room", lambda *a, **k: ri.RoomProbe(True, True, True, operator_present=True)
+    )
+    monkeypatch.setattr(ri.camera_preview_manager, "stop_all", lambda: None)
 
 
 # --- POST /api/v1/sessions: resolution failures ------------------------------
@@ -338,6 +370,9 @@ def test_follower_only_kinds_ignore_leader_gaps(client, tmp_lerobot_home, monkey
         ("recording", {}),  # dataset_repo_id/single_task are required
         ("inference", {}),  # policy_ref is required
         ("replay", {"repo_id": "u/d"}),  # episode_index is required
+        ("remote_inference", {}),  # policy_ref is required
+        ("remote_inference", {"policy_ref": "r", "coaching": True}),  # wrong kind's field
+        ("remote_inference", {"policy_ref": "r", "video_codec": "VP8"}),  # closed codec set
         ("teleoperation", {"dataset_repo_id": "u/d"}),  # wrong kind's field: extra forbidden
         ("recording", {"dataset_repo_id": "u/d", "single_task": "t", "num_episodes": "lots"}),
         ("calibration", {}),  # device_type is required
@@ -371,6 +406,7 @@ def test_unknown_kind_is_a_422(client, tmp_lerobot_home) -> None:
         ("makermodslab.teleoperate.teleoperation_active", "teleoperation"),
         ("makermodslab.record.recording_active", "recording"),
         ("makermodslab.rollout.inference_active", "inference"),
+        ("makermodslab.remote_inference.remote_inference_active", "remote_inference"),
         ("makermodslab.replay.replay_active", "replay"),
         ("makermodslab.wiggle.wiggle_active", "wiggle"),
     ],
@@ -622,6 +658,142 @@ def test_replay_request_built_from_record_and_options(client, tmp_lerobot_home, 
     assert (req.repo_id, req.episode_index) == ("u/d", 4)
     assert (req.follower_port, req.follower_config) == ("/dev/f", "FC")
     assert req.robot_name == "bench"
+
+
+def test_remote_inference_is_follower_only(client, tmp_lerobot_home, monkeypatch) -> None:
+    """A leaderless robot can run a remote session. Unconditionally: unlike
+    inference there is no coaching exception, because a remote session has no
+    handover — the operator is a GPU in another datacentre."""
+    _make_robot("armless", follower_only=True)
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.remote_inference.handle_start_remote_inference",
+        _fake_start("remote_inference", captured),
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "armless", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 201
+    assert "remote_inference" in sessions._FOLLOWER_ONLY_KINDS
+    req = captured[0]
+    # No leader half exists on the request model at all — assert the record's
+    # leader values did not sneak in under any name.
+    assert not any("leader" in field for field in type(req).model_fields)
+
+
+def test_remote_inference_request_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:
+    """The record supplies the hardware, the options the policy and the wire
+    contract — and the camera BINDINGS travel verbatim while the devices stay
+    the record's business (resolving one here is the one way to break Portal's
+    schema fingerprint, which fails as a healthy-looking zero-chunk run)."""
+    _make_robot()
+    captured: list = []
+    monkeypatch.setattr(
+        "makermodslab.remote_inference.handle_start_remote_inference",
+        _fake_start("remote_inference", captured),
+    )
+    resp = client.post(
+        "/api/v1/sessions",
+        json={
+            "kind": "remote_inference",
+            "robot": "bench",
+            "options": {
+                "policy_ref": "job:7:step:20000",
+                "policy_hub_id": "alice/act-pick",
+                "task": "pick the cube",
+                "camera_bindings": {"top": "workbench"},
+                "camera_dims": {"top": {"width": 320, "height": 240}},
+                "checkpoint_state_dim": 6,
+                "duration_s": 120,
+                "horizon": 32,
+                "fps": 25,
+                "video_codec": "MJPEG",
+                "skip_identity_check": True,
+            },
+        },
+    )
+    assert resp.status_code == 201
+    req = captured[0]
+    assert (req.follower_port, req.follower_config) == ("/dev/f", "FC")
+    assert (req.mode, req.robot_name, req.arm_type) == ("single", "bench", "so101")
+    assert (req.policy_ref, req.policy_hub_id) == ("job:7:step:20000", "alice/act-pick")
+    assert req.task == "pick the cube"
+    assert req.camera_bindings == {"top": "workbench"}
+    assert req.camera_dims["top"].width == 320 and req.camera_dims["top"].height == 240
+    assert (req.checkpoint_state_dim, req.duration_s) == (6, 120)
+    assert (req.horizon, req.fps, req.video_codec) == (32, 25, "MJPEG")
+    assert req.skip_identity_check is True
+    # Cameras resolve server-side from this record; no device dict rides along.
+    assert not hasattr(req, "cameras")
+
+
+def test_remote_inference_on_a_can_arm_is_refused_400(
+    client, tmp_lerobot_home, monkeypatch, remote_preflight
+) -> None:
+    """A Metal follower is refused SYNCHRONOUSLY and pre-spawn (draccus never
+    registered it in the child), and the refusal must arrive as a 400 — the
+    feature returns a refusal DICT, and handle_start_session's fallback turns
+    an unlabelled one into a 500. The slot must also be released: one bad
+    launch wedging the arm until a restart is the failure this guards."""
+    from makermodslab import remote_inference as ri
+    from makermodslab.utils import config as cfg
+
+    metal_lib = tmp_lerobot_home / "calibration" / "robots" / "metal_follower"
+    metal_lib.mkdir(parents=True)
+    (metal_lib / "MFC.json").write_text("{}")
+    monkeypatch.setattr(cfg, "METAL_FOLLOWER_CONFIG_PATH", str(metal_lib))
+    cfg.save_robot_record(
+        "canbot", {"follower_port": "/dev/can0", "follower_config": "MFC", "arm_type": "metal"}
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "canbot", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 400
+    assert ri.remote_inference_active is False
+
+
+def test_remote_inference_on_a_bimanual_robot_is_refused_400(
+    client, tmp_lerobot_home, remote_preflight
+) -> None:
+    """The first-action ease-in is single-Feetech-bus only, so a bimanual
+    robot's first move would be a full-speed snap to the policy's pose. Refused
+    at the same rung, with the same 400-not-500 requirement."""
+    from makermodslab import remote_inference as ri
+
+    _make_robot("bi", mode="bimanual", follower_only=True)
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "bi", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 400
+    assert "bimanual" in resp.json()["detail"]
+    assert ri.remote_inference_active is False
+
+
+def test_remote_inference_start_dispatches_to_its_own_handler(client, tmp_lerobot_home, monkeypatch) -> None:
+    """_dispatch_start falls through to REPLAY, so a kind added without its own
+    branch silently replays somebody's dataset onto the arm. Small, ugly, and
+    the only thing standing between a typo and that."""
+    _make_robot()
+    remote: list = []
+    replayed: list = []
+    monkeypatch.setattr(
+        "makermodslab.remote_inference.handle_start_remote_inference",
+        _fake_start("remote_inference", remote),
+    )
+    monkeypatch.setattr("makermodslab.replay.handle_start_replay", _fake_start("replay", replayed))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        json={"kind": "remote_inference", "robot": "bench", "options": _REMOTE_OPTIONS},
+    )
+    assert resp.status_code == 201
+    assert len(remote) == 1
+    assert replayed == []
 
 
 def test_calibration_request_built_from_the_record(client, tmp_lerobot_home, monkeypatch) -> None:

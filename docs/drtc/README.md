@@ -388,20 +388,27 @@ landed, `robot_sync` only.
 
 ## Not yet done
 
-- **No HTTP surface yet — but the feature module is in.** S3.2 landed
-  `makermodslab/remote_inference.py`: the `remote_inference` session kind, the
-  `robot.busy.remote_inference` discriminant, the `transport.*` error domain,
-  `arm_capabilities.supports_remote_inference`, reciprocal guards in all seven
-  peers plus `jobs._robot_busy`, the preflight ladder (extra → credentials →
-  room probe → arm type → arm count/cameras), the STOP-on-stdin stop machine
-  and the two empty-room watchdogs. What is still missing is the way in:
-  `sessions.py` does not know the kind yet (`STARTABLE_KINDS`,
-  `_FOLLOWER_ONLY_KINDS`, `_OPTIONS_MODELS`, `_REQUEST_BUILDERS`,
-  `_dispatch_start`/`_dispatch_stop`), there is no `RemoteInferenceOptions`
-  schema and no `/api/v1/remote-inference-status` or
-  `/api/v1/remote-inference/transport` route. Until those land, nothing starts
-  these entrypoints but a human at a shell. That is S3.3.
-- **No frontend.** S3.4, after the studio rework merges.
+- **The API surface is in.** S3.3 wired `remote_inference` into `sessions.py`
+  (`STARTABLE_KINDS`, `_FOLLOWER_ONLY_KINDS`, `_OPTIONS_MODELS`,
+  `_REQUEST_BUILDERS`, an EXPLICIT `_dispatch_start` branch above the replay
+  fall-through, the `_dispatch_stop` arm the lease's expiry watchdog routes
+  through, and `_held_by`), added `RemoteInferenceOptions` plus the exact
+  status/transport response models to `schemas/sessions.py`, and registered
+  three v1-only routes: `GET /api/v1/remote-inference-status`,
+  `GET /api/v1/remote-inference/transport` and
+  `POST /api/v1/remote-inference/clear-local-override`. Start and stop ride
+  `POST /api/v1/sessions` (kind `remote_inference`) and
+  `POST /api/v1/sessions/{id}/stop` like every other robot-driving kind, so no
+  new start/stop verbs exist and the flat surface did not grow.
+- **No frontend.** S3.4, after the studio rework merges. Nothing in the UI can
+  start a remote session yet — it is reachable only through the API.
+- **The Lab still does not launch Modal, and does not supervise the SFU.**
+  Lifecycle option A: a human runs `modal run
+makermodslab/drtc/modal_policy.py` in one terminal and (optionally)
+  `tools/drtc/local_sfu_ts.sh` in another; the session VERIFIES both before it
+  energizes anything and refuses with a coded `transport.*` otherwise. Option B
+  (the Lab launches the GPU side) is S3.5; option C (a supervised local SFU) is
+  S3.6, and only if earned.
 - **`robot_rtc` is untouched.** It still calls `robot.disconnect()` straight out
   of its control loop, with no ease-in, no stdin protocol and no
   `--livekit_url`/`--livekit_room`. Slice 3 is adaptive-sync only; if the RTC

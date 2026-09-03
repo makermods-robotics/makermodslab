@@ -468,6 +468,52 @@ def test_expiry_of_a_calibration_session_dispatches_its_stop(monkeypatch, fake_c
     assert sessions.tracker.last_ended()["reason"] == "session.lease_expired"
 
 
+def test_expiry_of_a_remote_inference_session_dispatches_its_stop(monkeypatch, fake_clock) -> None:
+    """The expiry safety stop must reach remote_inference's real stop handler —
+    the STOP on the child's stdin that makes it return the arm to its captured
+    start pose BEFORE releasing torque, not a generic kill."""
+    from makermodslab import remote_inference
+
+    snap = _lease_directly(kind="remote_inference")
+    calls: list = []
+
+    def fake_stop():
+        calls.append("stop")
+        notify_session_changed("remote_inference", False, phase="stopped")
+        return {"success": True, "message": "Remote inference stopped"}
+
+    monkeypatch.setattr(remote_inference, "handle_stop_remote_inference", fake_stop)
+    stopped = sessions.check_expiry(now=snap["lease"]["deadline"] + 1)
+    assert stopped is not None and stopped["id"] == snap["id"]
+    assert calls == ["stop"]
+    assert sessions.tracker.last_ended()["reason"] == "session.lease_expired"
+
+
+def test_expiry_during_a_remote_return_to_rest_is_not_double_dispatched(monkeypatch, fake_clock) -> None:
+    """This is the test that pins remote_inference's "phase stays `stopping`
+    through the return-to-rest" decision.
+
+    A `returning` phase of its own would fall OUTSIDE
+    sessions._WINDING_DOWN_PHASES, so an expiry tick landing while the child is
+    easing the arm home would dispatch a SECOND stop into the live return —
+    which the child reads as "cut it short" and drops torque wherever the arm
+    happens to be."""
+    from makermodslab import remote_inference
+
+    snap = _lease_directly(kind="remote_inference")
+    calls: list = []
+    monkeypatch.setattr(
+        remote_inference,
+        "handle_stop_remote_inference",
+        lambda: calls.append("stop") or {"success": True},
+    )
+    notify_session_changed("remote_inference", True, phase=remote_inference.PHASE_STOPPING)
+
+    assert remote_inference.PHASE_STOPPING in sessions._WINDING_DOWN_PHASES
+    assert sessions.check_expiry(now=snap["lease"]["deadline"] + 5) is None
+    assert calls == []
+
+
 def test_expiry_of_an_auto_calibration_session_stops_whichever_manager_is_live(
     monkeypatch, fake_clock
 ) -> None:

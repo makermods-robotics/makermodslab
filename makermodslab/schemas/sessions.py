@@ -45,12 +45,18 @@ __all__ = [
     "AutoCalibrationArmOption",
     "AutoCalibrationOptions",
     "CalibrationOptions",
+    "ClearLocalOverrideResponse",
     "CoachingCommandResponse",
     "CurrentSessionResponse",
     "EndedSessionInfo",
     "InferenceOptions",
     "PolicyCameraDims",
     "RecordingOptions",
+    "RemoteInferenceOptions",
+    "RemoteInferenceStats",
+    "RemoteInferenceStatusResponse",
+    "RemoteInferenceTransport",
+    "RemoteInferenceTransportStatusResponse",
     "ReplayOptions",
     "SessionCoachingBody",
     "SessionCoachingResponse",
@@ -149,6 +155,48 @@ class InferenceOptions(BaseModel):
     coaching_dataset_name: str = ""
 
 
+class RemoteInferenceOptions(BaseModel):
+    """Policy + transport fields of remote_inference.py's RemoteInferenceRequest.
+
+    Everything hardware-shaped resolves server-side from the robot record, as
+    for every other kind. What is here that inference does NOT have is the
+    transport triple — horizon / fps / video_codec — because Portal
+    fingerprints the wire schema and SILENTLY DROPS packets whose fingerprint
+    differs: a disagreement with the GPU side presents as a healthy session
+    with zero chunks, never as an error. They are options, not constants,
+    precisely so the panel can generate the matching `modal run` line from the
+    same object.
+
+    Deliberately NOT exposed (constants in remote_inference's arg builder, each
+    with a `# why` there): adaptive, base_lead, s_min, align, action_delay, the
+    latency coefficients, video_quality/bitrate, reliable_state. Their wrong
+    values present as "the arm freezes" or "the arm snaps at every boundary"
+    rather than as an error.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Two vocabularies, deliberately not collapsed: `policy_ref` is the opaque
+    # Lab ref /jobs/{id}/checkpoints yields (and what checkpoint_state_dim and
+    # camera_dims come from); `policy_hub_id` is the "<owner>/<repo>" the GPU
+    # container resolves with from_pretrained. Merging them would either make
+    # the Lab download a checkpoint it never runs, or leave the arm-count guard
+    # with nothing to check. `policy_hub_id` is advisory in this slice — the
+    # backend never reads it — and is kept because it is what lets the panel
+    # generate the other terminal's `modal run` line from this same object.
+    policy_ref: str
+    policy_hub_id: str = ""
+    task: str = ""
+    camera_bindings: dict[str, str] = {}
+    camera_dims: dict[str, PolicyCameraDims] = {}
+    checkpoint_state_dim: int | None = None
+    duration_s: int = 60  # 0 = unbounded
+    horizon: int = 16  # MUST match the GPU side
+    fps: int = 30  # MUST match the GPU side
+    video_codec: Literal["H264", "MJPEG"] = "H264"  # MUST match the GPU side
+    skip_identity_check: bool = False
+
+
 class ReplayOptions(BaseModel):
     """Episode selection for replay.py's ReplayRequest."""
 
@@ -226,7 +274,15 @@ class SessionStartBody(BaseModel):
     is no lease and no timeout-stop. Both fields' shape checks live in the
     handler (see the constants above)."""
 
-    kind: Literal["teleoperation", "recording", "inference", "replay", "calibration", "auto_calibration"]
+    kind: Literal[
+        "teleoperation",
+        "recording",
+        "inference",
+        "replay",
+        "calibration",
+        "auto_calibration",
+        "remote_inference",
+    ]
     robot: str
     owner: str | None = None
     # None → the per-kind default (LEASE_TIMEOUT_AUTO_CALIBRATION_S for
@@ -327,6 +383,143 @@ class SessionStopResponse(BaseModel):
 
     session: SessionInfo
     result: dict[str, Any]
+
+
+class RemoteInferenceStats(BaseModel):
+    """One 1 Hz STATS sample from the child, decoded by drtc_protocol.parse_stats.
+
+    Field-for-field :data:`makermodslab.drtc_protocol.STATS_KEYS`, in its order,
+    with that module's own nullability. Every key is ALWAYS present —
+    `format_stats` fills missing ones with null and raises on an unknown one,
+    and `parse_stats` refills the full set on the way back — which is what
+    makes this model exact instead of `exclude_none`. Adding a field here
+    without adding it to STATS_KEYS is a lie; change STATS_KEYS and nowhere
+    else.
+    """
+
+    t: int
+    chunks: int
+    reqs: int
+    sched: int
+    lead: int
+    s_min: int
+    horizon: int
+    lat_steps: int
+    lat_ms: float
+    holds: int
+    degrade: bool
+    # Null until the first chunk / the first operator / the first correlated
+    # round trip — LEGITIMATE nulls, which is why no exclusion mode may be
+    # applied to the status route (see RemoteInferenceStatusResponse).
+    chunk_age_ms: float | None
+    active: str | None
+    e2e_p50_us: int | None
+    e2e_p95_us: int | None
+    rtt_us: int | None
+    uncorr: int
+
+
+class RemoteInferenceTransport(BaseModel):
+    """The transport the session actually resolved (the READY echo, not what
+    the parent believed it passed — see drtc_protocol.format_ready).
+
+    `source` is narrower than the transport ROUTE's field of the same name on
+    purpose: this one is `remote_inference._transport_source`'s range, and that
+    function answers "which FILE names this exact url", folding the process
+    environment and the unattributable into "cloud". The route's
+    `_resolved_transport_source` walks the same chain but can also say
+    `process_env` / `none`, which only a pre-launch panel needs."""
+
+    url: str
+    room: str
+    source: Literal["cloud", "local_override", "cwd"]
+    operator_present: bool
+
+
+class RemoteInferenceStatusResponse(BaseModel):
+    """GET /api/v1/remote-inference-status — shape authority:
+    remote_inference.handle_remote_inference_status (pinned by that module's
+    tests as an equality-asserted key set).
+
+    Modelled EXACTLY: the handler funnels every branch (live,
+    idle-with-terminal-result, plain idle) through one payload builder
+    (`_payload_locked`) so the key set never varies, which is what lets this
+    route carry no exclusion mode at all. Contrast /inference-status, whose
+    live and terminal branches carry different keys — the reason it is still in
+    UNTYPED_V1_ROUTES.
+
+    `response_model_exclude_none` would be actively WRONG here: pydantic's
+    exclude_none recurses, so it would strip `chunk_age_ms` / `active` /
+    `e2e_*` / `rtt_us` out of `stats` exactly while the run is warming up —
+    the moment the operator most needs "no sample yet" rendered as an explicit
+    null rather than as a missing key.
+    """
+
+    remote_inference_active: bool
+    phase: str | None
+    policy_ref: str | None
+    started_at: float | None
+    elapsed_s: float
+    duration_s: int | None
+    log_path: str | None
+    # Terminal-run fields, reusing rollout's contracts verbatim
+    # (_classify_outcome / friendly_hint) so terminal handling matches the
+    # local sibling.
+    exited: bool
+    exit_code: int | None
+    outcome: str | None
+    error: str | None
+    hint: str | None
+    # Warn-but-allow arm-identity finding, surfaced once the run is up.
+    warning: str | None
+    # True inside the `stopping` phase while the child is easing the arm back
+    # to its captured start pose. Exposed as a flag rather than as a phase name
+    # BECAUSE sessions._WINDING_DOWN_PHASES must keep matching "stopping" — a
+    # `returning` phase would let an expiry tick dispatch a second stop into an
+    # in-flight return.
+    returning_to_rest: bool
+    shutting_down: bool
+    stats: RemoteInferenceStats | None
+    transport: RemoteInferenceTransport | None
+
+
+class RemoteInferenceTransportStatusResponse(BaseModel):
+    """GET /api/v1/remote-inference/transport — shape authority:
+    remote_inference.handle_remote_inference_transport.
+
+    Every key always present, so no exclusion mode: the four probe-shaped
+    fields are null when the probe DID NOT RUN (no extra, or not configured),
+    which is a third state distinct from false."""
+
+    extra_installed: bool
+    configured: bool  # all four LIVEKIT_* vars resolved
+    missing_vars: list[str]  # [] when configured
+    url: str  # "" when unresolved — never null
+    room: str
+    source: Literal["cloud", "local_override", "cwd", "process_env", "none"]
+    # The two local-SFU artifacts, by config.DRTC_SFU_CONFIG_PATH /
+    # DRTC_LOCAL_ENV_PATH. `local_env_exists` outliving its script is the
+    # documented top footgun — it is why the clear-override action exists.
+    sfu_config_exists: bool
+    local_env_exists: bool
+    local_env_path: str  # always the path, whether it exists or not
+    # Null (not false) when the probe did not run.
+    endpoint_reachable: bool | None
+    operator_present: bool | None
+    # The probe's coded failure ("transport.unreachable" / ".unauthorized" /
+    # ".no_policy"), or "transport.extra_missing" / ".not_configured" when the
+    # probe never ran. Null on success.
+    error_code: str | None
+    message: str | None
+
+
+class ClearLocalOverrideResponse(BaseModel):
+    """POST /api/v1/remote-inference/clear-local-override — shape authority:
+    remote_inference.handle_clear_local_override."""
+
+    success: bool
+    removed: bool  # False when the file was already absent
+    path: str  # config.DRTC_LOCAL_ENV_PATH, always echoed
 
 
 class SessionCoachingBody(BaseModel):

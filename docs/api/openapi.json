@@ -396,6 +396,30 @@
         "title": "CheckpointPolicyConfigResponse",
         "type": "object"
       },
+      "ClearLocalOverrideResponse": {
+        "description": "POST /api/v1/remote-inference/clear-local-override — shape authority:\nremote_inference.handle_clear_local_override.",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "boolean"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "removed",
+          "path"
+        ],
+        "title": "ClearLocalOverrideResponse",
+        "type": "object"
+      },
       "CoachingCommandResponse": {
         "description": "The 200 body of the coaching control verbs (rollout.handle_coaching_command).\n\nOnly the ACCEPTED shape is modelled: a refusal carries its own status code\nand is raised as an HTTPException by the route, so it never reaches here.",
         "properties": {
@@ -3688,6 +3712,457 @@
         "title": "ReleaseCanTorqueResponse",
         "type": "object"
       },
+      "RemoteInferenceStats": {
+        "description": "One 1 Hz STATS sample from the child, decoded by drtc_protocol.parse_stats.\n\nField-for-field :data:`makermodslab.drtc_protocol.STATS_KEYS`, in its order,\nwith that module's own nullability. Every key is ALWAYS present —\n`format_stats` fills missing ones with null and raises on an unknown one,\nand `parse_stats` refills the full set on the way back — which is what\nmakes this model exact instead of `exclude_none`. Adding a field here\nwithout adding it to STATS_KEYS is a lie; change STATS_KEYS and nowhere\nelse.",
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active"
+          },
+          "chunk_age_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Age Ms"
+          },
+          "chunks": {
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "degrade": {
+            "title": "Degrade",
+            "type": "boolean"
+          },
+          "e2e_p50_us": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "E2E P50 Us"
+          },
+          "e2e_p95_us": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "E2E P95 Us"
+          },
+          "holds": {
+            "title": "Holds",
+            "type": "integer"
+          },
+          "horizon": {
+            "title": "Horizon",
+            "type": "integer"
+          },
+          "lat_ms": {
+            "title": "Lat Ms",
+            "type": "number"
+          },
+          "lat_steps": {
+            "title": "Lat Steps",
+            "type": "integer"
+          },
+          "lead": {
+            "title": "Lead",
+            "type": "integer"
+          },
+          "reqs": {
+            "title": "Reqs",
+            "type": "integer"
+          },
+          "rtt_us": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtt Us"
+          },
+          "s_min": {
+            "title": "S Min",
+            "type": "integer"
+          },
+          "sched": {
+            "title": "Sched",
+            "type": "integer"
+          },
+          "t": {
+            "title": "T",
+            "type": "integer"
+          },
+          "uncorr": {
+            "title": "Uncorr",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "t",
+          "chunks",
+          "reqs",
+          "sched",
+          "lead",
+          "s_min",
+          "horizon",
+          "lat_steps",
+          "lat_ms",
+          "holds",
+          "degrade",
+          "chunk_age_ms",
+          "active",
+          "e2e_p50_us",
+          "e2e_p95_us",
+          "rtt_us",
+          "uncorr"
+        ],
+        "title": "RemoteInferenceStats",
+        "type": "object"
+      },
+      "RemoteInferenceStatusResponse": {
+        "description": "GET /api/v1/remote-inference-status — shape authority:\nremote_inference.handle_remote_inference_status (pinned by that module's\ntests as an equality-asserted key set).\n\nModelled EXACTLY: the handler funnels every branch (live,\nidle-with-terminal-result, plain idle) through one payload builder\n(`_payload_locked`) so the key set never varies, which is what lets this\nroute carry no exclusion mode at all. Contrast /inference-status, whose\nlive and terminal branches carry different keys — the reason it is still in\nUNTYPED_V1_ROUTES.\n\n`response_model_exclude_none` would be actively WRONG here: pydantic's\nexclude_none recurses, so it would strip `chunk_age_ms` / `active` /\n`e2e_*` / `rtt_us` out of `stats` exactly while the run is warming up —\nthe moment the operator most needs \"no sample yet\" rendered as an explicit\nnull rather than as a missing key.",
+        "properties": {
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration S"
+          },
+          "elapsed_s": {
+            "title": "Elapsed S",
+            "type": "number"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "exited": {
+            "title": "Exited",
+            "type": "boolean"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "log_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Path"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "policy_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Ref"
+          },
+          "remote_inference_active": {
+            "title": "Remote Inference Active",
+            "type": "boolean"
+          },
+          "returning_to_rest": {
+            "title": "Returning To Rest",
+            "type": "boolean"
+          },
+          "shutting_down": {
+            "title": "Shutting Down",
+            "type": "boolean"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteInferenceStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RemoteInferenceTransport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "remote_inference_active",
+          "phase",
+          "policy_ref",
+          "started_at",
+          "elapsed_s",
+          "duration_s",
+          "log_path",
+          "exited",
+          "exit_code",
+          "outcome",
+          "error",
+          "hint",
+          "warning",
+          "returning_to_rest",
+          "shutting_down",
+          "stats",
+          "transport"
+        ],
+        "title": "RemoteInferenceStatusResponse",
+        "type": "object"
+      },
+      "RemoteInferenceTransport": {
+        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is narrower than the transport ROUTE's field of the same name on\npurpose: this one is `remote_inference._transport_source`'s range, and that\nfunction answers \"which FILE names this exact url\", folding the process\nenvironment and the unattributable into \"cloud\". The route's\n`_resolved_transport_source` walks the same chain but can also say\n`process_env` / `none`, which only a pre-launch panel needs.",
+        "properties": {
+          "operator_present": {
+            "title": "Operator Present",
+            "type": "boolean"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "cloud",
+              "local_override",
+              "cwd"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "room",
+          "source",
+          "operator_present"
+        ],
+        "title": "RemoteInferenceTransport",
+        "type": "object"
+      },
+      "RemoteInferenceTransportStatusResponse": {
+        "description": "GET /api/v1/remote-inference/transport — shape authority:\nremote_inference.handle_remote_inference_transport.\n\nEvery key always present, so no exclusion mode: the four probe-shaped\nfields are null when the probe DID NOT RUN (no extra, or not configured),\nwhich is a third state distinct from false.",
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "endpoint_reachable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint Reachable"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "extra_installed": {
+            "title": "Extra Installed",
+            "type": "boolean"
+          },
+          "local_env_exists": {
+            "title": "Local Env Exists",
+            "type": "boolean"
+          },
+          "local_env_path": {
+            "title": "Local Env Path",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "missing_vars": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Vars",
+            "type": "array"
+          },
+          "operator_present": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Present"
+          },
+          "room": {
+            "title": "Room",
+            "type": "string"
+          },
+          "sfu_config_exists": {
+            "title": "Sfu Config Exists",
+            "type": "boolean"
+          },
+          "source": {
+            "enum": [
+              "cloud",
+              "local_override",
+              "cwd",
+              "process_env",
+              "none"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "extra_installed",
+          "configured",
+          "missing_vars",
+          "url",
+          "room",
+          "source",
+          "sfu_config_exists",
+          "local_env_exists",
+          "local_env_path",
+          "endpoint_reachable",
+          "operator_present",
+          "error_code",
+          "message"
+        ],
+        "title": "RemoteInferenceTransportStatusResponse",
+        "type": "object"
+      },
       "RenameJobBody": {
         "properties": {
           "new_name": {
@@ -4097,7 +4572,8 @@
               "inference",
               "replay",
               "calibration",
-              "auto_calibration"
+              "auto_calibration",
+              "remote_inference"
             ],
             "title": "Kind",
             "type": "string"
@@ -9269,6 +9745,72 @@
         "summary": "Recording Status"
       }
     },
+    "/api/v1/remote-inference-status": {
+      "get": {
+        "description": "Live telemetry of the remote-inference session: phase, elapsed/duration,\nthe child's 1 Hz STATS sample, and the transport it actually resolved.\n\nPoll at 1 Hz — the rate the child emits at. Metrics are deliberately NOT\npushed on the websocket: `holds` climbing and `degrade` mean the run is\nlosing quality and the operator's response is \"stop it\", which is not a\nmillisecond decision; and a droppable hint channel drops under queue\npressure, which is exactly when a run is in trouble. Only real transitions\nride `session_changed`.\n\n`stats` is null until the first sample lands (and stays null for a run that\nnever connected); every key WITHIN a sample is always present, null where\nunknown — a dropped or malformed line degrades to \"no sample this second\",\nnever to a half-populated one the UI would render as real. No exclusion\nmode: those nulls are meaningful (see RemoteInferenceStats).\n\nPollable unconditionally: when idle it answers\n`remote_inference_active=false` with null stats/transport, mirroring\n/inference-status.",
+        "operationId": "get_remote_inference_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteInferenceStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Inference Status",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/clear-local-override": {
+      "post": {
+        "description": "Delete livekit.local.env, sending the robot side back to LiveKit Cloud.\n\nThe ONE mutation the transport surface gets, and it earns it: that file is\nwritten by tools/drtc/local_sfu*.sh and OUTLIVES the script, so after a\nCtrl-C the robot keeps dialing a dead ws://127.0.0.1:7880 — the documented\ntop footgun of the local-SFU path. Deleting a file the Lab's own config\nmodule already names is the cheapest possible fix.\n\nIdempotent: an absent file is a 200 with `removed=false`, not a 404. The\nlocal SFU's own config (livekit.local.yaml, which holds the key/secret) is\nNOT touched — deleting that rotates the SFU's credentials, which is a\ndifferent and more destructive act.\n\nDeliberately NOT guarded by `_held_by()`: deleting a dotenv touches no\nhardware, and a live child resolved its transport at spawn.",
+        "operationId": "clear_remote_inference_override",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearLocalOverrideResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clear Remote Inference Override",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/remote-inference/transport": {
+      "get": {
+        "description": "What transport a remote-inference child would resolve RIGHT NOW, and\nwhether anything is answering on it. Read-only; touches no hardware and\nstarts nothing.\n\nResolved through `drtc._env.read_env()`, never `load_env()`: load_env\nstamps the local-SFU override into os.environ, and in a long-lived server\nDELETING livekit.local.env could then never un-set it — the server would\nkeep dialing a dead ws://127.0.0.1:7880 until restarted.\n\n`endpoint_reachable` / `operator_present` come from one `list_participants`\ncall behind remote_inference._probe_room, bounded at 3s, and are null when\nthat probe did not run at all. A missing [drtc] extra is REPORTED here\nrather than raised: the panel's job is to tell the user what to install,\nand the install command must name the PRIMARY CHECKOUT — an editable\ninstall run from a worktree silently re-points every other session's\nmakermodslab.\n\nDeliberately NOT refused while a session is live. Unlike\n/arms/release-torque this reads dotenv files and asks the SFU who is in a\nroom; it touches nothing the running child owns, and a live child already\npinned its transport at spawn (READY echoes the effective values).",
+        "operationId": "get_remote_inference_transport",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteInferenceTransportStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Remote Inference Transport",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/api/v1/replay-status": {
       "get": {
         "operationId": "replay_status",
@@ -9533,7 +10075,7 @@
     },
     "/api/v1/sessions": {
       "post": {
-        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds: teleoperation, recording, inference, replay,\ncalibration, auto_calibration. Only wiggle still starts through its\nlegacy flow endpoint (seconds of open-loop motion, no stop handler) —\nthe identity tracker observes it all the same. Calibration's mid-session\nwizard controls (complete-calibration-step, the status polls) stay on\ntheir existing endpoints, like recording's pause/rerecord.\n\n201 returns the session identity plus optional `warnings` — warn-but-\nallow findings from the feature's start (teleoperation/replay\narm-identity checks) that the legacy start responses used to carry; 409\nsession.held (details name the holder) when any session already holds\nthe hardware; 404 robot.not_found; 400 robot.not_ready (readiness is\nscoped to the arms the kind drives — inference/replay never open the\nleader bus; the calibration kinds need only a port per targeted slot);\n422 request.validation for options that don't fit the kind, an\nempty/oversized owner, or a lease_timeout_s outside 10–600. Other\nfeature refusals pass through with their existing statuses and codes.\n\n`owner` attaches a lease: heartbeat within `lease_timeout_s` (default\n60s) or the session is safety-stopped. No owner, no lease, no\ntimeout-stop — legacy-started and owner-less sessions are never killed.",
+        "description": "Start a robot session by robot name; ports, configs, mode, right-arm\nfields and cameras resolve server-side from the saved robot record, and\n`options` carries only the kind-specific fields (see schemas/sessions.py).\n\nStartable kinds: teleoperation, recording, inference, remote_inference,\nreplay, calibration, auto_calibration. Only wiggle still starts through\nits legacy flow endpoint (seconds of open-loop motion, no stop handler) —\nthe identity tracker observes it all the same. Calibration's mid-session\nwizard controls (complete-calibration-step, the status polls) stay on\ntheir existing endpoints, like recording's pause/rerecord.\n\n201 returns the session identity plus optional `warnings` — warn-but-\nallow findings from the feature's start (teleoperation/replay\narm-identity checks) that the legacy start responses used to carry; 409\nsession.held (details name the holder) when any session already holds\nthe hardware; 404 robot.not_found; 400 robot.not_ready (readiness is\nscoped to the arms the kind drives — inference/replay never open the\nleader bus; the calibration kinds need only a port per targeted slot);\n422 request.validation for options that don't fit the kind, an\nempty/oversized owner, or a lease_timeout_s outside 10–600. Other\nfeature refusals pass through with their existing statuses and codes.\n\n`owner` attaches a lease: heartbeat within `lease_timeout_s` (default\n60s) or the session is safety-stopped. No owner, no lease, no\ntimeout-stop — legacy-started and owner-less sessions are never killed.",
         "operationId": "start_session",
         "requestBody": {
           "content": {

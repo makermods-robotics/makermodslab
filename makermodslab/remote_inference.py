@@ -109,7 +109,7 @@ from typing import IO, Any, Literal
 
 from pydantic import BaseModel
 
-from .api_errors import ErrorCode
+from .api_errors import ApiError, ErrorCode
 from .arm_capabilities import supports_remote_inference
 from .arm_identity import ArmIdentityError
 from .camera_preview import camera_preview_manager
@@ -143,6 +143,7 @@ from .utils.config import (
     DRTC_ENV_PATH,
     DRTC_LOCAL_ENV_PATH,
     DRTC_LOG_DIR,
+    DRTC_SFU_CONFIG_PATH,
     CameraResolutionError,
 )
 from .utils.errors import friendly_hint, transport_hint
@@ -398,6 +399,51 @@ def _transport_source(url: str) -> str:
         except OSError:
             continue
     return "cloud"
+
+
+def _resolved_transport_source(url: str) -> str:
+    """Which LAYER of `drtc._env`'s precedence chain supplied `LIVEKIT_URL`.
+
+    The wider, read-only sibling of :func:`_transport_source`. That one answers
+    "which FILE names this exact url" for a refusal message and folds
+    everything it cannot attribute into "cloud"; this one walks `read_env`'s
+    chain in DESCENDING precedence and names the layer that actually won,
+    including the two the other cannot express — `process_env` (the value comes
+    from the server's own environment, so editing either dotenv file will not
+    change it) and `none` (nothing anywhere set it). The transport panel needs
+    that distinction: "your shell exported LIVEKIT_URL" and "livekit.env says
+    so" have different remedies, and telling the operator to edit a file that
+    is being overridden is the worst answer of the three.
+
+    Precedence, highest first, mirroring `drtc._env.read_env` exactly:
+    `.env.local` (cwd, override) → `livekit.local.env` (override) →
+    `os.environ` → `.env` (cwd) → `livekit.env`. Membership, not value
+    equality, decides: whichever layer SETS the key is by definition the one
+    whose value survived the merge.
+    """
+    if not url:
+        return "none"
+    if _dotenv_values is None:  # pragma: no cover — extra guard
+        return "process_env" if os.environ.get("LIVEKIT_URL") else "cloud"
+    # `None` marks the process-environment rung, which is not a file.
+    layers: tuple[tuple[Path | None, str], ...] = (
+        (Path.cwd() / ".env.local", "cwd"),
+        (Path(DRTC_LOCAL_ENV_PATH), "local_override"),
+        (None, "process_env"),
+        (Path.cwd() / ".env", "cwd"),
+        (Path(DRTC_ENV_PATH), "cloud"),
+    )
+    for path, source in layers:
+        if path is None:
+            if os.environ.get("LIVEKIT_URL"):
+                return source
+            continue
+        try:
+            if path.exists() and _dotenv_values(path).get("LIVEKIT_URL"):
+                return source
+        except OSError:
+            continue
+    return "none"
 
 
 def _missing_credentials(env: dict[str, str]) -> list[str]:
@@ -1473,35 +1519,140 @@ def handle_remote_inference_status() -> dict[str, Any]:
         return _payload_locked(shutting_down=shutting_down)
 
 
-def remote_inference_transport() -> dict[str, Any]:
-    """The EFFECTIVE transport right now, for the read-only status surface.
+def handle_remote_inference_transport() -> dict[str, Any]:
+    """What a child would resolve RIGHT NOW, and whether anything answers there.
+
+    The read-only half of the transport surface (`GET
+    /api/v1/remote-inference/transport`). Every key is ALWAYS present — the
+    four probe-shaped ones are null when the probe DID NOT RUN, which is a
+    third state distinct from "false": "we never asked" and "we asked and the
+    SFU is down" have nothing in common as remedies.
 
     Read afresh every call (never cached, never `load_env`): the whole point is
     that deleting `livekit.local.env` takes effect immediately, and a server
-    that had loaded the override into its own environment could never notice.
-    Does no network — the room probe belongs to the start ladder, where its 3 s
-    is paid once."""
+    that had stamped the override into its own environment could never notice.
+
+    Synchronous on purpose. `_probe_room` runs `asyncio.run` internally, which
+    RAISES inside a running loop — as a plain `def` this handler is dispatched
+    to FastAPI's threadpool, which has no loop of its own, exactly the contract
+    `_probe_room`'s docstring states. An `async def` here would turn every
+    configured call into a 500.
+    """
+    payload: dict[str, Any] = {
+        "extra_installed": True,
+        "configured": False,
+        "missing_vars": list(_REQUIRED_ENV),
+        "url": "",
+        "room": "",
+        "source": "none",
+        "sfu_config_exists": os.path.exists(DRTC_SFU_CONFIG_PATH),
+        "local_env_exists": os.path.exists(DRTC_LOCAL_ENV_PATH),
+        "local_env_path": DRTC_LOCAL_ENV_PATH,
+        "endpoint_reachable": None,
+        "operator_present": None,
+        "error_code": None,
+        "message": None,
+    }
+
     if _extra_missing():
-        return {
-            "url": "",
-            "room": "",
-            "source": "cloud",
-            "extra_missing": True,
-            "configured": False,
-            "missing": list(_REQUIRED_ENV),
-            "local_override": os.path.exists(DRTC_LOCAL_ENV_PATH),
-            "env_path": DRTC_ENV_PATH,
-        }
+        # Reported, never raised: the panel's job here is to tell the user what
+        # to install — and the install command must name the PRIMARY checkout
+        # (transport_hint owns that wording).
+        payload["extra_installed"] = False
+        payload["error_code"] = str(ErrorCode.TRANSPORT_EXTRA_MISSING)
+        payload["message"] = "The optional 'drtc' extra isn't installed. " + transport_hint(
+            ErrorCode.TRANSPORT_EXTRA_MISSING
+        )
+        return payload
+
     env = _read_env()
     missing = _missing_credentials(env)
     url = env.get("LIVEKIT_URL", "")
-    return {
+    source = _resolved_transport_source(url)
+    payload |= {
+        "configured": not missing,
+        "missing_vars": missing,
         "url": url,
         "room": env.get("LIVEKIT_ROOM", ""),
-        "source": _transport_source(url) if url else "cloud",
-        "extra_missing": False,
-        "configured": not missing,
-        "missing": missing,
-        "local_override": os.path.exists(DRTC_LOCAL_ENV_PATH),
-        "env_path": DRTC_ENV_PATH,
+        "source": source,
     }
+    if missing:
+        payload["error_code"] = str(ErrorCode.TRANSPORT_NOT_CONFIGURED)
+        payload["message"] = (
+            f"LiveKit credentials are incomplete (missing {', '.join(missing)}). "
+            + transport_hint(ErrorCode.TRANSPORT_NOT_CONFIGURED)
+        )
+        return payload
+
+    room = payload["room"]
+    probe = _probe_room(url, room=room, key=env["LIVEKIT_API_KEY"], secret=env["LIVEKIT_API_SECRET"])
+    payload["endpoint_reachable"] = probe.reachable
+    payload["operator_present"] = probe.operator_present
+    if not probe.reachable:
+        payload["error_code"] = str(ErrorCode.TRANSPORT_UNREACHABLE)
+        payload["message"] = f"Couldn't reach the LiveKit server at {url}. " + transport_hint(
+            ErrorCode.TRANSPORT_UNREACHABLE, local_override=source == "local_override"
+        )
+    elif not probe.authorized:
+        payload["error_code"] = str(ErrorCode.TRANSPORT_UNAUTHORIZED)
+        payload["message"] = f"The LiveKit server at {url} rejected these credentials. " + transport_hint(
+            ErrorCode.TRANSPORT_UNAUTHORIZED
+        )
+    elif not probe.operator_present:
+        payload["error_code"] = str(ErrorCode.TRANSPORT_NO_POLICY)
+        payload["message"] = f"No policy is in room '{room}'. " + transport_hint(
+            ErrorCode.TRANSPORT_NO_POLICY, room=room
+        )
+    else:
+        payload["message"] = _ready_message(url, room, source)
+    return payload
+
+
+def _ready_message(url: str, room: str, source: str) -> str:
+    """The success line: what resolved, and — when it did — that a LOCAL SFU
+    override is what resolved it.
+
+    Saying so on the HAPPY path matters as much as on the unreachable one: a
+    run that works against `ws://127.0.0.1:7880` today is a run that breaks
+    silently the moment the script behind it is Ctrl-C'd, and the operator has
+    no other place to notice that `livekit.local.env` is still in charge."""
+    line = f"A policy is in room '{room}' at {url}."
+    if source == "local_override":
+        line += (
+            " This is the LOCAL-SFU override (livekit.local.env), which outlives the script that "
+            "wrote it — clear it to go back to LiveKit Cloud."
+        )
+    return line
+
+
+def handle_clear_local_override() -> dict[str, Any]:
+    """Delete `livekit.local.env`, sending this machine back to LiveKit Cloud.
+
+    Idempotent: an absent file is a 200 with ``removed=false``, not a 404 —
+    the caller's intent ("stop overriding") is already satisfied.
+
+    The local SFU's OWN config (`livekit.local.yaml`, which holds the key and
+    secret it minted) is deliberately NOT touched: deleting that rotates the
+    SFU's credentials, which is a different and far more destructive act than
+    un-pointing this machine at it.
+
+    An `OSError` is a 500, never a 200 with ``success=False`` — this is the one
+    mutation on the transport surface, and a route that reports a failed delete
+    as a success is the only way an operator could end up trusting a stale
+    override again."""
+    path = Path(DRTC_LOCAL_ENV_PATH)
+    try:
+        removed = path.exists()
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.exception("Could not remove the local-SFU override at %s", path)
+        raise ApiError(
+            status_code=500,
+            detail=f"Couldn't remove the local-SFU override at {path}: {exc}",
+            code=ErrorCode.INTERNAL_UNEXPECTED,
+        ) from exc
+    if removed:
+        logger.info("Removed the local-SFU override at %s", path)
+    # The configured path verbatim (not `str(path)`), so the echo and
+    # `local_env_path` on the transport read are always the same string.
+    return {"success": True, "removed": removed, "path": DRTC_LOCAL_ENV_PATH}
