@@ -10,6 +10,7 @@ export default {
       teleoperation: "遥操作",
       recording: "录制会话",
       inference: "推理运行",
+      remote_inference: "远程推理运行",
       replay: "回合回放",
       calibration: "标定",
       auto_calibration: "自动标定",

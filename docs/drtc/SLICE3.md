@@ -517,3 +517,71 @@ def` would have turned every configured call into a 500.
 Ratchets: `V1_ONLY_ROUTES` grew by exactly the three routes;
 `LEGACY_ROUTES`, `UNTYPED_V1_ROUTES` and `RESPONSE_MODEL_EXEMPT` are unchanged
 (all three routes ship typed, and none returns a file or a stream).
+
+---
+
+## S3.4 as built (2026-09-03)
+
+The frontend, and only the deviations from §6 and the S3.3 plan's §7 touch list.
+
+- **The whole surface is ONE mount point in `DeployPanel`.** §6 called the
+  studio rework a live invalidation risk, so everything except the run-mode
+  entry, the guard flags and a single `<RemoteInferenceBlock>` element lives
+  under `frontend/src/components/remote-inference/`. `DeployPanel`'s own diff
+  is a run-mode value, a verb entry, four `runMode !== "remote"` conditionals,
+  two hook calls, two state values and that element — the rest rebases as a
+  unit.
+- **The verb row went from `grid-cols-3` to `grid-cols-2` (2x2).** A fourth
+  verb on one row shrank every commitment line to a two-word wrap in a panel a
+  third of the overlay wide, and the commitment travelling with the verb is
+  the point of that row.
+- **`transportReady` is FALSE while the probe has not answered.** §6 named the
+  flag but not its pre-probe value. Treating "not checked yet" as ready would
+  let an operator launch into an unverified transport and energize the arm for
+  a run nothing may ever drive, so the guard's own message points at the
+  transport read-out rather than trying to state which of the four conditions
+  failed — the section below it says that exactly.
+- **`inferenceActive` in `DeployGuardContext` is now fed `inferenceActive ||
+  remoteActive`,** and the camera previews pause on the same value. The two
+  inference modes are mutually exclusive server-side; a remote run claims the
+  cameras just as a local rollout does.
+- **`temporalEnsembleInvalid` is suppressed in remote mode.** The ACT control
+  is hidden there (no local rollout to configure) and the coeff is never sent,
+  so leaving the guard armed would refuse a launch by naming a field the
+  operator could not make appear — the dead end DeployPanel's own comments
+  already warn about for `disabled` verbs.
+- **The lease is heartbeated from `DeployPanel`, not from the block.** Remote
+  inference opens no session dialog, and `StudioOverlay` keeps `DeployPanel`
+  mounted for the whole visit, so the beat survives closing the studio. Without
+  it the expiry watchdog safety-stops the run 60 s in, mid-rollout.
+- **No deploy milestone for a remote run.** That banner is latched on the local
+  `InferenceSessionDialog` closing, which a remote run never opens — it would
+  have fired the instant the run started.
+- **Stop resolves its own session id.** The block prefers the id this tab got
+  from `startSession` and falls back to `GET /sessions/current` (accepting it
+  only when the kind matches), so a reload or a run started from another tab
+  still has a working Stop. Stopping is never owner-gated server-side, which is
+  what makes that legitimate.
+- **The generated `modal run` line is a tested pure function**
+  (`components/remote-inference/modalCommand.ts`, asserted verbatim). It
+  carries `--task` whenever the task is non-empty — §6's specified line did
+  not, but sending the sentence to the robot side and not to the container
+  does not fail loudly, it just makes a language-conditioned policy worse in
+  ways that read as the policy being bad. The task is arbitrary user text that
+  reaches a shell, so it is emitted as a double-quoted word with `\`, `"`, `$`
+  and the backtick escaped (double quotes, not single: an apostrophe in an
+  English task sentence is far likelier than any of those four). Flag order
+  follows `modal_policy.py`'s own `local_entrypoint` signature.
+- **`policy_hub_id` prefills from the selected job's `hf_repo_id`,** as a
+  PLACEHOLDER rather than typed into the field, matching how the task and
+  coaching-dataset fields already offer their defaults.
+- **New i18n namespace `remoteInference`** (en + zh-CN), rather than growing
+  `studio`. Only the four keys the Deploy panel itself resolves —
+  `runMode.remote.*`, `runVerbs.remote`, `blocked.transportNotReady`,
+  `blocked.remoteArmUnsupported` — landed in `studio`, again to keep the shared
+  file's diff small. Data left untranslated as §6 requires: the codec ids, the
+  room, the URL, the env-variable names, the error codes, the log path, the
+  `DEGRADE` badge and every character of the generated command.
+- **`useSessionHeartbeat` and `robotSetupGap` needed no change**, as predicted:
+  the first keys off `session.id` alone, and remote inference passes
+  `scope: "follower"` like inference and replay.

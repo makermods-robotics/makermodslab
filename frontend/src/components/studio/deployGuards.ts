@@ -11,7 +11,7 @@
  * The caller resolves it — see DeployPanel's `blockedReason`.
  */
 
-export type DeployRunMode = "single" | "eval" | "coach";
+export type DeployRunMode = "single" | "eval" | "coach" | "remote";
 
 export interface DeployGuardContext {
   /** A robot record is selected. */
@@ -34,6 +34,17 @@ export interface DeployGuardContext {
   requiresTask: boolean;
   /** The task string as typed. */
   task: string;
+  /** REMOTE mode only. The LiveKit transport is installed, configured,
+   * answering, AND already has the GPU-side operator in the room. False while
+   * the probe has not answered yet, which is deliberate: launching into an
+   * unverified transport energizes the arm for a run nothing will ever
+   * drive. */
+  transportReady: boolean;
+  /** REMOTE mode only. The selected robot is a family the remote ease-in
+   * supports — single-arm Feetech (SO-101). The CAN arms and bimanual rigs
+   * are refused by the backend too; this only moves the refusal to before the
+   * launch. */
+  armSupportsRemote: boolean;
 }
 
 export function deployBlockedReason(
@@ -58,6 +69,14 @@ export function deployBlockedReason(
   // blank, and the resulting success rate was measuring the wrong thing.
   if (ctx.requiresTask && ctx.task.trim() === "")
     return "studio.deploy.blocked.taskRequired";
+
+  // Remote inference. The arm check comes first: it is a fact about the robot
+  // that no amount of transport fixing changes, so saying "the transport isn't
+  // ready" to someone holding a Metal arm would send them to the wrong problem.
+  if (mode === "remote" && !ctx.armSupportsRemote)
+    return "studio.deploy.blocked.remoteArmUnsupported";
+  if (mode === "remote" && !ctx.transportReady)
+    return "studio.deploy.blocked.transportNotReady";
 
   if (mode === "coach" && ctx.leaderMissing)
     return "studio.deploy.blocked.leaderMissing";

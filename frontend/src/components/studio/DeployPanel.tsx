@@ -49,6 +49,19 @@ import { SkillItem } from "@/lib/modelsApi";
 import { useSkills } from "@/hooks/useSkills";
 import { importSourceForModel } from "@/lib/inferenceLaunch";
 import { deployBlockedReason } from "./deployGuards";
+import type { DeployRunMode } from "./deployGuards";
+import { useSessionHeartbeat } from "@/hooks/useSessionHeartbeat";
+import { useRemoteInferenceStatus } from "@/hooks/useRemoteInferenceStatus";
+import {
+  transportIsReady,
+  useRemoteInferenceTransport,
+} from "@/hooks/useRemoteInferenceTransport";
+import RemoteInferenceBlock from "@/components/remote-inference/RemoteInferenceBlock";
+import {
+  armSupportsRemoteInference,
+  DEFAULT_REMOTE_RUN_CONFIG,
+  type RemoteRunConfig,
+} from "@/components/remote-inference/remoteRunConfig";
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
@@ -98,10 +111,16 @@ const MAX_EVAL_EPISODES = 200;
 // the arm for all of them.
 const MAX_COACHING_CORRECTIONS = 100;
 
-// The three shapes a Deploy run can take. One control instead of inferring the
+// The shapes a Deploy run can take. One control instead of inferring the
 // mode from an episode count, which was already a little cryptic at 1-vs-many
 // and would be worse with a third option folded in.
-type RunMode = "single" | "eval" | "coach";
+//
+// "remote" is the DRTC run: the same checkpoint, the same robot, the same
+// cameras — but the policy runs on a remote GPU and the two meet in a LiveKit
+// room. It is a separate SESSION KIND server-side (remote_inference), not a
+// flag on inference, so everything it needs lives under
+// components/remote-inference/ and touches this file only here.
+type RunMode = DeployRunMode;
 
 /** Coefficient of the original ACT paper's exponential weighting (see
  * lerobot's ACTTemporalEnsembler). Offered as the starting point when the user
@@ -251,6 +270,9 @@ const RUN_MODES: {
   // "hands off" and walked away came back to a run stalled on episode 2.
   { value: "eval", stem: "eval", handsOn: true },
   { value: "coach", stem: "coach", handsOn: true },
+  // Hands off in the same sense "single" is — but it needs a second terminal
+  // running the GPU side, which its own commitment line says.
+  { value: "remote", stem: "remote" },
 ];
 
 /**
@@ -289,12 +311,19 @@ export const RunVerbs: React.FC<{
       ? t("studio.deploy.runVerbs.coach", { count: counts.coach })
       : m === "eval"
         ? t("studio.deploy.runVerbs.eval", { count: counts.eval })
-        : t("studio.deploy.runVerbs.single");
+        : m === "remote"
+          ? t("studio.deploy.runVerbs.remote")
+          : t("studio.deploy.runVerbs.single");
   const blocked = blockedReason(active);
   return (
     <div className="flex flex-col gap-2">
+      {/* Two columns, not four: the studio panel is a third of the overlay
+          wide, and a fourth verb squeezed onto one row shrank every label to
+          two words on a wrap. A 2x2 grid keeps each verb's commitment line
+          readable, which is the whole reason the commitment travels with the
+          verb. */}
       <div
-        className="grid grid-cols-3 gap-2"
+        className="grid grid-cols-2 gap-2"
         role="group"
         aria-label={t("studio.deploy.runVerbs.groupLabel")}
       >
@@ -589,6 +618,27 @@ const DeployPanel: React.FC = () => {
   // Light status poll while the panel is visible so the launch guards (and
   // the camera previews) know whether a rollout is already running.
   const [status, setStatus] = useState<InferenceStatus | null>(null);
+
+  // --- Remote inference (DRTC) -------------------------------------------
+  // Everything about this mode lives in components/remote-inference/; the
+  // panel holds only what the START request and the guards need.
+  const [remoteConfig, setRemoteConfig] = useState<RemoteRunConfig>(
+    DEFAULT_REMOTE_RUN_CONFIG,
+  );
+  const [remoteSessionId, setRemoteSessionId] = useState<string | null>(null);
+  // 1 Hz while a remote run is live, a slow tick while this panel is open, and
+  // an eager refetch on every `session_changed` hint.
+  const { status: remoteStatus } = useRemoteInferenceStatus(open);
+  // On demand: the probe opens a real (short) call to the SFU, so it is read
+  // when the remote verb is armed rather than on a timer.
+  const remoteTransport = useRemoteInferenceTransport(
+    open && runMode === "remote",
+  );
+  const remoteActive = remoteStatus?.remote_inference_active === true;
+  // The lease. Without this the expiry watchdog safety-stops the run 60s in,
+  // mid-rollout — this panel STAYS MOUNTED for the whole visit (StudioOverlay
+  // never unmounts it), so the beat survives closing the studio.
+  useSessionHeartbeat(remoteSessionId, tabOwnerId(), remoteActive);
 
   // Edge-triggered "consume once": handleStart sets the pending flag, and the
   // effect below latches it into showDeployMilestone the first time the live
@@ -962,6 +1012,9 @@ const DeployPanel: React.FC = () => {
   );
 
   const inferenceActive = status?.inference_active === true;
+  // Either inference mode holds the robot; they are mutually exclusive
+  // server-side, so every guard and every camera preview treats them alike.
+  const runActive = inferenceActive || remoteActive;
 
   // Temporal ensembling is an ACT config field — no other policy type has it,
   // and passing --policy.temporal_ensemble_coeff to one would fail the
@@ -969,8 +1022,12 @@ const DeployPanel: React.FC = () => {
   const isAct = policyConfig?.policy_type === "act";
   // Empty field or a non-positive number: the backend rejects it (weights are
   // exp(-coeff * i)), so block Start rather than round-trip a 400.
+  // Not in remote mode: the control is hidden there (no local rollout to
+  // configure) and the coeff is never sent, so blocking on it would be a dead
+  // end — a refusal naming a field the operator cannot make appear.
   const temporalEnsembleInvalid =
     isAct &&
+    runMode !== "remote" &&
     temporalEnsemble &&
     (temporalEnsembleCoeff === undefined || temporalEnsembleCoeff <= 0);
 
@@ -1005,7 +1062,7 @@ const DeployPanel: React.FC = () => {
     !temporalEnsembleInvalid &&
     !submitting &&
     !checkingExtra &&
-    !inferenceActive;
+    !runActive;
 
   /** Why `mode` cannot be launched right now, or null when it can.
    *
@@ -1021,8 +1078,12 @@ const DeployPanel: React.FC = () => {
       armMismatch: robotCheckpointArmMismatch,
       allCamerasBound,
       temporalEnsembleInvalid,
-      inferenceActive,
+      inferenceActive: runActive,
       leaderMissing,
+      // Remote inference: both flags are client mirrors of refusals the
+      // backend makes anyway — this only moves them to before the launch.
+      transportReady: transportIsReady(remoteTransport.transport),
+      armSupportsRemote: armSupportsRemoteInference(robot),
       requiresTask: !!policyConfig?.requires_task,
       // The effective value: an empty box that falls back to a real default is
       // not a missing task, and blocking on it would be a dead end.
@@ -1190,6 +1251,55 @@ const DeployPanel: React.FC = () => {
         };
       }
     }
+    // Remote inference is its own session KIND, with its own options model and
+    // its own status surface — so it forks here rather than adding a fourth
+    // conditional to the inference options below. Same robot, same checkpoint,
+    // same camera derivation; only the policy is somewhere else.
+    if (mode === "remote") {
+      try {
+        const { session } = await startSession(baseUrl, fetchWithHeaders, {
+          kind: "remote_inference",
+          robot: robot.name,
+          owner: tabOwnerId(),
+          options: {
+            policy_ref: selectedRef,
+            // Advisory to the backend in this slice — it is the GPU side's
+            // --policy-path, and keeping it on the request is what lets the
+            // panel generate that command from this same object.
+            policy_hub_id:
+              remoteConfig.policyHubId.trim() || selectedJob?.hf_repo_id || "",
+            task: effectiveTask,
+            camera_bindings: cameraBindingPayload,
+            camera_dims: cameraDimsPayload,
+            checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+            duration_s: remoteConfig.durationS,
+            // The transport triple. It MUST match the `modal run` line above
+            // it: Portal fingerprints the wire schema and silently drops
+            // mismatched packets, so a disagreement here is a healthy-looking
+            // session that never receives a chunk.
+            horizon: remoteConfig.horizon,
+            fps: remoteConfig.fps,
+            video_codec: remoteConfig.videoCodec,
+          },
+        });
+        setRemoteSessionId(session.id);
+        // No deploy milestone here: it is latched on the local session
+        // DIALOG closing, which a remote run never opens — the banner would
+        // fire the instant the run started.
+      } catch (e) {
+        toast({
+          title: t("remoteInference.toast.startFailed"),
+          description:
+            formatSessionHeld(t, e) ??
+            (e instanceof Error ? e.message : String(e)),
+          variant: "destructive",
+        });
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     try {
       // Robot NAME + policy-shaped options only — ports, configs, mode and
       // the camera devices behind the bindings resolve server-side from the
@@ -1599,7 +1709,9 @@ const DeployPanel: React.FC = () => {
                   )}
                 </div>
               ) : null}
-              {runMode !== "coach" ? (
+              {/* Remote has its own duration field, beside the transport
+                  knobs it must be read with. */}
+              {runMode !== "coach" && runMode !== "remote" ? (
                 <div className="space-y-2">
                   <Label htmlFor="deploy-duration">
                     {t("studio.deploy.duration.label")}
@@ -1755,7 +1867,9 @@ const DeployPanel: React.FC = () => {
                   </div>
                 </>
               ) : null}
-              {runMode !== "coach" ? (
+              {/* The sync/rtc engine picker is about the LOCAL rollout
+                  process; a remote run has no lerobot rollout to configure. */}
+              {runMode !== "coach" && runMode !== "remote" ? (
                 <div className="space-y-2">
                   <Label htmlFor="deploy-engine">
                     {t("studio.deploy.engine.label")}
@@ -1786,12 +1900,36 @@ const DeployPanel: React.FC = () => {
                       : t("studio.deploy.engine.syncHint")}
                   </p>
                 </div>
-              ) : (
+              ) : runMode === "coach" ? (
                 <p className="text-xs text-muted-foreground">
                   {t("studio.deploy.engine.coachingNote")}
                 </p>
-              )}
+              ) : null}
             </>
+          ) : null}
+
+          {/* Remote inference (DRTC) — the run form, the `modal run` line the
+              operator pastes into the other terminal, the transport read-out,
+              and the live telemetry. ONE mount point on purpose: the studio
+              panels are being reworked, and everything here rebases as a
+              unit. Kept mounted while a run is live even if the operator arms
+              another verb, so a live arm is never without its Stop. */}
+          {runMode === "remote" ||
+          remoteActive ||
+          remoteStatus?.exited === true ? (
+            <RemoteInferenceBlock
+              armed={runMode === "remote"}
+              config={remoteConfig}
+              onConfigChange={setRemoteConfig}
+              hubIdDefault={selectedJob?.hf_repo_id ?? ""}
+              // The SAME string the start request sends, so the GPU side and
+              // the robot side steer the policy identically.
+              task={effectiveTask}
+              transportState={remoteTransport}
+              status={remoteStatus}
+              sessionId={remoteSessionId}
+              onStopped={() => setRemoteSessionId(null)}
+            />
           ) : null}
 
           {/* Cameras — a repeater, so it keeps its eyebrow. ------------------ */}
@@ -1884,7 +2022,7 @@ const DeployPanel: React.FC = () => {
                               : undefined
                           }
                           uniqueId={boundCamera?.unique_id}
-                          paused={submitting || inferenceActive}
+                          paused={submitting || runActive}
                         />
                       </div>
                     );
@@ -1898,7 +2036,10 @@ const DeployPanel: React.FC = () => {
               so the two panels read as one form. ACT-only for now: temporal
               ensembling is an ACT config field, so for every other policy type
               the block has nothing to hold and stays hidden. ------------- */}
-          {isAct ? (
+          {/* Hidden for a remote run for the same reason it is hidden for a
+              non-ACT policy: there is no local rollout whose action selection
+              this could configure. */}
+          {isAct && runMode !== "remote" ? (
             <AdvancedSection
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}

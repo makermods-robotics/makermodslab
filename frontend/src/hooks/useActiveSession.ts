@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
 
 /**
- * The seven robot-driving features of the backend's mutual-exclusion state
+ * The eight robot-driving features of the backend's mutual-exclusion state
  * model (CLAUDE.md "State model & mutual exclusion") — the `kind` vocabulary
  * of the `session_changed` event (makermodslab/session_events.py).
  */
@@ -10,6 +10,12 @@ export type SessionKind =
   | "teleoperation"
   | "recording"
   | "inference"
+  // Remote inference (DRTC): the arm is driven locally while the policy runs
+  // on a remote GPU over a LiveKit room. Its own kind, not a variant of
+  // `inference` — different runner, different phases, and a client refused
+  // with `robot.busy.remote_inference` must be able to tell WHICH inference
+  // holds the arm.
+  | "remote_inference"
   | "replay"
   | "calibration"
   | "auto_calibration"

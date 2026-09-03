@@ -289,6 +289,11 @@ export default {
         what: "Take over when it's about to fail. Each rescue is saved as training data you can fine-tune on.",
         commitment: "hands on — you hold the leader arm the whole session",
       },
+      remote: {
+        title: "Run it remotely",
+        what: "The arm runs here; the policy runs on a remote GPU over a LiveKit room.",
+        commitment: "needs the GPU side running in another terminal",
+      },
     },
     // Coaching-only parameters, shown when run mode is "coach".
     coaching: {
@@ -418,6 +423,7 @@ export default {
       // {{count}} is the episode / correction target — a number, so no plural.
       eval: "Score it · {{count}}",
       coach: "Coach it · {{count}}",
+      remote: "Run it remotely",
     },
     // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
     blocked: {
@@ -434,6 +440,10 @@ export default {
         "Coaching needs a leader arm — add its port and calibration in Robot settings.",
       coachTaskRequired:
         "Describe the task first — it's saved with every correction.",
+      transportNotReady:
+        "The remote transport isn't ready — check it in the Remote run section below.",
+      remoteArmUnsupported:
+        "Remote runs need a single SO-101 arm. Bimanual rigs and the CAN arms aren't supported yet.",
     },
     actions: {
       start: "Start inference",

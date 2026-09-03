@@ -400,8 +400,20 @@ landed, `robot_sync` only.
   `POST /api/v1/sessions` (kind `remote_inference`) and
   `POST /api/v1/sessions/{id}/stop` like every other robot-driving kind, so no
   new start/stop verbs exist and the flat surface did not grow.
-- **No frontend.** S3.4, after the studio rework merges. Nothing in the UI can
-  start a remote session yet — it is reachable only through the API.
+- **The UI is in.** S3.4 added a fourth Deploy run mode, "Run it remotely":
+  the existing robot selector, checkpoint picker and camera bindings feed a
+  remote run's options, with a compact transport group (horizon / fps / codec /
+  duration) beside them. It generates the `modal run` line for the other
+  terminal from those same values — the mitigation for the mismatch that
+  Portal's schema fingerprint turns into a silently dropped stream — and shows
+  a live status panel (phase ladder, operator, chunks, the lead-vs-margin
+  bar, DEGRADE, chunk age, e2e p50/p95, rtt, and `holds` as a RATE) plus the
+  transport read-out with the clear-local-override button. Everything lives in
+  `frontend/src/components/remote-inference/`; the shared studio files carry
+  only a run-mode entry, two guard flags and one mount point.
+  - Known limitation: that block renders inside the Deploy panel's
+    "a skill is selected" section, so a remote run started from another tab or
+    through the API is not visible until a skill is picked here.
 - **The Lab still does not launch Modal, and does not supervise the SFU.**
   Lifecycle option A: a human runs `modal run
 makermodslab/drtc/modal_policy.py` in one terminal and (optionally)

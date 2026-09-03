@@ -4,8 +4,8 @@ import type { SessionKind } from "@/hooks/useActiveSession";
 
 /**
  * Client for the /api/v1/sessions surface — the named-session start/stop the
- * robot flows (teleoperation, recording, inference, replay, calibration,
- * auto-calibration) go through.
+ * robot flows (teleoperation, recording, inference, remote inference, replay,
+ * calibration, auto-calibration) go through.
  *
  * The frontend sends the robot's NAME plus kind-specific options only; ports,
  * configs, mode, right-arm fields and cameras all resolve server-side from
@@ -22,6 +22,7 @@ export type StartableSessionKind =
   | "teleoperation"
   | "recording"
   | "inference"
+  | "remote_inference"
   | "replay"
   | "calibration"
   | "auto_calibration";
@@ -106,6 +107,42 @@ export interface InferenceSessionOptions {
   coaching_dataset_name?: string;
 }
 
+/** Remote inference (DRTC) — mirrors schemas/sessions.py's
+ * `RemoteInferenceOptions` field for field.
+ *
+ * The arm is driven by THIS machine; the policy runs on a remote GPU and the
+ * two meet in a LiveKit room. Everything hardware-shaped still resolves
+ * server-side from the named robot record, exactly as for `inference`.
+ *
+ * `policy_ref` and `policy_hub_id` are two different vocabularies and are
+ * deliberately not collapsed: `policy_ref` is the opaque Lab ref the
+ * checkpoint picker yields (and what `checkpoint_state_dim` / `camera_dims`
+ * come from), while `policy_hub_id` is the "<owner>/<repo>" the GPU container
+ * resolves with `from_pretrained`. The backend never reads `policy_hub_id` in
+ * this slice — it is here so the panel can generate the other terminal's
+ * `modal run` line from this same object.
+ *
+ * horizon / fps / video_codec MUST match the GPU side. Portal fingerprints the
+ * wire schema and SILENTLY DROPS packets whose fingerprint differs, so a
+ * disagreement presents as a healthy-looking session with zero chunks rather
+ * than as an error — which is exactly why they are options here and not
+ * constants buried in the backend. */
+export interface RemoteInferenceSessionOptions {
+  policy_ref: string;
+  policy_hub_id?: string;
+  task?: string;
+  camera_bindings?: Record<string, string>;
+  camera_dims?: Record<string, { width: number; height: number }>;
+  checkpoint_state_dim?: number;
+  /** 0 = unbounded. */
+  duration_s?: number;
+  horizon?: number;
+  fps?: number;
+  /** Codec IDENTIFIERS — sent verbatim, never translated. */
+  video_codec?: "H264" | "MJPEG";
+  skip_identity_check?: boolean;
+}
+
 export interface ReplaySessionOptions {
   repo_id: string;
   episode_index: number;
@@ -146,6 +183,7 @@ export type SessionOptions =
   | TeleoperationSessionOptions
   | RecordingSessionOptions
   | InferenceSessionOptions
+  | RemoteInferenceSessionOptions
   | ReplaySessionOptions
   | CalibrationSessionOptions
   | AutoCalibrationSessionOptions;
@@ -287,6 +325,7 @@ const HOLDER_ACTIVITY_KEYS: Record<string, string> = {
   teleoperation: "shared.sessionBusy.activity.teleoperation",
   recording: "shared.sessionBusy.activity.recording",
   inference: "shared.sessionBusy.activity.inference",
+  remote_inference: "shared.sessionBusy.activity.remote_inference",
   replay: "shared.sessionBusy.activity.replay",
   calibration: "shared.sessionBusy.activity.calibration",
   auto_calibration: "shared.sessionBusy.activity.auto_calibration",

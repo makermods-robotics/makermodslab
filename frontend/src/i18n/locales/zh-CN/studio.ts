@@ -206,6 +206,11 @@ export default {
         what: "反复执行该任务，由你为每次尝试评判，汇总为成功率。",
         commitment: "片段之间需要上手 — 由你复位现场并为每次尝试评分",
       },
+      remote: {
+        title: "远程运行",
+        what: "机械臂在本机运行，策略在远程 GPU 上通过 LiveKit 房间运行。",
+        commitment: "需要在另一个终端里运行 GPU 侧",
+      },
       coach: {
         title: "指导它",
         what: "在它快要失败时接管。每次挽救都会保存为可用于微调的训练数据。",
@@ -320,6 +325,7 @@ export default {
       // {{count}} 是片段数 / 纠正次数目标，是数字，因此没有复数形式。
       eval: "打分 · {{count}}",
       coach: "指导 · {{count}}",
+      remote: "远程运行",
     },
     // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
     blocked: {
@@ -333,6 +339,8 @@ export default {
       taskRequired: "请先描述任务 — 该策略以语言为条件。",
       leaderMissing: "指导需要一条主臂 — 请在机器人设置中补上它的端口和标定。",
       coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
+      transportNotReady: "远程传输尚未就绪 — 请在下方的远程运行区块中检查。",
+      remoteArmUnsupported: "远程运行目前仅支持单臂 SO-101。双臂配置和 CAN 机械臂尚不支持。",
     },
     actions: {
       start: "开始推理",

@@ -1,0 +1,99 @@
+import type { TransportSource } from "@/hooks/useRemoteInferenceTransport";
+
+/**
+ * The `modal run` line the operator must paste into the OTHER terminal.
+ *
+ * This is the highest-value element of the remote-inference UI, and the reason
+ * `policy_hub_id` / `horizon` / `fps` / `video_codec` are options on the
+ * session rather than constants: the panel generates the GPU side's command
+ * from the SAME object the robot side is started with, so the two cannot
+ * disagree. They must not disagree — Portal fingerprints the wire schema and
+ * SILENTLY DROPS packets whose fingerprint differs, so a mismatched horizon or
+ * codec presents as a healthy session with zero chunks, never as an error.
+ *
+ * EVERY CHARACTER OF THE OUTPUT IS DATA. It is a shell command; it is never
+ * translated, never localized, never case-folded. Only the prose AROUND it in
+ * the panel goes through i18n.
+ *
+ * The Lab does not launch Modal (lifecycle A — see docs/drtc/SLICE3.md §2), so
+ * this line is how the human closes the loop. It becomes dead weight the day
+ * the Lab launches the GPU side itself, and that is fine.
+ */
+
+export interface ModalRunLineInput {
+  /** "<owner>/<repo>" the container resolves with `from_pretrained`. */
+  policyHubId: string;
+  /** The task string the run is started with. The GPU side takes it as
+   * `--task`, and a language-conditioned policy is STEERED by it — omitting it
+   * there while the robot side has it does not fail, it just makes the policy
+   * worse in ways that look like the policy being bad. Empty ⇒ no flag. */
+  task: string;
+  horizon: number;
+  fps: number;
+  videoCodec: "H264" | "MJPEG";
+  /** The room the transport endpoint reports, verbatim. */
+  room: string;
+  /** The LiveKit URL as the transport endpoint reports it, verbatim. */
+  url: string;
+  /** Which env layer supplied the URL. Only `local_override` needs the
+   * tailnet flags — a Cloud URL is reachable from a Modal container as-is. */
+  source: TransportSource;
+}
+
+/** Literal stand-ins for the two secrets. The API deliberately NEVER exposes
+ * them (a status endpoint that hands out an API secret is a credential leak
+ * wearing a diagnostic hat), so the line ships placeholders and the panel says
+ * where to read the real values. */
+export const LOCAL_SECRET_PLACEHOLDER = "<from livekit.local.yaml>";
+
+/** Where those two values actually live. Mirrors
+ * `utils/config.DRTC_SFU_CONFIG_PATH` — a real path, so it is data. */
+export const LOCAL_SFU_CONFIG_PATH =
+  "~/.cache/huggingface/lerobot/livekit.local.yaml";
+
+/** Stand-in for an unknown Hub id, so the line is still copy-able (and
+ * obviously incomplete) before the operator fills the field in. */
+export const POLICY_PATH_PLACEHOLDER = "<owner>/<repo>";
+
+/**
+ * The task as a double-quoted shell word.
+ *
+ * Double quotes, not single, because the operator will read this line and a
+ * `'`-quoted English sentence breaks on the first apostrophe ("don't drop the
+ * block"). Inside double quotes a POSIX shell still expands four characters,
+ * so all four are backslash-escaped: `\` first (it is the escape itself),
+ * then `"`, `$` and the backtick. A task is arbitrary user text and it reaches
+ * a shell — treating it as a plain string is how "$(rm …)" becomes a command.
+ */
+export function shellQuote(value: string): string {
+  return `"${value.replace(/[\\"$`]/g, (c) => `\\${c}`)}"`;
+}
+
+export function buildModalRunLine(input: ModalRunLineInput): string {
+  const task = input.task.trim();
+  const parts = [
+    "modal run makermodslab/drtc/modal_policy.py",
+    `--policy-path ${input.policyHubId.trim() || POLICY_PATH_PLACEHOLDER}`,
+    // Flag order follows modal_policy.py's own local_entrypoint signature, so
+    // the line reads the same way the function does.
+    ...(task ? [`--task ${shellQuote(task)}`] : []),
+    `--horizon ${input.horizon}`,
+    `--fps ${input.fps}`,
+    `--video-codec ${input.videoCodec}`,
+  ];
+  // The room is what makes the two sides meet. The GPU side otherwise takes it
+  // from the LiveKit-cloud secret's own LIVEKIT_ROOM — which the Lab cannot
+  // read and therefore cannot check — so pinning it here is what removes the
+  // one mismatch that is invisible by construction.
+  if (input.room) parts.push(`--livekit-room ${input.room}`);
+  // A local SFU is only reachable from a Modal container over the tailnet, and
+  // its credentials are not the Cloud ones the container's secret carries — so
+  // the whole transport has to travel on the command line.
+  if (input.source === "local_override") {
+    parts.push("--tailscale");
+    if (input.url) parts.push(`--livekit-url ${input.url}`);
+    parts.push(`--livekit-api-key ${LOCAL_SECRET_PLACEHOLDER}`);
+    parts.push(`--livekit-api-secret ${LOCAL_SECRET_PLACEHOLDER}`);
+  }
+  return parts.join(" ");
+}
