@@ -228,6 +228,10 @@ export default {
     videoAuto: "自动标定演示",
     poseMiddle: "起始姿态：中间位置",
     poseAutoStart: "自动标定起始姿态",
+    restingPoseCaption:
+      "这是 SO-101 的休息姿态，也是自动标定的起始姿态。按下「开始」之前，请先把机械臂摆成这个姿态。",
+    middlePoseCaption:
+      "按下「开始」之前，请先把机械臂摆成这个中间位置——每个关节都接近其行程的中点。",
     videoUnsupported: "你的浏览器不支持 video 标签。",
     videoLink: "点此查看标定视频",
     toast: {
