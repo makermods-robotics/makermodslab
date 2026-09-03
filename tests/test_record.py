@@ -2699,6 +2699,33 @@ def test_worker_invalidates_dataset_listing_after_saving_episodes(
         assert datasets._listing_cache is None
 
 
+def test_worker_leaves_the_listing_cache_alone_when_the_session_created_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """A session that failed before saving anything created no dataset, so the
+    listing did not change — dropping its cache would only force the next
+    /datasets to re-fan-out to the Hub for no reason. (A zero-episode session
+    that DID leave a directory is cleaned up by _discard_empty_dataset, which
+    invalidates on its own.)"""
+    import time
+
+    import makermodslab.datasets as datasets
+    import makermodslab.record as record
+
+    def _boom_connecting(cfg, events, **kwargs):
+        record.current_phase = "connecting_follower"
+        raise RuntimeError("Failed to connect to follower on COM_FOLLOWER")
+
+    sentinel = {"at": time.monotonic(), "value": [{"repo_id": "old/ds"}]}
+    with datasets._listing_cache_lock:
+        datasets._listing_cache = sentinel
+
+    _start_session_with_fake_work(monkeypatch, _boom_connecting)
+
+    with datasets._listing_cache_lock:
+        assert datasets._listing_cache is sentinel
+
+
 # ---------------------------------------------------------------------------
 # I8: shutdown_event() has no UI to poll and no "press Stop again" gesture
 # available, but handle_stop_recording()'s first call is deliberately

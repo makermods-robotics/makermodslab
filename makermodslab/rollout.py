@@ -3675,8 +3675,11 @@ def _finalise_coaching_locked(rc: int | None, cs: _CoachSession, *, aborted: boo
         _discard_empty_coaching_dataset(cs)
     # The corrections dataset (kept, or just removed above) changed the local
     # /datasets listing. Drop its cache before `_go_idle_locked` emits the
-    # release hint so a client refetching on the hint sees the new state.
-    invalidate_dataset_listing_cache()
+    # release hint so a client refetching on the hint sees the new state. Skip
+    # it when the runner never reported a repo id — nothing reached disk, so a
+    # drop would only force a needless Hub re-fan-out.
+    if cs.dataset_repo_id is not None:
+        invalidate_dataset_listing_cache()
     _go_idle_locked()
     _last_result = {
         "inference_active": False,

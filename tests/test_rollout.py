@@ -3815,6 +3815,32 @@ def test_coaching_finalise_invalidates_the_dataset_listing(monkeypatch) -> None:
             assert datasets._listing_cache is None, f"aborted={aborted}"
 
 
+def test_coaching_finalise_leaves_the_listing_cache_alone_when_no_dataset_was_created(
+    monkeypatch,
+) -> None:
+    """A coaching session killed before lerobot wrote meta/info.json has no
+    dataset_repo_id — nothing landed on disk, so the listing cache must be left
+    intact rather than forcing a needless Hub re-fan-out."""
+    import time
+
+    from makermodslab import datasets, rollout
+
+    session = rollout._CoachSession(request=_coaching_request(), corrections_target=5)
+    # dataset_repo_id stays None — the runner never reported one.
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_coach_session", session)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    sentinel = {"at": time.monotonic(), "value": []}
+    with datasets._listing_cache_lock:
+        datasets._listing_cache = sentinel
+
+    with rollout._state_lock:
+        rollout._finalise_coaching_locked(None, session, aborted=True)
+
+    with datasets._listing_cache_lock:
+        assert datasets._listing_cache is sentinel
+
+
 def test_coaching_stop_reports_aborted_but_keeps_the_partial_tally(monkeypatch) -> None:
     """Unlike an aborted EVAL — which must not claim an accuracy it never
     measured — a stopped coaching session loses nothing by reporting its count.

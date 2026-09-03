@@ -915,13 +915,16 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                         request.dataset_repo_id, request.resume
                     )
 
-                # The session changed the local dataset listing — a fresh
-                # dataset on the happy path, a removed one on the discard
-                # branches above (whose helpers also invalidate, so this is
-                # idempotent). Drop the cached /datasets listing BEFORE the
-                # release hint so a client that refetches on the hint sees the
-                # new state instead of a <=45s-stale one.
-                invalidate_dataset_listing_cache()
+                # The happy path adds a dataset to the local listing and nothing
+                # else drops the cache for it; a quit removes one. Invalidate for
+                # both, BEFORE the release hint, so a client that refetches on
+                # the hint sees the new state instead of a <=45s-stale one. The
+                # zero-episode-no-quit case is left to _discard_empty_dataset,
+                # which invalidates itself iff it actually removed a directory —
+                # a session that created nothing (e.g. a connect failure) must
+                # not force a needless Hub re-fan-out.
+                if saved_episodes > 0 or discard_requested:
+                    invalidate_dataset_listing_cache()
 
                 recording_active = False
                 # Final release: record_with_web_events' own finally already
