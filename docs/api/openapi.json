@@ -2890,6 +2890,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -3048,6 +3063,21 @@
             ],
             "title": "Last Modified"
           },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -3162,6 +3192,178 @@
           "source"
         ],
         "title": "ModelListItem",
+        "type": "object"
+      },
+      "ModelPublishBody": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ModelPublishBody",
+        "type": "object"
+      },
+      "ModelPublishStartResponse": {
+        "description": "POST /api/v1/models/publish (models.py ModelUploadManager.start) — the\nqueue was accepted and runs in the background; poll publish-status.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "started": {
+            "title": "Started",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "started",
+          "model_id",
+          "message"
+        ],
+        "title": "ModelPublishStartResponse",
+        "type": "object"
+      },
+      "ModelPublishStatusResponse": {
+        "description": "GET /api/v1/models/publish-status (models.py ModelUploadManager.get_status).\n`done_steps` stays meaningful on `error` — a queue that fails part-way keeps\neverything it published before it died.",
+        "properties": {
+          "current_step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Step"
+          },
+          "done": {
+            "title": "Done",
+            "type": "integer"
+          },
+          "done_steps": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Done Steps",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "running",
+              "done",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "state",
+          "model_id",
+          "repo_id",
+          "url",
+          "message",
+          "error",
+          "total",
+          "done",
+          "current_step",
+          "done_steps"
+        ],
+        "title": "ModelPublishStatusResponse",
         "type": "object"
       },
       "ModelUploadBody": {
@@ -3823,6 +4025,79 @@
         "title": "RobotPortResponse",
         "type": "object"
       },
+      "RunCheckpointItem": {
+        "description": "One saved checkpoint of a local run (models.py list_run_checkpoints).",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "published": {
+            "title": "Published",
+            "type": "boolean"
+          },
+          "step": {
+            "title": "Step",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "path",
+          "published"
+        ],
+        "title": "RunCheckpointItem",
+        "type": "object"
+      },
+      "RunCheckpointsResponse": {
+        "description": "GET /api/v1/models/checkpoints (models.py list_run_checkpoints) — what the\npublish picker needs for one run: its checkpoints, which are already on the\nHub, and the repo a publish would target. `hub_readable` is False when the\nHub could not be asked, in which case every `published` means \"unknown\".",
+        "properties": {
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/RunCheckpointItem"
+            },
+            "title": "Checkpoints",
+            "type": "array"
+          },
+          "default_repo_id": {
+            "title": "Default Repo Id",
+            "type": "string"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "hub_readable": {
+            "title": "Hub Readable",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legacy_root_checkpoint": {
+            "title": "Legacy Root Checkpoint",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "default_repo_id",
+          "hf_repo_id",
+          "legacy_root_checkpoint",
+          "hub_readable",
+          "checkpoints"
+        ],
+        "title": "RunCheckpointsResponse",
+        "type": "object"
+      },
       "RunnerFlavor": {
         "description": "One HF Jobs hardware flavor (server.py get_runners_hardware, flattened\nfrom huggingface_hub's JobHardwareInfo). accelerator is the label\n_format_accelerator renders (\"2× Nvidia A100\"), null on cpu-* flavors, as\nis vram (the Hub words it as a string, \"16 GB\"). unit_cost_usd is\n`int | float` so it passes through exactly as the Hub sent it.",
         "properties": {
@@ -4295,6 +4570,21 @@
               }
             ],
             "title": "Last Modified"
+          },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
           },
           "name": {
             "title": "Name",
@@ -8052,6 +8342,49 @@
         ]
       }
     },
+    "/api/v1/models/checkpoints": {
+      "get": {
+        "description": "The publish picker's source of truth for one local run: every checkpoint\nit saved, which steps are already on the Hub, and the repo a publish would\ntarget. `id` is a run id (query param for symmetry with /models/info).\n404 when the run has no uploadable checkpoint.",
+        "operationId": "models_checkpoints",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunCheckpointsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Checkpoints",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/custom": {
       "delete": {
         "description": "Unpin a saved custom model (does NOT touch the Hub or any local copy).",
@@ -8407,9 +8740,73 @@
         ]
       }
     },
+    "/api/v1/models/publish": {
+      "post": {
+        "description": "START publishing a local run's checkpoints to the Hub as ONE PUBLIC,\nMakerModsLab-tagged model repo. MUTATES the Hub (creates/updates the repo).\n\nReturns immediately with {started, model_id, message} — the queue runs\nsequentially in a background thread (a run's worth of checkpoints is\ngigabytes, far past what an inline request should hold open) and\nGET /api/v1/models/publish-status reports progress. 409 when a publish is\nalready running; the per-step failures (400 offline, 403 permission, 404\nunknown step, 502 Hub) surface through that status, not this call.",
+        "operationId": "models_publish",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelPublishBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Models Publish",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/publish-status": {
+      "get": {
+        "description": "Poll the single background publish: state (idle/running/done/error),\ntarget repo + url, `done`/`total`/`current_step` for the queue position, and\n`done_steps` — the steps already on the Hub, which stay meaningful after an\nerror because a failed queue keeps everything it published before it died.",
+        "operationId": "models_publish_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPublishStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Models Publish Status",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload",
         "requestBody": {
           "content": {
@@ -13179,7 +13576,7 @@
     },
     "/models/upload": {
       "post": {
-        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.",
+        "description": "Push a local run's final checkpoint to the Hub as a PUBLIC, MakerModsLab-tagged\nmodel repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when\nthe token can't write the namespace; 404 when the local model has no saved\ncheckpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}.\n\nThe single-checkpoint synchronous push, frozen for SDK clients — including\nits ON-HUB SHAPE: files land at the repo root, loadable by a plain\nfrom_pretrained(repo_id) (root_layout=True). The training view's\nmulti-checkpoint picker uses POST /api/v1/models/publish instead, which\nstep-addresses under checkpoints/<step>/.",
         "operationId": "models_upload_models_upload_post",
         "requestBody": {
           "content": {

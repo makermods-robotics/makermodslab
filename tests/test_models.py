@@ -49,6 +49,7 @@ def _reset_model_cache():
 
     def _reset() -> None:
         m.invalidate_model_listing_cache()
+        m._published_state_cache.clear()
         m._hub_last_good = None
         m._hub_last_good_auth = ""
         m._hub_last_good_authors = ()
@@ -133,6 +134,41 @@ def _seed_run(
             )
         )
     return pretrained
+
+
+def _add_checkpoint(registry, job_id: str, step: int, *, policy_type: str = "act") -> Path:
+    """Lay down one MORE checkpoint for an already-seeded run.
+
+    _seed_run writes a single (final) checkpoint; the publish path is the one
+    caller that works over the whole set, so its tests need runs with several.
+    Returns the new pretrained_model dir."""
+    record = registry._records[job_id]
+    pretrained = Path(record.output_dir) / "checkpoints" / str(step) / "pretrained_model"
+    pretrained.mkdir(parents=True)
+    (pretrained / "config.json").write_text(json.dumps({"type": policy_type}))
+    return pretrained
+
+
+@pytest.fixture
+def quiet_hub_reads():
+    """Neutralize the two best-effort Hub READS the publish path makes AFTER the
+    weights land — the published-step probe and the model-card refresh — so a
+    test asserting on upload_folder isn't also asserting on network behaviour.
+    Both are failure-tolerant in production (see their docstrings); this only
+    makes them quiet and deterministic. The probe reports an EMPTY but READABLE
+    repo, since `readable=False` deliberately suppresses the card refresh.
+    Yields the model-card mock for the tests that care what the card was asked
+    to contain."""
+    from makermodslab.models import PublishedRepoState
+
+    with (
+        patch(
+            "makermodslab.models._published_repo_state",
+            return_value=PublishedRepoState({}, False, True),
+        ),
+        patch("makermodslab.models._sync_model_card") as card,
+    ):
+        yield card
 
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +1083,770 @@ def test_upload_local_model_maps_auth_error(registry) -> None:
     ):
         upload_local_model("auth_run")
     assert ei.value.status == 403
+
+
+def test_upload_local_model_404_for_failed_run_with_checkpoint(registry) -> None:
+    """A "failed" run is never publishable, even with a checkpoint on disk — its
+    non-zero exit is a confirmed failure, so `_find_local_record` refuses it the
+    same way `list_local_models` leaves it out of the listing."""
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "failed_run", state="failed", steps=50)
+    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+        upload_local_model("failed_run")
+    assert ei.value.status == 404
+
+
+def test_upload_local_model_succeeds_for_interrupted_run_with_checkpoint(registry) -> None:
+    from makermodslab.models import upload_local_model
+
+    pretrained = _seed_run(registry, "interrupted_run", state="interrupted", steps=50)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+    ):
+        result = upload_local_model("interrupted_run")
+
+    _, ukw = fake_api.upload_folder.call_args
+    assert ukw["folder_path"] == str(pretrained)
+    assert result["repo_id"]
+
+
+def test_upload_local_model_404_when_still_running(registry) -> None:
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "running_run", state="running")
+    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+        upload_local_model("running_run")
+    assert ei.value.status == 404
+
+
+def test_upload_local_model_404_for_failed_run_without_checkpoint(registry) -> None:
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "dead_run", state="failed", with_checkpoint=False)
+    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+        upload_local_model("dead_run")
+    assert ei.value.status == 404
+
+
+def test_get_model_info_still_none_for_failed_run(registry) -> None:
+    """A failed run is not a usable model on any path — info included."""
+    from makermodslab.models import get_model_info
+
+    _seed_run(registry, "failed_info_run", state="failed", steps=50)
+    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+        assert get_model_info("failed_info_run") is None
+
+
+# ---------------------------------------------------------------------------
+# upload_local_model — multi-checkpoint publishing into ONE repo.
+# ---------------------------------------------------------------------------
+
+
+def _publish(model_id: str, **kwargs):
+    """Run a publish with the Hub fully mocked. Returns (result, fake_api)."""
+    from makermodslab.models import upload_local_model
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+    ):
+        return upload_local_model(model_id, **kwargs), fake_api
+
+
+def _uploaded_paths(fake_api) -> list[str]:
+    return [c.kwargs["path_in_repo"] for c in fake_api.upload_folder.call_args_list]
+
+
+def test_legacy_root_layout_uploads_to_the_repo_root(registry) -> None:
+    """POST /models/upload is frozen for SDK clients INCLUDING its on-Hub
+    shape: the final checkpoint's files land at the repo root (loadable by a
+    plain from_pretrained), no repo pin, and the return is exactly the
+    pre-multi-checkpoint {repo_id, url, tags}."""
+    from makermodslab.models import upload_local_model
+
+    _seed_run(registry, "legacy_run", steps=300)
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+    ):
+        result = upload_local_model("legacy_run", root_layout=True)
+
+    (call,) = fake_api.upload_folder.call_args_list
+    assert "path_in_repo" not in call.kwargs
+    assert sorted(result) == ["repo_id", "tags", "url"]
+    # The legacy push never pins — the old route didn't, and a pin would flip
+    # the training dialog to "published" for a legacy-shaped repo.
+    assert registry.get("legacy_run").hf_repo_id is None
+
+
+def test_published_repo_state_is_cached_for_the_picker(registry) -> None:
+    """The picker probes the target repo on every dialog open; within the TTL
+    that must cost ONE Hub roundtrip, and `fresh=True` (the post-upload reader)
+    must bypass and refresh the cache."""
+    from makermodslab.models import _published_repo_state
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = ["checkpoints/000300/pretrained_model/config.json"]
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        first = _published_repo_state("user/cached")
+        second = _published_repo_state("user/cached")
+        assert fake_api.list_repo_files.call_count == 1
+        assert second == first
+        _published_repo_state("user/cached", fresh=True)
+        assert fake_api.list_repo_files.call_count == 2
+
+
+def test_invalidate_model_hub_info_evicts_the_published_state_cache(registry) -> None:
+    """A repo deleted on the Hub (forget_hub_repo -> invalidate_model_hub_info)
+    must not keep answering the publish picker with its pre-delete checkpoints
+    for the 30s TTL. The probe cache is keyed the same way /models/info's is,
+    and the same mutations invalidate both."""
+    from makermodslab.models import _published_repo_state, invalidate_model_hub_info
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = ["checkpoints/000300/pretrained_model/config.json"]
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        assert _published_repo_state("user/gone").steps == {300: "000300"}
+
+        invalidate_model_hub_info("user/gone")
+
+        fake_api.list_repo_files.return_value = []
+        assert _published_repo_state("user/gone").steps == {}
+        assert fake_api.list_repo_files.call_count == 2
+
+
+def test_forget_hub_repo_evicts_the_published_state_cache(registry) -> None:
+    """The user-facing path: deleting the repo on the Hub. forget_hub_repo runs
+    the full invalidation, so the picker re-probes instead of badging vanished
+    checkpoints as published."""
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    from makermodslab.models import _published_repo_state, forget_hub_repo
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = ["checkpoints/000300/pretrained_model/config.json"]
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        assert _published_repo_state("user/deleted").steps == {300: "000300"}
+
+        forget_hub_repo("user/deleted")
+
+        fake_api.list_repo_files.side_effect = RepositoryNotFoundError(
+            "gone", response=MagicMock(status_code=404, headers={})
+        )
+        after = _published_repo_state("user/deleted")
+        assert after.steps == {}
+        assert after.readable is True
+
+
+def test_published_repo_state_does_not_cache_failures(registry) -> None:
+    """An unreadable probe ("couldn't check") must retry on the next read
+    rather than pinning the warning for the whole TTL."""
+    from makermodslab.models import _published_repo_state
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.side_effect = RuntimeError("hub down")
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        assert _published_repo_state("user/flaky").readable is False
+        assert _published_repo_state("user/flaky").readable is False
+        assert fake_api.list_repo_files.call_count == 2
+
+
+def test_publish_start_spawn_failure_lands_on_error_not_running(monkeypatch) -> None:
+    """The wedge: state flipped to "running" before the thread spawned, so a
+    spawn failure left the manager claiming a publish forever — every later
+    publish 409ed (and the delete guard refused deletes) until restart. A spawn
+    failure must free the slot as a visible "error"."""
+    import makermodslab.models as m
+    from makermodslab.models import ModelError, ModelUploadManager
+
+    manager = ModelUploadManager()
+
+    def _no_thread(*args, **kwargs):
+        raise RuntimeError("no threads left")
+
+    monkeypatch.setattr(m.threading, "Thread", _no_thread)
+    with pytest.raises(ModelError) as ei:
+        manager.start("run_w")
+    assert ei.value.status == 500
+    status = manager.get_status()
+    assert status["state"] == "error"
+    assert "no threads left" in (status["error"] or "")
+
+
+def test_upload_defaults_to_final_checkpoint_only(registry, quiet_hub_reads) -> None:
+    """No `steps` ⇒ the run's newest checkpoint, and nothing else — the
+    pre-multi-checkpoint default an API caller can still rely on."""
+    _seed_run(registry, "run_a", steps=300)
+    _add_checkpoint(registry, "run_a", 100)
+    _add_checkpoint(registry, "run_a", 200)
+
+    result, fake_api = _publish("run_a")
+
+    assert result["steps"] == [300]
+    assert _uploaded_paths(fake_api) == ["checkpoints/300/pretrained_model"]
+
+
+def test_upload_publishes_every_selected_step_into_one_repo(registry, quiet_hub_reads) -> None:
+    """The headline behaviour: many checkpoints, ONE repo, one commit stream —
+    each step step-addressed so none overwrites another."""
+    _seed_run(registry, "run_b", steps=300)
+    _add_checkpoint(registry, "run_b", 100)
+    _add_checkpoint(registry, "run_b", 200)
+
+    result, fake_api = _publish("run_b", steps=[100, 200, 300])
+
+    assert result["steps"] == [100, 200, 300]
+    assert _uploaded_paths(fake_api) == [
+        "checkpoints/100/pretrained_model",
+        "checkpoints/200/pretrained_model",
+        "checkpoints/300/pretrained_model",
+    ]
+    # One repo, created once, for every step.
+    assert fake_api.create_repo.call_count == 1
+    targets = {c.kwargs["repo_id"] for c in fake_api.upload_folder.call_args_list}
+    assert targets == {result["repo_id"]}
+
+
+def test_upload_runs_steps_oldest_first_whatever_order_was_asked(registry, quiet_hub_reads) -> None:
+    """Queue order is step order, so a queue that dies part-way leaves a
+    contiguous published prefix rather than a hole in the middle."""
+    _seed_run(registry, "run_c", steps=300)
+    _add_checkpoint(registry, "run_c", 100)
+    _add_checkpoint(registry, "run_c", 200)
+
+    result, fake_api = _publish("run_c", steps=[300, 100, 200, 100])
+
+    assert result["steps"] == [100, 200, 300]
+    assert _uploaded_paths(fake_api) == [
+        "checkpoints/100/pretrained_model",
+        "checkpoints/200/pretrained_model",
+        "checkpoints/300/pretrained_model",
+    ]
+
+
+def test_upload_preserves_zero_padded_checkpoint_dir_names(registry, quiet_hub_reads) -> None:
+    """lerobot zero-pads checkpoint dirs and jobs._hub_checkpoints_from_files
+    round-trips that padding into the ref it downloads by — so the repo path has
+    to be the on-disk dir name, not str(step)."""
+    _seed_run(registry, "run_pad", steps=100)
+    record = registry._records["run_pad"]
+    padded = Path(record.output_dir) / "checkpoints" / "000050" / "pretrained_model"
+    padded.mkdir(parents=True)
+    (padded / "config.json").write_text(json.dumps({"type": "act"}))
+
+    _, fake_api = _publish("run_pad", steps=[50])
+
+    assert _uploaded_paths(fake_api) == ["checkpoints/000050/pretrained_model"]
+
+
+def test_upload_pins_the_repo_so_a_later_publish_reuses_it(registry, quiet_hub_reads) -> None:
+    """A second publish must land in the SAME repo — the record is what carries
+    that across calls, so the first upload writes it."""
+    _seed_run(registry, "run_d", steps=300)
+    _add_checkpoint(registry, "run_d", 100)
+
+    first, _ = _publish("run_d", steps=[100], repo_id="user/pinned")
+    assert registry._records["run_d"].hf_repo_id == "user/pinned"
+
+    # No repo_id this time — it still goes to the pinned repo, not a new one.
+    second, fake_api = _publish("run_d", steps=[300])
+    assert second["repo_id"] == first["repo_id"] == "user/pinned"
+    assert {c.kwargs["repo_id"] for c in fake_api.upload_folder.call_args_list} == {"user/pinned"}
+
+
+def test_upload_reports_steps_already_on_the_hub(registry) -> None:
+    """`published_steps` unions what was just pushed with what the repo already
+    held, so the caller can render "5 of 8 published" after an incremental add."""
+    from makermodslab.models import PublishedRepoState, upload_local_model
+
+    _seed_run(registry, "run_e", steps=300)
+    _add_checkpoint(registry, "run_e", 100)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+        patch(
+            "makermodslab.models._published_repo_state",
+            return_value=PublishedRepoState({100: "100"}, False, True),
+        ),
+        patch("makermodslab.models._sync_model_card"),
+    ):
+        result = upload_local_model("run_e", steps=[300])
+
+    assert result["steps"] == [300]
+    assert result["published_steps"] == [100, 300]
+
+
+def test_upload_skips_the_card_when_the_repo_cant_be_read(registry) -> None:
+    """An unreadable probe leaves `published` holding only THIS call's steps.
+    Rewriting the index from that would delete the rows of steps that ARE
+    published, so the card is left stale instead."""
+    from makermodslab.models import PublishedRepoState, upload_local_model
+
+    _seed_run(registry, "run_unreadable", steps=300)
+    _add_checkpoint(registry, "run_unreadable", 100)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+        patch(
+            "makermodslab.models._published_repo_state",
+            return_value=PublishedRepoState({}, False, False),
+        ),
+        patch("makermodslab.models._sync_model_card") as card,
+    ):
+        upload_local_model("run_unreadable", steps=[300])
+
+    card.assert_not_called()
+
+
+def test_upload_reports_progress_per_step(registry, quiet_hub_reads) -> None:
+    """on_progress fires BEFORE each step, so `done` is the count already on the
+    Hub — the invariant the manager's queue position and its partial-failure
+    `done_steps` slice both rest on."""
+    from makermodslab.models import upload_local_model
+
+    _seed_run(registry, "run_f", steps=300)
+    _add_checkpoint(registry, "run_f", 100)
+    _add_checkpoint(registry, "run_f", 200)
+
+    seen: list[tuple[int, int, int | None]] = []
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+    ):
+        upload_local_model(
+            "run_f",
+            steps=[100, 200, 300],
+            on_progress=lambda done, total, step: seen.append((done, total, step)),
+        )
+
+    # The trailing (total, total, None) fires once every upload has landed and
+    # BEFORE the card/tag work, so a failure there can't be read as a lost step.
+    assert seen == [(0, 3, 100), (1, 3, 200), (2, 3, 300), (3, 3, None)]
+
+
+def test_upload_signals_all_landed_before_the_tagging_that_fails(registry, quiet_hub_reads) -> None:
+    """Regression: metadata_update raising AFTER every upload succeeded must not
+    look like the last checkpoint never made it."""
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "run_tagfail", steps=300)
+    _add_checkpoint(registry, "run_tagfail", 100)
+
+    seen: list[tuple[int, int, int | None]] = []
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update", side_effect=RuntimeError("hub 503")),
+        pytest.raises(ModelError),
+    ):
+        upload_local_model(
+            "run_tagfail",
+            steps=[100, 300],
+            on_progress=lambda done, total, step: seen.append((done, total, step)),
+        )
+
+    assert seen[-1] == (2, 2, None)
+
+
+def test_publish_manager_keeps_every_landed_step_when_the_tagging_fails(registry, quiet_hub_reads) -> None:
+    """The manager's partial-failure account, end to end: a failure after the
+    last upload reports ALL steps as published, not one fewer. Getting this
+    wrong sends the user to re-upload weights that are already on the Hub — and
+    for a single-checkpoint publish it claimed nothing had been published."""
+    import makermodslab.models as m
+
+    _seed_run(registry, "run_mgr", steps=300)
+    _add_checkpoint(registry, "run_mgr", 100)
+
+    manager = m.ModelUploadManager()
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update", side_effect=RuntimeError("hub 503")),
+    ):
+        manager.start("run_mgr", None, [100, 300])
+        manager._thread.join(timeout=10)
+
+    status = manager.get_status()
+    assert status["state"] == "error"
+    assert status["done_steps"] == [100, 300]
+    assert status["done"] == 2
+
+
+def test_publish_manager_drops_the_step_that_failed_mid_queue(registry, quiet_hub_reads) -> None:
+    """The other half of the contract: a failure DURING an upload reports only
+    the steps before it, since the one in flight never landed."""
+    import makermodslab.models as m
+
+    _seed_run(registry, "run_mid", steps=300)
+    _add_checkpoint(registry, "run_mid", 100)
+    _add_checkpoint(registry, "run_mid", 200)
+
+    manager = m.ModelUploadManager()
+    fake_api = MagicMock()
+    # Succeed for step 100, blow up on 200.
+    fake_api.upload_folder.side_effect = [None, RuntimeError("connection reset")]
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+    ):
+        manager.start("run_mid", None, [100, 200, 300])
+        manager._thread.join(timeout=10)
+
+    status = manager.get_status()
+    assert status["state"] == "error"
+    assert status["done_steps"] == [100]
+
+
+def test_upload_rejects_a_step_the_run_never_saved(registry) -> None:
+    """Silently dropping an unknown step would report success for an upload that
+    never happened."""
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "run_g", steps=300)
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        pytest.raises(ModelError) as ei,
+    ):
+        upload_local_model("run_g", steps=[999])
+    assert ei.value.status == 404
+    assert "999" in ei.value.message
+
+
+def test_upload_rejects_an_empty_selection(registry) -> None:
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "run_h", steps=300)
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        pytest.raises(ModelError) as ei,
+    ):
+        upload_local_model("run_h", steps=[])
+    assert ei.value.status == 400
+
+
+# ---------------------------------------------------------------------------
+# list_run_checkpoints — what the publish picker reads.
+# ---------------------------------------------------------------------------
+
+
+def test_list_run_checkpoints_marks_the_steps_already_published(registry) -> None:
+    from makermodslab.models import PublishedRepoState, list_run_checkpoints
+
+    _seed_run(registry, "run_i", steps=300, hf_repo_id="user/pinned")
+    _add_checkpoint(registry, "run_i", 100)
+    _add_checkpoint(registry, "run_i", 200)
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch(
+            "makermodslab.models._published_repo_state",
+            return_value=PublishedRepoState({100: "100", 200: "200"}, False, True),
+        ),
+    ):
+        out = list_run_checkpoints("run_i")
+
+    assert out["hf_repo_id"] == "user/pinned"
+    assert out["default_repo_id"] == "user/pinned"
+    assert out["hub_readable"] is True
+    assert [(c["step"], c["published"]) for c in out["checkpoints"]] == [
+        (100, True),
+        (200, True),
+        (300, False),
+    ]
+
+
+def test_list_run_checkpoints_skips_the_hub_probe_when_offline(registry) -> None:
+    """Offline is a normal state for this app — the picker still renders, it
+    just can't know what's published, and false-when-unknown only ever costs a
+    redundant re-upload."""
+    from makermodslab.models import list_run_checkpoints
+
+    _seed_run(registry, "run_j", steps=300)
+    probe = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=True),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models._published_repo_state", probe),
+    ):
+        out = list_run_checkpoints("run_j")
+
+    probe.assert_not_called()
+    assert [(c["step"], c["published"]) for c in out["checkpoints"]] == [(300, False)]
+    # The UI must be able to tell "not published" from "couldn't check".
+    assert out["hub_readable"] is False
+
+
+def test_published_run_row_still_reports_its_local_side_as_a_run(registry) -> None:
+    """Regression: pinning hf_repo_id collapses a published run onto its own Hub
+    repo as source="both". The row must keep local_kind="run", because the
+    frontend's delete confirmation reads it to decide whether removing the local
+    files is recoverable — for a run it isn't: only the published subset of its
+    checkpoints exists anywhere else."""
+    from makermodslab.models import list_all_models
+
+    _seed_run(registry, "run_p", steps=300, hf_repo_id="user/run_p")
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        # list_hub_models returns the /jobs hub-row shape, keyed on repo_id.
+        patch(
+            "makermodslab.models.list_hub_models",
+            return_value=[{"repo_id": "user/run_p", "last_modified": None}],
+        ),
+        patch("makermodslab.models.list_downloaded_models", return_value=[]),
+    ):
+        rows = list_all_models()
+
+    row = next(r for r in rows if r["id"] == "run_p")
+    assert row["source"] == "both"
+    assert row["local_kind"] == "run"
+
+
+def test_published_run_downloaded_back_keeps_its_trained_origin(registry, tmp_lerobot_home) -> None:
+    """A run the user trained, published, then downloaded back matches its own
+    repo_id in the downloaded-model scan. local_kind="run" is already sticky
+    against that fold; `origin` must be too — it is the provenance the library's
+    Trained/Imported filter reads (ModelsLibrary.tsx), and letting the
+    downloaded copy relabel it "downloaded" files the user's own training run
+    under "Imported"."""
+    from makermodslab.models import _local_models_root, list_all_models
+
+    _seed_run(registry, "run_d", steps=300, hf_repo_id="user/run_d", dataset="user/pick")
+    _make_model_checkpoint(_local_models_root(), "user/run_d", shape="tree", step=300)
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.is_dataset_private", return_value=False),
+        patch(
+            "makermodslab.models.list_hub_models",
+            return_value=[{"repo_id": "user/run_d", "last_modified": None}],
+        ),
+    ):
+        rows = list_all_models()
+
+    row = next(r for r in rows if r["id"] == "run_d")
+    assert row["source"] == "both"
+    assert row["local_kind"] == "run"
+    assert row["origin"] == "trained-local"
+
+
+def test_run_collapse_matches_hub_repo_case_insensitively(registry) -> None:
+    """A user-typed repo id differing in case from the Hub's canonical listing
+    must still collapse to ONE "both" row — the same fold every jobs-side dedup
+    (find_imported, the frontend's trackedRepoIds) applies. Byte-exact matching
+    left the run and its own repo as two rows."""
+    from makermodslab.models import list_all_models
+
+    _seed_run(registry, "run_c", steps=300, hf_repo_id="User/Run_C")
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch(
+            "makermodslab.models.list_hub_models",
+            return_value=[{"repo_id": "user/run_c", "last_modified": None}],
+        ),
+        patch("makermodslab.models.list_downloaded_models", return_value=[]),
+    ):
+        rows = list_all_models()
+
+    matches = [r for r in rows if r["id"] == "run_c" or r.get("hf_repo_id", "").lower() == "user/run_c"]
+    assert len(matches) == 1
+    assert matches[0]["source"] == "both"
+    assert matches[0]["local_kind"] == "run"
+
+
+def test_run_collapse_keeps_dataset_episodes(registry) -> None:
+    """The both-collapse copies the checkpoint-derived fields onto the
+    hub-seeded row; dataset_episodes was missing from that tuple, so publishing
+    a run silently dropped its episode subset from the listing."""
+    from makermodslab.models import list_all_models
+
+    _seed_run_with_episodes(registry, "run_ep", dataset="user/pick", episodes=[2, 1])
+    registry._records["run_ep"].hf_repo_id = "user/run_ep"
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.is_dataset_private", return_value=False),
+        patch(
+            "makermodslab.models.list_hub_models",
+            return_value=[{"repo_id": "user/run_ep", "last_modified": None}],
+        ),
+        patch("makermodslab.models.list_downloaded_models", return_value=[]),
+    ):
+        rows = list_all_models()
+
+    row = next(r for r in rows if r["id"] == "run_ep")
+    assert row["source"] == "both"
+    assert row["dataset_episodes"] == [1, 2]
+
+
+def test_downloaded_model_row_reports_its_local_side_as_a_copy(tmp_lerobot_home: Path) -> None:
+    """The other side of the same signal: a downloaded copy IS replaceable from
+    the Hub, so its row keeps the two-press "remove local copy" semantics."""
+    from makermodslab.models import _local_models_root, list_downloaded_models
+
+    _make_model_checkpoint(_local_models_root(), "user/policy")
+    rows = list_downloaded_models()
+
+    assert [r["local_kind"] for r in rows] == ["downloaded"]
+
+
+def test_list_run_checkpoints_404_without_a_checkpoint(registry) -> None:
+    from makermodslab.models import ModelError, list_run_checkpoints
+
+    _seed_run(registry, "run_k", state="failed", with_checkpoint=False)
+    with pytest.raises(ModelError) as ei:
+        list_run_checkpoints("run_k")
+    assert ei.value.status == 404
+
+
+# ---------------------------------------------------------------------------
+# The model card's checkpoint index.
+# ---------------------------------------------------------------------------
+
+
+def test_model_card_index_lists_every_published_step(registry) -> None:
+    from makermodslab.models import _render_checkpoint_index
+
+    _seed_run(registry, "run_l", steps=300)
+    body = _render_checkpoint_index(registry._records["run_l"], {100: "100", 200: "200", 300: "300"})
+
+    for step in (100, 200, 300):
+        assert f"`checkpoints/{step}/pretrained_model`" in body
+
+
+def test_model_card_index_prints_the_real_zero_padded_paths(registry) -> None:
+    """Regression: the index exists to be copied, and lerobot writes
+    checkpoints/000050 — a row saying checkpoints/50 is a 404 for anyone who
+    trusts it."""
+    from makermodslab.models import _render_checkpoint_index
+
+    _seed_run(registry, "run_padcard", steps=300)
+    body = _render_checkpoint_index(registry._records["run_padcard"], {50: "000050"})
+
+    assert "`checkpoints/000050/pretrained_model`" in body
+    assert "checkpoints/50/" not in body
+    # The step column stays human-readable.
+    assert "| 50 |" in body
+
+
+def test_published_repo_state_carries_the_padded_dir_names(registry) -> None:
+    """The padding comes back off the Hub in the checkpoint ref, and has to
+    survive into the card index."""
+    from makermodslab.models import _published_repo_state
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = [
+        "checkpoints/000050/pretrained_model/config.json",
+        "checkpoints/000300/pretrained_model/config.json",
+    ]
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        state = _published_repo_state("user/repo")
+
+    assert state.steps == {50: "000050", 300: "000300"}
+    assert state.readable is True
+    assert state.has_legacy_root is False
+
+
+def test_published_repo_state_reports_unreadable_rather_than_empty(registry) -> None:
+    from makermodslab.models import _published_repo_state
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.side_effect = RuntimeError("network down")
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
+        state = _published_repo_state("user/repo")
+
+    assert state.steps == {}
+    assert state.readable is False
+
+
+def test_model_card_refresh_preserves_the_rest_of_the_card(registry) -> None:
+    """Only the marked block is rewritten, so a hand-edited card (and its YAML
+    frontmatter) survives every re-publish."""
+    from makermodslab.models import _CARD_MARK_END, _CARD_MARK_START, _sync_model_card
+
+    _seed_run(registry, "run_m", steps=300)
+    existing = (
+        "---\ntags:\n- lerobot\n---\n\n"
+        "# My model\n\nHand-written notes.\n\n"
+        f"{_CARD_MARK_START}\nstale index\n{_CARD_MARK_END}\n\n"
+        "## Citation\n\nCite me.\n"
+    )
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.Path") as fake_path,
+        patch("huggingface_hub.hf_hub_download", return_value="/tmp/README.md"),
+    ):
+        fake_path.return_value.read_text.return_value = existing
+        _sync_model_card(fake_api, "user/repo", registry._records["run_m"], {100: "100", 300: "300"})
+
+    body = fake_api.upload_file.call_args.kwargs["path_or_fileobj"].decode()
+    assert "tags:\n- lerobot" in body
+    assert "Hand-written notes." in body
+    assert "Cite me." in body
+    assert "stale index" not in body
+    assert "`checkpoints/300/pretrained_model`" in body
+
+
+def test_model_card_refresh_leaves_an_unreadable_card_alone(registry) -> None:
+    """A network blip must not be mistaken for "no card yet" — that would
+    overwrite the user's prose with a bare index, which is exactly what the
+    marker mechanism exists to prevent."""
+    from makermodslab.models import _sync_model_card
+
+    _seed_run(registry, "run_n", steps=300)
+    fake_api = MagicMock()
+    with patch("huggingface_hub.hf_hub_download", side_effect=RuntimeError("hub 500")):
+        _sync_model_card(fake_api, "user/repo", registry._records["run_n"], {300: "300"})
+
+    fake_api.upload_file.assert_not_called()
+
+
+def test_model_card_is_written_from_scratch_when_absent(registry) -> None:
+    """The first-publish case: a genuinely missing README is the one failure
+    that DOES mean "write one"."""
+    from huggingface_hub.errors import EntryNotFoundError
+
+    from makermodslab.models import _sync_model_card
+
+    _seed_run(registry, "run_o", steps=300)
+    fake_api = MagicMock()
+    with patch("huggingface_hub.hf_hub_download", side_effect=EntryNotFoundError("nope")):
+        _sync_model_card(fake_api, "user/repo", registry._records["run_o"], {300: "300"})
+
+    body = fake_api.upload_file.call_args.kwargs["path_or_fileobj"].decode()
+    assert "`checkpoints/300/pretrained_model`" in body
 
 
 # ---------------------------------------------------------------------------
@@ -2202,8 +3002,10 @@ def _make_model_checkpoint(
     root: Path, repo_id: str, shape: str = "root", step: int = 500, policy_type: str = "act"
 ) -> Path:
     """Fabricate a checkpoint dir in one of the two recognized shapes: a root
-    config.json ("root", what upload_local_model pushes) or a
-    checkpoints/<step>/pretrained_model tree ("tree").
+    config.json ("root", the flat layout uploads used before they became
+    step-addressed, and what a foreign Hub repo usually looks like) or a
+    checkpoints/<step>/pretrained_model tree ("tree", what upload_local_model
+    pushes now).
 
     Both shapes carry `model.safetensors`: `_resolve_pretrained_dir` requires the
     weights lerobot actually loads, so a config-only tree is deliberately NOT a
@@ -2818,6 +3620,46 @@ def test_models_download_status_endpoint(client) -> None:
     resp = client.get("/models/download-status")
     assert resp.status_code == 200
     assert resp.json()["state"] in {"idle", "running", "done", "error"}
+
+
+def test_models_publish_endpoint_starts_a_queue(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The route hands the selection to the manager and returns immediately —
+    a run's worth of checkpoints is far past what an inline request should
+    hold open."""
+    import makermodslab.models as m
+
+    started = MagicMock(return_value={"started": True, "model_id": "run_x", "message": "ok"})
+    monkeypatch.setattr(m.model_upload_manager, "start", started)
+
+    resp = client.post("/api/v1/models/publish", json={"id": "run_x", "steps": [100, 200]})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    started.assert_called_once_with("run_x", None, [100, 200])
+
+
+def test_models_publish_endpoint_409_when_a_publish_is_running(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import makermodslab.models as m
+
+    monkeypatch.setattr(m.model_upload_manager, "state", "running")
+    monkeypatch.setattr(m.model_upload_manager, "model_id", "run_busy")
+    resp = client.post("/api/v1/models/publish", json={"id": "run_other"})
+    assert resp.status_code == 409
+    assert "run_busy" in resp.json()["detail"]
+
+
+def test_models_publish_status_endpoint(client) -> None:
+    resp = client.get("/api/v1/models/publish-status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] in {"idle", "running", "done", "error"}
+    assert "done_steps" in body and "total" in body
+
+
+def test_models_checkpoints_endpoint_404_for_unknown_run(client) -> None:
+    resp = client.get("/api/v1/models/checkpoints?id=nope")
+    assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -3517,6 +4359,112 @@ def test_models_delete_route_forwards_the_refusal_code(client, monkeypatch, tmp_
         job_registry._records.update(original)
 
 
+def test_delete_local_model_409_while_its_publish_is_running(registry, monkeypatch) -> None:
+    """The background publish reads a run's checkpoint dirs for minutes; a
+    delete that passes every terminal-state guard would rmtree them out from
+    under upload_folder mid-read. The registry guard refuses it with the same
+    coded 409 shape every other delete refusal uses."""
+    import makermodslab.models as m
+    from makermodslab.models import ModelError, delete_local_model
+
+    _seed_run(registry, "pub_run", state="done")
+    monkeypatch.setattr(m.model_upload_manager, "state", "running")
+    monkeypatch.setattr(m.model_upload_manager, "model_id", "pub_run")
+    with pytest.raises(ModelError) as ei:
+        delete_local_model("pub_run")
+    assert ei.value.status == 409
+    assert ei.value.code == "job.publish_in_progress"
+    # The dir must still be there — the publish is reading it.
+    assert (registry._output_root / "pub_run").exists()
+
+
+def test_delete_local_model_allowed_while_another_runs_publish_is_running(registry, monkeypatch) -> None:
+    """The guard is per-run: a publish of run A must not lock run B's delete —
+    the single-slot manager would otherwise make every delete 409 for minutes."""
+    import makermodslab.models as m
+    from makermodslab.models import delete_local_model
+
+    _seed_run(registry, "other_run", state="done")
+    monkeypatch.setattr(m.model_upload_manager, "state", "running")
+    monkeypatch.setattr(m.model_upload_manager, "model_id", "some_other_publish")
+    assert delete_local_model("other_run")["deleted"] is True
+
+
+def test_jobs_delete_route_409_while_publish_is_running(client, monkeypatch, tmp_path) -> None:
+    """The jobs surface reuses the registry guard: DELETE /jobs/{id} during
+    that run's publish refuses with the same code instead of racing the
+    upload."""
+    import makermodslab.models as m
+    from makermodslab.jobs import JobRecord, job_registry
+    from makermodslab.train import TrainingRequest
+
+    monkeypatch.setattr(m.model_upload_manager, "state", "running")
+    monkeypatch.setattr(m.model_upload_manager, "model_id", "pub-on-wire")
+    record = JobRecord(
+        id="pub-on-wire",
+        name="pub-on-wire",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+        output_dir=str(tmp_path / "pub-on-wire" / "run"),
+        started_at=0.0,
+        runner="local",
+    )
+    original = dict(job_registry._records)
+    try:
+        job_registry._records["pub-on-wire"] = record
+        resp = client.delete("/api/v1/jobs/pub-on-wire")
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["code"] == "job.publish_in_progress"
+        assert isinstance(body["detail"], str)
+        # The record survives the refusal.
+        assert "pub-on-wire" in job_registry._records
+    finally:
+        job_registry._records.clear()
+        job_registry._records.update(original)
+
+
+def test_models_routes_keep_local_kind(client, monkeypatch) -> None:
+    """Regression: `local_kind` was emitted by the producers but undeclared on
+    ModelListItem/ModelInfoResponse, so response_model silently FILTERED it and
+    the frontend's delete semantics never saw it. Declared now — the routes
+    must pass it through, and exclude_unset must keep it absent (not null) on
+    rows whose producer never set it."""
+    import makermodslab.models as m
+
+    run_row = {
+        "id": "run_lk",
+        "name": "run lk",
+        "policy_type": "act",
+        "dataset": "user/pick",
+        "steps": 100,
+        "path": "/tmp/x",
+        "last_modified": None,
+        "hf_repo_id": None,
+        "source": "local",
+        "local_kind": "run",
+    }
+    hub_row = {
+        "id": "user/repo",
+        "name": "repo",
+        "policy_type": None,
+        "dataset": None,
+        "steps": None,
+        "path": None,
+        "last_modified": None,
+        "hf_repo_id": "user/repo",
+        "source": "hub",
+    }
+    monkeypatch.setattr(m, "list_all_models", lambda: [run_row, hub_row])
+    rows = client.get("/api/v1/models").json()
+    assert rows[0]["local_kind"] == "run"
+    assert "local_kind" not in rows[1]
+
+    monkeypatch.setattr(m, "get_model_info", lambda _id: {**run_row, "size_bytes": 1})
+    info = client.get("/api/v1/models/info", params={"id": "run_lk"}).json()
+    assert info["local_kind"] == "run"
+
+
 def test_delete_local_model_names_the_queued_finetune_instead_of_502ing(registry) -> None:
     """JobRegistry.delete raises JobSourceOfQueuedRunError when a QUEUED run
     froze this run's checkpoint path at submit time. models.py didn't catch
@@ -3590,3 +4538,443 @@ def test_delete_downloaded_model_refuses_when_a_queued_run_reads_it(registry, tm
     result = delete_local_model("user/base")
     assert result["deleted"] is True
     assert not model_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# Multi-checkpoint publish — adversarial edge cases (folded in from the former
+# test_pr61_adversarial.py: zero-padded vs bare checkpoint dirs, mid-queue Hub
+# failures, a run downloaded back from its own repo, and the delete semantics
+# of a partly published run).
+# ---------------------------------------------------------------------------
+
+
+def _seed_multi(
+    registry,
+    job_id: str,
+    step_dirs: list[str],
+    *,
+    state: str = "done",
+    policy_type: str = "act",
+    dataset: str = "user/pick",
+    hf_repo_id: str | None = None,
+) -> Path:
+    """Register a run and lay out one checkpoint per entry of `step_dirs`.
+
+    `step_dirs` are the literal on-disk directory names, so a test can use
+    lerobot's real zero-padded form ("000100") or a bare one ("100")."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    run_dir = registry._output_root / job_id / "run"
+    registry._records[job_id] = JobRecord(
+        id=job_id,
+        name=f"run {job_id}",
+        state=state,
+        config=TrainingRequest(dataset_repo_id=dataset, policy_type=policy_type),
+        output_dir=str(run_dir),
+        started_at=1.0,
+        ended_at=1000.0,
+        runner="local",
+        hf_repo_id=hf_repo_id,
+    )
+    for name in step_dirs:
+        p = run_dir / "checkpoints" / name / "pretrained_model"
+        p.mkdir(parents=True)
+        (p / "config.json").write_text(json.dumps({"type": policy_type}))
+        (p / "train_config.json").write_text(
+            json.dumps(
+                {
+                    "policy": {"type": policy_type},
+                    "dataset": {"repo_id": dataset},
+                    "steps": int(name),
+                }
+            )
+        )
+    return run_dir
+
+
+def _hub_api(files: list[str] | None = None) -> MagicMock:
+    api = MagicMock()
+    api.list_repo_files.return_value = list(files or [])
+    return api
+
+
+def _no_card():
+    """Patch the card sync's downloader so no test reaches the network."""
+    from huggingface_hub.errors import EntryNotFoundError
+
+    return patch("huggingface_hub.hf_hub_download", side_effect=EntryNotFoundError("no card"))
+
+
+# ---------------------------------------------------------------------------
+# 1. Zero-padded checkpoint dirs must round-trip into the Hub path.
+# ---------------------------------------------------------------------------
+
+
+def test_padded_checkpoint_dirs_upload_to_padded_hub_paths(registry) -> None:
+    from makermodslab.models import upload_local_model
+
+    _seed_multi(registry, "pad_run", ["000100", "000200", "001000"])
+    api = _hub_api()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        patch("makermodslab.models.metadata_update"),
+        _no_card(),
+    ):
+        result = upload_local_model("pad_run", steps=[100, 1000])
+
+    paths = [c.kwargs["path_in_repo"] for c in api.upload_folder.call_args_list]
+    assert paths == [
+        "checkpoints/000100/pretrained_model",
+        "checkpoints/001000/pretrained_model",
+    ]
+    assert result["steps"] == [100, 1000]
+
+
+# ---------------------------------------------------------------------------
+# 2. Step selection errors.
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_user_typed_repo_name_gets_a_useful_error(registry) -> None:
+    """PublishToHubRow's repo-name Input is free text with no validation. A name
+    the Hub can't accept should come back as an actionable 400, not a generic
+    'the Hub rejected the upload' 502."""
+    from huggingface_hub.errors import HFValidationError
+
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_multi(registry, "bad_name", ["100"])
+    api = _hub_api()
+    api.create_repo.side_effect = HFValidationError(
+        "Repo id must use alphanumeric chars or '-', '_', '.'; got 'My Run!!'"
+    )
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        pytest.raises(ModelError) as ei,
+    ):
+        upload_local_model("bad_name", repo_id="My Run!!", steps=[100])
+    assert ei.value.status == 400
+
+
+def test_empty_step_list_is_400(registry) -> None:
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_multi(registry, "e_run", ["100"])
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        pytest.raises(ModelError) as ei,
+    ):
+        upload_local_model("e_run", steps=[])
+    assert ei.value.status == 400
+
+
+def test_unknown_step_is_404_and_names_the_saved_steps(registry) -> None:
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_multi(registry, "u_run", ["100", "200"])
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        pytest.raises(ModelError) as ei,
+    ):
+        upload_local_model("u_run", steps=[100, 999])
+    assert ei.value.status == 404
+    assert "999" in ei.value.message and "100, 200" in ei.value.message
+
+
+def test_duplicate_steps_upload_once(registry) -> None:
+    from makermodslab.models import upload_local_model
+
+    _seed_multi(registry, "d_run", ["100", "200"])
+    api = _hub_api()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        patch("makermodslab.models.metadata_update"),
+        _no_card(),
+    ):
+        result = upload_local_model("d_run", steps=[200, 100, 200])
+
+    assert api.upload_folder.call_count == 2
+    assert result["steps"] == [100, 200]
+
+
+# ---------------------------------------------------------------------------
+# 3. Partial failure: what survived, and where the run thinks it published to.
+# ---------------------------------------------------------------------------
+
+
+def test_partial_failure_reports_only_the_steps_that_landed(registry) -> None:
+    from makermodslab.models import ModelUploadManager
+
+    _seed_multi(registry, "p_run", ["100", "200", "300"])
+    api = _hub_api()
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("hub exploded")
+
+    api.upload_folder.side_effect = flaky
+
+    mgr = ModelUploadManager()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        patch("makermodslab.models.metadata_update"),
+        _no_card(),
+    ):
+        mgr.start("p_run", None, [100, 200, 300])
+        mgr._thread.join(timeout=10)
+
+    st = mgr.get_status()
+    assert st["state"] == "error"
+    assert st["done_steps"] == [100, 200]
+
+
+def test_partial_failure_still_pins_the_repo_it_published_into(registry) -> None:
+    """A queue that dies mid-way has already put weights in the target repo.
+
+    The record must remember that repo, or the retry (and the picker's
+    `published` badges) go looking at a different one."""
+    from makermodslab.models import ModelUploadManager
+
+    _seed_multi(registry, "pin_run", ["100", "200"])
+    api = _hub_api()
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("hub exploded")
+
+    api.upload_folder.side_effect = flaky
+
+    mgr = ModelUploadManager()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        patch("makermodslab.models.metadata_update"),
+        _no_card(),
+    ):
+        mgr.start("pin_run", "myorg/custom-name", [100, 200])
+        mgr._thread.join(timeout=10)
+
+    assert mgr.get_status()["done_steps"] == [100]
+    # Step 100 is on the Hub in myorg/custom-name.
+    assert registry._records["pin_run"].hf_repo_id == "myorg/custom-name"
+
+
+def test_retry_after_partial_failure_targets_the_same_repo(registry) -> None:
+    """The failure toast says 'retry the rest'. The retry must not fork the run
+    into a second repo."""
+    from makermodslab.models import ModelUploadManager, list_run_checkpoints
+
+    _seed_multi(registry, "retry_run", ["100", "200"])
+    api = _hub_api()
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("hub exploded")
+
+    api.upload_folder.side_effect = flaky
+
+    mgr = ModelUploadManager()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        patch("makermodslab.models.metadata_update"),
+        _no_card(),
+    ):
+        mgr.start("retry_run", "myorg/custom-name", [100, 200])
+        mgr._thread.join(timeout=10)
+
+        # What the reopened picker would target on retry.
+        api.list_repo_files.return_value = ["checkpoints/100/pretrained_model/config.json"]
+        picker = list_run_checkpoints("retry_run")
+
+    assert picker["default_repo_id"] == "myorg/custom-name"
+
+
+# ---------------------------------------------------------------------------
+# 4. hub_readable must distinguish "new repo" from "Hub unreachable".
+# ---------------------------------------------------------------------------
+
+
+def test_first_publish_does_not_claim_the_hub_was_unreachable(registry) -> None:
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    from makermodslab.models import list_run_checkpoints
+
+    _seed_multi(registry, "new_run", ["100"])
+    resp = MagicMock()
+    resp.status_code = 404
+    api = MagicMock()
+    api.list_repo_files.side_effect = RepositoryNotFoundError("404 — repo does not exist", response=resp)
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+    ):
+        data = list_run_checkpoints("new_run")
+
+    # The Hub answered — it said "no such repo". That is not an outage, and the
+    # picker renders `hub_readable: false` as "Couldn't reach the Hub".
+    assert data["hub_readable"] is True
+    assert data["checkpoints"] == [{"step": 100, "path": data["checkpoints"][0]["path"], "published": False}]
+
+
+# ---------------------------------------------------------------------------
+# 5. A published run that is ALSO downloaded back to the local models dir.
+# ---------------------------------------------------------------------------
+
+
+def test_published_run_downloaded_back_still_reads_as_a_run(registry, tmp_lerobot_home: Path) -> None:
+    """`local_kind` decides whether the delete dialog is the safe two-press
+    'remove local copy' or the destructive run delete. A run that was published
+    and then downloaded must stay 'run' — its unpublished checkpoints exist
+    nowhere else."""
+    from makermodslab.models import _local_models_root, list_all_models
+
+    _seed_multi(registry, "both_run", ["100", "200"], hf_repo_id="user/both_run")
+
+    # The user downloaded their own published repo back to the models dir.
+    dl = _local_models_root() / "user" / "both_run"
+    (dl / "checkpoints" / "100" / "pretrained_model").mkdir(parents=True)
+    (dl / "checkpoints" / "100" / "pretrained_model" / "config.json").write_text(json.dumps({"type": "act"}))
+
+    hub_rows = [{"repo_id": "user/both_run", "last_modified": "2026-01-01T00:00:00Z", "private": False}]
+    with (
+        patch("makermodslab.models.list_hub_models", return_value=hub_rows),
+        patch("makermodslab.models.get_saved_custom_models", return_value=[]),
+    ):
+        rows = list_all_models()
+
+    row = next(r for r in rows if r.get("hf_repo_id") == "user/both_run")
+    assert row["source"] == "both"
+    # The row's id is the RUN id, so a delete from this row deletes the run dir.
+    assert row["id"] == "both_run"
+    # ...therefore it must not be described as a replaceable downloaded copy.
+    assert row["local_kind"] == "run"
+
+
+# ---------------------------------------------------------------------------
+# 6. Concurrency: one publish at a time.
+# ---------------------------------------------------------------------------
+
+
+def test_second_publish_is_refused_while_one_is_running(registry) -> None:
+    import threading
+
+    from makermodslab.models import ModelUploadManager
+
+    _seed_multi(registry, "c1", ["100"])
+    _seed_multi(registry, "c2", ["100"])
+
+    gate = threading.Event()
+    api = _hub_api()
+    api.upload_folder.side_effect = lambda **kw: gate.wait(timeout=10)
+
+    mgr = ModelUploadManager()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        patch("makermodslab.models.metadata_update"),
+        _no_card(),
+    ):
+        assert mgr.start("c1", None, [100])["started"] is True
+        second = mgr.start("c2", None, [100])
+        assert second["started"] is False
+        gate.set()
+        mgr._thread.join(timeout=10)
+
+    assert mgr.get_status()["model_id"] == "c1"
+
+
+# ---------------------------------------------------------------------------
+# 7. Card index vs. what is actually on the Hub.
+# ---------------------------------------------------------------------------
+
+
+def test_card_index_merges_previously_published_steps(registry) -> None:
+    from makermodslab.models import upload_local_model
+
+    _seed_multi(registry, "card_run", ["000100", "000200"], hf_repo_id="user/card_run")
+    # 000100 is already up there from an earlier publish.
+    api = _hub_api(["checkpoints/000100/pretrained_model/config.json"])
+
+    captured = {}
+
+    def fake_sync(_api, repo_id, record, steps):
+        captured["steps"] = dict(steps)
+
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=api),
+        patch("makermodslab.models.metadata_update"),
+        patch("makermodslab.models._sync_model_card", side_effect=fake_sync),
+    ):
+        result = upload_local_model("card_run", steps=[200])
+
+    assert captured["steps"] == {100: "000100", 200: "000200"}
+    assert result["published_steps"] == [100, 200]
+
+
+def test_delete_from_the_clobbered_row_destroys_unpublished_checkpoints(
+    registry, tmp_lerobot_home: Path
+) -> None:
+    """Regression guard for the local_kind clobber.
+
+    The row's id is the RUN id, so a delete of the row removes the whole
+    training run — unpublished checkpoints included. The row must therefore
+    keep local_kind "run": the library UI no longer offers destructive model
+    deletes at all, but the routes remain for a future management surface, and
+    resolveDeleteAction (which that surface will reuse) reads local_kind to
+    pick the honest destructive dialog over the reassuring "the Hub copy
+    stays" one.
+
+    (Deleting really does destroy the unpublished steps; that is correct and
+    irreversible. What must never happen is that outcome behind the two-press
+    'remove local copy' wording.)"""
+    from makermodslab.models import _local_models_root, delete_local_model, list_all_models
+
+    run_dir = _seed_multi(registry, "victim", ["100", "200"], hf_repo_id="user/victim")
+    unpublished = run_dir / "checkpoints" / "200" / "pretrained_model" / "config.json"
+    assert unpublished.is_file()
+
+    dl = _local_models_root() / "user" / "victim"
+    (dl / "checkpoints" / "100" / "pretrained_model").mkdir(parents=True)
+    (dl / "checkpoints" / "100" / "pretrained_model" / "config.json").write_text(json.dumps({"type": "act"}))
+
+    hub_rows = [{"repo_id": "user/victim", "last_modified": "2026-01-01T00:00:00Z", "private": False}]
+    with (
+        patch("makermodslab.models.list_hub_models", return_value=hub_rows),
+        patch("makermodslab.models.get_saved_custom_models", return_value=[]),
+    ):
+        row = next(r for r in list_all_models() if r.get("hf_repo_id") == "user/victim")
+
+    # "run" + source "both" is the one combination resolveDeleteAction routes to
+    # the destructive "Delete" dialog rather than "Remove local copy of".
+    assert row["local_kind"] == "run"
+    assert row["id"] == "victim"
+
+    with patch("makermodslab.models._model_in_use", return_value=None):
+        delete_local_model(row["id"])
+
+    # "The Hub copy stays" was true. "Only the local copy is removed" was not.
+    assert not unpublished.exists(), "unpublished step 200 survived"
+    assert not run_dir.parent.exists(), "run dir survived"

@@ -368,4 +368,43 @@ export default {
       deleteFailedTitle: "删除失败",
     },
   },
+
+  publish: {
+    title: "发布到 Hub",
+    intro:
+      "将此训练的检查点作为公开模型分享到 Hub —— 你选择的每个步数都会进入同一个仓库、同一张模型卡。",
+    hubUnknownShort: "无法检查哪些检查点已发布",
+    publishedOf: "共 {{total}} 个检查点，已发布 {{published}} 个",
+    addCheckpoints: "添加检查点",
+    uploadToHub: "上传到 Hub",
+    addingTo:
+      "将添加到 <0>{{repo}}</0>。一次训练只对应一个仓库，所有检查点都归在同一张模型卡下。",
+    repoNameLabel: "仓库名称（可选）",
+    leaveBlank:
+      "留空则发布为 <0>{{placeholder}}</0>。之后的检查点也会进入这个仓库。",
+    repoInvalid: "仓库名称无效 —— 请使用 name 或 namespace/name 格式。",
+    repoNotWritable: "你的令牌无法写入 {{namespace}}。",
+    checkpointsLabel: "检查点",
+    clearAll: "全部清除",
+    selectAllCount: "全选（{{total}}）",
+    hubUnknownDetail:
+      "无法连接 Hub 检查哪些检查点已发布 —— 下方的标记可能不完整。",
+    publishedBadge: "已发布",
+    multiNote_other:
+      "{{count}} 个检查点将依次上传 —— 每个都是完整的一份策略权重。",
+    overwriteNote: "重新选择已发布的检查点会原地覆盖它。",
+    selectPrompt: "请选择检查点",
+    uploadCount_other: "上传 {{count}} 个检查点",
+    uploadingOf: "正在上传 {{current}}/{{total}}",
+    uploading: "正在上传",
+    publishingAria: "正在发布检查点",
+    legacyRootNote:
+      "此仓库根目录还有一次早期上传留下的检查点。它仍可读取，但工具加载的是上面按步数寻址的副本。",
+    toast: {
+      publishedTitle_other: "已发布 {{count}} 个检查点",
+      publishedBody: "{{repoId}} 已在 Hub 上。<0>查看模型</0>",
+      failedTitle: "发布失败",
+      failedLanded_other: "（已发布 {{count}} 个检查点 —— 只需重试其余部分。）",
+    },
+  },
 } as const;

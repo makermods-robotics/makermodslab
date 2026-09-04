@@ -2949,6 +2949,22 @@ class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
 
 
+class JobPublishInProgressError(Exception):
+    """Raised when delete() targets a run whose checkpoints the background Hub
+    publish (models.model_upload_manager) is uploading right now.
+
+    A publish reads the run's checkpoint dirs for minutes off the request
+    thread, so a delete that passes every other guard (the run IS terminal)
+    would rmtree the files out from under upload_folder mid-read — the upload
+    dies with an opaque OS/Hub error and its repo pin fails against a deleted
+    record. One guard here covers both delete surfaces, since POST
+    /models/delete's run branch reuses JobRegistry.delete."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+
+
 class JobSourceOfQueuedRunError(Exception):
     """Raised when delete() would take the checkpoint a QUEUED run will read.
 
@@ -4934,6 +4950,39 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def set_hf_repo_id(self, job_id: str, repo_id: str) -> JobRecord:
+        """Record the Hub model repo a LOCAL run has been published to.
+
+        Unlike `rename` this is identity, not decoration. It is what makes a
+        SECOND publish land in the same repo as the first — models.
+        `upload_local_model` defaults its target to `record.hf_repo_id` — and
+        what the training dialog reads to render "View on Hub" and to offer
+        "add more checkpoints" instead of a fresh publish.
+
+        Cloud runs get theirs at submit time (see `start`); this is the
+        local-run equivalent, written after the first successful upload.
+        Idempotent: re-publishing to the same repo rewrites the same value."""
+        target = repo_id.strip()
+        if not target:
+            raise ValueError("Hub repo id cannot be empty.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            if record.hf_repo_id == target:
+                return record
+            record.hf_repo_id = target
+            # Zeroed before the write, then restamped after — the same derived-
+            # field protocol `rename`, `start` and `reorder_queue` follow, so a
+            # position a read stamped onto the live record never freezes into
+            # job.json. (Publish targets terminal runs, whose position is 0
+            # anyway — the convention holds so no caller has to prove that.)
+            record.queue_position = 0
+            self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
+        self._notify_change()
+        return record
+
     def stop(self, job_id: str, expect_state: JobState | None = None) -> JobRecord:
         """Ask a running job to stop, and record that we asked.
 
@@ -5380,6 +5429,18 @@ class JobRegistry:
             )
 
     def delete(self, job_id: str) -> None:
+        # Refuse while the background Hub publish is reading this run's
+        # checkpoint dirs (lazy import: models imports from this module).
+        # Checked BEFORE our lock so the two locks are never held together —
+        # the publish worker takes this registry's lock (set_hf_repo_id)
+        # without holding the manager's. The unlocked read leaves a tiny
+        # start-after-check window, which is fine: a publish that starts after
+        # this point 404s on the deleted run instead of racing the rmtree.
+        from .models import model_upload_manager
+
+        publish = model_upload_manager.get_status()
+        if publish["state"] == "running" and publish["model_id"] == job_id:
+            raise JobPublishInProgressError(job_id)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
