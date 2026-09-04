@@ -34,12 +34,16 @@ terminal; the session VERIFIES it is there before it energizes anything (see
 checked the other half first". Lifecycle option A of docs/drtc/SLICE3.md.
 
 The SFU is no longer a third party a human runs. Since S3.6 the Lab hosts it
-itself (`makermodslab --sfu`, `makermodslab/sfu.py`): when it is up, this
-module takes the url, the room and the CHILD'S TOKEN from it in-process and
-`livekit.env` is not read at all. That file is the LiveKit Cloud fallback for a
-station with no local SFU, and it is now the ONLY credential file — the shell
-scripts, their `livekit.local.env` override and the cwd dotenv rungs are all
-retired. `_transport_source` names which of the two is in force.
+itself (`makermodslab --sfu`, `makermodslab/sfu.py`), and since the combine
+with remote teleoperation it is the ONLY transport this module knows: the url,
+the room and every participant's TOKEN are minted in-process from the SFU's
+0600 key file, the same way hosting and remote teleoperation get theirs. No
+credential file is read here — `livekit.env` is a bench aid for running the
+`drtc` entrypoints by hand (see `drtc/_env.py`) and the server never opens it.
+The signing secret never leaves this process: the child gets a robot-role
+token on its argv, and the GPU side gets an operator-role token from the
+launcher's child env (or from the panel's generated line). With no SFU there
+is nothing to resolve and `resolve_transport()` says so (`source == "none"`).
 
 The two engines are the same session in every respect this module can see: the
 same preflight ladder, the same protocol, the same watchdogs, the same stop.
@@ -161,7 +165,6 @@ from .rollout import (
 )
 from .session_events import notify_session_changed
 from .utils.config import (
-    DRTC_ENV_PATH,
     DRTC_LOG_DIR,
     LIVEKIT_KEY_FILE,
     CameraResolutionError,
@@ -169,29 +172,24 @@ from .utils.config import (
 )
 from .utils.errors import friendly_hint, transport_hint
 
-# The `[remote]` extra is OPTIONAL, and this module is imported by the FastAPI
-# server at boot (and by every peer feature's reciprocal guard), so none of its
-# packages may be a hard import. Guarded at module TOP rather than inside the
-# functions — an import inside a function body is the thing this project does
-# not do — and read as "the extra is installed" at the one place that asks
-# (`_extra_missing`). All three come from the same extra, so one guard covers
-# them: a partial install is reported as a missing extra, which is the honest
-# remedy either way.
+# `livekit-api` is a core dependency since the bundled SFU landed, and aiohttp
+# rides in with it — but this module is imported by the FastAPI server at boot
+# (and by every peer feature's reciprocal guard), so neither may be a hard
+# import: a broken install degrades to a coded refusal instead of a boot
+# failure. Guarded at module TOP rather than inside the functions — an import
+# inside a function body is the thing this project does not do — and read as
+# "the extra is installed" at the one place that asks (`_extra_missing`),
+# together with the `[remote]` extra's own package.
 #
 # `livekit.api` is safe to import here: it is pure Python + aiohttp. The FFI
 # dylib is `livekit.portal`, which this module NEVER imports — its presence is
 # checked with importlib.util.find_spec and nothing else.
 try:
     import aiohttp as _aiohttp
-    from dotenv import dotenv_values as _dotenv_values
     from livekit import api as _livekit_api
-
-    from .drtc._env import read_env as _read_env
 except ImportError:  # pragma: no cover — exercised by monkeypatching the names
     _aiohttp = None
-    _dotenv_values = None
     _livekit_api = None
-    _read_env = None
 
 logger = logging.getLogger(__name__)
 
@@ -239,11 +237,6 @@ _PROBE_TIMEOUT_S = 3.0
 _POLICY_IDENTITY = "policy"
 _PORTAL_ROLE_ATTRIBUTE = "lk.portal.role"
 _OPERATOR_ROLE = "operator"
-
-# The four credentials a child needs. LIVEKIT_ROOM is as load-bearing as the
-# rest: it is the one value the GPU side takes ONLY from its Modal secret, so a
-# mismatch is undetectable from here (see the transport.no_policy hint).
-_REQUIRED_ENV = ("LIVEKIT_URL", "LIVEKIT_ROOM", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
 
 # Bound on the graceful stop: the child returns the arm to its captured start
 # pose before releasing torque, and `rest_pose.RETURN_CEILING_S` is that
@@ -402,7 +395,7 @@ def _extra_missing() -> bool:
     `find_spec` and NEVER an import: `livekit.portal` is an FFI dylib, and
     loading it into the server process is precisely what the extra's split
     exists to avoid. The child imports it; we only ask whether it is there."""
-    if _livekit_api is None or _read_env is None or _dotenv_values is None or _aiohttp is None:
+    if _livekit_api is None or _aiohttp is None:
         return True
     try:
         return importlib.util.find_spec("livekit.portal") is None
@@ -411,52 +404,18 @@ def _extra_missing() -> bool:
         return True
 
 
-def _transport_source(url: str) -> str:
-    """Which layer supplied the EFFECTIVE url: sfu | cloud | process_env | none.
+def _transport_source() -> str:
+    """Which layer supplies the transport: `sfu` | `none`.
 
-    Four values, and they are four different remedies:
-
-    - `sfu` — this process runs the Lab's own LiveKit server
-      (`makermodslab --sfu`). Nothing on disk is consulted at all: the url, the
-      room and the child's token are all minted in-process from the 0600 key
-      file, so there is no credential for anyone to get wrong.
-    - `process_env` — the server's own environment exported LIVEKIT_URL, so
-      editing `livekit.env` will not change anything. Telling an operator to
-      edit a file that is being overridden is the worst of the three answers,
-      which is why this is a value of its own.
-    - `cloud` — `livekit.env`, the saved LiveKit Cloud credentials.
-    - `none` — nothing anywhere set it.
-
-    Membership, not value equality, decides among the last three, walked in
-    `drtc._env.read_env`'s DESCENDING precedence: whichever layer SETS the key
-    is by definition the one whose value survived the merge.
-
-    Retired in S3.6 along with the shell SFU scripts: `local_override`
-    (`livekit.local.env`) and `cwd` (a `.env`/`.env.local` beside wherever the
-    Lab happened to be started). The Lab-owned SFU is what they were for.
+    Two values, two remedies: `sfu` means this process runs the Lab's own
+    LiveKit server (`makermodslab --sfu`) and every url, room and token is
+    minted in-process from the 0600 key file, so there is no credential for
+    anyone to get wrong; `none` means it was started without the flag, and the
+    remedy is the flag. The LiveKit Cloud rungs this used to walk (`cloud`,
+    `process_env`) retired with the combine — the SFU is the one transport
+    remote teleoperation and remote inference share.
     """
-    if sfu.sfu_enabled():
-        # Not conditioned on the url matching: when the SFU is up the session
-        # uses it unconditionally, so the url IS the SFU's by construction.
-        return "sfu"
-    if not url:
-        return "none"
-    if os.environ.get("LIVEKIT_URL"):
-        return "process_env"
-    if _dotenv_values is None:  # pragma: no cover — extra guard
-        return "cloud"
-    try:
-        saved = Path(DRTC_ENV_PATH)
-        if saved.exists() and _dotenv_values(saved).get("LIVEKIT_URL"):
-            return "cloud"
-    except OSError:
-        pass
-    return "none"
-
-
-def _missing_credentials(env: dict[str, str]) -> list[str]:
-    """Which of the four LiveKit variables the resolved environment lacks."""
-    return [name for name in _REQUIRED_ENV if not env.get(name)]
+    return "sfu" if sfu.sfu_enabled() else "none"
 
 
 def _robot_request(request: RemoteInferenceRequest) -> InferenceRequest:
@@ -532,12 +491,12 @@ def _robot_sync_args(
     probed room X, the child resolved room Y" class of failure. The child
     echoes the effective values back in READY and we compare.
 
-    `token` is sent only in the SFU case, where the parent signed it in-process
-    with the key file's secret: the child then needs no LiveKit credential of
-    its own. Empty on the Cloud path, where the child mints its own from the
-    environment (`_common.mint_token`). It is a short-lived, single-room,
-    single-identity JWT rather than the API secret — which is why it may ride
-    an argv at all, and the secret may not.
+    `token` is the robot-role JWT the parent signed in-process with the key
+    file's secret: the child needs no LiveKit credential of its own and reads
+    no credential file. It is a short-lived, single-room, single-identity JWT
+    rather than the API secret — which is why it may ride an argv at all, and
+    the secret may not. Always present: without the SFU the preflight refuses
+    long before this is built.
 
     draccus has NO `--no-<flag>` form (verified against the installed draccus,
     not assumed): a boolean is `--flag=false`. `--return_to_rest` and
@@ -562,7 +521,7 @@ def _robot_sync_args(
         *([f"--s_min={request.s_min}"] if request.engine == "rtc" else []),
         f"--livekit_url={url}",
         f"--livekit_room={room}",
-        *([f"--livekit_token={token}"] if token else []),
+        f"--livekit_token={token}",
         "--return_to_rest=true",
         "--ease_in=true",
     ]
@@ -614,9 +573,9 @@ def _stdin_seed() -> bytes:
 #
 # When this process was started with `makermodslab --sfu` (sfu.py), the whole
 # credential question disappears: the SFU is on this machine, its API secret is
-# in a 0600 file only the server reads, and the session mints the child's token
-# itself. `livekit.env` is then never consulted — it is the LiveKit Cloud
-# fallback for a station with no local SFU.
+# in a 0600 file only the server reads, and the session mints every
+# participant's token itself — the child's (role `robot`) and the GPU side's
+# (role `operator`). Without the flag there is no transport at all.
 
 # Portal identities, and they are CONTRACTS, not defaults. The child connects
 # as `robot` (robot_sync/robot_rtc's IDENTITY) and the GPU side as `policy`
@@ -625,9 +584,11 @@ def _stdin_seed() -> bytes:
 # is deliberately NOT used here: a random identity would make the probe blind.
 _ROBOT_IDENTITY = "robot"
 
-# How long a child's token stays valid. The session's own `duration_s` ceiling
-# is minutes, not hours; an hour covers a long run plus a reconnect, and the
-# token dies with the room long before it could become a standing credential.
+# How long a token stays valid — the child's and the GPU side's alike. The
+# session's own `duration_s` ceiling is minutes, not hours; an hour covers a
+# long run plus a reconnect, and the token dies with the room long before it
+# could become a standing credential. The GPU launcher's own idle stop (10
+# minutes) and Modal's 2 h cap both sit well inside it.
 _TOKEN_TTL_S = 3600
 
 # `tailscale ip -4` is how a Modal container learns an address that reaches
@@ -642,21 +603,28 @@ _TAILSCALE_APP_PATH = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 @dataclass(frozen=True)
 class SfuTransport:
     """What the local SFU gives one session: where to dial, which room, the
-    credentials the PARENT probes with, and the token the CHILD joins with."""
+    credentials the PARENT probes with, and the two tokens the participants
+    join with — the CHILD's (robot role) and the GPU side's (operator role)."""
 
     url: str
     room: str
     api_key: str
     api_secret: str
     token: str
+    policy_token: str
 
 
 def _sfu_transport() -> SfuTransport:
-    """Resolve the local SFU's transport and sign the child's token.
+    """Resolve the local SFU's transport and sign both participants' tokens.
 
     Raises `OSError`/`RuntimeError` when the key file is unreadable or holds no
     pair — the launcher wrote it before the app started, so that is a genuinely
     broken install rather than a configuration the user can fix in the panel.
+
+    The policy token is minted here rather than by the GPU launcher so that the
+    session's preflight, the transport endpoint and the launcher all hand out
+    the SAME identity (`_POLICY_IDENTITY`, the one `_probe_room` looks for) —
+    a policy that joins under another name is invisible to the probe.
     """
     api_key, api_secret = sfu.api_keys()
     room = sfu.default_room(get_instance_id())
@@ -668,7 +636,22 @@ def _sfu_transport() -> SfuTransport:
         role="robot",
         ttl_seconds=_TOKEN_TTL_S,
     )
-    return SfuTransport(url=sfu.local_url(), room=room, api_key=api_key, api_secret=api_secret, token=token)
+    policy_token, _expires_at = sfu.mint_token(
+        api_key=api_key,
+        api_secret=api_secret,
+        identity=_POLICY_IDENTITY,
+        room=room,
+        role="operator",
+        ttl_seconds=_TOKEN_TTL_S,
+    )
+    return SfuTransport(
+        url=sfu.local_url(),
+        room=room,
+        api_key=api_key,
+        api_secret=api_secret,
+        token=token,
+        policy_token=policy_token,
+    )
 
 
 def _sfu_key_file() -> str:
@@ -680,10 +663,11 @@ def _sfu_key_file() -> str:
 class ResolvedTransport:
     """Where the two halves of a remote run meet, resolved ONCE.
 
-    The SFU-first ladder of :func:`resolve_transport`, as a value. `missing` is
-    non-empty only on the LiveKit Cloud path and then nothing else in here is
-    meaningful; `child_token` is the parent-signed JWT the SFU path hands the
-    child and is empty on the Cloud path, where the child mints its own.
+    :func:`resolve_transport` as a value. `configured` is False only when this
+    process runs no SFU, and then nothing else in here is meaningful.
+    `child_token` is the robot-role JWT the child joins with, `policy_token`
+    the operator-role JWT the GPU side joins with; `api_key`/`api_secret` are
+    for the parent's own in-process room probe and go NOWHERE else.
     """
 
     url: str
@@ -691,19 +675,33 @@ class ResolvedTransport:
     api_key: str
     api_secret: str
     child_token: str
+    policy_token: str
     source: str
-    missing: tuple[str, ...]
+    configured: bool
+
+
+_UNCONFIGURED = ResolvedTransport(
+    url="",
+    room="",
+    api_key="",
+    api_secret="",
+    child_token="",  # noqa: S106  # nosec B106 — an empty JWT: "no SFU, nothing to sign"
+    policy_token="",  # noqa: S106  # nosec B106 — same
+    source="none",
+    configured=False,
+)
 
 
 def resolve_transport() -> ResolvedTransport:
     """THE credential resolution — the session's preflight, the transport
     endpoint and `modal_launcher` all call this and nothing else.
 
-    Two mutually exclusive paths, and the SFU wins: when this process runs one,
-    that is where the room is, and reading a LiveKit Cloud file to dial past
-    our own server would be a config error waiting to happen. On the Cloud path
-    we READ and never load — `_env.load_env` writes os.environ, and a server
-    that has stamped a url into its own environment can never re-resolve it.
+    One path: the Lab's own SFU. When this process runs one, that is where the
+    room is, and the url, the room and both participants' tokens are minted
+    here from the 0600 key file. When it does not, there is no transport —
+    remote inference has no other, by the same decision that gave remote
+    teleoperation none: the secret stays in this process and every join is a
+    short-lived, role-scoped token from it.
 
     Why one function rather than three call sites that happen to agree: the GPU
     side and the robot side meeting in DIFFERENT ROOMS is invisible by
@@ -715,34 +713,21 @@ def resolve_transport() -> ResolvedTransport:
     Raises `OSError`/`RuntimeError` from the SFU key file, as
     :func:`_sfu_transport` does: the launcher wrote that file before the app
     started, so an unreadable one is a broken install and not a configuration
-    the caller can repair. Total otherwise — a Cloud path with nothing
-    configured comes back with every variable in `missing`.
+    the caller can repair. Total otherwise — no SFU comes back as the
+    `_UNCONFIGURED` value.
     """
-    if sfu.sfu_enabled():
-        transport = _sfu_transport()
-        return ResolvedTransport(
-            url=transport.url,
-            room=transport.room,
-            api_key=transport.api_key,
-            api_secret=transport.api_secret,
-            child_token=transport.token,
-            source="sfu",
-            missing=(),
-        )
-    # `_read_env` is None only when the `[remote]` extra is absent. Both session
-    # callers gate on `_extra_missing()` long before this, so the fallback is
-    # for the launcher's benefit: "nothing is configured" is the honest answer
-    # there, and it carries the same remedy.
-    env = _read_env() if _read_env is not None else {}
-    url = env.get("LIVEKIT_URL", "")
+    if not sfu.sfu_enabled():
+        return _UNCONFIGURED
+    transport = _sfu_transport()
     return ResolvedTransport(
-        url=url,
-        room=env.get("LIVEKIT_ROOM", ""),
-        api_key=env.get("LIVEKIT_API_KEY", ""),
-        api_secret=env.get("LIVEKIT_API_SECRET", ""),
-        child_token="",  # noqa: S106  # nosec B106 — an empty JWT: "the child mints its own"
-        source=_transport_source(url),
-        missing=tuple(_missing_credentials(env)),
+        url=transport.url,
+        room=transport.room,
+        api_key=transport.api_key,
+        api_secret=transport.api_secret,
+        child_token=transport.token,
+        policy_token=transport.policy_token,
+        source="sfu",
+        configured=True,
     )
 
 
@@ -805,7 +790,7 @@ def _probe_room(url: str, key: str, secret: str, room: str) -> RoomProbe:
     the signaling endpoint is down, an auth error means the credentials are
     wrong, and the participant list says whether a policy is there to talk to.
     The twirp client normalizes `ws://` → `http://` itself, so a local SFU's
-    `ws://127.0.0.1:7880` and a cloud `wss://…` both work unchanged.
+    `ws://127.0.0.1:7880` and a `wss://…` one both work unchanged.
 
     Synchronous by design — it runs on the request thread, bounded by
     `_PROBE_TIMEOUT_S`, before anything is energized. `asyncio.run` is safe
@@ -1042,8 +1027,8 @@ def _watchdog_failure_locked() -> str | None:
         room = (_transport or {}).get("room", "the room")
         return (
             f"No policy joined room '{room}' within {_ACTIVE_TIMEOUT_S:.0f}s of connecting. "
-            "Start the GPU side (modal run makermodslab/drtc/modal_policy.py), and check that "
-            "its LiveKit-cloud secret names this same room."
+            "Start the GPU side (Start GPU, or the modal run line in the panel), and check that "
+            "its --livekit-room names this same room."
         )
     if _chunks == 0 and now - _active_at >= _CHUNK_TIMEOUT_S:
         return (
@@ -1503,12 +1488,12 @@ def handle_start_remote_inference(request: RemoteInferenceRequest) -> dict[str, 
             f"couldn't be read: {exc}",
             "code": ErrorCode.TRANSPORT_NOT_CONFIGURED,
         }
-    if resolved.missing:
+    if not resolved.configured:
         _release_slot()
         return {
             "success": False,
             "status_code": 400,
-            "message": f"LiveKit credentials are incomplete (missing {', '.join(resolved.missing)}). "
+            "message": "This Lab isn't running its LiveKit SFU, so there is no room for a remote run. "
             + transport_hint(ErrorCode.TRANSPORT_NOT_CONFIGURED),
             "code": ErrorCode.TRANSPORT_NOT_CONFIGURED,
         }
@@ -1874,18 +1859,18 @@ def handle_remote_inference_transport() -> dict[str, Any]:
     state distinct from "false": "we never asked" and "we asked and the SFU is
     down" have nothing in common as remedies.
 
-    Two transports, reported through one shape. When this process runs the
-    Lab's own SFU (`makermodslab --sfu`) the url, room and credentials are
-    resolved in-process from the 0600 key file and `livekit.env` is not read at
-    all; otherwise the LiveKit Cloud credentials are read afresh (never cached,
-    never `load_env`) so an edited file takes effect on the next call.
+    One transport: the Lab's own SFU (`makermodslab --sfu`). The url, the room
+    and the tokens are resolved in-process from the 0600 key file on every
+    call, never cached; without the flag the payload says so and nothing is
+    probed.
 
-    The `sfu_*` block is what the panel needs to write the OTHER terminal's
-    `modal run` line: the key NAME (an identifier, not a secret), the file the
-    secret is in — so a human can read it — and the tailnet URL a container can
-    actually dial. **The API secret itself is never returned.** A status
-    endpoint that hands out a signing key is a credential leak wearing a
-    diagnostic hat.
+    The `sfu_*` block plus `policy_token` is what the panel needs to write the
+    OTHER terminal's `modal run` line: the tailnet URL a container can actually
+    dial, and the operator-role JWT the GPU side joins with. That token is the
+    same thing `POST /api/v1/sfu/token` hands any caller — short-lived, one
+    room, one identity — and it is the ONLY credential this route returns.
+    **The API secret itself is never returned.** A status endpoint that hands
+    out a signing key is a credential leak wearing a diagnostic hat.
 
     Synchronous on purpose. `_probe_room` runs `asyncio.run` internally, which
     RAISES inside a running loop — as a plain `def` this handler is dispatched
@@ -1897,20 +1882,18 @@ def handle_remote_inference_transport() -> dict[str, Any]:
     payload: dict[str, Any] = {
         "extra_installed": True,
         "configured": False,
-        "missing_vars": list(_REQUIRED_ENV),
         "url": "",
         "room": "",
-        "source": "none",
+        "source": _transport_source(),
         "sfu_enabled": enabled,
         "sfu_url": None,
         "sfu_modal_url": None,
         "sfu_external_ip": sfu.external_ip_enabled(),
-        "sfu_key_id": None,
-        "sfu_key_file": _sfu_key_file() if enabled else None,
         # Present ONLY when the binary is missing: an install hint beside a
         # working SFU is noise, and its absence is how the panel knows not to
         # offer the "start it with --sfu" line as if it were achievable.
         "sfu_install_hint": (None if sfu.find_livekit_server() else sfu.install_hint(platform.system())),
+        "policy_token": None,
         "endpoint_reachable": None,
         "operator_present": None,
         "error_code": None,
@@ -1940,38 +1923,34 @@ def handle_remote_inference_transport() -> dict[str, Any]:
         )
         return payload
 
+    if not resolved.configured:
+        payload["error_code"] = str(ErrorCode.TRANSPORT_NOT_CONFIGURED)
+        payload["message"] = "This Lab isn't running its LiveKit SFU. " + transport_hint(
+            ErrorCode.TRANSPORT_NOT_CONFIGURED
+        )
+        return payload
+
     payload |= {
-        "configured": not resolved.missing,
-        "missing_vars": list(resolved.missing),
+        "configured": True,
         "url": resolved.url,
         "room": resolved.room,
         "source": resolved.source,
+        "sfu_url": resolved.url,
+        "sfu_modal_url": sfu_modal_url(),
+        # The operator-role token, never the secret: what `POST /sfu/token`
+        # would mint for the same identity, so nothing new is exposed here.
+        "policy_token": resolved.policy_token,
     }
-    if enabled:
-        payload |= {
-            "sfu_url": resolved.url,
-            "sfu_modal_url": sfu_modal_url(),
-            # The key ID, never the secret. It is the `--livekit-api-key` half
-            # of the Modal line and it identifies rather than authorizes.
-            "sfu_key_id": resolved.api_key,
-        }
-    if resolved.missing:
-        payload["error_code"] = str(ErrorCode.TRANSPORT_NOT_CONFIGURED)
-        payload["message"] = (
-            f"LiveKit credentials are incomplete (missing {', '.join(resolved.missing)}). "
-            + transport_hint(ErrorCode.TRANSPORT_NOT_CONFIGURED)
-        )
-        return payload
     key, secret = resolved.api_key, resolved.api_secret
 
-    url, room, source = payload["url"], payload["room"], payload["source"]
+    url, room = resolved.url, resolved.room
     probe = _probe_room(url, room=room, key=key, secret=secret)
     payload["endpoint_reachable"] = probe.reachable
     payload["operator_present"] = probe.operator_present
     if not probe.reachable:
         payload["error_code"] = str(ErrorCode.TRANSPORT_UNREACHABLE)
         payload["message"] = f"Couldn't reach the LiveKit server at {url}. " + transport_hint(
-            ErrorCode.TRANSPORT_UNREACHABLE, sfu=source == "sfu"
+            ErrorCode.TRANSPORT_UNREACHABLE, sfu=True
         )
     elif not probe.authorized:
         payload["error_code"] = str(ErrorCode.TRANSPORT_UNAUTHORIZED)
@@ -1984,24 +1963,19 @@ def handle_remote_inference_transport() -> dict[str, Any]:
             ErrorCode.TRANSPORT_NO_POLICY, room=room
         )
     else:
-        payload["message"] = _ready_message(url, room, source)
+        payload["message"] = _ready_message(url, room)
     return payload
 
 
-def _ready_message(url: str, room: str, source: str) -> str:
-    """The success line: what resolved, and which of the two transports it is.
+def _ready_message(url: str, room: str) -> str:
+    """The success line: what resolved, and what the GPU side has to be told.
 
-    Naming the transport on the HAPPY path matters as much as on the
-    unreachable one. Under the Lab's own SFU everything a peer needs is minted
-    here and the GPU side has to be pointed at THIS machine explicitly; on
-    LiveKit Cloud both ends read their own credentials and the room is the only
-    thing that has to agree. An operator reading "it works" without knowing
-    which of those they are in cannot tell what to change when it stops
-    working."""
-    if source == "sfu":
-        return (
-            f"A policy is in room '{room}' at {url} — the Lab's own SFU. The GPU side must be "
-            "launched with the --livekit-url/--livekit-api-key/--livekit-api-secret from the "
-            "command above."
-        )
-    return f"A policy is in room '{room}' at {url} (LiveKit Cloud credentials from livekit.env)."
+    Everything a peer needs is minted here, and the GPU side has to be pointed
+    at THIS machine explicitly — so the happy path names the flags, because an
+    operator reading "it works" without knowing what the other half was started
+    with cannot tell what to change when it stops working."""
+    return (
+        f"A policy is in room '{room}' at {url} — the Lab's own SFU. The GPU side must be "
+        "launched with the --livekit-url, --livekit-room and --livekit-token from the "
+        "command above."
+    )

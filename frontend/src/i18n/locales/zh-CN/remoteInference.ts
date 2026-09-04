@@ -63,9 +63,8 @@ export default {
     copyFailedTitle: "复制失败",
     copyFailedBody: "请手动选中命令并复制。",
     noRoomYet: "尚未解析出房间 — 请先在下方重新检查传输，然后再复制命令。",
-    // <0> 是字面占位符，<1> 是字面路径，二者都是标识符，保持拉丁字符。
-    secretsHint:
-      "请把 <0>{{placeholder}}</0> 替换为 <1>{{path}}</1> 中该 key id 对应的 secret。命令中的 key id 是真实值；MakerMods Lab 的接口从不返回 secret。",
+    tokenHint:
+      "命令中的 token 由本 MakerMods Lab 为 GPU 端签发：只能进入这个房间、只对应一个身份，约一小时后过期 — 如果命令放了一段时间，请重新复制。MakerMods Lab 的接口从不返回签名用的 secret。",
     noTailnetUrl:
       "没有 tailnet 地址，命令中也就没有可供 GPU 端拨号的 URL。请在本机登录 Tailscale，然后重新检查传输。",
   },
@@ -126,15 +125,14 @@ export default {
     sourceLabel: "读取自",
     source: {
       sfu: "MakerMods Lab 自带的 SFU",
-      cloud: "livekit.env（LiveKit Cloud）",
-      process_env: "本进程的环境变量",
-      none: "无来源 — 尚未配置任何内容",
+      none: "无来源 — MakerMods Lab 未运行自带的 SFU",
     },
     urlLabel: "URL",
     roomLabel: "房间",
     credentialsLabel: "凭据",
-    configured: "齐全",
-    missingVars: "缺少 {{vars}}",
+    configured: "本机签发",
+    // "--sfu" 是命令行标志名，保留拉丁字符。
+    notConfigured: "无 — 请用 --sfu 启动 MakerMods Lab",
     reachableLabel: "端点",
     reachable: "有响应",
     unreachable: "无响应",
@@ -143,19 +141,17 @@ export default {
     operatorPresent: "已在房间中",
     operatorAbsent: "不在房间中",
     extraMissing:
-      "未安装可选的 drtc 附加依赖，因此无法进行任何检查。请在主检出目录中安装 — 在 worktree 中执行可编辑安装会让其他所有会话都指向该目录。",
+      "未安装可选的 remote 附加依赖，因此无法进行任何检查。请在主检出目录中安装 — 在 worktree 中执行可编辑安装会让其他所有会话都指向该目录。",
     sfuRunningTitle: "本机的 LiveKit 服务器",
     sfuModalUrlLabel: "供 GPU 使用的地址",
     sfuNoTailnet: "没有 tailnet 地址",
-    sfuKeyIdLabel: "Key id",
-    sfuKeyFileLabel: "Secret 位于",
     sfuExternalIpLabel: "对外媒体地址",
     sfuExternalIpOn: "已公布",
     sfuExternalIpOff: "未公布",
     sfuExternalIpHint:
       "不公布的话，远端 GPU 能连上本服务器打个招呼，却无法发送视频或动作。请用下面的参数重启 MakerMods Lab 来开启它。",
     sfuNotRunning:
-      "本 MakerMods Lab 未运行 LiveKit 服务器。可以用下面的参数启动它，也可以保持关闭并改用 livekit.env 里的 LiveKit Cloud 凭据。",
+      "本 MakerMods Lab 未运行 LiveKit 服务器，远程运行也就没有与 GPU 会合的地方。请用下面的参数启动 MakerMods Lab。",
   },
   phase: {
     idle: "未运行",

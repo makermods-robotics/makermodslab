@@ -290,27 +290,20 @@ _REMOTE_OPTIONS = {"policy_ref": "job:1:step:1000"}
 def remote_preflight(monkeypatch):
     """Make remote_inference's transport ladder pass without touching a network.
 
-    The rungs before the ARM checks are the extra, the credentials and one
+    The rungs before the ARM checks are the extra, the Lab's own SFU (the one
+    transport — its key file and server are stubbed here, never run) and one
     `list_participants` call; a test that wants to reach the arm-type or
     arm-count rung has to get past all three, and `_probe_room` is the single
     seam that keeps this offline (livekit-api is aiohttp-based, so
-    httpx.MockTransport does not apply). `_read_env` is stubbed too — without
-    it the handler would read the developer's REAL ~/.cache livekit.env, which
-    the tmp_lerobot_home fixture does not redirect."""
+    httpx.MockTransport does not apply)."""
     from makermodslab import remote_inference as ri
 
     monkeypatch.setattr(ri, "_extra_missing", lambda: False)
-    monkeypatch.setattr(
-        ri,
-        "_read_env",
-        lambda: {
-            "LIVEKIT_URL": "wss://x.livekit.cloud",
-            "LIVEKIT_ROOM": "portal-lerobot-inference",
-            "LIVEKIT_API_KEY": "key",
-            "LIVEKIT_API_SECRET": "secret",
-        },
-    )
-    monkeypatch.setattr(ri, "_transport_source", lambda url: "cloud")
+    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(ri.sfu, "api_keys", lambda *a, **k: ("APIkey123", "s3cret"))
+    monkeypatch.setattr(ri.sfu, "local_url", lambda *a, **k: "ws://127.0.0.1:7880")
+    monkeypatch.setattr(ri.sfu, "default_room", lambda instance_id: "mml-abcdef012345")
+    monkeypatch.setattr(ri.sfu, "mint_token", lambda **kw: (f"jwt.{kw['identity']}", 0))
     monkeypatch.setattr(
         ri, "_probe_room", lambda *a, **k: ri.RoomProbe(True, True, True, operator_present=True)
     )

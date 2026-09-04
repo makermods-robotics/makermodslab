@@ -74,10 +74,8 @@ export default {
     copyFailedBody: "Select the command and copy it by hand.",
     noRoomYet:
       "No room resolved yet — re-check the transport below, then copy the command again.",
-    // <0> is the literal placeholder text and <1> the literal key-file path.
-    // Both are identifiers and stay in the Latin script.
-    secretsHint:
-      "Replace <0>{{placeholder}}</0> with the secret beside that key id in <1>{{path}}</1>. The key id in the line is real; the Lab never sends the secret over its own API.",
+    tokenHint:
+      "The token in the line was signed by this Lab for the GPU side: it opens this room only, under one identity, and expires after about an hour — copy the line again if it has been sitting. The Lab never sends its signing secret over its own API.",
     noTailnetUrl:
       "No tailnet address, so the command has no URL for the GPU side to dial. Sign in to Tailscale on this machine and re-check the transport.",
   },
@@ -141,16 +139,14 @@ export default {
     sourceLabel: "Read from",
     source: {
       sfu: "the Lab's own SFU",
-      cloud: "livekit.env (LiveKit Cloud)",
-      process_env: "this process's environment",
-      none: "nowhere — nothing is configured",
+      none: "nowhere — the Lab isn't running its SFU",
     },
     urlLabel: "URL",
     roomLabel: "Room",
     credentialsLabel: "Credentials",
-    configured: "all present",
-    // {{vars}} is a list of environment variable NAMES — data, shown verbatim.
-    missingVars: "missing {{vars}}",
+    configured: "signed here",
+    // "--sfu" is a flag name, kept in the Latin script.
+    notConfigured: "none — start the Lab with --sfu",
     reachableLabel: "Endpoint",
     reachable: "answering",
     unreachable: "not answering",
@@ -159,19 +155,17 @@ export default {
     operatorPresent: "in the room",
     operatorAbsent: "not in the room",
     extraMissing:
-      "The optional drtc extra isn't installed, so nothing could be checked. Install it from the primary checkout — an editable install run from a worktree re-points every other session.",
+      "The optional remote extra isn't installed, so nothing could be checked. Install it from the primary checkout — an editable install run from a worktree re-points every other session.",
     sfuRunningTitle: "This machine's LiveKit server",
     sfuModalUrlLabel: "Address for the GPU",
     sfuNoTailnet: "no tailnet address",
-    sfuKeyIdLabel: "Key id",
-    sfuKeyFileLabel: "Secret is in",
     sfuExternalIpLabel: "Public media address",
     sfuExternalIpOn: "advertised",
     sfuExternalIpOff: "not advertised",
     sfuExternalIpHint:
       "Without it a remote GPU can reach this server to say hello but has no way to send video or actions. Restart the Lab with the flag below to turn it on.",
     sfuNotRunning:
-      "This Lab isn't running a LiveKit server. Start it with the flags below, or leave it off and use LiveKit Cloud credentials from livekit.env.",
+      "This Lab isn't running a LiveKit server, and a remote run has nowhere to meet its GPU. Start the Lab with the flags below.",
   },
   // Backend phase values. Matched on, never displayed raw — the raw value is
   // the fallback for a phase a newer server introduces.

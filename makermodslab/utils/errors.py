@@ -112,21 +112,18 @@ def classify_outcome(work_completed: bool, error_text: str | None) -> str:
 # The remedy for each `transport.*` refusal (see api_errors.ErrorCode), as
 # prose the preflight appends to its message. Kept here, beside friendly_hint,
 # because it is the same job — a plain-language, actionable headline — and
-# because it must stay PURE: the one branch that depends on the machine's state
-# (is the Lab's own SFU the transport?) is passed IN rather than read here, so
-# the wording is unit-testable without touching the filesystem.
-_TRANSPORT_ENV_FILE = "~/.cache/huggingface/lerobot/livekit.env"
+# because it must stay PURE: nothing here reads the machine's state, so the
+# wording is unit-testable without touching the filesystem.
 
 
-def transport_hint(code: str, *, sfu: bool = False, room: str = "") -> str:
+def transport_hint(code: str, *, sfu: bool = True, room: str = "") -> str:
     """What to do about a `transport.*` refusal. Always a non-empty sentence.
 
-    `sfu` is whether the transport in force is the Lab's OWN SFU
-    (`makermodslab --sfu`) rather than LiveKit Cloud. The two have disjoint
-    remedies — one is a process on this machine, the other a file of
-    credentials — and an "unreachable" that does not say which sends the
-    operator to check their internet connection when the answer was a flag
-    they did not pass.
+    The transport is the Lab's OWN SFU (`makermodslab --sfu`) — the one
+    remote teleoperation and remote inference share — so every remedy here is
+    about a process on this machine, never about a file of credentials. `sfu`
+    is kept for the callers that still pass it; it no longer selects a second
+    set of remedies.
     """
     code = str(code)
     if code.endswith("extra_missing"):
@@ -140,36 +137,28 @@ def transport_hint(code: str, *, sfu: bool = False, room: str = "") -> str:
         )
     if code.endswith("not_configured"):
         return (
-            f"Put LIVEKIT_URL, LIVEKIT_ROOM, LIVEKIT_API_KEY and LIVEKIT_API_SECRET in "
-            f"{_TRANSPORT_ENV_FILE} (see docs/drtc/livekit.env.example)."
+            "Start the Lab with `makermodslab --sfu` (add `--sfu-external-ip` for a Modal GPU): "
+            "it runs the LiveKit server the two sides meet on and signs every join itself."
         )
     if code.endswith("unreachable"):
-        if sfu:
-            return (
-                "The Lab's SFU isn't answering — was the Lab started with `--sfu`? It runs as a "
-                "child of the launcher, so it stops with the Lab and a reload does not bring it "
-                "back on its own."
-            )
         return (
-            "Check the URL and this machine's network. If the address should be a LiveKit Cloud "
-            f"project, check LIVEKIT_URL in {_TRANSPORT_ENV_FILE}; if it should be a local SFU, "
-            "start the Lab with `makermodslab --sfu` and it will mint its own."
+            "The Lab's SFU isn't answering — was the Lab started with `--sfu`? It runs as a "
+            "child of the launcher, so it stops with the Lab and a reload does not bring it "
+            "back on its own."
         )
     if code.endswith("unauthorized"):
         return (
-            f"LIVEKIT_API_KEY and LIVEKIT_API_SECRET in {_TRANSPORT_ENV_FILE} must be the pair "
-            "the LiveKit Cloud project issued. (Under the Lab's own SFU nothing reads that file: "
-            "the key pair is minted once into ~/.cache/huggingface/lerobot/livekit_keys.yaml and "
-            "the server signs with it directly.)"
+            "The SFU rejected the key pair the Lab signs with. The pair is minted once into "
+            "the key file under MAKERMODSLAB_HOME (livekit_keys.yaml) and the running server "
+            "reads the same file; delete it and restart the Lab to rotate both together."
         )
     if code.endswith("no_policy"):
         where = f" '{room}'" if room else ""
         return (
-            f"Three things do this: the GPU side was never started (modal run "
-            f"makermodslab/drtc/modal_policy.py); its Modal 'LiveKit-cloud' secret sets a "
-            f"LIVEKIT_ROOM different from{where or ' yours'} — the Lab cannot read that secret, so "
-            "this is the one mismatch it can't detect for you; or the container's TS_AUTHKEY "
-            "expired, so it never made it onto the tailnet to join at all."
+            "Three things do this: the GPU side was never started (Start GPU, or the modal run "
+            f"line in the panel); it was started with a --livekit-room other than{where or ' yours'} "
+            "— the panel's line and the launcher both pin it, a hand-typed one may not; or the "
+            "container's TS_AUTHKEY expired, so it never made it onto the tailnet to join at all."
         )
     return "Check the LiveKit transport settings and try again."
 

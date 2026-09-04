@@ -56,21 +56,30 @@ Everything else in `makermodslab/drtc/` imports `livekit.portal` at module top.
 
 ## Transport
 
-Two, and the Lab picks between them with no configuration:
+One: the Lab's own SFU. It is the transport remote teleoperation and remote
+inference share, and remote inference has no other.
 
-### The Lab's own SFU (`makermodslab --sfu`) — the normal path
+### The Lab's own SFU (`makermodslab --sfu`)
 
 The Lab runs `livekit-server` itself, as a child of the launcher (not of the
 app — `uvicorn --reload` restarts the app on every save and the SFU must
-outlive that). When it is up, a remote-inference session takes **everything**
-from it in-process and reads no credential file at all:
+outlive that). A remote-inference session takes **everything** from it
+in-process and reads no credential file at all:
 
-- the url the child dials — `ws://127.0.0.1:7880` (`sfu.local_url()`);
+- the url the child dials — the bind host (`sfu.local_url()`);
 - the room — `mml-<instance id prefix>` (`sfu.default_room`), one per station;
-- the child's **token**, signed here with the key file's secret and passed on
-  its argv as `--livekit_token`. The child therefore never holds an API secret;
-  the secret lives only in `~/.cache/huggingface/lerobot/livekit_keys.yaml`
-  (mode 0600, minted on the first `--sfu` run — delete it to rotate).
+- the child's **token** (robot role), signed here with the key file's secret
+  and passed on its argv as `--livekit_token`;
+- the GPU side's **token** (operator role, identity `policy` — the one the
+  room probe looks for), handed to the Modal container by the launcher as
+  `LIVEKIT_TOKEN` in its environment, or by the Deploy panel's generated line
+  as `--livekit-token`.
+
+Neither participant ever holds an API secret; the secret lives only in
+`livekit_keys.yaml` under `MAKERMODSLAB_HOME` (mode 0600, minted on the first
+`--sfu` run — delete it to rotate). Without `--sfu` the session refuses with
+`transport.not_configured`, the transport endpoint says so, and Start GPU
+refuses with `gpu.launch_failed` — all three naming the flag.
 
 ```bash
 makermodslab --dev --sfu --bind <tailnet-ip> --sfu-external-ip   # or without --dev
@@ -96,47 +105,22 @@ Three flags, three jobs:
   needs UDP 7882 reachable here; forward it if your NAT defeats hole punching.
 
 The Deploy panel's transport section reports all of it — whether the SFU is
-running, the key ID, the file its secret is in, whether the public media
-address is advertised, and the **tailnet** URL a container should dial — and
-folds them into the `modal run` line it generates. Copy that line; the only
-thing to fill in by hand is the secret.
+running, whether the public media address is advertised, the **tailnet** URL a
+container should dial, and (in the payload) the operator token — and folds them
+into the `modal run` line it generates. Copy that line as-is; there is nothing
+to fill in by hand. The token expires after an hour, so re-copy a line that has
+been sitting.
 
-### LiveKit Cloud — the fallback
+### Running the entrypoints by hand (bench only)
 
-With no local SFU, `LIVEKIT_URL`, `LIVEKIT_ROOM`, `LIVEKIT_API_KEY` and
-`LIVEKIT_API_SECRET` are read by `_env.read_env()` from **two** sources:
-
-1. `~/.cache/huggingface/lerobot/livekit.env` (`config.DRTC_ENV_PATH`) — the
-   saved credentials, beside the rest of the Lab's persistent state, so a wheel
-   install and a source checkout read the same file. Start from
-   [`livekit.env.example`](livekit.env.example).
-2. The process environment, which wins.
-
-Three rungs were **retired in S3.6** with the shell SFU scripts: a cwd `.env`, a
-cwd `.env.local`, and `livekit.local.env`. All three were cwd-relative or
-`override=True`; a cwd-relative source makes the answer depend on where the Lab
-was started (two "connection refused" false starts on 2026-09-02), and an
-override a long-lived process cannot un-set is a transport that survives the
-deletion of the file naming it.
-
-### `read_env` vs `load_env`
-
-Two entry points, one precedence implementation:
-
-- **`load_env()`** resolves the sources and writes them into `os.environ`. For
-  the CLI entrypoints, whose downstream code (`_common.mint_token`, `policy.py`)
-  reads credentials from the environment.
-- **`read_env() -> dict`** resolves the same sources onto a **copy** of the
-  process environment and hands it back, mutating nothing. `load_env` is
-  implemented on top of it.
-
-Use `read_env` from anything long-lived: it re-resolves from disk on every call,
-so an edited file takes effect without a restart. Both are parametrized over the
-same cases in `tests/test_drtc_env.py`.
-
-One deliberate narrowing: `${VAR}` interpolation inside the file resolves
-against the process environment only. Nothing in `livekit.env.example`
-interpolates.
+`robot_sync` / `robot_rtc` / `policy` / `policy_rtc` can still be run by hand
+against any LiveKit server. With no `--livekit_*` flags they read
+`LIVEKIT_URL`, `LIVEKIT_ROOM` and either `LIVEKIT_TOKEN` or an API key/secret
+to mint one from, from the process environment layered over `livekit.env`
+under `MAKERMODSLAB_HOME` (`_env.load_env`; start from
+[`livekit.env.example`](livekit.env.example)). **The Lab's server never reads
+that file** — every process the Lab starts is handed a station-signed token —
+so it can hold whatever a bench needs without affecting a session.
 
 ## GPU side, on Modal
 
@@ -152,12 +136,12 @@ and stays supported — it is the route when `modal` is missing or not signed in
 when you want `--detach` or a hand-tuned flag, and it is the line to compare
 against when a run connects but receives nothing.
 
-One thing the Lab-launched path does differently: it passes the API key and
-secret in the CHILD'S ENVIRONMENT rather than as flags, because a
-`@local_entrypoint` body runs on your machine and `--livekit-api-secret` would
-put a signing key in `ps`. Both wrappers' `main()` falls back to
-`LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` for that reason; the flags still win
-when present, so every command in this file is unchanged.
+One thing the Lab-launched path does differently: it passes the token in the
+CHILD'S ENVIRONMENT (`LIVEKIT_TOKEN`) rather than as a flag, because a
+`@local_entrypoint` body runs on your machine and `--livekit-token` would put
+a live credential in `ps`. Both wrappers' `main()` falls back to the
+environment for that reason; the flag still wins when present, which is what
+the panel's generated line relies on.
 
 The Modal wrappers are invoked in **file form, from the repo root** — not as
 `python -m`:
@@ -191,30 +175,26 @@ cannot be used because it resolves modules through the _local_ interpreter.
 
 ### Modal secrets
 
-| Secret           | Keys                                                                   | Needed for                                                          |
-| ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `LiveKit-cloud`  | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_ROOM` | always                                                              |
-| `huggingface`    | `HF_TOKEN`                                                             | private/gated checkpoints or base backbones (drop it if all public) |
-| `tailscale-auth` | `TS_AUTHKEY` (REUSABLE + EPHEMERAL)                                    | `--tailscale` only                                                  |
+| Secret           | Keys                                | Needed for                                                          |
+| ---------------- | ----------------------------------- | ------------------------------------------------------------------- |
+| `huggingface`    | `HF_TOKEN`                          | private/gated checkpoints or base backbones (drop it if all public) |
+| `tailscale-auth` | `TS_AUTHKEY` (REUSABLE + EPHEMERAL) | `--tailscale` only                                                  |
 
 ```bash
-modal secret create LiveKit-cloud \
-    LIVEKIT_URL=wss://<your-project>.livekit.cloud \
-    LIVEKIT_API_KEY=<key> LIVEKIT_API_SECRET=<secret> \
-    LIVEKIT_ROOM=portal-lerobot-inference
 modal secret create huggingface HF_TOKEN=hf_...
 modal secret create tailscale-auth TS_AUTHKEY=tskey-...
 ```
 
-`--livekit-url` / `--livekit-api-key` / `--livekit-api-secret` / `--livekit-room`
-are all per-run flags; each unset one falls through to the `LiveKit-cloud`
-secret, so every pre-existing invocation is unchanged. `--livekit-room` was
-added on 2026-09-02 and closes a failure class that used to be silent: the room
-came _only_ from the secret, and two peers in different rooms never see each
-other — the robot reports a healthy connection with zero chunks forever. A
-launcher that already knows which room the robot joined can now pin the GPU to
-it. `modal_policy.py` records the room in its `/reset` `modal.Dict` too, so a
-respawn lands in the same room.
+There is no LiveKit secret. The connection — `--livekit-url`,
+`--livekit-room`, `--livekit-token` — is per-station and per-run, so it rides
+the command line (or, from the Lab's launcher, the child environment), and the
+token is one the station signed for this run's identity; the station's API key
+and secret never reach Modal. `--livekit-room` closes a failure class that used
+to be silent: two peers in different rooms never see each other — the robot
+reports a healthy connection with zero chunks forever — so the launcher and the
+panel's line both pin it. `modal_policy.py` records the room in its `/reset`
+`modal.Dict` too, so a respawn lands in the same room (with the token it was
+started with — past the token's hour, start a fresh run instead).
 
 `--fps` / `--horizon` / `--video-codec` must match the robot's flags, and for
 the RTC pair `--s-min` must match `robot_rtc`'s `--s_min` too.

@@ -12,31 +12,29 @@ import type { Fetcher } from "@/lib/apiClient";
  * `list_participants` call against the SFU, so it is fetched when the panel
  * asks rather than on a timer.
  *
- * Two transports arrive through one shape. When the Lab was started with
- * `--sfu` it hosts the LiveKit server itself and mints the url, the room and
- * the robot child's token in-process; otherwise it falls back to LiveKit Cloud
- * credentials in `livekit.env`. `sfu_enabled` selects which, and the whole
- * `sfu_*` block is null/false in the Cloud case.
+ * One transport: the Lab's own SFU. Started with `--sfu`, the Lab hosts the
+ * LiveKit server itself and mints the url, the room and every participant's
+ * token in-process — the robot child's and the GPU side's (`policy_token`).
+ * Without the flag there is nothing to resolve: `configured` is false, the
+ * whole `sfu_*` block is null/false, and the remedy is the flag.
  *
  * There is NO mutation on this surface any more. `clearLocalOverride()` went
  * with the shell SFU scripts in S3.6 — the dotenv override it deleted was
  * written by a script that no longer exists.
  */
 
-/** Which layer supplied LIVEKIT_URL. `sfu` means the Lab's own server, where
- * nothing on disk is consulted at all; the other three are the LiveKit Cloud
- * fallback, and they are three different remedies ("your shell exported
- * LIVEKIT_URL" and "livekit.env says so" are not the same problem). */
-export type TransportSource = "sfu" | "cloud" | "process_env" | "none";
+/** Which layer supplied the transport. `sfu` means the Lab's own server,
+ * where nothing on disk is consulted at all; `none` means the Lab was started
+ * without `--sfu`. There is no other transport. */
+export type TransportSource = "sfu" | "none";
 
 export interface RemoteInferenceTransportStatus {
   /** The optional `[remote]` extra. False ⇒ the probe did not run and the four
    * probe-shaped fields below are null. */
   extra_installed: boolean;
-  /** All four LIVEKIT_* vars resolved. */
+  /** The Lab runs its SFU and its key file is readable — url, room and
+   * tokens were minted in-process. */
   configured: boolean;
-  /** Empty when `configured`. Variable NAMES — data, never translated. */
-  missing_vars: string[];
   /** "" when unresolved — never null. Data. */
   url: string;
   /** Room NAME — data. */
@@ -56,14 +54,14 @@ export interface RemoteInferenceTransportStatus {
    * --sfu-external-ip). Without it a container can reach signalling over the
    * tailnet and still never punch a media path. */
   sfu_external_ip: boolean;
-  /** The key's NAME — the `--livekit-api-key` half of the Modal line. It
-   * identifies rather than authorizes. THE SECRET IS NEVER RETURNED. Data. */
-  sfu_key_id: string | null;
-  /** Where the secret actually lives, for a human to read. Data. */
-  sfu_key_file: string | null;
   /** The per-OS install line, present ONLY when `livekit-server` is missing
    * from PATH. Backend prose — shown verbatim. */
   sfu_install_hint: string | null;
+  /** The OPERATOR-role JWT the GPU side joins with — the `--livekit-token`
+   * half of the Modal line, null when unconfigured. Short-lived and scoped to
+   * one room and one identity; the same thing `POST /api/v1/sfu/token` hands
+   * any caller. THE SIGNING SECRET IS NEVER RETURNED. Data. */
+  policy_token: string | null;
   /** NULL (not false) when the probe did not run: no extra, or not
    * configured. A third state, and the panel must render it as one. */
   endpoint_reachable: boolean | null;

@@ -19,9 +19,12 @@ On a GPU box you already own, it is also a plain `python -m` entrypoint::
 
 The policy type is auto-detected from the checkpoint. The wire schema (state
 dim, action dim, camera names, horizon) is derived from the loaded policy — see
-`_schema.py`. LiveKit creds + room come from `_env.load_env` (saved credentials
-in `~/.cache/huggingface/lerobot/livekit.env`, or the Modal secret in a
-container; see `docs/drtc/README.md`).
+`_schema.py`. The LiveKit connection comes from the environment: `LIVEKIT_URL`,
+`LIVEKIT_ROOM` and the station-signed `LIVEKIT_TOKEN` (what the Lab's launcher
+and the Deploy panel's line hand a container). Run by hand on a bench,
+`_env.load_env` layers `livekit.env` under the environment and an API
+key/secret there can mint the token instead; the Lab itself never uses that
+path (see `docs/drtc/README.md`).
 
 `--task` is REQUIRED for a language-conditioned policy (see `load_policy`), and
 `--model-dtype` optionally overrides the checkpoint's saved precision.
@@ -55,7 +58,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
 from ..utils.system import molmoact2_inference_action_mode, policy_requires_task
-from ._common import fmt_us, load_env, mint_token, required_env
+from ._common import env_str, fmt_us, load_env, mint_token, required_env
 from ._schema import CHUNK_NAME, IMAGE_PREFIX, policy_wire_schema
 
 IDENTITY = "policy"
@@ -298,7 +301,10 @@ async def main() -> None:
     load_env()
     url = required_env("LIVEKIT_URL")
     room = required_env("LIVEKIT_ROOM")
-    token = mint_token(IDENTITY, room)
+    # The station-signed operator token (what the Lab's launcher and the Deploy
+    # panel's line hand over) wins; minting from an API key/secret in the
+    # environment is the hand-run bench fallback only.
+    token = env_str("LIVEKIT_TOKEN", "") or mint_token(IDENTITY, room)
     fps = args.fps
     horizon = args.horizon
     duration = args.duration

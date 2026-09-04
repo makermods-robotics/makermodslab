@@ -49,14 +49,15 @@ export interface ModalRunLineInput {
    * child uses; on LiveKit Cloud it is unused (the container's secret carries
    * its own). */
   url: string;
-  /** Which layer supplied the transport. Only `sfu` needs the tailnet flags:
-   * a Cloud URL is reachable from a Modal container as-is, and the container's
-   * own `LiveKit-cloud` secret already holds the credentials for it. */
+  /** Which layer supplied the transport: `sfu` (the Lab's own server — the
+   * only one there is) or `none`. The tailnet block below is emitted for
+   * `sfu` alone; with `none` there is no room to join. */
   source: TransportSource;
-  /** The `--livekit-api-key` value: the key's NAME, which the API does expose
-   * because it identifies rather than authorizes. Empty ⇒ a placeholder is
-   * emitted instead. */
-  sfuKeyId: string;
+  /** The `--livekit-token` value: the OPERATOR-role JWT the station signed
+   * for the GPU side's identity, reported by the transport endpoint. Short-
+   * lived and scoped to one room, which is why it may sit on a command line
+   * at all. Empty ⇒ a placeholder is emitted instead. */
+  policyToken: string;
   /** WHICH WORKSPACE PAYS, mirroring what the Lab's own launch does with the
    * same two values: the profile as a `MODAL_PROFILE=` assignment PREFIXING
    * the command (the CLI reads it per process, and `modal profile activate`
@@ -67,22 +68,11 @@ export interface ModalRunLineInput {
   environment: string;
 }
 
-/** Literal stand-in for the API SECRET. The API deliberately never exposes it
- * (a status endpoint that hands out a signing key is a credential leak wearing
- * a diagnostic hat), so the line ships a placeholder and the panel names the
- * file to read it from. The key ID beside it is real — it identifies rather
- * than authorizes. */
-export const LOCAL_SECRET_PLACEHOLDER = "<from livekit_keys.yaml>";
-
-/** Stand-in for a key ID the transport endpoint has not reported yet, so the
- * line stays copy-able (and obviously incomplete) before the SFU is up. */
-export const LOCAL_KEY_ID_PLACEHOLDER = "<key id>";
-
-/** Where the secret actually lives. Mirrors `utils/config.LIVEKIT_KEY_FILE` —
- * a real path, so it is data. The transport endpoint reports the effective one
- * in `sfu_key_file`; this is the fallback for rendering before it has. */
-export const LOCAL_SFU_KEY_FILE =
-  "~/.cache/huggingface/lerobot/livekit_keys.yaml";
+/** Stand-in for a token the transport endpoint has not reported yet, so the
+ * line stays copy-able (and obviously incomplete) before the SFU is up. The
+ * real value is a station-signed, one-room, one-identity JWT; the signing
+ * secret itself is never on this line and never leaves the station. */
+export const TOKEN_PLACEHOLDER = "<token from the transport section>";
 
 /** Stand-in for an unknown Hub id, so the line is still copy-able (and
  * obviously incomplete) before the operator fills the field in. */
@@ -137,22 +127,19 @@ export function buildModalRunLine(input: ModalRunLineInput): string {
     ...(input.engine === "rtc" ? [`--s-min ${input.sMin}`] : []),
     `--video-codec ${input.videoCodec}`,
   ];
-  // The room is what makes the two sides meet. The GPU side otherwise takes it
-  // from the LiveKit-cloud secret's own LIVEKIT_ROOM — which the Lab cannot
-  // read and therefore cannot check — so pinning it here is what removes the
-  // one mismatch that is invisible by construction.
+  // The room is what makes the two sides meet: two peers in different rooms
+  // never see each other and the robot reports a healthy connection with zero
+  // chunks forever, so pinning it here is what removes the one mismatch that
+  // is invisible by construction.
   if (input.room) parts.push(`--livekit-room ${input.room}`);
   // The Lab's own SFU is only reachable from a Modal container over the
-  // tailnet, and its key pair is not the Cloud one the container's secret
-  // carries — so the whole transport has to travel on the command line. The
-  // key ID is real; only the secret is a placeholder.
+  // tailnet, and the container holds no credential of its own — so the whole
+  // transport travels on the command line: the tailnet url and the
+  // station-signed operator token.
   if (input.source === "sfu") {
     parts.push("--tailscale");
     if (input.url) parts.push(`--livekit-url ${input.url}`);
-    parts.push(
-      `--livekit-api-key ${input.sfuKeyId.trim() || LOCAL_KEY_ID_PLACEHOLDER}`,
-    );
-    parts.push(`--livekit-api-secret ${LOCAL_SECRET_PLACEHOLDER}`);
+    parts.push(`--livekit-token ${input.policyToken.trim() || TOKEN_PLACEHOLDER}`);
   }
   return parts.join(" ");
 }

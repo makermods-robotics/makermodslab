@@ -295,9 +295,9 @@ async def run(cfg: RobotSideRTCConfig) -> None:
     url = cfg.livekit_url or required_env("LIVEKIT_URL")
     room = cfg.livekit_room or required_env("LIVEKIT_ROOM")
     # A token handed to us is already scoped to this room and identity and was
-    # signed by whoever owns the SFU's secret (the Lab, under `--sfu`). Minting
-    # our own is the LiveKit Cloud path, and needs the API secret in this
-    # process's environment.
+    # signed by whoever owns the SFU's secret (the Lab, under `--sfu`) — the
+    # only way the Lab ever starts this process. Minting our own from an API
+    # key/secret in the environment is the hand-run bench fallback.
     token = cfg.livekit_token or mint_token(IDENTITY, room)
     # Emitted BEFORE the bus is opened, so a parent that spots a transport
     # mismatch can kill the child before anything is energized.

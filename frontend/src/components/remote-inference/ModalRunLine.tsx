@@ -1,14 +1,10 @@
 import React from "react";
-import { Trans, useTranslation } from "react-i18next";
+import { useTranslation } from "react-i18next";
 import { Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import type { RemoteInferenceTransportStatus } from "@/hooks/useRemoteInferenceTransport";
-import {
-  buildModalRunLine,
-  LOCAL_SECRET_PLACEHOLDER,
-  LOCAL_SFU_KEY_FILE,
-} from "./modalCommand";
+import { buildModalRunLine } from "./modalCommand";
 import type { RemoteRunConfig } from "./remoteRunConfig";
 
 /**
@@ -20,10 +16,11 @@ import type { RemoteRunConfig } from "./remoteRunConfig";
  * side is about to start with — same horizon, same fps, same codec, same room
  * — because a disagreement there is invisible by construction.
  *
- * Under the Lab's own SFU the line also carries the whole transport: the
- * TAILNET url (`sfu_modal_url` — never the loopback one a local child dials,
- * which a Modal container has no route to), the real key ID, and a placeholder
- * for the secret the API deliberately never returns.
+ * The line also carries the whole transport: the TAILNET url
+ * (`sfu_modal_url` — never the loopback one a local child dials, which a
+ * Modal container has no route to) and the OPERATOR-role token the station
+ * signed for the GPU side. The station's signing secret is never on it and
+ * the API deliberately never returns it.
  *
  * The command text itself is DATA: never translated, never reflowed, never
  * case-folded. Only the prose around it is localized.
@@ -60,7 +57,7 @@ const ModalRunLine: React.FC<{
     // --livekit-url rather than offering a loopback one that cannot work.
     url: transport?.sfu_modal_url ?? "",
     source: transport?.source ?? "none",
-    sfuKeyId: transport?.sfu_key_id ?? "",
+    policyToken: transport?.policy_token ?? "",
     // The same two values Start GPU sends, rendered the way the CLI takes
     // them: MODAL_PROFILE= in front, --env as a `modal run` option.
     profile,
@@ -113,20 +110,7 @@ const ModalRunLine: React.FC<{
       {transport?.source === "sfu" ? (
         <>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            {/* <0> and <1> hold a literal placeholder and a literal path —
-                identifiers, so they stay in the Latin script inside whatever
-                sentence a translator writes around them. */}
-            <Trans
-              i18nKey="remoteInference.modalRun.secretsHint"
-              values={{
-                placeholder: LOCAL_SECRET_PLACEHOLDER,
-                path: transport.sfu_key_file ?? LOCAL_SFU_KEY_FILE,
-              }}
-              components={[
-                <code key="0" className="font-mono" />,
-                <code key="1" className="font-mono" />,
-              ]}
-            />
+            {t("remoteInference.modalRun.tokenHint")}
           </p>
           {!transport.sfu_modal_url ? (
             <p className="text-xs text-warn">

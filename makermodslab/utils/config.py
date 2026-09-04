@@ -170,19 +170,17 @@ FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.join(MAKERMODSLAB_HOME, "robots")
 
-# LiveKit CLOUD credentials for remote inference (makermodslab.drtc). A dotenv
-# file holding LIVEKIT_URL / LIVEKIT_ROOM / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
-# It lives beside the rest of our persistent state rather than in the package
-# so a wheel install and a source checkout read the same credentials, and so
-# `.env` never lands inside site-packages.
+# BENCH-ONLY LiveKit credentials for running the drtc entrypoints by hand
+# (`python -m makermodslab.drtc.robot_sync` / `.policy` against some LiveKit
+# server): a dotenv file holding LIVEKIT_URL / LIVEKIT_ROOM and either a
+# LIVEKIT_TOKEN or an API key/secret to mint one from (drtc/_env.py).
 #
-# It is the FALLBACK, not the primary path: when this process runs the bundled
-# SFU (`makermodslab --sfu`, see sfu.py) the session mints its own url, room
-# and token in-process and never reads this file. It is also the only file left
-# in the chain — the cwd `.env` / `.env.local` rungs and the `livekit.local.env`
-# override the retired tools/drtc scripts wrote are gone (S3.6), so the whole
-# precedence is now: process environment, then this file.
-DRTC_ENV_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/livekit.env")
+# THE SERVER NEVER READS IT. Remote inference has one transport, the bundled
+# SFU (`makermodslab --sfu`, sfu.py): the session mints the url, the room and
+# every participant's token in-process from LIVEKIT_KEY_FILE, and the GPU
+# launcher hands the container a token the same way. It lives beside the rest
+# of our state so a wheel install and a source checkout read the same file.
+DRTC_ENV_PATH = os.path.join(MAKERMODSLAB_HOME, "livekit.env")
 
 # Remote-inference session logs, one file per run (remote_inference._LOG_DIR
 # appends "sessions/"). The directory predates the bundled SFU, when the

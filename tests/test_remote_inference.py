@@ -408,29 +408,24 @@ def test_start_refuses_while_a_previous_startup_worker_is_still_alive(
 # ---------------------------------------------------------------------------
 
 
-_GOOD_ENV = {
-    "LIVEKIT_URL": "wss://x.livekit.cloud",
-    "LIVEKIT_ROOM": "portal-lerobot-inference",
-    "LIVEKIT_API_KEY": "key",
-    "LIVEKIT_API_SECRET": "secret",
-}
-
-
 @pytest.fixture
 def preflight(monkeypatch: pytest.MonkeyPatch):
     """Everything up to (and excluding) the rung under test, made to pass.
 
-    The extra is reported present, the credentials resolve, the room answers
-    with a policy in it, and the startup worker is replaced by a recorder — so
-    a test can knock out exactly one rung and see its refusal."""
+    The extra is reported present, the Lab's own SFU is up (the ONE transport
+    — everything below comes from sfu.py, with only the key file and the
+    server itself stubbed; nothing in this file ever runs `livekit-server`),
+    the room answers with a policy in it, and the startup worker is replaced
+    by a recorder — so a test can knock out exactly one rung and see its
+    refusal."""
     started: list[tuple] = []
 
     monkeypatch.setattr(ri, "_extra_missing", lambda: False)
-    monkeypatch.setattr(ri, "_read_env", lambda: dict(_GOOD_ENV))
-    monkeypatch.setattr(ri, "_transport_source", lambda url: "cloud")
-    # The LiveKit Cloud branch. The Lab-owned SFU is the OTHER branch and gets
-    # its own fixture below; nothing in this file ever runs `livekit-server`.
-    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: False)
+    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(ri.sfu, "api_keys", lambda *a, **k: ("APIkey123", "s3cret"))
+    monkeypatch.setattr(ri.sfu, "local_url", lambda *a, **k: "ws://127.0.0.1:7880")
+    monkeypatch.setattr(ri.sfu, "default_room", lambda instance_id: "mml-abcdef012345")
+    monkeypatch.setattr(ri.sfu, "mint_token", lambda **kw: (f"jwt.{kw['identity']}.{kw['room']}", 0))
     monkeypatch.setattr(
         ri, "_probe_room", lambda *a, **k: ri.RoomProbe(True, True, True, operator_present=True)
     )
@@ -456,16 +451,14 @@ def test_preflight_passes_and_hands_off_to_the_worker(preflight) -> None:
     assert ri.remote_inference_active is True
     assert len(preflight) == 1
     # The verified transport — not whatever the child would resolve on its own
-    # — is what gets pinned onto the child's argv.
+    # — is what gets pinned onto the child's argv, token included.
     _req, _robot_req, url, room, token, _cancel = preflight[0]
-    assert (url, room) == (_GOOD_ENV["LIVEKIT_URL"], _GOOD_ENV["LIVEKIT_ROOM"])
-    # No token on the Cloud path: the child mints its own from the credentials
-    # it resolves, and there is no secret here for the parent to sign with.
-    assert token == ""
+    assert (url, room) == ("ws://127.0.0.1:7880", "mml-abcdef012345")
+    assert token == "jwt.robot.mml-abcdef012345"
     assert ri._transport == {
-        "url": _GOOD_ENV["LIVEKIT_URL"],
-        "room": _GOOD_ENV["LIVEKIT_ROOM"],
-        "source": "cloud",
+        "url": "ws://127.0.0.1:7880",
+        "room": "mml-abcdef012345",
+        "source": "sfu",
         "operator_present": True,
     }
     ri._go_idle_locked()
@@ -483,11 +476,13 @@ def test_preflight_refuses_when_the_extra_is_missing(monkeypatch, preflight) -> 
     assert ri.remote_inference_active is False
 
 
-def test_preflight_refuses_incomplete_credentials(monkeypatch, preflight) -> None:
-    monkeypatch.setattr(ri, "_read_env", lambda: {"LIVEKIT_URL": "wss://x"})
+def test_preflight_refuses_without_the_sfu(monkeypatch, preflight) -> None:
+    """Started without `--sfu` there is no transport at all — no room, no
+    token, nothing to probe — and the remedy is the flag."""
+    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: False)
     result = ri.handle_start_remote_inference(_request())
     assert result["code"] == "transport.not_configured"
-    assert "LIVEKIT_ROOM" in result["message"]
+    assert "--sfu" in result["message"]
     assert ri.remote_inference_active is False
 
 
@@ -501,14 +496,14 @@ def test_preflight_refuses_an_unreachable_sfu(monkeypatch, preflight) -> None:
 
 
 def test_the_unreachable_message_names_the_sfu_when_that_is_the_transport(monkeypatch, preflight) -> None:
-    """The Lab's own SFU and LiveKit Cloud have disjoint remedies — a process
-    on this machine that stops with the launcher, versus a file of credentials.
-    An "unreachable" that does not say which sends the operator off to check
-    their internet connection when the answer was a flag they did not pass."""
-    monkeypatch.setattr(ri, "_transport_source", lambda url: "sfu")
-    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: True)
+    """The remedy is a process on this machine that stops with the launcher,
+    never a file of credentials. An "unreachable" that does not say so sends
+    the operator off to check their internet connection when the answer was a
+    flag they did not pass."""
     monkeypatch.setattr(
-        ri, "_sfu_transport", lambda: ri.SfuTransport("ws://127.0.0.1:7880", "r", "k", "s", "j")
+        ri,
+        "_sfu_transport",
+        lambda: ri.SfuTransport("ws://127.0.0.1:7880", "r", "k", "s", "jwt.robot", "jwt.policy"),
     )
     monkeypatch.setattr(
         ri, "_probe_room", lambda *a, **k: ri.RoomProbe(False, False, False, False, error="refused")
@@ -527,13 +522,13 @@ def test_preflight_refuses_bad_credentials(monkeypatch, preflight) -> None:
 
 def test_preflight_refuses_an_empty_room_and_names_the_three_causes(monkeypatch, preflight) -> None:
     """The empty room, caught BEFORE torque. The Lab cannot detect a room
-    mismatch (the GPU's room comes only from its Modal secret), so the message
-    has to name all three ways this happens."""
+    mismatch on a hand-typed `modal run` line, so the message has to name all
+    three ways this happens."""
     monkeypatch.setattr(ri, "_probe_room", lambda *a, **k: ri.RoomProbe(True, True, True, False))
     result = ri.handle_start_remote_inference(_request())
     assert result["code"] == "transport.no_policy"
     assert "modal run" in result["message"]
-    assert "LIVEKIT_ROOM" in result["message"]
+    assert "--livekit-room" in result["message"]
     assert "TS_AUTHKEY" in result["message"]
     assert ri.remote_inference_active is False
 
@@ -594,7 +589,7 @@ def _live_session(phase: str = ri.PHASE_STARTING, **meta) -> None:
     ri._transport = {
         "url": "wss://x",
         "room": "rm",
-        "source": "cloud",
+        "source": "sfu",
         "operator_present": True,
     }
 
@@ -1183,48 +1178,14 @@ def test_a_startup_failure_is_reported_the_way_local_inference_reports_one() -> 
 # ---------------------------------------------------------------------------
 
 
-def test_the_sfu_is_the_source_whenever_this_process_runs_one(monkeypatch) -> None:
-    """Not conditioned on the url matching: when the SFU is up the session uses
-    it unconditionally, so the url IS the SFU's by construction."""
+def test_the_source_is_the_sfu_or_nothing(monkeypatch) -> None:
+    """Two values, two remedies. The LiveKit Cloud rungs (`cloud`,
+    `process_env`) retired with the combine: the SFU is the one transport
+    remote teleoperation and remote inference share."""
     monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: True)
-
-    assert ri._transport_source("ws://127.0.0.1:7880") == "sfu"
-
-
-def test_the_saved_file_is_recognised_as_the_source(tmp_path, monkeypatch) -> None:
-    """Which layer supplied the effective url decides what the "unreachable"
-    message says, so it is read from the environment and the file rather than
-    assumed."""
-    pytest.importorskip("dotenv")
-    saved = tmp_path / "livekit.env"
-    saved.write_text("LIVEKIT_URL=wss://x.livekit.cloud\n")
-    monkeypatch.setattr(ri, "DRTC_ENV_PATH", str(saved))
+    assert ri._transport_source() == "sfu"
     monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: False)
-    monkeypatch.delenv("LIVEKIT_URL", raising=False)
-
-    assert ri._transport_source("wss://x.livekit.cloud") == "cloud"
-
-
-def test_the_process_environment_is_named_when_it_is_what_won(tmp_path, monkeypatch) -> None:
-    """A remedy of its own: telling an operator to edit `livekit.env` while
-    their shell is overriding it is the worst of the three answers."""
-    pytest.importorskip("dotenv")
-    saved = tmp_path / "livekit.env"
-    saved.write_text("LIVEKIT_URL=wss://from-file\n")
-    monkeypatch.setattr(ri, "DRTC_ENV_PATH", str(saved))
-    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: False)
-    monkeypatch.setenv("LIVEKIT_URL", "wss://from-shell")
-
-    assert ri._transport_source("wss://from-shell") == "process_env"
-
-
-def test_nothing_anywhere_is_none_rather_than_cloud(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(ri, "DRTC_ENV_PATH", str(tmp_path / "absent.env"))
-    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: False)
-    monkeypatch.delenv("LIVEKIT_URL", raising=False)
-
-    assert ri._transport_source("") == "none"
-    assert ri._transport_source("wss://x.livekit.cloud") == "none"
+    assert ri._transport_source() == "none"
 
 
 # ---------------------------------------------------------------------------
@@ -1233,21 +1194,9 @@ def test_nothing_anywhere_is_none_rather_than_cloud(tmp_path, monkeypatch) -> No
 
 
 @pytest.fixture
-def sfu_preflight(monkeypatch, preflight):
-    """The `preflight` ladder, with the SFU branch taken instead of Cloud.
-
-    `_read_env` is made to explode: the point of the branch is that no
-    credential file is consulted at all when the Lab hosts the SFU."""
-
-    def _boom():
-        raise AssertionError("livekit.env was read while the Lab's own SFU is running")
-
-    monkeypatch.setattr(ri, "_read_env", _boom)
-    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: True)
-    monkeypatch.setattr(ri.sfu, "api_keys", lambda *a, **k: ("APIkey123", "s3cret"))
-    monkeypatch.setattr(ri.sfu, "local_url", lambda *a, **k: "ws://127.0.0.1:7880")
-    monkeypatch.setattr(ri.sfu, "default_room", lambda instance_id: "mml-abcdef012345")
-    monkeypatch.setattr(ri.sfu, "mint_token", lambda **kw: (f"jwt.{kw['identity']}.{kw['room']}", 0))
+def sfu_preflight(preflight):
+    """The `preflight` ladder — the SFU IS the ladder now; the alias keeps the
+    S3.6 tests below readable as the contract they state."""
     return preflight
 
 
@@ -1281,11 +1230,24 @@ def test_the_child_token_rides_the_argv_and_the_secret_never_does(sfu_preflight)
     assert not any("s3cret" in a for a in args)
 
 
-def test_no_token_flag_is_emitted_on_the_cloud_path() -> None:
-    """The child mints its own there, and an empty `--livekit_token=` would
-    read to draccus as a value rather than as an absence."""
-    args = ri._robot_sync_args(_request(), [], url="wss://x", room="r", token="")
-    assert not any(a.startswith("--livekit_token") for a in args)
+def test_both_tokens_are_minted_from_the_one_key_file(sfu_preflight) -> None:
+    """The robot child's (robot role) and the GPU side's (operator role) come
+    from the same resolver, for the two identities the room probe pairs up —
+    so the launcher and the panel can never hand the GPU a name the probe
+    would not recognise."""
+    resolved = ri.resolve_transport()
+    assert resolved.configured is True
+    assert resolved.child_token == "jwt.robot.mml-abcdef012345"
+    assert resolved.policy_token == "jwt.policy.mml-abcdef012345"
+    assert resolved.source == "sfu"
+
+
+def test_no_sfu_resolves_to_the_unconfigured_transport(monkeypatch) -> None:
+    monkeypatch.setattr(ri.sfu, "sfu_enabled", lambda *a, **k: False)
+    resolved = ri.resolve_transport()
+    assert resolved.configured is False
+    assert resolved.source == "none"
+    assert resolved.child_token == "" and resolved.policy_token == ""
 
 
 def test_an_unreadable_key_file_refuses_before_the_arm_is_claimed(monkeypatch, sfu_preflight) -> None:

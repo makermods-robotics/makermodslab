@@ -11,23 +11,23 @@ import type { UseRemoteInferenceTransport } from "@/hooks/useRemoteInferenceTran
  * Three things here are worth more than they look:
  *
  *  - `endpoint_reachable` / `operator_present` are `boolean | null`, and null
- *    means THE PROBE DID NOT RUN (no `[remote]` extra, or no credentials). That
- *    is a third state, and collapsing it into "false" would tell an operator
- *    the SFU is down when nothing ever asked it.
- *  - `source` distinguishes the Lab's OWN SFU from LiveKit Cloud, and within
- *    Cloud, "livekit.env says so" from "your shell exported LIVEKIT_URL" —
- *    three different problems with three different remedies.
+ *    means THE PROBE DID NOT RUN (no `[remote]` extra, or no SFU). That is a
+ *    third state, and collapsing it into "false" would tell an operator the
+ *    SFU is down when nothing ever asked it.
+ *  - `configured` is whether the Lab runs its own SFU at all — the one
+ *    transport there is — so "not configured" has exactly one remedy: the
+ *    `--sfu` flag, shown below.
  *  - the SFU block. When the Lab hosts the server, everything the GPU side
- *    needs is minted here: the key ID, the file its secret is in, and the
- *    TAILNET url a Modal container can actually dial. That block is what makes
- *    the generated `modal run` line above complete.
+ *    needs is minted here: the TAILNET url a Modal container can actually
+ *    dial and (in the transport payload) the operator token the generated
+ *    `modal run` line above carries. The signing secret is never shown.
  *
  * There is no clear-override button any more. It deleted a dotenv file the
  * retired `tools/drtc/local_sfu*.sh` scripts wrote; with the Lab hosting the
  * SFU there is no file outliving a script to clear.
  *
- * Every value rendered here (url, room, key id, paths, variable names, error
- * codes, the backend's message and install hint) is data and appears verbatim.
+ * Every value rendered here (url, room, error codes, the backend's message and
+ * install hint) is data and appears verbatim.
  */
 const Row: React.FC<{ label: string; children: React.ReactNode }> = ({
   label,
@@ -134,10 +134,7 @@ const TransportSection: React.FC<{
               label={
                 transport.configured
                   ? t("remoteInference.transport.configured")
-                  : // Variable NAMES — identifiers, joined and shown verbatim.
-                    t("remoteInference.transport.missingVars", {
-                      vars: transport.missing_vars.join(", "),
-                    })
+                  : t("remoteInference.transport.notConfigured")
               }
             />
           </Row>
@@ -192,19 +189,6 @@ const TransportSection: React.FC<{
                   </span>
                 )}
               </Row>
-              <Row label={t("remoteInference.transport.sfuKeyIdLabel")}>
-                {/* The key NAME. The secret is never sent here — the file
-                    below is where a human reads it. */}
-                <span className="font-mono">
-                  {transport.sfu_key_id ??
-                    t("remoteInference.transport.unresolved")}
-                </span>
-              </Row>
-              {transport.sfu_key_file ? (
-                <Row label={t("remoteInference.transport.sfuKeyFileLabel")}>
-                  <span className="font-mono">{transport.sfu_key_file}</span>
-                </Row>
-              ) : null}
               <Row label={t("remoteInference.transport.sfuExternalIpLabel")}>
                 <Verdict
                   state={transport.sfu_external_ip}

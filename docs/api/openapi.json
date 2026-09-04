@@ -4912,7 +4912,7 @@
         "type": "object"
       },
       "RemoteInferenceTransport": {
-        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is `remote_inference._transport_source`'s range, the SAME set the\ntransport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit\nserver, so the url, room and the child's token were minted in-process),\n`process_env`, `cloud` (livekit.env) or `none`. It used to be narrower than\nthe route's; one walker now serves both, and the two values it lost —\n`local_override` and `cwd` — retired with the shell SFU scripts in S3.6.",
+        "description": "The transport the session actually resolved (the READY echo, not what\nthe parent believed it passed — see drtc_protocol.format_ready).\n\n`source` is `remote_inference._transport_source`'s range, the SAME set the\ntransport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit\nserver, so the url, room and every token were minted in-process) or\n`none`. The LiveKit Cloud values (`cloud`, `process_env`) retired with the\ncombine — the SFU is the one transport remote inference has.",
         "properties": {
           "operator_present": {
             "title": "Operator Present",
@@ -4925,8 +4925,6 @@
           "source": {
             "enum": [
               "sfu",
-              "cloud",
-              "process_env",
               "none"
             ],
             "title": "Source",
@@ -4990,13 +4988,6 @@
             ],
             "title": "Message"
           },
-          "missing_vars": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Missing Vars",
-            "type": "array"
-          },
           "operator_present": {
             "anyOf": [
               {
@@ -5007,6 +4998,17 @@
               }
             ],
             "title": "Operator Present"
+          },
+          "policy_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Token"
           },
           "room": {
             "title": "Room",
@@ -5030,28 +5032,6 @@
               }
             ],
             "title": "Sfu Install Hint"
-          },
-          "sfu_key_file": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sfu Key File"
-          },
-          "sfu_key_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sfu Key Id"
           },
           "sfu_modal_url": {
             "anyOf": [
@@ -5078,8 +5058,6 @@
           "source": {
             "enum": [
               "sfu",
-              "cloud",
-              "process_env",
               "none"
             ],
             "title": "Source",
@@ -5093,7 +5071,6 @@
         "required": [
           "extra_installed",
           "configured",
-          "missing_vars",
           "url",
           "room",
           "source",
@@ -5101,9 +5078,8 @@
           "sfu_url",
           "sfu_modal_url",
           "sfu_external_ip",
-          "sfu_key_id",
-          "sfu_key_file",
           "sfu_install_hint",
+          "policy_token",
           "endpoint_reachable",
           "operator_present",
           "error_code",

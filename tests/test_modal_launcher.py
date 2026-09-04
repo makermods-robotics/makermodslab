@@ -39,6 +39,9 @@ from makermodslab import modal_launcher as ml, remote_inference as ri
 from makermodslab.api_errors import ApiError, ErrorCode
 
 SECRET = "test-secret"  # noqa: S105  # nosec B105 — a fixture value, not a credential
+# The station-signed operator token the container joins with — the ONE
+# credential that ever reaches the GPU side.
+TOKEN = "jwt.operator.policy.0123"
 
 
 class FakeClock:
@@ -78,10 +81,9 @@ def _plan(*, needs_tailscale: bool = True, url: str = "ws://100.64.0.1:7880") ->
     return ml.TransportPlan(
         url=url,
         room="mml-abcdef123456",
-        api_key="APIkeyname",
-        api_secret=SECRET,
+        token=TOKEN,
         needs_tailscale=needs_tailscale,
-        source="sfu" if needs_tailscale else "cloud",
+        source="sfu",
     )
 
 
@@ -208,28 +210,32 @@ def test_tailscale_flags_ride_on_the_plan_alone():
     assert "--tailscale" in ts
     assert ts[ts.index("--livekit-url") + 1] == "ws://100.64.0.1:7880"
 
-    cloud = ml.build_argv(_plan(needs_tailscale=False), **_ARGS, engine="sync")
-    assert "--tailscale" not in cloud
-    assert "--livekit-url" not in cloud
+    # The seam: a directly reachable SFU would flip this in ONE place.
+    direct = ml.build_argv(_plan(needs_tailscale=False), **_ARGS, engine="sync")
+    assert "--tailscale" not in direct
+    assert "--livekit-url" not in direct
 
 
-def test_the_secret_is_never_in_argv_and_always_in_the_child_env():
+def test_the_token_is_never_in_argv_and_always_in_the_child_env():
     """THE load-bearing assertion of this module.
 
     argv is world-readable in `ps` on this machine, so a regression that
-    re-introduces `--livekit-api-secret` is a credential leak that nothing else
-    here would catch. Both wrappers' `main()` falls back to the environment
-    precisely so this flag never has to be passed."""
+    re-introduces `--livekit-token` (or, worse, the retired key/secret flags)
+    is a credential leak that nothing else here would catch. Both wrappers'
+    `main()` falls back to the environment precisely so this flag never has
+    to be passed — and the station's API key and secret never reach the GPU
+    side in ANY form."""
     plan = _plan()
     argv = ml.build_argv(plan, **_ARGS, engine="rtc")
 
+    assert "--livekit-token" not in argv
     assert "--livekit-api-secret" not in argv
     assert "--livekit-api-key" not in argv
-    assert SECRET not in " ".join(argv)
+    assert TOKEN not in " ".join(argv)
 
     env = ml.child_env(plan, env={"PATH": "/usr/bin"})
-    assert env["LIVEKIT_API_SECRET"] == SECRET
-    assert env["LIVEKIT_API_KEY"] == "APIkeyname"
+    assert env["LIVEKIT_TOKEN"] == TOKEN
+    assert "LIVEKIT_API_SECRET" not in env and "LIVEKIT_API_KEY" not in env
     assert env["PYTHONUNBUFFERED"] == "1"
 
 
@@ -732,8 +738,8 @@ def test_the_spawn_gets_the_built_argv_and_the_credentialed_env(spawned, fake_cl
     assert argv[argv.index("--policy-path") + 1] == "someone/p"  # stripped
     assert "--task" not in argv
     assert argv[argv.index("--s-min") + 1] == "6"
-    assert SECRET not in " ".join(argv)
-    assert env["LIVEKIT_API_SECRET"] == SECRET
+    assert TOKEN not in " ".join(argv)
+    assert env["LIVEKIT_TOKEN"] == TOKEN
 
 
 # --- the two deadlines -------------------------------------------------------
@@ -938,9 +944,10 @@ def test_the_plan_comes_from_the_session_s_own_resolver(monkeypatch):
             room="mml-deadbeef0000",
             api_key="APIkeyname",
             api_secret=SECRET,
-            child_token="jwt",
+            child_token="jwt.robot",
+            policy_token=TOKEN,
             source="sfu",
-            missing=(),
+            configured=True,
         ),
     )
     monkeypatch.setattr(ri, "sfu_modal_url", lambda: "ws://100.64.0.1:7880")
@@ -950,26 +957,35 @@ def test_the_plan_comes_from_the_session_s_own_resolver(monkeypatch):
     assert plan.url == "ws://100.64.0.1:7880"
     assert plan.needs_tailscale is True
     assert plan.room == "mml-deadbeef0000"
-    assert plan.api_secret == SECRET
+    assert plan.configured is True
+    # The GPU side's token — and NOT the robot child's, and NOT the secret.
+    assert plan.token == TOKEN
+    assert SECRET not in (plan.url, plan.room, plan.token)
 
 
-def test_the_cloud_path_needs_no_tailnet(monkeypatch):
-    monkeypatch.setattr(
-        ri,
-        "resolve_transport",
-        lambda: ri.ResolvedTransport(
-            url="wss://x.livekit.cloud",
-            room="portal-lerobot-inference",
-            api_key="APIkeyname",
-            api_secret=SECRET,
-            child_token="",
-            source="cloud",
-            missing=(),
-        ),
-    )
+def test_no_sfu_is_an_unconfigured_plan(monkeypatch):
+    """Started without `--sfu` the resolver has nothing to sign, and the plan
+    says so rather than carrying an empty token into a launch."""
+    monkeypatch.setattr(ri, "resolve_transport", lambda: ri._UNCONFIGURED)
+
     plan = ml.resolve_transport_plan()
-    assert plan.url == "wss://x.livekit.cloud"
+    assert plan.configured is False
+    assert plan.token == "" and plan.room == "" and plan.url == ""
     assert plan.needs_tailscale is False
+
+
+def test_start_refuses_an_unconfigured_plan_before_the_spawn(monkeypatch, spawned):
+    """Refused synchronously, naming the flag — never ninety seconds into a
+    cold start the user is watching for progress."""
+    unconfigured = ml.TransportPlan(
+        url="", room="", token="", needs_tailscale=False, source="none", configured=False
+    )
+    monkeypatch.setattr(ml, "resolve_transport_plan", lambda: unconfigured)
+    with pytest.raises(ApiError) as excinfo:
+        ml.start(engine="sync", policy_hub_id="someone/p")
+    assert excinfo.value.code == ErrorCode.GPU_LAUNCH_FAILED
+    assert "--sfu" in excinfo.value.detail
+    assert spawned["popen"] == []
 
 
 # --- the stop's own bound ----------------------------------------------------

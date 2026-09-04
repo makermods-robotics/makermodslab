@@ -67,12 +67,12 @@ The pre-port docstring said ``--no-adaptive``, which has never worked here.
 
 ``--horizon`` MUST match policy.py's ``--horizon`` and should equal the
 checkpoint's ``n_action_steps`` (and be ``<=`` its ``chunk_size``) so one
-transmitted chunk is exactly one open-loop block. LiveKit creds come from
-`~/.cache/huggingface/lerobot/livekit.env` (see `_env.load_env`), and
-``--livekit_url`` / ``--livekit_room`` / ``--livekit_token`` pin the transport
-explicitly for a parent that has already verified it — which is what the Lab
-does when it hosts the SFU itself (`makermodslab --sfu`): it signs the token
-here and this process never sees an API secret. The remote policy runs in this
+transmitted chunk is exactly one open-loop block. ``--livekit_url`` /
+``--livekit_room`` / ``--livekit_token`` pin the transport explicitly for a
+parent that has already verified it — which is what the Lab always does
+(`makermodslab --sfu`): it signs the token here and this process never sees an
+API secret. Run by hand on a bench, the three fall back to `livekit.env` /
+the environment (see `_env.load_env`). The remote policy runs in this
 package's `policy.py`, launched on Modal by
 `modal run makermodslab/drtc/modal_policy.py` (see docs/drtc/README.md).
 
@@ -302,9 +302,9 @@ async def run(cfg: RobotSideConfig) -> None:
     url = cfg.livekit_url or required_env("LIVEKIT_URL")
     room = cfg.livekit_room or required_env("LIVEKIT_ROOM")
     # A token handed to us is already scoped to this room and identity and was
-    # signed by whoever owns the SFU's secret (the Lab, under `--sfu`). Minting
-    # our own is the LiveKit Cloud path, and needs the API secret in this
-    # process's environment.
+    # signed by whoever owns the SFU's secret (the Lab, under `--sfu`) — the
+    # only way the Lab ever starts this process. Minting our own from an API
+    # key/secret in the environment is the hand-run bench fallback.
     token = cfg.livekit_token or mint_token(IDENTITY, room)
     # Emitted BEFORE the bus is opened, so a parent that spots a transport
     # mismatch can kill the child before anything is energized.

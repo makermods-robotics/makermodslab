@@ -1,15 +1,17 @@
-"""LiveKit CLOUD credential loading for remote inference — no LiveKit dependency.
+"""LiveKit credential loading for the hand-run drtc entrypoints — no LiveKit dependency.
 
 Split out of `_common` so the precedence rules can be unit-tested without the
-`drtc` extra installed (`_common` imports `livekit.api` for token minting).
+`remote` extra installed (`_common` imports `livekit.api` for token minting).
 
-This is the FALLBACK path. When the Lab runs its own SFU (`makermodslab --sfu`,
-see `makermodslab/sfu.py`) the session resolves url, room and token in-process
-and passes them to the child on the command line, so nothing here is consulted
-at all. What is left is the LiveKit Cloud case, and it has exactly two rungs:
+This is a BENCH AID, not a Lab path. The Lab's server never reads it: the
+session resolves url, room and every participant's token in-process from its
+own SFU (`makermodslab --sfu`, see `makermodslab/sfu.py`) and pins them on the
+child's command line, and the GPU launcher hands the container a token the
+same way. What is left is running `robot_sync` / `policy` by hand against some
+LiveKit server, and that has exactly two rungs:
 
-  1. `DRTC_ENV_PATH` (`~/.cache/huggingface/lerobot/livekit.env`) — the saved
-     credentials, beside the rest of the Lab's persistent state.
+  1. `DRTC_ENV_PATH` (`livekit.env` under `MAKERMODSLAB_HOME`) — a saved
+     url / room / key / secret, beside the rest of the Lab's state.
   2. The process environment, which wins (dotenv's own `override=False` rule).
 
 Three rungs were RETIRED in S3.6 along with the `tools/drtc/local_sfu*.sh`
@@ -43,7 +45,7 @@ import pathlib
 
 from ..utils.config import DRTC_ENV_PATH
 
-_EXTRA_HINT = "remote inference needs the optional 'drtc' extra: uv pip install -e '.[remote]'"
+_EXTRA_HINT = "remote inference needs the optional 'remote' extra: uv pip install -e '.[remote]'"
 
 try:
     from dotenv import dotenv_values
@@ -82,8 +84,7 @@ def read_env(search_from: pathlib.Path | None = None) -> dict[str, str]:
 
     `search_from` is accepted and ignored. It named the cwd the two dotenv
     rungs were resolved against, and both are gone; the parameter stays so the
-    two entrypoints' `load_env()` call sites and the tests keep one signature
-    while the Cloud path is still reachable.
+    two entrypoints' `load_env()` call sites and the tests keep one signature.
     """
     env = dict(os.environ)
     saved = pathlib.Path(DRTC_ENV_PATH)
@@ -97,8 +98,9 @@ def load_env(search_from: pathlib.Path | None = None) -> None:
 
     For the CLI entrypoints only — see the module docstring for why a
     long-lived process should call :func:`read_env` instead. A child the Lab
-    spawned under its own SFU has its url, room and token pinned on the command
-    line and does not depend on this having found anything."""
+    spawned has its url, room and token pinned on the command line and does
+    not depend on this having found anything; nor does a container the Lab's
+    launcher started (`LIVEKIT_TOKEN` in its env)."""
     for key, value in read_env(search_from).items():
         if os.environ.get(key) != value:
             os.environ[key] = value

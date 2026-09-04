@@ -480,14 +480,13 @@ class RemoteInferenceTransport(BaseModel):
 
     `source` is `remote_inference._transport_source`'s range, the SAME set the
     transport ROUTE reports: `sfu` (this process runs the Lab's own LiveKit
-    server, so the url, room and the child's token were minted in-process),
-    `process_env`, `cloud` (livekit.env) or `none`. It used to be narrower than
-    the route's; one walker now serves both, and the two values it lost —
-    `local_override` and `cwd` — retired with the shell SFU scripts in S3.6."""
+    server, so the url, room and every token were minted in-process) or
+    `none`. The LiveKit Cloud values (`cloud`, `process_env`) retired with the
+    combine — the SFU is the one transport remote inference has."""
 
     url: str
     room: str
-    source: Literal["sfu", "cloud", "process_env", "none"]
+    source: Literal["sfu", "none"]
     operator_present: bool
 
 
@@ -558,14 +557,14 @@ class RemoteInferenceTransportStatusResponse(BaseModel):
     which is a third state distinct from false."""
 
     extra_installed: bool
-    # Under the Lab's own SFU this is True by construction (the credentials are
-    # minted in-process); on the Cloud path it means all four LIVEKIT_* vars
-    # resolved.
+    # True when this process runs the Lab's own SFU and its key file is
+    # readable — the url, the room and the tokens are then minted in-process.
+    # False means the Lab was started without `--sfu`; there is no other
+    # transport.
     configured: bool
-    missing_vars: list[str]  # [] when configured
     url: str  # "" when unresolved — never null
     room: str
-    source: Literal["sfu", "cloud", "process_env", "none"]
+    source: Literal["sfu", "none"]
     # --- the Lab-owned SFU (makermodslab --sfu; see makermodslab/sfu.py) ---
     # Everything below is null/false when this process does not run one, so a
     # panel can render the whole block from one flag.
@@ -579,15 +578,16 @@ class RemoteInferenceTransportStatusResponse(BaseModel):
     # --sfu-external-ip). Without it a Modal container can reach signalling
     # over the tailnet and still never punch a media path.
     sfu_external_ip: bool
-    # The key's NAME — the `--livekit-api-key` half of the Modal line. It
-    # identifies rather than authorizes. THE SECRET IS NEVER RETURNED; the
-    # panel names the file below and a human reads it.
-    sfu_key_id: str | None
-    sfu_key_file: str | None
     # The per-OS install line, present ONLY when `livekit-server` is missing
     # from PATH — otherwise null, which is how the panel knows `--sfu` is a
     # flag the user can actually pass.
     sfu_install_hint: str | None
+    # The operator-role JWT the GPU side joins the room with — the
+    # `--livekit-token` half of the Modal line, null when unconfigured. It is
+    # the same thing `POST /api/v1/sfu/token` hands any caller for that
+    # identity (short-lived, one room, one identity), so this route exposes
+    # nothing the token route does not. THE SIGNING SECRET IS NEVER RETURNED.
+    policy_token: str | None
     # Null (not false) when the probe did not run.
     endpoint_reachable: bool | None
     operator_present: bool | None

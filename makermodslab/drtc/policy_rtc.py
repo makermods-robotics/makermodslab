@@ -68,8 +68,9 @@ and measure true e2e latency. The raw-chunk cache is keyed by that same
         --fps 30 --horizon 16 --video-codec H264 --task "put the block in the box"
     # ACT etc.: runs, logs a warning, serves plain chunks (no in-painting).
 
-Config is CLI-only. Only the LiveKit connection (LIVEKIT_URL / LIVEKIT_API_KEY /
-LIVEKIT_API_SECRET / LIVEKIT_ROOM) is read from the environment / `_env.load_env`; every
+Config is CLI-only. Only the LiveKit connection (LIVEKIT_URL / LIVEKIT_ROOM and the
+station-signed LIVEKIT_TOKEN — or, on a bench, an API key/secret to mint one from) is
+read from the environment / `_env.load_env`; every
 behavior knob below is a command-line flag with no env fallback, so there is a
 single, unambiguous place to set each one. `--fps` / `--horizon` / `--video-codec`
 MUST match the robot's flags.
@@ -114,7 +115,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
 from ..utils.system import molmoact2_inference_action_mode, policy_requires_task
-from ._common import load_env, mint_token, required_env
+from ._common import env_str, load_env, mint_token, required_env
 from ._schema_rtc import (
     CHUNK_NAME,
     IMAGE_PREFIX,
@@ -549,7 +550,10 @@ async def main() -> None:
     load_env()
     url = required_env("LIVEKIT_URL")
     room = required_env("LIVEKIT_ROOM")
-    token = mint_token(IDENTITY, room)
+    # The station-signed operator token (what the Lab's launcher and the Deploy
+    # panel's line hand over) wins; minting from an API key/secret in the
+    # environment is the hand-run bench fallback only.
+    token = env_str("LIVEKIT_TOKEN", "") or mint_token(IDENTITY, room)
     fps = args.fps
     horizon = args.horizon
     duration = args.duration

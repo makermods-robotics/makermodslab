@@ -62,14 +62,17 @@ only remaining way to stop the app, and it needs an id that a dead process
 cannot tell us — so it is parsed from the log and persisted the moment it
 appears.
 
-The secret never reaches argv
------------------------------
-`modal run … --livekit-api-secret <secret>` would put a signing key in `ps` on
-this machine. Both wrappers' `main()` therefore fall back to `LIVEKIT_API_KEY`
-/ `LIVEKIT_API_SECRET` from the environment (a `local_entrypoint` body runs
-HERE, on the user's machine), and :func:`build_argv` passes neither flag —
-they ride the child env instead. `tests/test_modal_launcher.py` asserts both
-halves of that, because it is the one regression nothing else would catch.
+The credential is a token, and it never reaches argv
+----------------------------------------------------
+The GPU side joins the room with an OPERATOR-role JWT the station signs for
+identity `policy` (`remote_inference.resolve_transport().policy_token`) — never
+with the SFU's API key and secret, which stay in the station's 0600 key file.
+Even so, `modal run … --livekit-token <jwt>` would put a live credential in
+`ps` on this machine, so both wrappers' `main()` fall back to `LIVEKIT_TOKEN`
+from the environment (a `local_entrypoint` body runs HERE, on the user's
+machine) and :func:`build_argv` passes no such flag — it rides the child env
+instead. `tests/test_modal_launcher.py` asserts both halves of that, because
+it is the one regression nothing else would catch.
 
 Which workspace it bills (S3.8b)
 --------------------------------
@@ -528,57 +531,56 @@ def check_target(profile: str, environment: str) -> None:
 
 @dataclass(frozen=True)
 class TransportPlan:
-    """Everything the GPU side needs to end up in the SAME room as the arm.
+    """What the container needs to reach the room, as the launcher sees it.
 
     Produced by :func:`resolve_transport_plan` and consumed by the argv builder
-    and the child env. One producer on purpose: the two halves meeting in
-    different rooms is the failure Portal turns into a silently dropped stream,
-    so a second credential path is not a duplication smell, it is the bug.
+    and the child env. `url` is the address a CONTAINER dials — the station's
+    tailnet address, never the loopback one a local child uses — and is empty
+    when the SFU is up but this machine has no tailnet address to offer.
+    `token` is the operator-role JWT the station signed for the GPU side's
+    identity; the API secret is not in here and never was the container's.
     """
 
-    #: What a MODAL CONTAINER dials — not what a local child dials. Empty when
-    #: the SFU is up but this machine has no tailnet address to offer.
     url: str
     room: str
-    api_key: str
-    api_secret: str
+    token: str
     #: Whether the container has to join the tailnet to reach `url` at all.
-    #: The SEAM for the open question `--sfu-external-ip` raises: if the Lab's
-    #: SFU ever becomes directly reachable, this goes false in ONE place and
-    #: the argv, the child env and the tests all follow.
+    #: Always True while the SFU is the station's own; the seam stays so that
+    #: if the SFU ever becomes directly reachable this goes false in ONE place
+    #: and the argv, the child env and the tests all follow.
     needs_tailscale: bool
     source: str
+    #: False when the Lab runs no SFU: there is no room to launch into.
+    configured: bool = True
 
 
 def resolve_transport_plan() -> TransportPlan:
     """The launcher's view of `remote_inference.resolve_transport()`.
 
     Calls THE resolver — never a second credential path — and translates it
-    into what a container needs: on the Lab's own SFU that means the TAILNET
-    url (`sfu_modal_url`) rather than the loopback one a local child dials, and
-    the tailscale flags to reach it; on LiveKit Cloud the url is reachable as-is
-    and the container's own `LiveKit-cloud` secret would even carry the
-    credentials (we pass ours anyway, so the two halves cannot drift).
+    into what a container needs: the TAILNET url (`sfu_modal_url`) rather than
+    the loopback one a local child dials, the tailscale flags to reach it, and
+    the policy token the station signed. An unconfigured transport (no `--sfu`)
+    comes back as an unconfigured plan, which `start()` refuses.
 
     Propagates `OSError`/`RuntimeError` from an unreadable SFU key file, like
     every other caller of the resolver.
     """
     resolved = remote_inference.resolve_transport()
-    if resolved.source == "sfu":
+    if not resolved.configured:
         return TransportPlan(
-            url=remote_inference.sfu_modal_url() or "",
-            room=resolved.room,
-            api_key=resolved.api_key,
-            api_secret=resolved.api_secret,
-            needs_tailscale=True,
+            url="",
+            room="",
+            token="",  # noqa: S106  # nosec B106 — no SFU, nothing was signed
+            needs_tailscale=False,
             source=resolved.source,
+            configured=False,
         )
     return TransportPlan(
-        url=resolved.url,
+        url=remote_inference.sfu_modal_url() or "",
         room=resolved.room,
-        api_key=resolved.api_key,
-        api_secret=resolved.api_secret,
-        needs_tailscale=False,
+        token=resolved.policy_token,
+        needs_tailscale=True,
         source=resolved.source,
     )
 
@@ -619,9 +621,9 @@ def build_argv(
       the child env (`child_env`), because the CLI takes it that way and the
       alternative — `modal profile activate` — would rewrite a file every
       other terminal on this machine shares.
-    - **the key and the secret are not here.** They ride the child env
-      (`LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`), which both wrappers' `main()`
-      falls back to. argv is world-readable in `ps` on this machine.
+    - **the token is not here.** It rides the child env (`LIVEKIT_TOKEN`),
+      which both wrappers' `main()` falls back to. argv is world-readable in
+      `ps` on this machine.
 
     `--duration` is left at the wrapper's 0.0: the GPU is a Lab-level resource
     with its own idle stop, and the run's length is the ROBOT side's ceiling.
@@ -661,7 +663,8 @@ def child_env(
     """The environment the `modal run` child inherits.
 
     Unbuffered (so the phase lines arrive as they are printed rather than in
-    4 KB gulps at the end) plus the two credentials that must never be argv.
+    4 KB gulps at the end) plus the one credential that must never be argv:
+    the station-signed operator token.
 
     `profile` is the third thing that travels here, for a related reason: the
     CLI reads `MODAL_PROFILE` per process, so ONE launch can bill a different
@@ -672,8 +675,7 @@ def child_env(
     """
     base = dict(os.environ if env is None else env)
     base["PYTHONUNBUFFERED"] = "1"
-    base["LIVEKIT_API_KEY"] = plan.api_key
-    base["LIVEKIT_API_SECRET"] = plan.api_secret
+    base["LIVEKIT_TOKEN"] = plan.token
     if profile:
         base["MODAL_PROFILE"] = profile
     return base
@@ -1485,11 +1487,11 @@ def start(
             f"The Lab's SFU is running but its key file couldn't be read: {exc}",
             code=ErrorCode.GPU_LAUNCH_FAILED,
         ) from exc
-    if not plan.room or not plan.api_key or not plan.api_secret:
+    if not plan.configured or not plan.room or not plan.token:
         raise ApiError(
             400,
-            "No LiveKit transport is configured, so there is no room to launch the GPU into. "
-            "Check the transport section below.",
+            "This Lab isn't running its LiveKit SFU, so there is no room to launch the GPU into. "
+            "Start it with `makermodslab --sfu --sfu-external-ip` and re-check the transport.",
             code=ErrorCode.GPU_LAUNCH_FAILED,
         )
     if plan.needs_tailscale and not plan.url:
