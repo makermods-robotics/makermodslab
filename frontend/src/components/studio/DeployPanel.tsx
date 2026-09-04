@@ -1128,6 +1128,44 @@ const DeployPanel: React.FC = () => {
     };
   }, [selectedJob, baseUrl, fetchWithHeaders]);
 
+  // Drop the operator's typed overrides when the POLICY changes.
+  //
+  // `task` and `coachDatasetName` are this panel's only raw text state, and
+  // typed text BEATS the derived default (`effectiveTask` / `effectiveCoachName`
+  // both read `typed.trim() || default`). Without this reset a sentence typed
+  // for one policy rides silently along to the next one and suppresses that
+  // policy's own prefill — and the task string is not cosmetic: it reaches
+  // lerobot as `--task=` on every run and is written into EVERY FRAME of a
+  // coaching dataset as `--dataset.single_task`, so a stale one mislabels data
+  // on disk with nothing anywhere reporting it.
+  //
+  // Keyed on `policyConfigJobId` — the job that actually OWNS the selected
+  // checkpoint — and deliberately NOT on `selectedStep`. Walking the steps of
+  // one job is the most common thing done in this panel, and every checkpoint
+  // of a job shares that job's training dataset, so resetting per step would
+  // clear a carefully typed sentence for no correctness gain. The owner id DOES
+  // change when the selection crosses into an ancestor of a resume chain, which
+  // is exactly the case where the training dataset can differ.
+  useEffect(() => {
+    setTask("");
+    setCoachDatasetName("");
+  }, [policyConfigJobId]);
+
+  // The same two overrides, dropped when the studio is dismissed.
+  //
+  // StudioOverlay never unmounts — Launchpad renders it unconditionally and
+  // open/close only slides it with a transform — so panel state survives a
+  // close/reopen by design. That is right for the robot picker and the camera
+  // bindings, and wrong for these two: they are the only fields whose staleness
+  // is written to disk, and reopening the studio tomorrow must not silently
+  // re-arm yesterday's sentence against whatever policy is selected then.
+  useEffect(() => {
+    if (!open) {
+      setTask("");
+      setCoachDatasetName("");
+    }
+  }, [open]);
+
   // A prefill may name the run mode — that is how "Policy failing? Coach it"
   // lands the user in coaching without them having to know the control exists.
   useEffect(() => {
