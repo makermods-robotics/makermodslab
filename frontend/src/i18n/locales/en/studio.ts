@@ -418,6 +418,11 @@ export default {
       // own key), interpolated, never translated.
       unmatched:
         "The policy expects camera <0>{{name}}</0> but this robot has no camera named “{{name}}” — rename one in Robot settings.",
+      // The same fact for a REMOTE run, which has a role picker and therefore a
+      // different remedy: a robot camera's name is its identity and is never
+      // renamed to suit a checkpoint.
+      unmatchedRemote:
+        "The policy expects camera <0>{{name}}</0> and no camera on this robot has that name — choose which camera plays that role above.",
       // Matched by name, but the robot captures at a different size than the
       // checkpoint trained at. All four numbers are raw pixel dimensions.
       resolutionMismatch:

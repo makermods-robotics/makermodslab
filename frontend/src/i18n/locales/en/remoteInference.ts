@@ -25,14 +25,37 @@ export default {
     horizonLabel: "Horizon",
     fpsLabel: "Frames per second",
     codecLabel: "Video codec",
+    // The checkpoint's own chunk width. {{steps}} is a number read off its
+    // config, never a translated value.
+    horizonFromCheckpoint:
+      "This checkpoint returns {{steps}} steps per chunk, so the horizon starts from that and must not go above it.",
+    horizonOverCeiling:
+      "The horizon is above the {{steps}} steps this checkpoint returns. The two sides then disagree about the chunk shape and every packet is dropped in silence — the run will look connected and receive nothing.",
     durationLabel: "Max duration (s)",
-    durationHint: "The run stops itself after this long. Stop it early anytime.",
+    durationHint:
+      "The run stops itself after this long. Stop it early anytime.",
     durationUnbounded: "0 — the run continues until you stop it.",
     sMinLabel: "Minimum budget",
     // "--s-min" is a flag name, kept in the Latin script like every other
     // identifier in this panel.
     sMinHint:
       "Steps of the plan the arm keeps in hand for the round trip. It must be the same number as --s-min in the command above: the arm works out which part of the next chunk is still fresh from it, and the GPU takes that answer on trust.",
+  },
+  // The per-role camera picker. It appears ONLY for checkpoint cameras that
+  // matched nothing by name, so most runs never see it.
+  cameraRoles: {
+    title: "Camera roles",
+    hint: "This checkpoint names cameras that nothing on this robot is called. Choose which camera plays each role for this run.",
+    // Roles that bound themselves and need no control.
+    nameMatched_one: "{{count}} other camera matched by name.",
+    nameMatched_other: "{{count}} other cameras matched by name.",
+    // Both numbers are raw pixel dimensions from the checkpoint's config.
+    capturesAt: "The policy trained at {{width}}×{{height}}.",
+    unbound: "Not chosen",
+    noCameras: "This robot has no cameras — add one in Robot settings.",
+    disconnected: "Not plugged in right now.",
+    identityNote:
+      "The choice is remembered for this checkpoint and robot, and is sent with this run only. Nothing is renamed: the camera keeps the name it has in Robot settings, and the server still finds the device by it.",
   },
   // Backend engine values. Matched on, never displayed raw — the raw value is
   // the fallback for an engine a newer server introduces.
@@ -156,7 +179,8 @@ export default {
     // {{elapsed}} and {{duration}} are pre-formatted; {{duration}} is "∞" for
     // an unbounded run, so neither may take i18next's magic `count`.
     elapsed: "{{elapsed}}s / {{duration}}",
-    returningToRest: "Easing the arm back to where it started before letting go.",
+    returningToRest:
+      "Easing the arm back to where it started before letting go.",
     operator: "Operator",
     noOperatorYet: "waiting",
     chunks: "Chunks / requests",
@@ -170,7 +194,8 @@ export default {
     // Both values are plain integers from the child's own sample.
     leadValue: "{{lead}} of {{margin}}",
     degradeHint: "quality is degrading",
-    noSampleYet: "No sample yet — the first one lands a second after connecting.",
+    noSampleYet:
+      "No sample yet — the first one lands a second after connecting.",
     stop: "Stop the run",
     stopping: "Stopping…",
   },

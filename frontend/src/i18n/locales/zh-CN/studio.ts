@@ -253,7 +253,8 @@ export default {
       label: "任务描述",
       placeholder: "例如：拿起红色方块",
       hint: "该策略以语言为条件（{{policyType}}）。",
-      hintUnknown: "只有以语言为条件的策略才会使用该字段 — 选择策略后即可确认。",
+      hintUnknown:
+        "只有以语言为条件的策略才会使用该字段 — 选择策略后即可确认。",
       hintNotConditioned:
         "该策略（{{policyType}}）不以语言为条件 — 会忽略该字段。",
       // 当任务描述是从该检查点自己的训练数据集自动填入时，追加在 hint 之后。
@@ -310,6 +311,8 @@ export default {
       noRobot: "请选择机器人以查看其摄像头。",
       unmatched:
         "策略需要摄像头 <0>{{name}}</0>，但该机器人没有名为“{{name}}”的摄像头 — 请在机器人设置中重命名。",
+      unmatchedRemote:
+        "策略需要摄像头 <0>{{name}}</0>，该机器人没有同名摄像头 — 请在上方选择由哪个摄像头承担该角色。",
       resolutionMismatch:
         "<0>{{name}}</0> 在机器人设置中为 {{robotWidth}}×{{robotHeight}}，而策略是在 {{policyWidth}}×{{policyHeight}} 下训练的 — 运行时按策略的分辨率采集。",
     },
@@ -352,7 +355,8 @@ export default {
       leaderMissing: "指导需要一条主臂 — 请在机器人设置中补上它的端口和标定。",
       coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
       transportNotReady: "远程传输尚未就绪 — 请在下方的远程运行区块中检查。",
-      remoteArmUnsupported: "远程运行目前仅支持单臂 SO-101。双臂配置和 CAN 机械臂尚不支持。",
+      remoteArmUnsupported:
+        "远程运行目前仅支持单臂 SO-101。双臂配置和 CAN 机械臂尚不支持。",
       remoteEngineUnsupported:
         "实时分块只适用于流式策略。请把动作块引擎切换回“自适应同步”。",
     },

@@ -11,8 +11,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  DEFAULT_HORIZON,
   VIDEO_CODECS,
+  horizonForEngine,
   type RemoteEngine,
   type RemoteRunConfig,
 } from "./remoteRunConfig";
@@ -38,8 +38,19 @@ const RemoteRunFields: React.FC<{
    * refusal explains itself rather than vanishing, and `deployGuards` blocks
    * the launch. */
   rtcSupported: boolean;
+  /** The checkpoint's `n_action_steps` — how many steps it actually returns
+   * per chunk, and therefore the CEILING on the horizon. Null when its config
+   * doesn't say, which is when the engine defaults stand alone. */
+  checkpointHorizon: number | null;
   disabled?: boolean;
-}> = ({ config, onChange, hubIdDefault, rtcSupported, disabled }) => {
+}> = ({
+  config,
+  onChange,
+  hubIdDefault,
+  rtcSupported,
+  checkpointHorizon,
+  disabled,
+}) => {
   const { t } = useTranslation();
   const set = <K extends keyof RemoteRunConfig>(
     key: K,
@@ -85,11 +96,18 @@ const RemoteRunFields: React.FC<{
             // families' full chunk_size) and a horizon carried over from the
             // other engine is the mismatch Portal drops packets over. An
             // operator who has already typed their own keeps it.
+            //
+            // Both sides of that comparison go through `horizonForEngine`, so
+            // the checkpoint's ceiling holds across the switch: without it, a
+            // 30-step checkpoint seeded to 16 for sync would read as "the sync
+            // default, untouched" and be re-seeded to the rtc default of 50 —
+            // straight past the ceiling, into a silently dropped run.
             const engine = v as RemoteEngine;
             const kept =
-              config.horizon !== DEFAULT_HORIZON[config.engine]
+              config.horizon !==
+              horizonForEngine(config.engine, checkpointHorizon)
                 ? config.horizon
-                : DEFAULT_HORIZON[engine];
+                : horizonForEngine(engine, checkpointHorizon);
             onChange({ ...config, engine, horizon: kept });
           }}
         >
@@ -214,6 +232,29 @@ const RemoteRunFields: React.FC<{
             </div>
           ) : null}
         </div>
+        {/* Said once, under the group, rather than beside the field: the
+            number is only ever a problem in relation to the GPU side, which is
+            what this whole group is about. Shown whenever the checkpoint
+            declares a chunk width, and sharpened when the operator has typed
+            past it — that is the state that ends in a connected session
+            receiving nothing at all. */}
+        {checkpointHorizon != null ? (
+          <p
+            className={`text-xs leading-relaxed ${
+              config.horizon > checkpointHorizon
+                ? "text-warn"
+                : "text-muted-foreground"
+            }`}
+          >
+            {config.horizon > checkpointHorizon
+              ? t("remoteInference.form.horizonOverCeiling", {
+                  steps: checkpointHorizon,
+                })
+              : t("remoteInference.form.horizonFromCheckpoint", {
+                  steps: checkpointHorizon,
+                })}
+          </p>
+        ) : null}
         <p className="text-xs text-muted-foreground">
           {config.durationS === 0
             ? t("remoteInference.form.durationUnbounded")

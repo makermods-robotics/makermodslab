@@ -34,6 +34,17 @@ export interface PolicyConfigSummary {
   // null when the checkpoint omits the feature.
   state_dim: number | null;
   action_dim: number | null;
+  /** The checkpoint's chunk geometry, null when the config omits it.
+   *
+   * `n_action_steps` is how many steps `predict_action_chunk` actually returns,
+   * and therefore the CEILING on a remote-inference horizon: declare more and
+   * the two Portal peers disagree about the action-chunk shape, the wire-schema
+   * fingerprint stops matching, and every packet is dropped in silence — a
+   * connected session that receives nothing. `chunk_size` is the wider window
+   * the policy predicts internally (>= n_action_steps); carried for display and
+   * diagnosis, never used as the ceiling. */
+  n_action_steps: number | null;
+  chunk_size: number | null;
   /** Raw lerobot robot_type of the dataset this checkpoint was trained on
    * (recovered via its train_config.json). null when it can't be
    * established — an imported flat model, a deleted training dataset, an

@@ -12,6 +12,10 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import CameraRoleBindings, {
+  type CameraRoleOption,
+  type CameraRoleSlot,
+} from "./CameraRoleBindings";
 import GpuLaunchSection from "./GpuLaunchSection";
 import ModalRunLine from "./ModalRunLine";
 import RemoteInferenceStatusPanel from "./RemoteInferenceStatusPanel";
@@ -45,6 +49,16 @@ const RemoteInferenceBlock: React.FC<{
   /** Whether the selected checkpoint's policy family can be in-painted, i.e.
    * whether the `rtc` engine is meaningful for it. */
   rtcSupported: boolean;
+  /** The checkpoint's `n_action_steps` — the ceiling on the horizon. */
+  checkpointHorizon: number | null;
+  /** Checkpoint camera roles with NO name match on this robot, in the order
+   * the checkpoint declares them. Empty (the usual case) renders no section. */
+  cameraRoleSlots: CameraRoleSlot[];
+  /** The robot's cameras, as the options for those roles. */
+  cameraRoleOptions: CameraRoleOption[];
+  /** How many roles bound themselves by name and therefore need no control. */
+  cameraRoleNameMatched: number;
+  onCameraRoleChange: (requestKey: string, cameraName: string | null) => void;
   /** The effective task (typed, else the checkpoint's inherited default) —
    * the same string the start request carries. */
   task: string;
@@ -60,6 +74,11 @@ const RemoteInferenceBlock: React.FC<{
   onConfigChange,
   hubIdDefault,
   rtcSupported,
+  checkpointHorizon,
+  cameraRoleSlots,
+  cameraRoleOptions,
+  cameraRoleNameMatched,
+  onCameraRoleChange,
   task,
   transportState,
   status,
@@ -127,6 +146,19 @@ const RemoteInferenceBlock: React.FC<{
             onChange={onConfigChange}
             hubIdDefault={hubIdDefault}
             rtcSupported={rtcSupported}
+            checkpointHorizon={checkpointHorizon}
+            disabled={active}
+          />
+          {/* Between the run's own fields and the GPU launch, because that is
+              where it sits in the work: the roles are part of what this run
+              sends, and the command below is generated from a configured run.
+              Renders nothing at all when every checkpoint camera matched a
+              robot camera by name, which is the ordinary case. */}
+          <CameraRoleBindings
+            slots={cameraRoleSlots}
+            cameras={cameraRoleOptions}
+            nameMatchedCount={cameraRoleNameMatched}
+            onChange={onCameraRoleChange}
             disabled={active}
           />
           <GpuLaunchSection

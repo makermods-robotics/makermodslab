@@ -102,7 +102,9 @@ const metrics = (current: number, total: number, loss = 0.042) => ({
 // Overridable per entry via the spread below.
 let mockJobNumber = 0;
 
-const job = (j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">): JobRecord => ({
+const job = (
+  j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">,
+): JobRecord => ({
   job_number: ++mockJobNumber,
   display_name: null,
   state: "done",
@@ -255,9 +257,10 @@ const checkpointsByJob: Record<string, JobCheckpoint[]> = {
     `${USER}/pi05_metal_pick_place_lora_mock`,
     [0],
   ),
-  "act_imported_2026-07-11_16-39-00": hubCkpts(`${USER}/act_so101_merged_mock`, [
-    5000, 10000,
-  ]),
+  "act_imported_2026-07-11_16-39-00": hubCkpts(
+    `${USER}/act_so101_merged_mock`,
+    [5000, 10000],
+  ),
   "smolvla_imported_2026-07-10_09-30-00": hubCkpts(
     `${USER}/smolvla_sock_purple_green_mock`,
     [0],
@@ -359,6 +362,12 @@ const policyConfig = (policy: string): PolicyConfigSummary => ({
   supports_rtc: policy === "smolvla" || policy === "pi05",
   state_dim: 6,
   action_dim: 6,
+  // Chunk geometry, as the real route reports it. ACT's config defaults are
+  // 100/100; the flow families ship 50/50. Both are >= the panel's engine
+  // defaults, so mock mode exercises the "ceiling doesn't move the seed" side
+  // of horizonForEngine (a checkpoint like MolmoAct2's 30 is the other).
+  n_action_steps: policy === "act" ? 100 : 50,
+  chunk_size: policy === "act" ? 100 : 50,
 });
 
 /** /models rows derived live from the registry so mutations stay coherent. */

@@ -66,12 +66,53 @@ export const DEFAULT_REMOTE_RUN_CONFIG: RemoteRunConfig = {
  * and ignores the extra state fields, so `rtc` buys it nothing and costs it the
  * play-to-completion contract it was evaluated in. Values are lerobot
  * `policy_type` identifiers, matched verbatim.
+ *
+ * FALLBACK ONLY since S3.7b. The server answers this question itself now
+ * (`supports_rtc`, from `jobs.policy_type_supports_rtc`'s hand-mirrored read of
+ * the pinned fork), and its answer is the primary one — this list is consulted
+ * only when the field is null, i.e. a server too old to send it. The two lists
+ * do disagree (this one carries `diffusion`, which the fork's classes say
+ * cannot; the fork's carries `evo1`/`groot`/`molmoact2`, which this one has
+ * never heard of), and that disagreement is precisely why the server's answer
+ * wins wherever there is one.
  */
-export const FLOW_POLICY_TYPES = ["smolvla", "pi0", "pi05", "diffusion"] as const;
+export const FLOW_POLICY_TYPES = [
+  "smolvla",
+  "pi0",
+  "pi05",
+  "diffusion",
+] as const;
 
+/**
+ * The slice of a checkpoint's policy config every remote-engine decision reads.
+ *
+ * Structural on purpose: `PolicyConfigSummary` satisfies it without this module
+ * importing the API types, and — more to the point — the default engine, the
+ * `remoteEngineSupported` launch guard and the "this can't be in-painted" copy
+ * are now handed the SAME object, so they cannot answer differently.
+ */
+export interface PolicyRtcInfo {
+  policy_type?: string | null;
+  supports_rtc?: boolean | null;
+}
+
+/**
+ * Whether this checkpoint's architecture can run Real-Time Chunking.
+ *
+ * `supports_rtc` from the server is the answer whenever it has one, including
+ * `false`. `null` means "not established" — a policy type newer than the
+ * server's table — and only then does the frontend's own family list decide.
+ * An unknown type on both sides reads as "no", which is the safe direction:
+ * guessing rtc pairs the arm with a GPU server the operator was never told to
+ * start, and the rtc option stays selectable regardless so the refusal explains
+ * itself rather than vanishing.
+ */
 export function policySupportsRtc(
-  policyType: string | null | undefined,
+  policy: PolicyRtcInfo | null | undefined,
 ): boolean {
+  if (!policy) return false;
+  if (typeof policy.supports_rtc === "boolean") return policy.supports_rtc;
+  const policyType = policy.policy_type;
   if (!policyType) return false;
   return (FLOW_POLICY_TYPES as readonly string[]).includes(
     policyType.toLowerCase(),
@@ -86,13 +127,39 @@ export function policySupportsRtc(
  * re-plans about once a second and two flow-policy plans made 400 ms apart
  * disagree at every seam — a visible ~1 Hz twitch on a perfectly healthy
  * transport. Everything else defaults to `sync`, which is correct for ANY
- * policy. An UNKNOWN policy type is "everything else": guessing `rtc` for one
- * would pair the arm with a GPU server the operator was never told to start.
+ * policy — including a checkpoint nobody has classified.
  */
-export function defaultEngineForPolicyType(
-  policyType: string | null | undefined,
+export function defaultEngineForPolicy(
+  policy: PolicyRtcInfo | null | undefined,
 ): RemoteEngine {
-  return policySupportsRtc(policyType) ? "rtc" : "sync";
+  return policySupportsRtc(policy) ? "rtc" : "sync";
+}
+
+/**
+ * The horizon to seed for `engine`, given what the checkpoint returns per
+ * chunk (`n_action_steps`, null when the config doesn't say).
+ *
+ * `n_action_steps` is a CEILING, not a target. `predict_action_chunk` returns
+ * exactly that many steps, so a horizon above it makes the two Portal peers
+ * disagree about the action-chunk shape: the wire-schema fingerprint stops
+ * matching and every packet is dropped IN SILENCE — a connected, healthy-
+ * looking session that transfers nothing. MolmoAct2's published checkpoint is
+ * 30 against an rtc default of 50, which is exactly that trap.
+ *
+ * So the seed is the engine default CLAMPED to the ceiling, never raised to it:
+ * an ACT checkpoint declaring 100 still starts at one open-loop block (16), and
+ * a flow checkpoint declaring 50 still starts at 50. Only a checkpoint that
+ * returns FEWER steps than the engine default moves the number, which is the
+ * only case where the default was unusable.
+ */
+export function horizonForEngine(
+  engine: RemoteEngine,
+  nActionSteps: number | null | undefined,
+): number {
+  const ceiling =
+    typeof nActionSteps === "number" && nActionSteps > 0 ? nActionSteps : null;
+  const base = DEFAULT_HORIZON[engine];
+  return ceiling != null ? Math.min(base, ceiling) : base;
 }
 
 /** Codec choices. Values are wire identifiers; only a label beside them could

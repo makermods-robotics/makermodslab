@@ -23,6 +23,11 @@ export default {
     horizonLabel: "Horizon",
     fpsLabel: "帧率",
     codecLabel: "视频编码",
+    // {{steps}} 是从检查点配置里读出的数字，不做任何翻译。
+    horizonFromCheckpoint:
+      "该检查点每个动作块返回 {{steps}} 步，因此 horizon 以此为起点，且不能超过它。",
+    horizonOverCeiling:
+      "horizon 超过了该检查点返回的 {{steps}} 步。这样两侧对动作块形状的理解就不一致，所有数据包都会被静默丢弃 — 运行看上去已连接，却收不到任何东西。",
     durationLabel: "最长时长（秒）",
     durationHint: "到时后自动停止。你随时可以提前停止。",
     durationUnbounded: "0 — 一直运行，直到你停止它。",
@@ -30,6 +35,18 @@ export default {
     // "--s-min" 是命令行标志名，与本面板中其他标识符一样保留拉丁文写法。
     sMinHint:
       "机械臂为一次往返预留的计划步数。它必须和上面命令里的 --s-min 完全一致：机械臂据此算出下一个动作块中还“新鲜”的部分，而 GPU 会直接采信这个结果。",
+  },
+  // 按角色绑定摄像头。只有当检查点的某个摄像头在机器人上找不到同名摄像头时才会出现。
+  cameraRoles: {
+    title: "摄像头角色",
+    hint: "该检查点使用的摄像头名称在这台机器人上不存在。请为本次运行选择由哪个摄像头承担每个角色。",
+    nameMatched_other: "另有 {{count}} 个摄像头按名称自动匹配。",
+    capturesAt: "策略的训练分辨率为 {{width}}×{{height}}。",
+    unbound: "尚未选择",
+    noCameras: "该机器人没有摄像头 — 请在机器人设置中添加。",
+    disconnected: "当前未接入。",
+    identityNote:
+      "该选择会按此检查点与机器人记住，并且只随本次运行发送。不会重命名任何东西：摄像头仍沿用机器人设置中的名称，服务端也仍按该名称查找设备。",
   },
   // 后端引擎取值。用于匹配，不直接展示 — 原值只作为新版服务端引入新引擎时的兜底。
   engine: {

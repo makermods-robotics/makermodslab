@@ -63,14 +63,22 @@ import {
   useRemoteInferenceTransport,
 } from "@/hooks/useRemoteInferenceTransport";
 import RemoteInferenceBlock from "@/components/remote-inference/RemoteInferenceBlock";
+import type {
+  CameraRoleOption,
+  CameraRoleSlot,
+} from "@/components/remote-inference/CameraRoleBindings";
 import {
-  DEFAULT_HORIZON,
-  defaultEngineForPolicyType,
+  horizonForEngine,
+  defaultEngineForPolicy,
   policySupportsRtc,
   armSupportsRemoteInference,
   DEFAULT_REMOTE_RUN_CONFIG,
   type RemoteRunConfig,
 } from "@/components/remote-inference/remoteRunConfig";
+import {
+  remoteCameraRoleKey,
+  useRemoteCameraRoles,
+} from "@/hooks/useRemoteCameraRoles";
 import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
@@ -348,7 +356,9 @@ export const RunVerbs: React.FC<{
               className={cn("relative", m.wide && "col-span-2")}
             >
               <Button
-                onClick={() => (blockedHere ? onArm(m.value) : onLaunch(m.value))}
+                onClick={() =>
+                  blockedHere ? onArm(m.value) : onLaunch(m.value)
+                }
                 onMouseEnter={() => onArm(m.value)}
                 onFocus={() => onArm(m.value)}
                 aria-disabled={blockedHere}
@@ -518,7 +528,7 @@ const DeployPanel: React.FC = () => {
 
   const selectedCheckpoint =
     selectedRef != null
-      ? checkpoints.find((c) => c.ref === selectedRef) ?? null
+      ? (checkpoints.find((c) => c.ref === selectedRef) ?? null)
       : null;
   // The step is now DERIVED from the selected checkpoint, never the other way
   // round — it is a label, not an identity.
@@ -586,7 +596,9 @@ const DeployPanel: React.FC = () => {
   const [datasetTasks, setDatasetTasks] = useState<string[]>([]);
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
-  const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
+  const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">(
+    "sync",
+  );
   const [submitting, setSubmitting] = useState(false);
   // ACT temporal ensembling. Held as (on, coeff) rather than `number | null`
   // so clearing the number field mid-edit doesn't silently switch the feature
@@ -641,9 +653,12 @@ const DeployPanel: React.FC = () => {
   useSessionHeartbeat(remoteSessionId, tabOwnerId(), remoteActive);
 
   // Whether this checkpoint can be in-painted at all — the rtc engine's whole
-  // premise. Unknown policy type counts as "no": guessing rtc for one would
-  // pair the arm with a GPU server the operator was never told to start.
-  const rtcSupported = policySupportsRtc(policyConfig?.policy_type);
+  // premise. The whole policy config goes in, not just its type: the SERVER's
+  // `supports_rtc` is the answer whenever it has one, and the frontend's own
+  // family list only decides for a policy type newer than the server's table.
+  // Unknown on both sides counts as "no": guessing rtc would pair the arm with
+  // a GPU server the operator was never told to start.
+  const rtcSupported = policySupportsRtc(policyConfig);
 
   // Preselect the engine from the checkpoint's policy family, and the horizon
   // from the engine. A flow policy defaults to rtc because that is the whole
@@ -651,25 +666,35 @@ const DeployPanel: React.FC = () => {
   // about once a second, and two flow-policy plans made 400 ms apart disagree
   // at every seam — a visible ~1 Hz twitch with a perfectly healthy transport.
   //
-  // Keyed on the RESOLVED policy type so it re-seeds when the operator picks a
-  // different checkpoint, and never while a run is live (the fields are
-  // disabled then, and re-seeding under a live run would make the generated
-  // command disagree with the arm). It seeds a DEFAULT, so it deliberately
-  // overwrites: an engine left on rtc from the previous checkpoint is exactly
-  // the state this exists to correct.
+  // Keyed on everything the seed READS, not on the policy type alone — since
+  // S3.7b the horizon also follows the checkpoint's own `n_action_steps`, and
+  // two checkpoints of the same family can declare different ones (MolmoAct2's
+  // published checkpoint returns 30 against an rtc default of 50). Keying on
+  // the type alone would leave the first checkpoint's horizon standing over the
+  // second, which is the exact mismatch Portal drops every packet over.
+  //
+  // Never while a run is live (the fields are disabled then, and re-seeding
+  // under a live run would make the generated command disagree with the arm).
+  // It seeds a DEFAULT, so it deliberately overwrites: an engine left on rtc
+  // from the previous checkpoint is exactly the state this exists to correct.
   const seededEngineFor = useRef<string | null>(null);
   useEffect(() => {
     const policyType = policyConfig?.policy_type ?? null;
     if (!policyType || remoteActive) return;
-    if (seededEngineFor.current === policyType) return;
-    seededEngineFor.current = policyType;
-    const engine = defaultEngineForPolicyType(policyType);
+    const seedKey = [
+      policyType,
+      policyConfig?.supports_rtc ?? "?",
+      policyConfig?.n_action_steps ?? "?",
+    ].join("|");
+    if (seededEngineFor.current === seedKey) return;
+    seededEngineFor.current = seedKey;
+    const engine = defaultEngineForPolicy(policyConfig);
     setRemoteConfig((prev) => ({
       ...prev,
       engine,
-      horizon: DEFAULT_HORIZON[engine],
+      horizon: horizonForEngine(engine, policyConfig?.n_action_steps),
     }));
-  }, [policyConfig?.policy_type, remoteActive]);
+  }, [policyConfig, remoteActive]);
 
   // Edge-triggered "consume once": handleStart sets the pending flag, and the
   // effect below latches it into showDeployMilestone the first time the live
@@ -709,6 +734,22 @@ const DeployPanel: React.FC = () => {
     () => robot?.cameras ?? [],
     [robot],
   );
+
+  // Per-role camera picks for a REMOTE run, remembered per (checkpoint, robot).
+  // The checkpoint half is the pair that addresses its policy config — the
+  // owning job id and the checkpoint ref — because that is what "this
+  // checkpoint" means everywhere else in this panel. A remembered pick naming a
+  // camera the record no longer holds is dropped on read, inside the hook.
+  const robotCameraNames = useMemo(
+    () => robotCameras.map((c) => c.name),
+    [robotCameras],
+  );
+  const { roles: remoteCameraRoles, setRole: setRemoteCameraRole } =
+    useRemoteCameraRoles(
+      remoteCameraRoleKey(policyConfigJobId, selectedRef),
+      robot?.name ?? null,
+      robotCameraNames,
+    );
 
   /**
    * The camera bindings, DERIVED BY NAME rather than chosen: each camera the
@@ -751,6 +792,54 @@ const DeployPanel: React.FC = () => {
     [cameraMap, robotCameras, policyConfig, availableCameras],
   );
 
+  /**
+   * REMOTE runs only: the same bindings, with the operator's per-role picks
+   * filled in where nothing matched by name.
+   *
+   * A checkpoint's camera name is a ROLE, not a claim about this robot —
+   * `lerobot/MolmoAct2-SO100_101-LeRobot` names `cam0` / `cam1`, which no robot
+   * record has ever been called — and a role nothing matches is a question the
+   * operator has to answer, not a defect in the record. A robot camera's name
+   * stays its identity: nothing here renames anything, and the pick is
+   * remembered per (checkpoint, robot) rather than written to the record.
+   *
+   * Layered over the name-derived list rather than replacing it, so a name
+   * match ALWAYS wins and the local run keeps exactly the bindings it had. A
+   * pick is re-checked against the record on every render (a camera deleted in
+   * Robot settings simply stops resolving) and its connectedness is judged the
+   * same way a name match's is — a pick of an unplugged camera is a pick, not a
+   * binding, and still blocks Start.
+   */
+  const remoteCameraBindings = useMemo(
+    () =>
+      cameraBindings.map((b) => {
+        if (b.camera != null) return b;
+        const picked = remoteCameraRoles[b.mapping.requestKey];
+        const camera = picked
+          ? (robotCameras.find((c) => c.name === picked) ?? null)
+          : null;
+        if (camera == null) return b;
+        return {
+          ...b,
+          camera,
+          connected: isCameraConnected(camera, availableCameras),
+          resolutionDiffers:
+            b.dims != null &&
+            (camera.width !== b.dims.width || camera.height !== b.dims.height),
+        };
+      }),
+    [cameraBindings, remoteCameraRoles, robotCameras, availableCameras],
+  );
+
+  /** Which list a given verb reads. Only the remote run has a picker, so every
+   * other mode sees the name-derived list unchanged — identity included, since
+   * `remoteCameraBindings` is `cameraBindings` when nothing was picked. */
+  const bindingsFor = useCallback(
+    (mode: RunMode) =>
+      mode === "remote" ? remoteCameraBindings : cameraBindings,
+    [remoteCameraBindings, cameraBindings],
+  );
+
   /** Cameras the policy needs that this robot has nothing named for. Start is
    * blocked on these: the rollout cannot invent the feed. */
   const unmatchedCameras = cameraBindings.filter((b) => b.camera == null);
@@ -763,6 +852,48 @@ const DeployPanel: React.FC = () => {
    * policy trained on. A warning only: the rollout forwards the checkpoint's
    * dims as `camera_dims` and the camera is opened at those. */
   const mismatchedCameras = cameraBindings.filter((b) => b.resolutionDiffers);
+
+  // The same three questions asked of the REMOTE list. Kept beside their
+  // name-only twins rather than replacing them: the alert and the guards each
+  // pick the one their mode is about, so a role pick can never quietly change
+  // what a local run is allowed to do.
+  const remoteUnmatchedCameras = remoteCameraBindings.filter(
+    (b) => b.camera == null,
+  );
+  const remoteDisconnectedCameras = remoteCameraBindings.filter(
+    (b) => b.camera != null && !b.connected,
+  );
+  const remoteMismatchedCameras = remoteCameraBindings.filter(
+    (b) => b.resolutionDiffers,
+  );
+
+  /** The picker's slots: the roles with NO name match, in checkpoint order.
+   * A matched role gets no control — there is no decision to make. */
+  const cameraRoleSlots: CameraRoleSlot[] = useMemo(
+    () =>
+      cameraBindings
+        .filter((b) => b.camera == null)
+        .map((b) => ({
+          requestKey: b.mapping.requestKey,
+          display: b.mapping.display,
+          dims: b.dims,
+          selected: remoteCameraRoles[b.mapping.requestKey] ?? null,
+        })),
+    [cameraBindings, remoteCameraRoles],
+  );
+
+  /** The robot's cameras as options. Names are the record's own spelling —
+   * the value the start request carries. */
+  const cameraRoleOptions: CameraRoleOption[] = useMemo(
+    () =>
+      robotCameras.map((c) => ({
+        name: c.name,
+        width: c.width,
+        height: c.height,
+        connected: isCameraConnected(c, availableCameras),
+      })),
+    [robotCameras, availableCameras],
+  );
 
   // Opening the studio is a freshness gesture, so it still re-pulls — but it is
   // no longer the ONLY thing that does, which is what made a run completing
@@ -1056,6 +1187,22 @@ const DeployPanel: React.FC = () => {
   // Every camera the policy needs is matched by name AND plugged in.
   const allCamerasReady =
     unmatchedCameras.length === 0 && disconnectedCameras.length === 0;
+  // The remote answer to the same question: a role bound by hand counts, and a
+  // pick of an unplugged camera does not. Never LESS ready than the name-only
+  // answer — picks only ever add bindings — so no verb can be blocked by this
+  // that was not blocked before.
+  const remoteCamerasReady =
+    remoteUnmatchedCameras.length === 0 &&
+    remoteDisconnectedCameras.length === 0;
+  const camerasReadyFor = (mode: RunMode) =>
+    mode === "remote" ? remoteCamerasReady : allCamerasReady;
+  // What the alert below reports, for the mode currently armed. A role bound by
+  // hand is no longer "unmatched", so it must not still be listed as the reason
+  // the run cannot start.
+  const shownUnmatchedCameras =
+    runMode === "remote" ? remoteUnmatchedCameras : unmatchedCameras;
+  const shownMismatchedCameras =
+    runMode === "remote" ? remoteMismatchedCameras : mismatchedCameras;
 
   const inferenceActive = status?.inference_active === true;
   // Either inference mode holds the robot; they are mutually exclusive
@@ -1104,7 +1251,11 @@ const DeployPanel: React.FC = () => {
     !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
-    allCamerasReady &&
+    // The ARMED mode's answer. Camera readiness stopped being one fact for the
+    // whole panel when the remote run gained its role picker; each verb's own
+    // refusal still comes from `blockedReason(mode)` below, and this only stops
+    // the row disabling a mode whose cameras ARE bound.
+    camerasReadyFor(runMode) &&
     !temporalEnsembleInvalid &&
     !submitting &&
     !checkingExtra &&
@@ -1122,9 +1273,12 @@ const DeployPanel: React.FC = () => {
       followerReady: !!robot?.follower_ready,
       hasCheckpoint: selectedRef != null && !!policyConfig,
       armMismatch: robotCheckpointArmMismatch,
-      // Same predicate, renamed: bindings are derived by name now, so "bound"
-      // means matched-and-plugged-in rather than picked from a dropdown.
-      allCamerasBound: allCamerasReady,
+      // Same predicate, renamed: bindings are derived by name, so "bound"
+      // means matched-and-plugged-in. A REMOTE run may also bind a role by
+      // hand (there is no other way to run a checkpoint whose cameras are
+      // named `cam0`/`cam1`), so it asks the same question of the list that
+      // includes those picks. The guard's own semantics are untouched.
+      allCamerasBound: camerasReadyFor(mode),
       temporalEnsembleInvalid,
       inferenceActive: runActive,
       leaderMissing,
@@ -1292,7 +1446,16 @@ const DeployPanel: React.FC = () => {
     // /policy-config, the server applies them.
     const cameraDimsPayload: Record<string, { width: number; height: number }> =
       {};
-    for (const { mapping, camera, dims } of cameraBindings) {
+    // The list this MODE binds with: a remote run's includes the roles bound by
+    // hand, every other mode's is the name-derived list unchanged. Keyed on the
+    // launched mode rather than the armed one, because the verb row can launch
+    // a mode it has only just armed.
+    //
+    // A role pick changes nothing else about the request: the VALUES are still
+    // robot-record camera names the server resolves to devices itself, and
+    // `camera_dims` still comes from the CHECKPOINT's own image_features, the
+    // same for a picked role as for a name-matched one.
+    for (const { mapping, camera, dims } of bindingsFor(mode)) {
       if (camera == null) continue;
       // The robot record's own spelling, not the checkpoint's — the name
       // matched case-insensitively and the server looks it up verbatim.
@@ -1470,7 +1633,11 @@ const DeployPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="3" title={t("studio.deploy.title")} dataTour="studio-deploy">
+      <PanelHeader
+        step="3"
+        title={t("studio.deploy.title")}
+        dataTour="studio-deploy"
+      >
         {resolving ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         ) : null}
@@ -1837,10 +2004,10 @@ const DeployPanel: React.FC = () => {
                       Coaching pays off once the policy already works sometimes.
                     </span>{" "}
                     It learns from rescuing the policy's own mistakes, so it
-                    needs the policy to get far enough to make interesting ones —
-                    roughly a 1-in-10 success rate. If it fails immediately every
-                    time, record more demonstrations first; that's faster than
-                    correcting your way there.
+                    needs the policy to get far enough to make interesting ones
+                    — roughly a 1-in-10 success rate. If it fails immediately
+                    every time, record more demonstrations first; that's faster
+                    than correcting your way there.
                   </p>
                 </div>
                 <div className="space-y-2">
@@ -1994,6 +2161,16 @@ const DeployPanel: React.FC = () => {
                 onConfigChange={setRemoteConfig}
                 hubIdDefault={selectedJob?.hf_repo_id ?? ""}
                 rtcSupported={rtcSupported}
+                // The ceiling on the horizon, straight off the checkpoint.
+                checkpointHorizon={policyConfig?.n_action_steps ?? null}
+                // Only the roles nothing matched by name; an empty list renders
+                // no section at all.
+                cameraRoleSlots={cameraRoleSlots}
+                cameraRoleOptions={cameraRoleOptions}
+                cameraRoleNameMatched={
+                  cameraBindings.length - cameraRoleSlots.length
+                }
+                onCameraRoleChange={setRemoteCameraRole}
                 // The SAME string the start request sends, so the GPU side and
                 // the robot side steer the policy identically.
                 task={effectiveTask}
@@ -2025,24 +2202,36 @@ const DeployPanel: React.FC = () => {
                 the rollout cannot invent the feed), and a name match whose
                 resolution differs from the checkpoint's (a warning: the run
                 captures at the policy's size regardless). */}
-            {unmatchedCameras.length > 0 || mismatchedCameras.length > 0 ? (
+            {shownUnmatchedCameras.length > 0 ||
+            shownMismatchedCameras.length > 0 ? (
               <Alert
-                variant={unmatchedCameras.length > 0 ? "destructive" : undefined}
+                variant={
+                  shownUnmatchedCameras.length > 0 ? "destructive" : undefined
+                }
                 className={
-                  unmatchedCameras.length > 0
+                  shownUnmatchedCameras.length > 0
                     ? undefined
                     : "border-warn/40 text-warn [&>svg]:text-warn"
                 }
               >
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription className="space-y-1">
-                  {unmatchedCameras.map((b) => (
+                  {shownUnmatchedCameras.map((b) => (
                     <p key={b.mapping.requestKey}>
                       {/* The camera NAME is data (it is the robot record's own
                           key), so it rides in as a value and <0> only makes it
-                          bold. */}
+                          bold.
+
+                          Remote runs get their own sentence: renaming a robot
+                          camera is the WRONG remedy there — the name on the
+                          record is that camera's identity, and the role picker
+                          above is the answer. */}
                       <Trans
-                        i18nKey="studio.deploy.cameras.unmatched"
+                        i18nKey={
+                          runMode === "remote"
+                            ? "studio.deploy.cameras.unmatchedRemote"
+                            : "studio.deploy.cameras.unmatched"
+                        }
                         values={{ name: b.mapping.display }}
                         components={[<strong key="0" />]}
                       />
@@ -2050,7 +2239,7 @@ const DeployPanel: React.FC = () => {
                   ))}
                   {/* `resolutionDiffers` is only ever true with both sides
                       present; the guard is what tells the compiler so. */}
-                  {mismatchedCameras.map(({ mapping, camera, dims }) =>
+                  {shownMismatchedCameras.map(({ mapping, camera, dims }) =>
                     camera && dims ? (
                       <p key={mapping.requestKey}>
                         <Trans
