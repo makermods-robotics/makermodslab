@@ -26,8 +26,9 @@ export interface RemoteRunConfig {
   fps: number;
   /** Codec IDENTIFIER — sent verbatim on both sides, never translated. */
   videoCodec: "H264" | "MJPEG";
-  /** Seconds; 0 = unbounded. */
-  durationS: number;
+  // No duration here since S3.9: the panel offers ONE max-duration field for
+  // both places a run can happen, and it lives in the panel's own state beside
+  // the task. 0 still means unbounded to the backend for a remote run.
   /** RTC only. Minimum execution budget in steps; the robot computes
    * `overlap_end = H - max(s_min, d)` and the GPU server TRUSTS that number, so
    * the two `--s-min` / `--s_min` values must be the same. */
@@ -53,7 +54,6 @@ export const DEFAULT_REMOTE_RUN_CONFIG: RemoteRunConfig = {
   horizon: DEFAULT_HORIZON.sync,
   fps: 30,
   videoCodec: "H264",
-  durationS: 60,
   sMin: DEFAULT_S_MIN,
 };
 
@@ -88,8 +88,11 @@ export const FLOW_POLICY_TYPES = [
  *
  * Structural on purpose: `PolicyConfigSummary` satisfies it without this module
  * importing the API types, and — more to the point — the default engine, the
- * `remoteEngineSupported` launch guard and the "this can't be in-painted" copy
- * are now handed the SAME object, so they cannot answer differently.
+ * ENABLED state of the rtc option, the sentence under the picker and the
+ * `remoteEngineSupported` launch guard are all handed the SAME object, so they
+ * cannot answer differently. Since S3.9's follow-up that is one rule rather
+ * than two: the panel no longer keeps a separate, fail-open "the server won't
+ * refuse this" reading for a local rollout.
  */
 export interface PolicyRtcInfo {
   policy_type?: string | null;
@@ -104,8 +107,11 @@ export interface PolicyRtcInfo {
  * server's table — and only then does the frontend's own family list decide.
  * An unknown type on both sides reads as "no", which is the safe direction:
  * guessing rtc pairs the arm with a GPU server the operator was never told to
- * start, and the rtc option stays selectable regardless so the refusal explains
- * itself rather than vanishing.
+ * start, and locally it trades the play-to-completion contract the checkpoint
+ * was evaluated in for nothing. This is the ONLY answer the UI asks now — the
+ * rtc option is disabled wherever it comes back false, on both the local and
+ * the remote path, with one sentence under the picker saying why rather than a
+ * greyed-out control explaining nothing.
  */
 export function policySupportsRtc(
   policy: PolicyRtcInfo | null | undefined,

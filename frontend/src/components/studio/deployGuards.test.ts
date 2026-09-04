@@ -10,6 +10,7 @@ const ok: DeployGuardContext = {
   armMismatch: false,
   allCamerasBound: true,
   temporalEnsembleInvalid: false,
+  durationValid: true,
   inferenceActive: false,
   leaderMissing: false,
   requiresTask: false,
@@ -62,6 +63,24 @@ describe("coaching keeps its own task requirement", () => {
     // Remote inference least of all: the Star Arm 102 leader holds encoders
     // and no motors, and the remote run never touches a leader anyway.
     expect(deployBlockedReason("remote", { ...ok, leaderMissing: true })).toBeNull();
+  });
+});
+
+describe("the shared max-duration field means different things per mode", () => {
+  // One field, two contracts: 0 is "run until I stop you" for a remote run and
+  // a run that ends the instant it starts for a local one. The panel cannot
+  // express that with a min= on the input, because the same input serves both.
+  it.each(["single", "eval", "coach"] as DeployRunMode[])(
+    "blocks %s on a duration this mode cannot use",
+    (mode) => {
+      expect(deployBlockedReason(mode, { ...ok, durationValid: false })).toMatch(
+        /blocked\.durationRequired/,
+      );
+    },
+  );
+
+  it("lets a remote run keep an unbounded duration", () => {
+    expect(deployBlockedReason("remote", { ...ok, durationValid: false })).toBeNull();
   });
 });
 

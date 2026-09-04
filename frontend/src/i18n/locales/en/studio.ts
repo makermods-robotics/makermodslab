@@ -291,11 +291,17 @@ export default {
         commitment:
           "take control of the follower with the leader when it's failing, and gather data",
       },
-      remote: {
-        title: "Run it remotely",
-        what: "The arm runs here; the policy runs on a remote GPU over a LiveKit room.",
-        commitment: "needs the GPU side running in another terminal",
-      },
+    },
+    // WHERE the policy runs — the segmented control above the tab strip. The
+    // option VALUES ("local"/"remote") are identifiers the panel switches on;
+    // only these labels are translated.
+    runsOn: {
+      label: "Runs on",
+      local: "This machine",
+      remote: "Remote GPU",
+      localHint: "This machine loads the checkpoint and drives the arm.",
+      remoteHint:
+        "The arm runs here; the policy runs on a remote GPU, and the two meet in a LiveKit room. This machine never loads the checkpoint.",
     },
     // Coaching-only parameters, shown when run mode is "coach".
     coaching: {
@@ -368,6 +374,12 @@ export default {
       label: "Max duration (s)",
       hint: "Per episode. An episode that runs this long without you calling it a success counts as a failure.",
       singleHint: "The run stops after this long.",
+      coachHint:
+        "Per attempt. An attempt that runs this long without a rescue or a finish ends on its own.",
+      // Remote only, where 0 is the backend's own unbounded contract rather
+      // than a run that ends the instant it starts.
+      remoteHint: "The run stops after this long. Set 0 to run until you stop it.",
+      remoteUnbounded: "0 — the run continues until you stop it.",
     },
     episodes: {
       label: "Episodes",
@@ -382,14 +394,15 @@ export default {
       label: "Inference engine",
       // Option labels only — the submitted values ("sync" / "rtc") are
       // identifiers the backend parses and are never translated.
-      sync: "Sync (default)",
-      rtc: "RTC — experimental, smoother control",
-      syncHint:
-        "One policy forward per control step. The arm pauses briefly between action chunks.",
-      rtcHint:
-        "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
-      // Shown under the picker when the selected checkpoint's architecture
-      // can't run RTC (the server refuses it), which also disables the option.
+      sync: "Sync",
+      rtc: "Real-time chunking",
+      // The two hints live in `remoteInference.form.engine` — one field, one
+      // pair of explanations, whichever machine the policy runs on.
+      // Shown under the picker whenever the selected checkpoint's architecture
+      // isn't KNOWN to support RTC, which also disables the option — one rule
+      // for a local rollout and a remote run alike. "isn't available" covers
+      // both halves of that on purpose: a checkpoint the server ruled out and
+      // one nobody has classified are the same answer here.
       rtcUnavailable:
         "Real-Time Chunking isn't available for this checkpoint's policy.",
       // Shown INSTEAD of the picker in coaching mode, which is pinned to sync.
@@ -446,15 +459,14 @@ export default {
       coeffHint:
         "Weights are exp(-coeff × age): higher favours the newest prediction, lower averages more evenly. The ACT paper uses {{value}}.",
     },
-    // The action row: each verb selects its mode and launches it in one press.
-    runVerbs: {
-      groupLabel: "Start a run",
-      single: "Run",
-      // {{count}} is the episode / correction target — a number, so no plural.
-      eval: "Score it · {{count}}",
-      coach: "Human in the loop · {{count}}",
-      // No count: a remote run is one attempt, like `single`.
-      remote: "Run it remotely",
+    // The run-type tab strip above the cameras. The tab labels are
+    // `runMode.<mode>.title`; this is the strip's accessible name.
+    tabs: {
+      groupLabel: "What you do",
+      // Under the strip while Remote GPU is selected, saying why the second
+      // tab is disabled rather than leaving it mysteriously dead.
+      coachNeedsLocal:
+        "Human in the loop needs the policy on this machine — a remote run can't hand the arm to the leader yet.",
     },
     // Why a verb can't run, keyed so deployGuards.ts stays pure prose-free.
     blocked: {
@@ -465,14 +477,19 @@ export default {
       camerasUnbound: "Bind every camera the checkpoint expects.",
       temporalEnsemble: "Fix the temporal-ensemble setting.",
       runInProgress: "A run is already in progress.",
+      // Local runs only: 0 is the remote run's "until you stop me" and a local
+      // run that ends the instant it starts.
+      durationRequired: "Set a max duration of at least 1 second.",
       taskRequired:
         "Describe the task first — this policy is language-conditioned.",
       leaderMissing:
         "Coaching needs a leader arm — add its port and calibration in Robot settings.",
       coachTaskRequired:
         "Describe the task first — it's saved with every correction.",
-      transportNotReady:
-        "The remote transport isn't ready — check it in the Remote run section below.",
+      // Rarely seen: the panel answers this one with the probe's own sentence
+      // (remoteInference.transport.summary.*), which names WHICH step is the
+      // one to fix. This is the fallback wording if that is ever shown alone.
+      transportNotReady: "The remote transport isn't ready yet.",
       remoteArmUnsupported:
         "Remote runs need a single SO-101 arm. Bimanual rigs and the CAN arms aren't supported yet.",
       remoteEngineUnsupported:

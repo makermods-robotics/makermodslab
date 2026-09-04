@@ -26,6 +26,15 @@ export interface DeployGuardContext {
   allCamerasBound: boolean;
   /** The temporal-ensemble coefficient is out of range. */
   temporalEnsembleInvalid: boolean;
+  /** The max-duration field holds a value this mode can use.
+   *
+   * The panel offers ONE duration field for both places a run can happen, and
+   * the two read 0 differently: a REMOTE run treats it as "until you stop me"
+   * (the backend's own unbounded contract), while a local rollout is handed
+   * `duration_s` verbatim and would stop the instant it started. So the guard
+   * is asked only of the local modes — see the `mode !== "remote"` check
+   * below — and the field's own hint says which meaning is in force. */
+  durationValid: boolean;
   /** Another run already owns the robot. */
   inferenceActive: boolean;
   /** The leader arm is missing or its calibration is gone. */
@@ -52,7 +61,15 @@ export interface DeployGuardContext {
    * tell a flow policy from an ACT one and accepts whichever engine it is
    * given. The UI is the only gate — `rtc` guides denoising, which an ACT
    * checkpoint cannot act on, and the run would simply be worse than `sync`
-   * with nothing anywhere saying why. */
+   * with nothing anywhere saying why.
+   *
+   * The panel now DISABLES the rtc option for such a checkpoint rather than
+   * warning about it after the fact, which leaves this as belt and braces: it
+   * catches the render between a new checkpoint landing and the effect that
+   * snaps a stale `rtc` back to `sync`. Kept because it is the last check
+   * before a physical launch and costs one boolean — and because the caller
+   * derives it from the same `policySupportsRtc` fact the picker does, so the
+   * two cannot answer differently. */
   remoteEngineSupported: boolean;
 }
 
@@ -66,6 +83,11 @@ export function deployBlockedReason(
   if (ctx.armMismatch) return "studio.deploy.blocked.armMismatch";
   if (!ctx.allCamerasBound) return "studio.deploy.blocked.camerasUnbound";
   if (ctx.temporalEnsembleInvalid) return "studio.deploy.blocked.temporalEnsemble";
+  // Local runs only. 0 is a legitimate REMOTE duration (unbounded) and an
+  // impossible local one, and the shared field cannot tell which without
+  // being asked per mode.
+  if (mode !== "remote" && !ctx.durationValid)
+    return "studio.deploy.blocked.durationRequired";
   if (ctx.inferenceActive) return "studio.deploy.blocked.runInProgress";
 
   // Applies to EVERY mode, not just coaching.

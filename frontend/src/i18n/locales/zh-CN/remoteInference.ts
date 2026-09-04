@@ -1,23 +1,23 @@
 export default {
-  intro:
-    "机械臂在本机运行，策略在远程 GPU 上运行，二者在一个 LiveKit 房间中会合。本机不会加载检查点 — 请用下面的命令自行启动 GPU 侧。",
   form: {
     hubIdLabel: "Hub 策略 id",
     hubIdHint: "GPU 容器要加载的仓库。本机不会下载它 — 本机只负责驱动机械臂。",
     hubIdInherited: "留空时将使用本次运行自己的输出仓库。",
-    engineLabel: "动作块引擎",
+    // 引擎的标签位于 `studio.deploy.engine` —— 它现在是本地与远程共用的一个
+    // 字段。这里只保留两条说明文案，因为它们讲的是两种引擎各自做什么，
+    // 而不是谁是默认值。
     engine: {
-      // 选项 VALUE（"sync" / "rtc"）是后端标识符，只翻译这些标签。
-      sync: "自适应同步",
-      rtc: "实时分块",
       syncHint:
         "把每个动作块执行完，再刚好及时地请求下一个。适用于任何策略，也是 ACT 的唯一选择。",
       rtcHint:
         "每次请求都把尚未执行的动作一并发过去，让 GPU 据此生成能够接续的下一个动作块，从而消除块与块之间的接缝。只有流式策略（SmolVLA、π0、π0.5、diffusion）能这样被引导。",
-      rtcUnsupported:
-        "该检查点不是流式策略，无法以这种方式引导 — 实时运行不会比自适应同步更好，启动还更慢。请切换回“自适应同步”后再启动。",
     },
-    transportGroup: "传输",
+    // “高级参数”折叠标题下的摘要行。其中每个取值都是实时数据 —— 编码 id 是
+    // 线上取值，数字就是实际发出的数字。写成两句完整的话而不是一句加片段：
+    // s_min 只有 rtc 才会真正上线，因此只在那一句里提到它。
+    advancedSummary: "传输：horizon {{horizon}} · {{fps}} fps · {{codec}}",
+    advancedSummaryRtc:
+      "传输：horizon {{horizon}} · {{fps}} fps · {{codec}} · 最小预留 {{sMin}}",
     transportGroupHint:
       "这几项必须与 GPU 侧完全一致。不一致不会报错：线上协议带有 schema 指纹，不匹配的数据包会被静默丢弃，运行看上去正常却收不到任何东西。",
     horizonLabel: "Horizon",
@@ -28,9 +28,6 @@ export default {
       "该检查点每个动作块返回 {{steps}} 步，因此 horizon 以此为起点，且不能超过它。",
     horizonOverCeiling:
       "horizon 超过了该检查点返回的 {{steps}} 步。这样两侧对动作块形状的理解就不一致，所有数据包都会被静默丢弃 — 运行看上去已连接，却收不到任何东西。",
-    durationLabel: "最长时长（秒）",
-    durationHint: "到时后自动停止。你随时可以提前停止。",
-    durationUnbounded: "0 — 一直运行，直到你停止它。",
     sMinLabel: "最小预留",
     // "--s-min" 是命令行标志名，与本面板中其他标识符一样保留拉丁文写法。
     sMinHint:
@@ -118,44 +115,48 @@ export default {
     logLabel: "日志",
   },
   transport: {
-    title: "传输",
-    refresh: "重新检查",
-    checking: "检查中…",
-    notCheckedYet: "尚未检查。",
+    // 传输区块已经撤掉，这里剩下的是：手动命令旁边那份需要人用眼睛读、再手动
+    // 抄到别处的小抄；会话对话框策略行要用的来源标签；以及“开始”下面那句结论。
+    // 这些标签背后的每个取值都是数据，一律原样显示。
     unresolved: "未设置",
-    sourceLabel: "读取自",
     source: {
       sfu: "MakerMods Lab 自带的 SFU",
       cloud: "livekit.env（LiveKit Cloud）",
       process_env: "本进程的环境变量",
       none: "无来源 — 尚未配置任何内容",
     },
-    urlLabel: "URL",
     roomLabel: "房间",
-    credentialsLabel: "凭据",
-    configured: "齐全",
-    missingVars: "缺少 {{vars}}",
-    reachableLabel: "端点",
-    reachable: "有响应",
-    unreachable: "无响应",
-    notProbed: "未检查",
-    operatorLabel: "GPU 操作方",
-    operatorPresent: "已在房间中",
-    operatorAbsent: "不在房间中",
     extraMissing:
       "未安装可选的 drtc 附加依赖，因此无法进行任何检查。请在主检出目录中安装 — 在 worktree 中执行可编辑安装会让其他所有会话都指向该目录。",
-    sfuRunningTitle: "本机的 LiveKit 服务器",
     sfuModalUrlLabel: "供 GPU 使用的地址",
     sfuNoTailnet: "没有 tailnet 地址",
     sfuKeyIdLabel: "Key id",
     sfuKeyFileLabel: "Secret 位于",
-    sfuExternalIpLabel: "对外媒体地址",
-    sfuExternalIpOn: "已公布",
-    sfuExternalIpOff: "未公布",
-    sfuExternalIpHint:
-      "不公布的话，远端 GPU 能连上本服务器打个招呼，却无法发送视频或动作。请用下面的参数重启 MakerMods Lab 来开启它。",
+    // 和下面那些结论句一样，只是没有放进 summary：它是唯一一条“解决办法是一条
+    // 命令”的结论，面板会把那条命令（以及后端给出的安装提示，如果有）打印在这
+    // 句话下面。“下面的参数”指的就是那段 <pre>。参见 transportSummary.ts。
     sfuNotRunning:
       "本 MakerMods Lab 未运行 LiveKit 服务器。可以用下面的参数启动它，也可以保持关闭并改用 livekit.env 里的 LiveKit Cloud 凭据。",
+    // 把传输状态归纳成一句话，按“第一个出问题的环节”来选 —— 顺序就是操作者
+    // 需要依次解决的顺序。它会取代“开始”下面那句笼统的“尚未就绪”，所以每一条
+    // 都必须说清楚接下来该做什么。参见 transportSummary.ts。
+    summary: {
+      // {{error}} 是抛出的错误自身的文本，属于后端文案，原样显示。
+      fetchFailed: "无法读取传输状态：{{error}}",
+      checking: "正在检查房间…",
+      notChecked: "尚未检查房间。",
+      // {{vars}} 是一组环境变量名，属于数据，原样显示。
+      missingVars:
+        "没有 LiveKit 凭据：缺少 {{vars}}。请用 --sfu 启动 MakerMods Lab，或在 livekit.env 中填入 Cloud 凭据。",
+      // {{url}} 就是地址本身，属于数据。
+      unreachable:
+        "{{url}} 上没有任何响应。请确认 LiveKit 服务器已启动，并且本机能连上它。",
+      notProbed: "无法从本机检查该房间。",
+      // {{room}} 是房间名，属于数据。
+      ready: "已有 GPU 在 {{room}} 中，随时可以驱动机械臂。",
+      operatorAbsent:
+        "{{room}} 中还没有 GPU — 请在上方启动一个，或自行运行该命令。",
+    },
   },
   phase: {
     idle: "未运行",
@@ -177,7 +178,27 @@ export default {
     ran_with_warning: "已结束，但清理时有警告",
   },
   status: {
-    elapsed: "{{elapsed}} 秒 / {{duration}}",
+    // 会话对话框中远程运行专用的文案。状态药丸、按钮和日志标题与本地运行共用，
+    // 位于 `inference.*` 之下。
+    //
+    // 整个启动阶段只用这一句：当前阶段会显示在按钮下方的阶段行里，若这里也跟着
+    // 变，计时器下方就会成为整屏最吵的地方。
+    connectingSubtitle: "正在连接 GPU 与机械臂…",
+    // duration 为 0 的远程运行会一直跑到被停止。这里的 “/” 与有时限运行显示的
+    // “/ 01:00” 保持一致。
+    unbounded: "/ ∞ — 你不停它就不停",
+    unboundedDone: "/ ∞",
+    // {{ref}} 是策略 ref，{{room}} 是房间名，{{source}} 是解析出的来源标签，
+    // 三者都是数据，原样显示。
+    policyLine: "策略：{{ref}} · 远程 · {{room}}，来自 {{source}}",
+    policyLineNoRoom: "策略：{{ref}} · 远程",
+    gpuCardTitle: "远程 GPU",
+    // {{profile}} 是 Modal 自己的 profile 名，属于数据。A100 与“计费”说明的是
+    // 这次运行的成本，就写在操作者盯着它运行的地方。
+    gpuBilling: "Modal · {{profile}} · A100 · 计费中",
+    // 子进程会写一个日志文件并报告它的路径；浏览器这边没有任何流式日志，
+    // 因此日志区域显示这个路径，由操作者自行打开。
+    noLogYet: "尚无日志路径 — 本次运行还没有创建。",
     returningToRest: "正在把机械臂缓慢送回起始位姿，然后再释放力矩。",
     operator: "操作方",
     noOperatorYet: "等待中",
@@ -191,8 +212,6 @@ export default {
     leadValue: "{{lead}} / {{margin}}",
     degradeHint: "质量正在下降",
     noSampleYet: "尚无采样 — 连接成功一秒后会收到第一条。",
-    stop: "停止运行",
-    stopping: "正在停止…",
   },
   toast: {
     startFailed: "无法启动远程运行",

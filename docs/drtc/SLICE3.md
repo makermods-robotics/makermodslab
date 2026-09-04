@@ -1375,3 +1375,192 @@ whole diff is those two fields plus two docstrings.
 No new dependency in `pyproject.toml` (the image's `pydantic` is the GPU
 container's, not the Lab's), no `modal` import anywhere, no change to
 `remote_inference.py`'s preflight ladder, and no `frontend/` change of any kind.
+
+## S3.9 as built (2026-09-03)
+
+Frontend only. Not one line of `makermodslab/` changed: the backend's two
+session kinds (`inference` with optional coaching options, `remote_inference`)
+are exactly as S3.8d left them, and the panel now maps a **(where, what)** pair
+onto them instead of offering four verbs that were never siblings.
+
+### The panel is two axes, not one strip
+
+`RUN_MODES` / the three-tab strip is gone. In its place:
+
+- **A5 "Runs on"** — This machine / Remote GPU, a `role="radiogroup"` of two
+  buttons wearing the tab strip's own classes (a radiogroup rather than a second
+  radix `Tabs`, because it selects a value and reveals no pane of its own).
+- **A11 the tab strip** — Run / Human in the loop, and nothing else.
+
+`DeployRunMode` survives unchanged as a DERIVED value (`remote` → remote, else
+coach → coach, else the prefill-only `eval`, else single), so `deployGuards`,
+`handleStart` and every backend contract keep speaking the vocabulary they
+already spoke. Nothing about the request shapes moved.
+
+Why the axes: "Run it remotely" answered a different question from "Run" and
+"Human in the loop" — where the weights load, not what the person does — and
+sitting it beside them forced every field that belongs to BOTH questions (the
+engine, the duration, the cameras) to live inside one tab and vanish from the
+others. Splitting them is what let those three fields become shared.
+
+**Remote + coach is not startable** and says so: the Human in the loop tab is
+`disabled` (never hidden) while Remote GPU is selected, with the reason under
+the strip, and `effectiveOperator` collapses a standing coach selection to
+`single` so it can never reach a launch. The remote child has no takeover
+protocol; this is a real capability gap, not a UI choice.
+
+### Three fields stopped being asked twice
+
+- **Engine (A9).** One `engine` on `remoteConfig` (that object is what the GPU
+  card and the generated `modal run` line are built from, so it has to be the
+  same value the local rollout is started with). Labels are now the plain names
+  ("Sync" / "Real-time chunking"); the HINTS are the remote catalog's pair,
+  which describe what each engine does rather than which is the default.
+  Coaching pins sync for display without writing to state.
+
+  **The two availability facts were deliberately NOT merged.** `rtcAvailable`
+  (`supports_rtc !== false`) is "the server will not 400 this request" and is
+  fail-OPEN on an unknown policy type; `rtcSupported` (`policySupportsRtc`) is
+  "this architecture can actually be in-painted" and is fail-CLOSED on one.
+  They differ exactly at `supports_rtc: null`. So the shared field disables the
+  rtc option on `!rtcAvailable` (the strictly weaker fact — it can only be false
+  when the server said false, which makes `rtcSupported` false too) and keeps
+  the remote run's soft warn + `remoteEngineSupported` guard for the unknown
+  case. Both behaviours are exactly what they were; **whether an unknown-rtc
+  checkpoint should stop being selectable everywhere is an open question left to
+  the coordinator.**
+
+- **Max duration (A10).** One field, whose `0` means two different things: the
+  remote kind's own unbounded contract, and a local rollout that would stop the
+  instant it started. That asymmetry cannot live in a `min=` on a shared input,
+  so it is a new guard — `durationValid` in `DeployGuardContext`, asked only of
+  the non-remote modes, returning `studio.deploy.blocked.durationRequired`.
+  `deployGuards` stays pure and key-returning; `deployGuards.test.ts` covers
+  both directions. `RemoteRunConfig.durationS` was deleted.
+
+- **Camera roles (A8).** `CameraRoleBindings` renders for EVERY combination,
+  directly under Task, whenever a checkpoint camera has no name match — the
+  question it answers ("which camera plays this role?") has nothing to do with
+  where the policy runs, and a local run previously had no answer to it at all.
+  `bindingsFor(mode)` is gone: one `boundCameraBindings` list feeds the guards,
+  the alert and both start requests, so a local `inference` start now carries
+  `camera_bindings` from the picks (the server already accepts them on both
+  kinds). `camera_dims` is unchanged on both paths.
+
+### Transport stopped being a section
+
+`TransportSection.tsx` is deleted. Its one live bit was `operator_present`,
+which gates Start; the rest was a row-by-row read-out behind a manual Re-check
+button — so the one fact that matters was as stale as the last time somebody
+pressed it, and the moment it changes is the moment the GPU joins the room,
+which the operator is watching the GPU card for. Replaced by:
+
+- **automatic re-probing** in the panel: the hook probes when Runs on becomes
+  remote, an effect re-probes the instant `useGpuLauncher` reports
+  `state: ready` / `phase: connected|claimed`, and a 15 s timer covers a GPU this
+  Lab did not launch. Both stop with the panel and neither runs while a run is
+  live.
+- **the verdict under Start**: `deployGuards` still returns `transportNotReady`,
+  and the panel renders `summarizeTransport()`'s sentence (with its tone) in
+  place of the generic line, plus the probe's own `error_code — message` on a
+  second destructive line. A ready transport with nothing else blocking renders
+  nothing. `remoteInference.transport.summary.*` shipped in both catalogs.
+
+The four values a human actually has to retype — the GPU's address, the room,
+the key id, the key file — moved into R7, beside the hand-typed command they
+belong to. The `sfuNotRunning` block and its per-OS install hint went with the
+section; **that is the one piece of diagnostic prose S3.9 loses**, noted here in
+case it wants a home later.
+
+### The remote run opens the session dialog
+
+`handleStart("remote")` now calls `openInferenceSession(id, null,
+"remote_inference")` exactly as the local modes do. Consequences: the panel's
+Collapsible is no longer forced open by a live run, the panel-side heartbeat is
+gone (the dialog holds the lease), `RemoteInferenceStatusPanel` and
+`RemoteInferenceBlock` are deleted, and the first-deploy milestone now fires for
+a remote run too.
+
+**Structure — a sibling dialog, not a branch.** `InferenceSessionDialog` is
+2 345 lines whose ~40 hooks are all about a local rollout: its 1 Hz
+`/inference-status` poll, its log fetch, the coaching key handler, and a lease
+gated on `inference_active` — which would go QUIET under a live remote run and
+let the expiry watchdog safety-stop it 60 s in. So:
+
+- `components/inference/sessionFrame.ts` — the pill/dot/text palettes and
+  `formatTime`, moved out of the dialog verbatim (a `.ts`, so importing a colour
+  map costs no fast refresh);
+- `components/remote-inference/RemoteSessionBody.tsx` — the whole remote body,
+  including the D4 telemetry card lifted out of the retired status panel with
+  its two load-bearing decisions intact (holds as a RATE, lead against
+  `horizon − s_min`), plus 30-sample sparklines under e2e p50 / round trip /
+  holds rate;
+- `components/inference/RemoteSessionDialog.tsx` — the Dialog shell, the
+  heartbeat, the unload warning and the stop (`getCurrentSession` fallback for a
+  run this tab did not start);
+- `InferenceSessionContext` gained a `kind` and picks between the two.
+
+The local dialog's only change is the import of those four moved values. **This
+is the brief's option (a) + (b) together, and a deviation worth flagging: the
+brief preferred one dialog rendering a `RemoteSessionBody`, which is not
+reachable without gating every hook in that 2 345-line file — including the
+polling the brief also said not to touch.**
+
+No GPU controls in the dialog: Start/Stop GPU and the idle countdown stay on the
+panel's R6 card, and nothing auto-stops the GPU when a run ends. The dialog
+reads `useGpuLauncher` for exactly one line (the Modal profile in the billing
+strip), omitted when the launcher does not know one. The log slot holds
+`log_path` verbatim in the existing `LogPanel` — the child streams no log, and
+S3.9 adds no endpoint to make it.
+
+### Localization
+
+en + zh-CN both edited; parity and dynamic-key tests pass. Added:
+`studio.deploy.runsOn.*`, `tabs.coachNeedsLocal`, `duration.{coachHint,
+remoteHint,remoteUnbounded}`, `blocked.durationRequired`,
+`remoteInference.form.advancedSummary{,Rtc}`,
+`remoteInference.transport.summary.*`, and the dialog's own
+`remoteInference.status.*` (connectingSubtitle, unbounded, unboundedDone,
+policyLine, policyLineNoRoom, gpuCardTitle, gpuBilling, noLogYet). Removed:
+`remoteInference.intro`, `form.engineLabel`, `form.engine.{sync,rtc}`,
+`form.transportGroup`, `form.duration*`, the twenty-odd TransportSection rows,
+`status.{elapsed,stop,stopping}`, `studio.deploy.runMode.remote.*` and
+`studio.deploy.engine.{syncHint,rtcHint}`. `blocked.transportNotReady` was
+rewritten to stop naming a section that no longer exists.
+
+### Checks
+
+`npm run lint` 38 problems / 4 errors — the pre-existing baseline, unmoved.
+Both tsc projects clean. `npx vitest run` 30 files / 335 tests green.
+`npx vite build` clean (built to a scratch dir; `frontend/dist` untouched).
+
+### Follow-ups the same evening
+
+- **One engine rule, fail-closed everywhere.** The shared engine field kept two
+  readings of the same question: `rtcAvailable` (`supports_rtc !== false`,
+  fail-OPEN, disabled the option only on a server refusal) for a local rollout,
+  and `policySupportsRtc` (fail-CLOSED) plus a soft warn paragraph and the
+  `remoteEngineSupported` guard for a remote run — so an unclassified checkpoint
+  was a silent yes locally and a refusal remotely, out of one control.
+  `rtcAvailable` is gone: `rtcSupported = policySupportsRtc(policyConfig)` now
+  disables the rtc option, drives the snap-back-to-sync effect (still through
+  `setEngine`, so the horizon re-seeds), and answers the guard. One hint under
+  the picker for the disabled case on both paths
+  (`studio.deploy.engine.rtcUnavailable`); the remote-only
+  `remoteInference.form.engine.rtcUnsupported` became unreachable and was
+  removed from both catalogs. `remoteEngineSupported` **stays** in
+  `deployGuards.ts` as belt and braces — the picker can no longer offer rtc for
+  such a checkpoint, but the guard still covers the one render between a new
+  checkpoint landing and the effect firing, and it is derived from the same
+  fact, so the two cannot drift. Its blocked key and tests are untouched.
+- **"The SFU isn't running" got its home back.** `summarizeTransport()` gained
+  a case between `extra_installed` and `configured`: SFU off **and** nothing
+  else configured → `remoteInference.transport.sfuNotRunning` (restored
+  verbatim in both catalogs), tone `error`, exported as `SFU_OFF_SUMMARY_KEY`.
+  It is ordered ahead of the credentials line because a stopped Lab SFU is
+  *why* the variables are missing, and guarded on `configured` because a Cloud
+  operator's Lab never hosts one — that is normal, not a fault; both directions
+  are tested. When that key fires, the blocked line under Start also renders
+  the literal `makermodslab --sfu --sfu-external-ip` in a `<pre>` (data,
+  verbatim) and the backend's `sfu_install_hint` when it sent one — which
+  closes the "one piece of diagnostic prose S3.9 loses" note above.

@@ -1,25 +1,32 @@
 export default {
-  intro:
-    "The arm runs here; the policy runs on a remote GPU, and the two meet in a LiveKit room. This machine never loads the checkpoint — start the GPU side yourself with the command below.",
   form: {
     hubIdLabel: "Hub policy id",
     hubIdHint:
       "The repo the GPU container loads. It is not downloaded here — this machine only drives the arm.",
     hubIdInherited: "Left empty, this run's own output repo is used.",
-    engineLabel: "Chunk engine",
+    // The engine's LABELS live under `studio.deploy.engine` — it is one field
+    // for both places a run can happen. These hints are the pair that survived
+    // the merge, because they describe what the two engines DO rather than
+    // which of them is the default.
+    //
+    // There was a third: a remote-only warning that the selected checkpoint
+    // couldn't be in-painted. It went with the fail-open half of the engine
+    // rule — the rtc option is now disabled outright for such a checkpoint, on
+    // both paths, so nobody can select it and be warned afterwards. The one
+    // remaining sentence for that state is `studio.deploy.engine.rtcUnavailable`.
     engine: {
-      // Option VALUES ("sync" / "rtc") are backend identifiers — only these
-      // labels are translated.
-      sync: "Adaptive sync",
-      rtc: "Real-time chunking",
       syncHint:
         "Plays each action chunk to the end and asks for the next one just in time. Right for any policy, and the only choice for ACT.",
       rtcHint:
         "Sends the moves it has not made yet with every request, so the GPU shapes the next chunk to continue them. Removes the seam between chunks — only flow policies (SmolVLA, π0, π0.5, diffusion) can do this.",
-      rtcUnsupported:
-        "This checkpoint isn't a flow policy, so it can't be guided this way — a real-time run would be no better than adaptive sync, and slower to start. Switch back to Adaptive sync to launch.",
     },
-    transportGroup: "Transport",
+    // The Advanced trigger's summary line. Every value is live and is DATA —
+    // the codec id is the wire value, the numbers are the ones that go out.
+    // Two whole sentences rather than one plus a fragment: `s_min` only
+    // reaches the wire for rtc, so it is only claimed there.
+    advancedSummary: "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}}",
+    advancedSummaryRtc:
+      "Transport: horizon {{horizon}} · {{fps}} fps · {{codec}} · minimum budget {{sMin}}",
     transportGroupHint:
       "These must match the GPU side exactly. A mismatch is not an error: the wire schema is fingerprinted, so mismatched packets are dropped silently and the run looks healthy while receiving nothing.",
     horizonLabel: "Horizon",
@@ -31,10 +38,6 @@ export default {
       "This checkpoint returns {{steps}} steps per chunk, so the horizon starts from that and must not go above it.",
     horizonOverCeiling:
       "The horizon is above the {{steps}} steps this checkpoint returns. The two sides then disagree about the chunk shape and every packet is dropped in silence — the run will look connected and receive nothing.",
-    durationLabel: "Max duration (s)",
-    durationHint:
-      "The run stops itself after this long. Stop it early anytime.",
-    durationUnbounded: "0 — the run continues until you stop it.",
     sMinLabel: "Minimum budget",
     // "--s-min" is a flag name, kept in the Latin script like every other
     // identifier in this panel.
@@ -133,45 +136,53 @@ export default {
     logLabel: "Log",
   },
   transport: {
-    title: "Transport",
-    refresh: "Re-check",
-    checking: "Checking…",
-    notCheckedYet: "Not checked yet.",
+    // What is left of the retired Transport section: the values a human has to
+    // read with their eyes and retype somewhere else (the crib sheet beside the
+    // hand-typed `modal run` line), the source label the session dialog's
+    // policy line reads, and the one-sentence verdict under Start. Every value
+    // behind these labels is data and appears verbatim.
     unresolved: "not set",
-    sourceLabel: "Read from",
     source: {
       sfu: "the Lab's own SFU",
       cloud: "livekit.env (LiveKit Cloud)",
       process_env: "this process's environment",
       none: "nowhere — nothing is configured",
     },
-    urlLabel: "URL",
     roomLabel: "Room",
-    credentialsLabel: "Credentials",
-    configured: "all present",
-    // {{vars}} is a list of environment variable NAMES — data, shown verbatim.
-    missingVars: "missing {{vars}}",
-    reachableLabel: "Endpoint",
-    reachable: "answering",
-    unreachable: "not answering",
-    notProbed: "not checked",
-    operatorLabel: "GPU operator",
-    operatorPresent: "in the room",
-    operatorAbsent: "not in the room",
     extraMissing:
       "The optional drtc extra isn't installed, so nothing could be checked. Install it from the primary checkout — an editable install run from a worktree re-points every other session.",
-    sfuRunningTitle: "This machine's LiveKit server",
     sfuModalUrlLabel: "Address for the GPU",
     sfuNoTailnet: "no tailnet address",
     sfuKeyIdLabel: "Key id",
     sfuKeyFileLabel: "Secret is in",
-    sfuExternalIpLabel: "Public media address",
-    sfuExternalIpOn: "advertised",
-    sfuExternalIpOff: "not advertised",
-    sfuExternalIpHint:
-      "Without it a remote GPU can reach this server to say hello but has no way to send video or actions. Restart the Lab with the flag below to turn it on.",
+    // A summary verdict like the ones below, kept out of `summary` because it
+    // outlived the retired Transport section unchanged: it is the one case
+    // whose remedy is a command, and the panel prints that command (and the
+    // backend's install hint, when there is one) beneath this sentence.
+    // "the flags below" is that `<pre>`. See transportSummary.ts.
     sfuNotRunning:
       "This Lab isn't running a LiveKit server. Start it with the flags below, or leave it off and use LiveKit Cloud credentials from livekit.env.",
+    // The transport as ONE sentence, chosen by the first thing that is wrong —
+    // the order is the order an operator has to fix things in. It stands under
+    // Start in place of the generic "not ready" line, so each of these has to
+    // say what to DO. See transportSummary.ts.
+    summary: {
+      // {{error}} is the thrown error's own text — backend prose, verbatim.
+      fetchFailed: "Couldn't read the transport: {{error}}",
+      checking: "Checking the room…",
+      notChecked: "The room hasn't been checked yet.",
+      // {{vars}} is a list of environment variable NAMES — data, verbatim.
+      missingVars:
+        "No LiveKit credentials: {{vars}} missing. Start the Lab with --sfu, or put Cloud credentials in livekit.env.",
+      // {{url}} is the address itself — data.
+      unreachable:
+        "Nothing is answering at {{url}}. Check the LiveKit server is up and reachable from here.",
+      notProbed: "The room could not be checked from here.",
+      // {{room}} is the room NAME — data.
+      ready: "A GPU is in {{room}}, ready to drive the arm.",
+      operatorAbsent:
+        "No GPU in {{room}} yet — start one above, or run the command yourself.",
+    },
   },
   // Backend phase values. Matched on, never displayed raw — the raw value is
   // the fallback for a phase a newer server introduces.
@@ -195,9 +206,28 @@ export default {
     ran_with_warning: "Finished, with a cleanup warning",
   },
   status: {
-    // {{elapsed}} and {{duration}} are pre-formatted; {{duration}} is "∞" for
-    // an unbounded run, so neither may take i18next's magic `count`.
-    elapsed: "{{elapsed}}s / {{duration}}",
+    // The session dialog's own copy for a remote run. The pill, the button and
+    // the log title are shared with a local run and live under `inference.*`.
+    //
+    // ONE fixed sentence for the whole setup: the live phase is named on the
+    // phase line under the button, and a subtitle that changed with it made the
+    // number under the clock the noisiest thing on the screen.
+    connectingSubtitle: "Connecting to the GPU & the arm…",
+    // A remote run with duration 0 runs until it is stopped. The "/" matches
+    // the "/ 01:00" a bounded run shows in the same slot.
+    unbounded: "/ ∞ — stops when you do",
+    unboundedDone: "/ ∞",
+    // {{ref}} is the policy ref, {{room}} the room NAME and {{source}} the
+    // resolved source label — all three data, shown verbatim.
+    policyLine: "policy: {{ref}} · remote · {{room}} on {{source}}",
+    policyLineNoRoom: "policy: {{ref}} · remote",
+    gpuCardTitle: "Remote GPU",
+    // {{profile}} is Modal's own profile name — data. A100 and "billing" are
+    // facts about what this costs, said where the operator is watching it run.
+    gpuBilling: "Modal · {{profile}} · A100 · billing",
+    // The child writes a log FILE and reports its path; nothing is streamed to
+    // the browser, so the log slot holds the path for the operator to open.
+    noLogYet: "No log path yet — the run hasn't opened one.",
     returningToRest:
       "Easing the arm back to where it started before letting go.",
     operator: "Operator",
@@ -215,8 +245,6 @@ export default {
     degradeHint: "quality is degrading",
     noSampleYet:
       "No sample yet — the first one lands a second after connecting.",
-    stop: "Stop the run",
-    stopping: "Stopping…",
   },
   toast: {
     startFailed: "Couldn't start the remote run",

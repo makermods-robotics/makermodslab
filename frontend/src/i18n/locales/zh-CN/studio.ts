@@ -204,16 +204,21 @@ export default {
         what: "反复执行该任务，由你为每次尝试评判，汇总为成功率。",
         commitment: "片段之间需要上手 — 由你复位现场并为每次尝试评分",
       },
-      remote: {
-        title: "远程运行",
-        what: "机械臂在本机运行，策略在远程 GPU 上通过 LiveKit 房间运行。",
-        commitment: "需要在另一个终端里运行 GPU 侧",
-      },
       coach: {
         title: "人在回路",
         what: "在它快要失败时接管。每次挽救都会保存为可用于微调的训练数据。",
         commitment: "当它快要失败时，用主臂接管从臂并采集数据",
       },
+    },
+    // 策略在哪里运行 —— 标签栏上方的分段控件。选项 VALUE（"local"/"remote"）
+    // 是面板用来判断的标识符，只翻译这些标签。
+    runsOn: {
+      label: "运行位置",
+      local: "本机",
+      remote: "远程 GPU",
+      localHint: "由本机加载检查点并驱动机械臂。",
+      remoteHint:
+        "机械臂在本机运行，策略在远程 GPU 上运行，二者在一个 LiveKit 房间中会合。本机不会加载检查点。",
     },
     // 仅在运行模式为 “指导” 时显示的参数。
     coaching: {
@@ -273,6 +278,10 @@ export default {
       label: "最长时长（秒）",
       hint: "按单个片段计。片段跑满该时长而你没有判定成功，即记为失败。",
       singleHint: "运行到这个时长后就停止。",
+      coachHint: "按单次尝试计。一次尝试跑满该时长且既没有被挽救也没有完成，就会自行结束。",
+      // 仅用于远程运行：那里的 0 是后端“不限时长”的约定，而不是一启动就结束。
+      remoteHint: "运行到这个时长后就停止。填 0 表示一直运行到你停止它。",
+      remoteUnbounded: "0 — 一直运行，直到你停止它。",
     },
     episodes: {
       label: "片段数",
@@ -283,14 +292,13 @@ export default {
     },
     engine: {
       label: "推理引擎",
-      sync: "Sync（默认）",
-      rtc: "RTC — 实验性，控制更平滑",
-      syncHint:
-        "每个控制步执行一次策略前向推理。机械臂在动作块之间会短暂停顿。",
-      rtcHint:
-        "Real-Time Chunking 让推理与运动重叠进行，消除动作块之间的停顿。它也改变了动作的生成方式 — 在采信结果之前请先与 Sync 对比。",
-      // 当所选检查点的架构无法运行 RTC（服务端会拒绝）时显示在选择器下方，
-      // 同时该选项也会被禁用。
+      sync: "Sync",
+      rtc: "实时分块",
+      // 两条说明文案位于 `remoteInference.form.engine` —— 一个字段、一对解释，
+      // 无论策略在哪台机器上运行都一样。
+      // 只要无法确认所选检查点的架构支持 RTC，就显示在选择器下方，同时该选项
+      // 也会被禁用 —— 本机运行与远程运行适用同一条规则。“不支持”同时涵盖两种
+      // 情况：服务端明确否定的检查点，以及尚无人归类的检查点。
       rtcUnavailable: "该检查点的策略不支持 Real-Time Chunking。",
       // 指导模式固定使用 sync，因此显示这句话来代替引擎选择器。
       coachingNote:
@@ -332,15 +340,14 @@ export default {
       coeffHint:
         "权重为 exp(-系数 × 时间差)：系数越大越偏向最新的预测，越小则平均得越均匀。ACT 论文取 {{value}}。",
     },
-    // 操作行：每个动词都在一次按下中同时选定模式并启动。
-    runVerbs: {
-      groupLabel: "开始一次运行",
-      single: "运行",
-      // {{count}} 是片段数 / 纠正次数目标，是数字，因此没有复数形式。
-      eval: "打分 · {{count}}",
-      coach: "人在回路 · {{count}}",
-      // 远程运行只跑一次，和 `single` 一样，因此没有计数。
-      remote: "远程运行",
+    // 摄像头上方的运行方式标签栏。标签文字取自 `runMode.<mode>.title`；
+    // 这里是标签栏的无障碍名称。
+    tabs: {
+      groupLabel: "你要做什么",
+      // 选中“远程 GPU”时显示在标签栏下方，说明第二个标签为什么被禁用，
+      // 而不是让它莫名其妙地点不动。
+      coachNeedsLocal:
+        "人在回路需要策略跑在本机上 — 远程运行还无法把机械臂交给主臂。",
     },
     // 某个动词无法运行的原因；以键的形式提供，好让 deployGuards.ts 不含文案。
     blocked: {
@@ -351,10 +358,16 @@ export default {
       camerasUnbound: "请为检查点所需的每个摄像头完成绑定。",
       temporalEnsemble: "请先修正时间集成设置。",
       runInProgress: "已有一次运行正在进行中。",
+      // 仅限本地运行：0 对远程运行意味着“直到你停止我”，对本地运行则意味着
+      // 一启动就结束。
+      durationRequired: "请把最长时长设为至少 1 秒。",
       taskRequired: "请先描述任务 — 该策略以语言为条件。",
       leaderMissing: "指导需要一条主臂 — 请在机器人设置中补上它的端口和标定。",
       coachTaskRequired: "请先描述任务 — 它会随每次纠正一起保存。",
-      transportNotReady: "远程传输尚未就绪 — 请在下方的远程运行区块中检查。",
+      // 很少见：面板会用探测自身的那句话来回答它
+      //（remoteInference.transport.summary.*），那句话会指出该修哪一步。
+      // 这里的文案只是万一单独显示时的兜底。
+      transportNotReady: "远程传输尚未就绪。",
       remoteArmUnsupported:
         "远程运行目前仅支持单臂 SO-101。双臂配置和 CAN 机械臂尚不支持。",
       remoteEngineUnsupported:
