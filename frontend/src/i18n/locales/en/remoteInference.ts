@@ -120,6 +120,12 @@ export default {
     idleStopIn:
       "It stops itself in about {{minutes}} min if no remote run starts.",
     idleStopPaused: "A remote run is using it, so it won't stop itself.",
+    // Drift between the form and the running server. {{fields}} is a list of
+    // flag NAMES (engine, horizon, fps, codec, s_min, policy, task) — data.
+    // The launched values follow the sentence, verbatim.
+    driftBody:
+      "You changed {{fields}} since the GPU was started. A running server keeps the values it was started with, and a mismatch is a run that receives nothing — not an error. It is running:",
+    restart: "Restart GPU with these settings",
     roomLabel: "Room",
     logLabel: "Log",
   },

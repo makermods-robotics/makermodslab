@@ -1,6 +1,14 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
-import { Cpu, Loader2, Play, Square, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  Cpu,
+  Loader2,
+  Play,
+  RefreshCw,
+  Square,
+  XCircle,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -58,7 +66,7 @@ const GpuLaunchSection: React.FC<{
   task: string;
 }> = ({ launcher, targets, config, hubIdDefault, task }) => {
   const { t } = useTranslation();
-  const { status, pending, error, start, stop } = launcher;
+  const { status, pending, error, start, stop, launched } = launcher;
   const {
     targets: listing,
     profile,
@@ -75,20 +83,46 @@ const GpuLaunchSection: React.FC<{
   const canPick = listing != null && listing.error == null;
   const running = state !== "idle" && state !== "failed";
 
-  const launch = () =>
-    void start({
-      engine: config.engine,
-      policy_hub_id: hubId,
-      task,
-      horizon: config.horizon,
-      fps: config.fps,
-      video_codec: config.videoCodec,
-      s_min: config.sMin,
-      // Whatever is selected, always — the backend's "empty means the CLI
-      // decides" is for API clients; the panel is explicit about who pays.
-      profile,
-      environment,
-    });
+  const startBody = {
+    engine: config.engine,
+    policy_hub_id: hubId,
+    task,
+    horizon: config.horizon,
+    fps: config.fps,
+    video_codec: config.videoCodec,
+    s_min: config.sMin,
+    // Whatever is selected, always — the backend's "empty means the CLI
+    // decides" is for API clients; the panel is explicit about who pays.
+    profile,
+    environment,
+  };
+  const launch = () => void start(startBody);
+
+  // The running server holds the values it was started with; the form can
+  // move on without it. Everything below is part of the Portal wire schema
+  // (a disagreement drops every packet in silence) or steers the policy
+  // itself, so any drift while the GPU is up is worth a loud line and a
+  // one-press restart. Compared against what THIS tab launched: a GPU started
+  // elsewhere echoes only engine and Hub id, and a partial comparison would
+  // say "matches" about knobs it never checked.
+  const up = state === "starting" || state === "ready";
+  const drifted: string[] = [];
+  if (launched && up) {
+    if (launched.engine !== startBody.engine) drifted.push("engine");
+    if (launched.policy_hub_id !== startBody.policy_hub_id)
+      drifted.push("policy");
+    if (launched.task !== startBody.task) drifted.push("task");
+    if (launched.horizon !== startBody.horizon) drifted.push("horizon");
+    if (launched.fps !== startBody.fps) drifted.push("fps");
+    if (launched.video_codec !== startBody.video_codec) drifted.push("codec");
+    // s_min only exists on the wire for rtc; sync ignores it on both sides.
+    if (startBody.engine === "rtc" && launched.s_min !== startBody.s_min)
+      drifted.push("s_min");
+  }
+  const restart = async () => {
+    await stop();
+    await start(startBody);
+  };
 
   // The workspace behind the profile a RUNNING GPU was launched with. The
   // status echoes the profile name only, so the workspace is looked up in the
@@ -299,6 +333,37 @@ const GpuLaunchSection: React.FC<{
               <span className="font-mono break-all">{status.room}</span>
             </p>
           ) : null}
+        </div>
+      ) : null}
+
+      {drifted.length > 0 && launched ? (
+        <div className="space-y-1.5 rounded-md border border-warn/40 p-2">
+          <p className="flex items-start gap-1.5 text-xs leading-relaxed text-warn">
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>
+              {/* Field NAMES are identifiers (they are the flags the server
+                  was started with) and the values are data — both verbatim. */}
+              {t("remoteInference.gpu.driftBody", {
+                fields: drifted.join(", "),
+              })}{" "}
+              <span className="font-mono">
+                {launched.engine} · h{launched.horizon} · {launched.fps} fps ·{" "}
+                {launched.video_codec}
+                {launched.engine === "rtc" ? ` · s_min ${launched.s_min}` : ""}
+              </span>
+            </span>
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void restart()}
+            disabled={busy}
+            className="h-7 gap-1.5 px-2 text-xs"
+          >
+            <RefreshCw className="h-3 w-3" />
+            {t("remoteInference.gpu.restart")}
+          </Button>
         </div>
       ) : null}
 

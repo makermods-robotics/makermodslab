@@ -761,3 +761,72 @@ def test_identity_reason_recognises_our_sfu_child_but_not_a_foreign_livekit() ->
     foreign = _FakeProc(301, ["livekit-server", "--config", "/etc/livekit/livekit.yaml"])
     assert launcher._identity_reason(" ".join(ours.info["cmdline"]), ours) == "livekit-server (--sfu)"
     assert launcher._identity_reason(" ".join(foreign.info["cmdline"]), foreign) is None
+
+
+# --- _frontend_deps_current ---------------------------------------------------
+#
+# `--dev` used to run a bare `npm install` on every start. With a complete
+# node_modules that is two registry round trips (audit + fund) that install
+# nothing — and the audit POST hung a start for minutes on 2026-09-03. The
+# skip is keyed on npm's own end-of-install marker.
+
+
+def _frontend_tree(tmp_path, *, marker: bool = True):
+    import os
+
+    frontend = tmp_path / "frontend"
+    (frontend / "node_modules").mkdir(parents=True)
+    (frontend / "package.json").write_text("{}")
+    (frontend / "package-lock.json").write_text("{}")
+    if marker:
+        (frontend / "node_modules" / ".package-lock.json").write_text("{}")
+    # Pin every mtime explicitly so the assertions do not depend on how fast
+    # the filesystem wrote the three files.
+    base = 1_700_000_000
+    for name, t in (
+        ("package.json", base),
+        ("package-lock.json", base),
+        ("node_modules/.package-lock.json", base + 10),
+    ):
+        p = frontend / name
+        if p.exists():
+            os.utime(p, (t, t))
+    return frontend
+
+
+def test_frontend_deps_current_when_marker_is_newer_than_both_manifests(tmp_path) -> None:
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(_frontend_tree(tmp_path)) is True
+
+
+def test_frontend_deps_stale_without_npm_marker(tmp_path) -> None:
+    # Fresh clone, deleted node_modules, or an install that died midway.
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(_frontend_tree(tmp_path, marker=False)) is False
+
+
+@pytest.mark.parametrize("touched", ["package.json", "package-lock.json"])
+def test_frontend_deps_stale_when_a_manifest_is_touched_after_install(tmp_path, touched) -> None:
+    import os
+
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    frontend = _frontend_tree(tmp_path)
+    later = 1_700_000_000 + 20
+    os.utime(frontend / touched, (later, later))
+    assert _frontend_deps_current(frontend) is False
+
+
+def test_frontend_deps_stale_when_frontend_dir_is_missing(tmp_path) -> None:
+    from makermodslab.scripts.makermodslab import _frontend_deps_current
+
+    assert _frontend_deps_current(tmp_path / "nowhere") is False
+
+
+def test_npm_install_skips_audit_and_fund() -> None:
+    from makermodslab.scripts.makermodslab import NPM_INSTALL_ARGS
+
+    assert NPM_INSTALL_ARGS[:2] == ("npm", "install")
+    assert {"--no-audit", "--no-fund", "--prefer-offline"} <= set(NPM_INSTALL_ARGS)

@@ -177,6 +177,40 @@ def render_config(
         f"  udp_port: {udp_port}",
         f"  use_external_ip: {'true' if external_ip else 'false'}",
     ]
+    if external_ip:
+        # Three settings that turn the STUN probe into candidates a peer can
+        # actually use, all confirmed against livekit 1.13.4's own decision
+        # log on the bench (2026-09-03):
+        #
+        #  - skip_external_ip_validation. After STUN, livekit "validates" the
+        #    public IP by sending itself a packet at <public ip>:7882 and
+        #    waiting 5 s for it to come back — a hairpin through the router,
+        #    which most home routers do not do. When that times out livekit
+        #    logs "could not validate external IP", declares NO external
+        #    mappings, and falls back to rewriting every candidate to the
+        #    node IP with the internal addresses DROPPED — so the robot child
+        #    on this machine is left with only a public address it cannot
+        #    hairpin to either. The STUN answer was right all along; the
+        #    self-check is what fails.
+        #  - advertise_internal_ip. Keep the LAN candidate beside the public
+        #    one: the Modal container needs 73.x.x.x:7882, the robot child on
+        #    this machine needs 192.168.x.x:7882, and both peers are in the
+        #    same room.
+        #  - ips.excludes. Media never rides the tailnet (the container's
+        #    tailscale is userspace networking: TCP relay only, no UDP), so
+        #    the Tailscale interface is a candidate that can never connect,
+        #    and its STUN probe from <tailnet ip>:7882 collides with the LAN
+        #    socket's on the router's single :7882 mapping. Excluded by
+        #    Tailscale's CIDRs rather than by interface name (livekit matches
+        #    names exactly, and macOS numbers utun devices per boot).
+        lines += [
+            "  skip_external_ip_validation: true",
+            "  advertise_internal_ip: true",
+            "  ips:",
+            "    excludes:",
+            "      - 100.64.0.0/10",
+            "      - fd7a:115c:a1e0::/48",
+        ]
     # The pin and the probe are mutually exclusive: pinning node_ip to a
     # tailnet address is exactly what makes the discovered public candidate
     # unreachable, so `--sfu-external-ip` must not do both.
@@ -185,6 +219,17 @@ def render_config(
     if bind_host != "0.0.0.0":  # noqa: S104  # nosec B104 — the wildcard is livekit's default listener, so it needs no bind line
         lines.append("bind_addresses:")
         lines.append(f"  - {bind_host}")
+        # A specific address (the tailnet case) ALSO binds loopback. Two
+        # things dial this server from the machine itself and both use
+        # 127.0.0.1: the launcher's readiness probe (`_wait_for_port`
+        # connects to localhost, and on failure kills the server it just
+        # started — a `--bind <tailnet-ip>` dev session died this way on
+        # 2026-09-03 with "never came up" while livekit was perfectly
+        # healthy) and the robot child, which dials `sfu.local_url()`. The
+        # tailnet address is only for the remote peer. Wildcard covers both
+        # already; loopback is loopback already.
+        if _is_specific_address(bind_host):
+            lines.append("  - 127.0.0.1")
     lines += [
         "room:",
         "  auto_create: true",

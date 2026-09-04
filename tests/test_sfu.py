@@ -99,6 +99,18 @@ def test_render_config_specific_address_pins_node_ip() -> None:
     assert "  - 100.64.0.7" in lines
 
 
+def test_render_config_specific_address_also_binds_loopback() -> None:
+    """The launcher's readiness probe and the robot child both dial
+    127.0.0.1; binding the tailnet address ALONE made the launcher kill a
+    healthy server after 15 s ("never came up")."""
+    lines = _lines(sfu.render_config(bind_host="100.64.0.7", key_file="/k.yaml"))
+    bind_block = lines[lines.index("bind_addresses:") + 1 :]
+    assert bind_block[:2] == ["  - 100.64.0.7", "  - 127.0.0.1"]
+    # Loopback and wildcard binds gain nothing and get no second line.
+    loop = _lines(sfu.render_config(bind_host="127.0.0.1", key_file="/k.yaml"))
+    assert loop.count("  - 127.0.0.1") == 1
+
+
 def test_render_config_ports_are_overridable() -> None:
     lines = _lines(
         sfu.render_config(bind_host="127.0.0.1", key_file="/k", http_port=1, tcp_port=2, udp_port=3)
@@ -120,6 +132,28 @@ def test_render_config_external_ip_turns_the_stun_probe_on_and_drops_the_pin() -
     assert not any(line.strip().startswith("node_ip") for line in lines)
     # The listener still follows the bind: signalling stays on the tailnet.
     assert "  - 100.64.0.7" in lines
+
+
+def test_render_config_external_ip_skips_hairpin_validation_and_keeps_lan_candidate() -> None:
+    """Bench finding (2026-09-03): livekit's post-STUN self-check hairpins
+    through the router and times out on a home NAT, after which it drops the
+    internal candidates the robot child needs. With validation skipped and
+    the internal IP advertised, livekit logged
+    `using external IPs ["73.x/192.168.x"]` — one public, one LAN. The
+    tailnet is excluded from candidate gathering by CIDR (media never rides
+    it, and its probe collides with the LAN socket's on :7882)."""
+    text = sfu.render_config(bind_host="100.64.0.7", key_file="/k.yaml", external_ip=True)
+    lines = _lines(text)
+    assert "  skip_external_ip_validation: true" in lines
+    assert "  advertise_internal_ip: true" in lines
+    assert "      - 100.64.0.0/10" in lines
+    assert "      - fd7a:115c:a1e0::/48" in lines
+    # rtc.ips.excludes must sit INSIDE the rtc block, i.e. before the
+    # top-level bind_addresses key.
+    assert text.index("    excludes:") < text.index("bind_addresses:")
+    # None of it leaks into the default (Cloud-free loopback) config.
+    off = _lines(sfu.render_config(bind_host="127.0.0.1", key_file="/k.yaml"))
+    assert not any("skip_external_ip_validation" in line or "advertise_internal_ip" in line for line in off)
 
 
 def test_render_config_external_ip_defaults_off() -> None:

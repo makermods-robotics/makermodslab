@@ -57,6 +57,16 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 FRONTEND_PATH = PROJECT_ROOT / "frontend"
 FRONTEND_DIST = FRONTEND_PATH / "dist"
 FRONTEND_PACKAGE_JSON = FRONTEND_PATH / "package.json"
+FRONTEND_LOCKFILE = FRONTEND_PATH / "package-lock.json"
+# npm writes this at the END of every successful install; it is the only
+# on-disk record that node_modules reflects the lockfile.
+FRONTEND_INSTALLED_LOCKFILE = FRONTEND_PATH / "node_modules" / ".package-lock.json"
+# `--no-audit` / `--no-fund`: a warm install's two registry round trips that
+# install nothing — and the audit POST is the one that hung a `--dev` start
+# for minutes on 2026-09-03 (npm's per-request timeout is 5 min, x3 with
+# retries) with a complete node_modules on disk. `--prefer-offline` serves
+# whatever the cache already holds without a freshness check.
+NPM_INSTALL_ARGS = ("npm", "install", "--no-audit", "--no-fund", "--prefer-offline")
 BACKEND_PORT = 8000
 FRONTEND_DEV_PORT = 8080
 ENTRY_POINT_NAMES = ("makermodslab", "makermodslab-station")
@@ -530,6 +540,34 @@ def _run_prod(
             logger.info("  ✅ LiveKit SFU stopped")
 
 
+def _frontend_deps_current(frontend_path: Path = FRONTEND_PATH) -> bool:
+    """True when node_modules already reflects the lockfile, so `npm install`
+    has nothing to do.
+
+    The signal is npm's own: it rewrites `node_modules/.package-lock.json` as
+    the last step of every successful install, so that file being newer than
+    both `package.json` and `package-lock.json` means nothing has changed
+    since the tree was last installed. Anything that touches either manifest
+    — an edit, a merge, a checkout of another branch — bumps its mtime past
+    the marker and the install runs again. A missing marker (fresh clone,
+    deleted node_modules, an install that died midway) always installs.
+
+    Deliberately an mtime check and not a content one: the marker holds only
+    the INSTALLED subset (platform-specific optional deps are absent by
+    design), so a package-set comparison would report "stale" forever on
+    macOS. mtime is what npm itself uses to decide the tree is warm.
+    """
+    marker = frontend_path / "node_modules" / ".package-lock.json"
+    try:
+        stamp = marker.stat().st_mtime
+        for name in ("package.json", "package-lock.json"):
+            if (frontend_path / name).stat().st_mtime > stamp:
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def _run_dev(
     sfu_bin: str | None = None,
     sfu_external_ip: bool = False,
@@ -561,8 +599,11 @@ def _run_dev(
     _ensure_port_available("Frontend", FRONTEND_DEV_PORT)
     _ensure_port_available("Backend", BACKEND_PORT)
 
-    logger.info("📦 Installing frontend deps...")
-    subprocess.run(["npm", "install"], check=True, cwd=FRONTEND_PATH)
+    if _frontend_deps_current():
+        logger.info("📦 Frontend deps are current — skipping npm install.")
+    else:
+        logger.info("📦 Installing frontend deps...")
+        subprocess.run(list(NPM_INSTALL_ARGS), check=True, cwd=FRONTEND_PATH)
 
     logger.info("🎨 Starting Vite dev server (port %d)...", FRONTEND_DEV_PORT)
     frontend_process = subprocess.Popen(

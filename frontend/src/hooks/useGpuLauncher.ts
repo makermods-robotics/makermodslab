@@ -182,6 +182,13 @@ export interface UseGpuLauncher {
   start: (body: GpuStartRequest) => Promise<void>;
   stop: () => Promise<void>;
   refresh: () => void;
+  /** The request THIS tab last launched the GPU with, kept while that GPU is
+   * up so the panel can warn when the form drifts away from it — the
+   * transport knobs are half of a fingerprint the running server holds, and a
+   * mismatch is a run that receives nothing, not an error. Null after a
+   * reload or for a GPU started elsewhere (the status echoes only engine and
+   * Hub id today), and cleared by a stop. */
+  launched: GpuStartRequest | null;
 }
 
 /**
@@ -194,6 +201,7 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
   const [status, setStatus] = useState<GpuStatus | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [launched, setLaunched] = useState<GpuStartRequest | null>(null);
   const [nonce, setNonce] = useState(0);
   // Ref rather than state: the poll effect reads it to decide whether to keep
   // ticking, and putting it in the dep array would re-arm the interval on
@@ -247,6 +255,7 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
       try {
         const result = await startGpu(baseUrl, fetchWithHeaders, body);
         setStatus(result.gpu);
+        setLaunched(body);
       } catch (e) {
         // The backend's own coded refusal text (gpu.cli_missing names the
         // install line, gpu.launch_failed names the field or the tailnet).
@@ -265,6 +274,7 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
     settled.current = false;
     try {
       setStatus(await stopGpu(baseUrl, fetchWithHeaders));
+      setLaunched(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -273,7 +283,7 @@ export function useGpuLauncher(enabled: boolean): UseGpuLauncher {
     }
   }, [baseUrl, fetchWithHeaders, refresh]);
 
-  return { status, pending, error, start, stop, refresh };
+  return { status, pending, error, start, stop, refresh, launched };
 }
 
 /* -------------------------------------------------------------------------

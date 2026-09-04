@@ -105,6 +105,12 @@ export default {
     // {{minutes}} 是普通整数，刻意不使用 count 机制。
     idleStopIn: "若约 {{minutes}} 分钟内没有远程运行开始，它会自动停止。",
     idleStopPaused: "有远程运行正在使用它，因此不会自动停止。",
+    // 表单与正在运行的服务之间的不一致。{{fields}} 是一组参数名
+    //（engine、horizon、fps、codec、s_min、policy、task）— 属于数据。
+    // 启动时的取值原样跟在这句话之后。
+    driftBody:
+      "GPU 启动后你改动了 {{fields}}。正在运行的服务会一直沿用启动时的取值，二者不一致时运行不会报错，只会什么都收不到。它当前的取值是：",
+    restart: "用这些设置重启 GPU",
     roomLabel: "房间",
     logLabel: "日志",
   },
