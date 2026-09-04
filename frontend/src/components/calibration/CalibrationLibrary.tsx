@@ -1,7 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Pencil, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, Trash2, Upload, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -78,6 +85,19 @@ interface CalibrationLibraryProps {
    * sibling instance renamed/deleted/imported one (see onLibraryChanged).
    */
   reloadToken?: number;
+  /**
+   * Opens the caller's new-calibration flow for this arm. Passing it adds a
+   * "Calibrate" segment to the control group; omitting it leaves the group as
+   * picker + overflow menu.
+   *
+   * The action lives INSIDE this component rather than beside it because the
+   * three controls share a single border — a sibling button could not join
+   * that group without the parent re-implementing its seams.
+   */
+  onCalibrate?: () => void;
+  /** The caller's calibration panel is open for this arm; presses the segment. */
+  calibrateOpen?: boolean;
+  calibrateDisabled?: boolean;
 }
 
 /**
@@ -99,6 +119,9 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   onAssigned,
   onLibraryChanged,
   reloadToken,
+  onCalibrate,
+  calibrateOpen,
+  calibrateDisabled,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
@@ -216,7 +239,17 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         variant: "destructive",
       });
     }
-  }, [baseUrl, fetchWithHeaders, device, armType, pendingDelete, toast, t, onAssigned, onLibraryChanged]);
+  }, [
+    baseUrl,
+    fetchWithHeaders,
+    device,
+    armType,
+    pendingDelete,
+    toast,
+    t,
+    onAssigned,
+    onLibraryChanged,
+  ]);
 
   // Assign a config to this robot's slot. Called straight from the dropdown's
   // onValueChange — picking a config IS choosing it for this robot; there is
@@ -240,7 +273,10 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           name === excludeConfig &&
           excludeConfigField !== field;
         const body = isSwap
-          ? { [field]: name, [excludeConfigField as string]: assignedConfig ?? "" }
+          ? {
+              [field]: name,
+              [excludeConfigField as string]: assignedConfig ?? "",
+            }
           : { [field]: name };
         const res = await fetchWithHeaders(
           `${baseUrl}/api/v1/robots/${encodeURIComponent(robotName)}`,
@@ -263,8 +299,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
               ? t("calibration.library.toast.swapped", {
                   name,
                   previous:
-                    assignedConfig ||
-                    t("calibration.library.toast.noConfig"),
+                    assignedConfig || t("calibration.library.toast.noConfig"),
                 })
               : t("calibration.library.toast.assigned", { name }),
           });
@@ -376,9 +411,21 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
 
   const empty = configs.length === 0;
 
+  // Opens the import file picker from the overflow menu; the input and the
+  // naming dialog stay mounted inside ImportCalibrationButton at the row root.
+  const importPick = React.useRef<(() => void) | null>(null);
+
   return (
     <div className="mt-1 ml-6 space-y-1">
-      <div className="flex items-center gap-1">
+      {/* One control, not three. The picker, Calibrate and the overflow menu
+          share a single border with hairline seams, so the row reads as one
+          object instead of a bordered select flanked by two buttons at two
+          other visual weights. Every segment is h-10, matching SelectTrigger.
+
+          Focus rings are moved INSIDE (ring-inset, no offset): the default
+          shadcn ring draws 2px outside the element, which here would overlap
+          the neighbouring segment and spill past the group's own border. */}
+      <div className="flex items-stretch overflow-hidden rounded-md border border-input bg-background">
         <Select
           value={selected ?? ""}
           onValueChange={(name) => {
@@ -391,7 +438,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           }}
           disabled={empty || assigning}
         >
-          <SelectTrigger className="flex-1">
+          <SelectTrigger className="min-w-0 flex-1 rounded-none border-0 bg-transparent focus:ring-1 focus:ring-inset focus:ring-offset-0">
             <SelectValue
               placeholder={
                 empty
@@ -440,39 +487,81 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           </SelectContent>
         </Select>
 
-        <Button
-          size="icon"
-          variant="ghost"
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-          disabled={!selected}
-          onClick={openRename}
-          aria-label={t("calibration.library.renameAria")}
-          title={t("calibration.library.renameTooltip")}
-        >
-          <Pencil className="h-4 w-4" />
-        </Button>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="shrink-0 text-muted-foreground hover:text-destructive"
-          disabled={!selected}
-          onClick={() => selected && setPendingDelete(selected)}
-          aria-label={t("calibration.library.deleteAria")}
-          title={t("calibration.library.deleteTooltip")}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
-        <ImportCalibrationButton
-              armType={armType}
-          device={device}
-          onImported={async (name) => {
-            await refresh();
-            setSelected(name);
-            // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
-            onLibraryChanged?.();
-          }}
-        />
+        {/* The row's main action, and the reason anyone opens this section.
+            It stays a labelled segment rather than folding into the menu
+            below: a bare "+" beside a file picker reads as "add a file" when
+            it actually starts a calibration run. */}
+        {onCalibrate && (
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onCalibrate}
+            disabled={calibrateDisabled}
+            aria-expanded={calibrateOpen}
+            title={t("robotConfig.files.newCalibrationTitle")}
+            className={cn(
+              "h-10 shrink-0 gap-1.5 rounded-none border-l border-input px-3 font-normal focus-visible:ring-inset focus-visible:ring-offset-0",
+              calibrateOpen && "bg-accent text-accent-foreground",
+            )}
+          >
+            <Wand2 className="h-4 w-4" />
+            {t("robotConfig.files.calibrate")}
+          </Button>
+        )}
+
+        {/* Rename, import and delete are rare next to picking a config, so
+            they fold into one overflow menu and the row reads select,
+            calibrate, more — instead of a strip of loose icons. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-10 w-10 shrink-0 rounded-none border-l border-input text-muted-foreground hover:text-foreground focus-visible:ring-inset focus-visible:ring-offset-0"
+              aria-label={t("calibration.library.moreAria")}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              disabled={!selected}
+              onSelect={() => openRename()}
+            >
+              <Pencil className="mr-2 h-4 w-4" />
+              {t("calibration.library.renameTooltip")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => importPick.current?.()}>
+              <Upload className="mr-2 h-4 w-4" />
+              {t("calibration.library.importShort")}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!selected}
+              className="text-destructive focus:text-destructive"
+              onSelect={() => selected && setPendingDelete(selected)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              {t("calibration.library.deleteTooltip")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
+
+      {/* Renders nothing: the trigger lives in the menu above. Mounted OUTSIDE
+          the control group so its hidden file input is never a flex child of
+          a border-seamed row. */}
+      <ImportCalibrationButton
+        armType={armType}
+        device={device}
+        pickRef={importPick}
+        onImported={async (name) => {
+          await refresh();
+          setSelected(name);
+          // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+          onLibraryChanged?.();
+        }}
+      />
 
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
         <DialogContent>
@@ -497,12 +586,11 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             autoFocus
             placeholder={t("calibration.library.rename.placeholder")}
           />
-          {renameError && <p className="text-sm text-destructive">{renameError}</p>}
+          {renameError && (
+            <p className="text-sm text-destructive">{renameError}</p>
+          )}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              onClick={() => setRenameOpen(false)}
-            >
+            <Button variant="outline" onClick={() => setRenameOpen(false)}>
               {t("common.cancel")}
             </Button>
             <Button
@@ -538,10 +626,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              onClick={() => setPendingDelete(null)}
-            >
+            <Button variant="outline" onClick={() => setPendingDelete(null)}>
               {t("common.cancel")}
             </Button>
             <Button

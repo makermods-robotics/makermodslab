@@ -4,7 +4,6 @@ import { ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
 import RobotCorner from "@/components/launchpad/RobotCorner";
-import LanguageSwitcher from "@/components/LanguageSwitcher";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import CollectPanel from "@/components/studio/CollectPanel";
 import TrainPanel from "@/components/studio/TrainPanel";
@@ -18,8 +17,8 @@ import { useEyebrowClass } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
 
 /**
- * The fullscreen skill studio — slides up over the Launchpad when the
- * "+ New Skill" banner (or any Run-on-robot / Fine-tune action) opens it.
+ * The fullscreen policy studio — slides up over the Launchpad when the
+ * "+ New Policy" banner (or any Run-on-robot / Fine-tune action) opens it.
  * Stays mounted so panel state survives close/reopen within a visit.
  */
 const StudioOverlay: React.FC = () => {
@@ -107,10 +106,6 @@ const StudioOverlay: React.FC = () => {
         <span className="hidden sm:inline-flex">
           <HfAuthChip />
         </span>
-        {/* Mounted here as well as on the Launchpad: this overlay is
-            `fixed inset-0` and covers the viewport, so the header switcher
-            would otherwise be unreachable while the studio is open. */}
-        <LanguageSwitcher />
         <RobotCorner />
         <Button
           variant="ghost"

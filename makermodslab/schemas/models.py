@@ -56,6 +56,9 @@ __all__ = [
     "ModelUploadResponse",
     "RunCheckpointItem",
     "RunCheckpointsResponse",
+    "SkillListItem",
+    "SkillsHubStatus",
+    "SkillsResponse",
     "SuccessRepoIdResponse",
 ]
 
@@ -201,3 +204,52 @@ class ModelDeleteResponse(BaseModel):
 
     deleted: bool
     id: str
+
+
+class SkillListItem(ModelListItem):
+    """One row of GET /skills (models.py list_skills).
+
+    The deployable projection of a listing row: the same producers, the same
+    absent-key heterogeneity (the route serializes with exclude_unset for the
+    reason ModelListItem documents — a scanned checkpoint dir carries no
+    ``state``, for instance), plus the annotations list_skills stamps on every
+    row it emits.
+
+    ``origin`` is where the weights CAME FROM, as opposed to ``source``, which
+    is where they live now. ``deployable`` is derived on read, never stored:
+    a checkpoint dir can be deleted and a resume can land at any moment, so a
+    persisted flag would rot with no writer nearby.
+    """
+
+    origin: Literal["trained-local", "trained-cloud", "imported", "downloaded", "hub-untracked"]
+    weights: Literal["ready", "unverified", "none"]
+    #: The run that represents this row's resume chain. Non-null means the row
+    #: is a link to another skill, and `deployable` is False.
+    superseded_by: str | None
+    deployable: bool
+    #: The registry record that deploys this row. Null for a row no run tracks
+    #: (a bare Hub repo, a scanned directory) — those lazy-import on pick.
+    job_id: str | None
+    #: Only on a Hub row served from the last complete listing because this
+    #: refresh could not reach the Hub (models.py _hub_listing).
+    stale: bool | None = None
+
+
+class SkillsHubStatus(BaseModel):
+    """The Hub half's reachability, carried by the /skills envelope so the UI
+    can tell an outage from an empty shelf — the two used to render
+    identically, as an empty list (models.py _hub_listing)."""
+
+    ok: bool
+    authenticated: bool
+    degraded: bool
+    #: Some rows are being served from the last complete listing.
+    stale_rows: bool
+
+
+class SkillsResponse(BaseModel):
+    """GET /skills (models.py list_skills): an envelope, not a bare array —
+    see SkillsHubStatus for why the `hub` half exists."""
+
+    skills: list[SkillListItem]
+    hub: SkillsHubStatus

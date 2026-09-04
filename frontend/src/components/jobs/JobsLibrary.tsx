@@ -93,7 +93,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const { t } = useTranslation();
 
   // Run on a job card doesn't open a dialog: it prefills the Deploy panel's
-  // skill/checkpoint picker and focuses that panel.
+  // policy/checkpoint picker and focuses that panel.
   const { openStudio } = useStudio();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();

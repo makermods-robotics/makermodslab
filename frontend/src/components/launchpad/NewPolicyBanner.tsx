@@ -6,46 +6,46 @@ import { useStudio } from "@/contexts/StudioContext";
  * strings here would never follow a language change. */
 const STEPS = [
   {
-    labelKey: "launchpad.newSkill.steps.collect.label",
-    subKey: "launchpad.newSkill.steps.collect.sub",
+    labelKey: "launchpad.newPolicy.steps.collect.label",
+    subKey: "launchpad.newPolicy.steps.collect.sub",
   },
   {
-    labelKey: "launchpad.newSkill.steps.train.label",
-    subKey: "launchpad.newSkill.steps.train.sub",
+    labelKey: "launchpad.newPolicy.steps.train.label",
+    subKey: "launchpad.newPolicy.steps.train.sub",
   },
   {
-    labelKey: "launchpad.newSkill.steps.deploy.label",
-    subKey: "launchpad.newSkill.steps.deploy.sub",
+    labelKey: "launchpad.newPolicy.steps.deploy.label",
+    subKey: "launchpad.newPolicy.steps.deploy.sub",
   },
 ] as const;
 
 /**
- * The "＋ New Skill" workbench banner — Layout D's signature element. Resting, it
+ * The "＋ New Policy" workbench banner — Layout D's signature element. Resting, it
  * reads "Collect, train, deploy — without leaving this page."; on hover or
  * keyboard focus it reveals the 1·Collect → 2·Train → 3·Deploy pipeline with a
  * smooth height/opacity transition (grid-rows 0fr → 1fr). Click slides the
  * studio up on the Collect panel. Fully keyboard accessible (it's a button;
  * :focus-visible reveals the steps).
  */
-const NewSkillBanner: React.FC = () => {
+const NewPolicyBanner: React.FC = () => {
   const { openStudio } = useStudio();
   const { t } = useTranslation();
 
   return (
     <button
       type="button"
-      data-tour="launchpad-new-skill"
+      data-tour="launchpad-new-policy"
       onClick={() => openStudio("collect")}
       className="group w-full rounded-lg border border-border bg-card px-6 py-7 text-left shadow-1 transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none"
-      aria-label={t("launchpad.newSkill.aria")}
+      aria-label={t("launchpad.newPolicy.aria")}
     >
       <span className="font-display text-xl font-semibold tracking-tight">
-        {t("launchpad.newSkill.title")}
+        {t("launchpad.newPolicy.title")}
       </span>
 
       {/* Resting subtitle: fades out as the steps expand in. */}
       <span className="mt-1 block text-sm text-muted-foreground transition-opacity duration-300 group-hover:opacity-0 group-focus-visible:opacity-0">
-        {t("launchpad.newSkill.subtitle")}
+        {t("launchpad.newPolicy.subtitle")}
       </span>
 
       {/* Steps: collapsed to zero height at rest, expanding on hover/focus. */}
@@ -79,4 +79,4 @@ const NewSkillBanner: React.FC = () => {
   );
 };
 
-export default NewSkillBanner;
+export default NewPolicyBanner;

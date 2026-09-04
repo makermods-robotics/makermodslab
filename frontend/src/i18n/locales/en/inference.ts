@@ -14,6 +14,14 @@ export default {
     resetting: "Reset the scene",
     finished: "Evaluation complete",
     aborted: "Evaluation aborted",
+    // Coaching phases. The only ones in this map worded from the OPERATOR's
+    // point of view rather than the system's — they say who is holding the arm.
+    watching: "Policy driving — watch for a failure",
+    holding: "Held — the arm is holding its pose",
+    correcting: "You're driving — recording",
+    handingOver: "Handing over — the arm is moving",
+    saving: "Saving the correction…",
+    attemptReset: "Home — arm is limp, reposition freely",
   },
   result: {
     success: "Success",
@@ -31,6 +39,198 @@ export default {
     settingUp: "Setting up",
     running: "Running",
     finished: "Finished",
+    coaching: "Coaching",
+    coachingComplete: "Coaching complete",
+    coachingStopped: "Coaching stopped",
+  },
+
+  // The big in-session coaching banner. Titles are SHOUTED on purpose: the
+  // operator is looking at the arm, not the screen, and reads this peripherally.
+  // Qualifiers that ride beside the banner title. Short and shouty on purpose:
+  // three of the four parked states sit on the same step of the loop and differ
+  // only in whether the arm is safe to grab, which is the one difference on
+  // this screen an operator can be hurt by getting wrong.
+  coachBadge: {
+    paused: "PAUSED",
+    armMoving: "ARM MOVING",
+    recording: "RECORDING",
+    limp: "LIMP",
+    notHome: "NOT HOME",
+    // Not a state label but a promise the operator acts on with their hands:
+    // the leader matches the follower and is holding still under torque.
+    aligned: "ALIGNED & HELD",
+    mayBeStiff: "MAY BE STIFF",
+  },
+  coachBanner: {
+    watching: {
+      title: "WATCHING",
+      hint: "The policy is driving. Press space to take over — the leader arm will move itself to the robot's pose first, so hold it loosely and let it.",
+    },
+    held: {
+      title: "HELD",
+      hint: "The arm is holding its pose. Nothing is being recorded. Space to take over, Enter if the task is done.",
+    },
+    handingOver: {
+      title: "HANDING OVER",
+      hint: "The arm is moving into position — don't fight it. Wait for it to settle.",
+    },
+    resetting: {
+      title: "RETURNING HOME…",
+      hint: "The arm is moving back to the start pose — don't grab it yet. It goes limp and stays put once it arrives. Nothing is being recorded.",
+    },
+    saving: {
+      title: "SAVING…",
+      hint: "Writing the correction to disk. The arm is held; the policy resumes when this finishes.",
+    },
+    // The first of the two presses that make up a takeover. Both arms are
+    // still and nothing is being recorded — the same facts as HELD — but the
+    // instruction is the opposite, so the wording leads with what to DO.
+    poised: {
+      title: "TAKE THE ARM",
+      hint: "The leader is lined up with the robot and holding still — nothing is being recorded yet. Take hold of the leader, then press space again: that releases it and starts driving AND recording. If the two arms don't match, line them up by hand first.",
+    },
+    correcting: {
+      title: "YOU'RE DRIVING",
+      hint: "Every frame is being recorded. Space hands back. Enter saves this correction AND ends the attempt, if the task is finished. If you had to rewind the arm first, press G when you reach a state the policy has seen — that splits the rescue from the correction.",
+    },
+    // Parked straight after a reset. Distinct from HELD because the
+    // INSTRUCTION differs — "space to take over" here is what produced the
+    // unwanted correction this state exists to prevent.
+    parked: {
+      title: "RESET",
+      hint: "The arm is home and will not move — it is limp and safe to grab. Reposition it and the scene freely, then press Enter for the next one.",
+    },
+    // The reset did not finish cleanly: the follower never reached home.
+    parkedStuck: {
+      title: "CHECK THE ARM",
+      hint: "The arm has stopped and will not move, but it never reached the home pose — something may be obstructing it. Move it back by hand, then press Enter for the next one.",
+    },
+    // Homed, but a limp arm could not be confirmed — never promise one we
+    // cannot confirm, because the operator acts on that promise by grabbing it.
+    parkedRigid: {
+      title: "RESET — ARM MAY BE STIFF",
+      hint: "The arm is home and will not move on its own, but it may still be holding torque. Don't force it — reposition the scene, then press Enter for the next one.",
+    },
+    // The two halves of a takeover. Both are `correcting` to lerobot; they
+    // differ only in the INSTRUCTION, which is the point — RaC's data
+    // efficiency comes from the operator treating them as separate jobs.
+    recovering: {
+      title: "RECOVERING",
+      hint: "Bring the arm back to a state the policy has seen before. Press G when you're there — everything after that counts as the correction.",
+    },
+    correcting2: {
+      title: "CORRECTING",
+      hint: "Now show it the right thing. Confident and clean, complete the subtask, don't overcorrect. Space hands back and saves.",
+    },
+    starting: {
+      title: "STARTING…",
+      hint: "Loading the policy and connecting the arms.",
+    },
+  },
+
+  coach: {
+    // In-session controls. Each button also renders its key, which is never
+    // translated — "space" and "esc" are the physical keys.
+    takeOver: "Take control",
+    handBack: "Give back control",
+    // The SECOND takeover press. Names what the operator is confirming (their
+    // hand is on a stationary, aligned leader) and what it costs (recording
+    // starts) — not a second invitation to take control they already asked for.
+    confirmHold: "I have the arm — start driving",
+    discard: "Discard this correction",
+    // Names BOTH halves. The control used to stop at "discarded" and leave the
+    // arm holding the pose the fumble ended in; it now brings the arm home too,
+    // and a label that hid that would make the arm move unexpectedly.
+    discardAndReset: "Discard this correction and reset",
+    hold: "Hold — freeze the arm",
+    resume: "Let the policy continue",
+    ending: "Ending…",
+    endSession: "End session & keep corrections",
+    // The handoff offered on a terminal session screen. {{percent}} is the
+    // share the evaluation got wrong — a number, so no plural form.
+    offer: "Policy failing? Coach it",
+    offerWithGap: "Coach it — fix the {{percent}}% it got wrong",
+    reset: "Task done — reset for next attempt",
+    recovered: "Recovered — the correction starts here",
+    // {{seconds}} is the correction's own length, pre-formatted by the caller.
+    // The DURATION is what identifies it: the operator has just watched it
+    // happen and has no episode number in their head, but they know roughly how
+    // long they were driving.
+    dropLast: "Delete that {{seconds}} correction",
+    // Backspace pressed when the delete window has already closed. Only the
+    // most recent correction is still held in memory; the runner writes it at
+    // the next takeover, and lerobot cannot take an episode back out of an open
+    // dataset afterwards. The operator gets told the rule rather than silence,
+    // and is pointed at the one undo that IS still available.
+    nothingToDropHint: {
+      title: "That one's already saved",
+      body: "Only the most recent correction can be taken back, and there isn't one waiting. Everything before it is already written to the dataset. You can still delete the whole dataset when the session ends.",
+    },
+    nothingToDelete: "No corrections to delete",
+    // A command that lands after the runner finalized. Not a failure.
+    sessionEnded: {
+      title: "Session already ended",
+      body: "That command arrived after the session finished — nothing was changed. Your corrections are safe.",
+    },
+    // The end-of-session handoff. <0> is the training dataset's name.
+    handoffNext:
+      "Next: merge these corrections with <0>{{dataset}}</0> — what this checkpoint was last trained on — then fine-tune it on the result. Training takes one dataset, so the merge isn't optional.",
+    handoffAction: "Merge & fine-tune",
+    handoffHint:
+      "Opens the merge with both datasets already chosen, then the training panel with this skill as the base.",
+    startAttempt: "Start attempt {{attempt}}",
+    takeOverInstead: "Take over instead",
+    // Trailing separator included: it prefixes the recorded-time span.
+    attemptPrefix: "attempt {{attempt}} · ",
+    // Live tally. {{saved}} and {{target}} are raw counts; {{target}} is "?"
+    // until the runner reports one, so this is not a plural form.
+    tally: "{{saved}} of {{target}} corrections",
+    recorded: "{{duration}} recorded",
+    savingTo: "saving to {{dataset}}",
+    // Summary. Two forms because a known dataset name changes the sentence,
+    // not just a fragment; <0> emphasises the name, which is data.
+    summarySaved_one: "{{count}} correction saved.",
+    summarySaved_other: "{{count}} corrections saved.",
+    summarySavedTo_one: "{{count}} correction saved to <0>{{dataset}}</0>.",
+    summarySavedTo_other: "{{count}} corrections saved to <0>{{dataset}}</0>.",
+    summaryNextSteps:
+      "To turn these into a better policy: merge this dataset with the one this checkpoint was <0>last</0> trained on — if you fine-tuned, that's the fine-tuning dataset, not the original demos — then fine-tune from this same checkpoint on the merged result. Training takes one dataset, so the merge isn't optional. Both steps are in the dataset library and the training panel.",
+    summaryNone: "No corrections were saved — nothing to train on from this session.",
+    // Discarding the whole dataset from the summary — a first-class outcome,
+    // not a failure path.
+    delete: "Delete these corrections",
+    deleteConfirm: "Really delete? This can't be undone",
+    deleting: "Deleting…",
+    deleted: "Deleted",
+    deleteRefused: "The server refused the delete.",
+    deleteFailed: "Couldn't delete the dataset",
+    deletedToast: {
+      title: "Corrections deleted",
+      body: "{{dataset}} was removed from disk.",
+    },
+    // Command labels. {{action}} in `failed` is one of the labels below, so
+    // they read as sentence fragments rather than button text.
+    cmd: {
+      failed: "{{action}} failed",
+      takeOver: "Take over",
+      takingOver: "Taking over…",
+      handBack: "Hand back",
+      handingBack: "Handing back…",
+      hold: "Hold",
+      holding: "Holding…",
+      resume: "Resume policy",
+      resuming: "Resuming…",
+      discard: "Discard correction",
+      discarding: "Discarding…",
+      reset: "Reset",
+      resetting: "Returning home…",
+      startNextAttempt: "Start next attempt",
+      recovered: "Recovery marked",
+      marking: "Marking…",
+      dropLast: "Delete the last correction",
+      dropping: "Deleting…",
+      starting: "Starting…",
+    },
   },
   toast: {
     startedWarningTitle: "Started with a warning",
@@ -44,6 +244,11 @@ export default {
     // {{percent}} arrives pre-rounded — formatting is done by the caller.
     evalAccuracy: "{{percent}}% success rate.",
     evalNoScoreable: "No scoreable episodes.",
+    coachStoppedTitle: "Coaching session stopped",
+    coachCompleteTitle: "Coaching complete",
+    // count 0 is a real outcome here — a session can end having saved nothing.
+    coachSaved_one: "{{count}} correction saved.",
+    coachSaved_other: "{{count}} corrections saved.",
     finishedTitle: "Inference finished",
     finishedDescription: "Run completed.",
     hungTitle: "Inference seems hung",

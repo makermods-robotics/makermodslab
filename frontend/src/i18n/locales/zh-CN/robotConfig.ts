@@ -65,42 +65,52 @@ export default {
     label: "设备",
     groupBimanual: "设备与机械臂",
     groupSingle: "设备",
+    left: "左",
+    right: "右",
   },
 
   slotCard: {
-    undetectedLabel: "已保存的端口当前未检测到",
-    undetectedTitle: "已保存的端口当前未检测到 — 请接上机械臂并重新扫描",
+    undetectedLabel: "端口未检测到",
+    undetectedTitle: "已保存的端口未检测到。请接上机械臂并重新扫描。",
     noPort: "未分配端口",
+    readyLabel: "就绪",
   },
 
   // ---- 端口选择、识别、抖动 ----------------------------------------------
   port: {
     label: "端口",
     select: "选择端口",
-    none: "未检测到机械臂 — 请接上并刷新",
+    none: "未检测到机械臂。请接上并重新扫描。",
     otherArm: "其他机械臂",
     clear: "清除端口",
     clearTitle: "清除端口 — 释放它且不分配新端口",
-    rescan: "重新扫描端口",
+    rescan: "重新扫描",
     detect: "识别",
     detecting: "监测中…",
     detectTitle: "手动识别：将机械臂底座大幅向左和向右摆动",
     detectHelp:
       "手动识别 — 将机械臂底座分别大幅摆向左侧和右侧（每个方向都要超过起始位置 10–15°）；检测到运动的端口会被分配。小幅晃动不会被识别。",
     detectLive:
-      "请大幅摆动机械臂底座 — 向左和向右都要明显超过起始位置。小幅或单侧的晃动会被忽略（这样才能滤掉碰撞）。检测到运动的端口将被分配给这条机械臂。",
+      "把底座向左右大幅摆动，明显越过起始位置。小幅或单向的晃动会被忽略。",
     detectHelpMaker:
       "自动识别 —— Maker 机械臂的从臂和主臂使用不同协议，无需手动操作。双臂装置请将其中一条机械臂的底座向左和向右摆动，以指明是哪一侧。",
     detectLiveMaker:
-      "正在逐个检测端口上的 Maker 机械臂…… 如果该侧有两条机械臂响应，请大幅摆动要分配的那条机械臂底座 —— 向左和向右都要明显超过起始位置。",
+      "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
     detectHelpMetal:
       "自动识别 —— Metal 机械臂的从臂和主臂使用不同协议，无需手动操作。双臂装置请将其中一条机械臂的底座向左和向右摆动，以指明是哪一侧。",
     detectLiveMetal:
-      "正在逐个检测端口上的 Metal 机械臂…… 如果该侧有两条机械臂响应，请大幅摆动要分配的那条机械臂底座 —— 向左和向右都要明显超过起始位置。",
+      "正在逐个探测端口。若有两条机械臂响应，请把要分配的那条底座向左右摆动。",
     wiggle: "抖动",
     wiggling: "抖动中…",
     wiggleTitle: "驱动该端口上的夹爪，看看是哪条机械臂",
-    wiggleHelp: "确认机械臂接在该端口上 — 会短暂驱动它的夹爪，你可以看到哪条机械臂有反应。",
+    wiggleHelp:
+      "确认机械臂接在该端口上 — 会短暂驱动它的夹爪，你可以看到哪条机械臂有反应。",
+    detectTip: "把底座向左右大幅摆动。小幅晃动会被忽略。",
+    detectAuto: "自动识别",
+    detectTipAuto: "逐个探测端口，无需手动摆动。",
+    wiggleTip: "驱动夹爪，你可以看到哪条机械臂有反应。",
+    noneAssigned: "无端口",
+    forSlot: "{{slot}} 的端口",
     toast: {
       missingPortTitle: "缺少端口",
       missingPortWiggle: "请先输入或识别端口，再用抖动确认是哪条机械臂。",
@@ -110,7 +120,8 @@ export default {
       detectFailedTitle: "识别失败",
       swappedDetectedTitle: "已识别机械臂 — 端口已互换",
       swappedTitle: "端口已互换",
-      swappedDescription: "{{port}} 现已分配给这条机械臂；{{released}}接管了 {{swapPort}}。",
+      swappedDescription:
+        "{{port}} 现已分配给这条机械臂；{{released}}接管了 {{swapPort}}。",
       movedDetectedTitle: "已识别机械臂 — 端口已迁移",
       movedTitle: "端口已迁移",
       movedDescription:
@@ -140,7 +151,7 @@ export default {
 
   // ---- 02 · 标定文件 -----------------------------------------------------
   files: {
-    step: "标定文件",
+    step: "标定",
     calibrateAll: "全部标定",
     calibrateAllTitle: "选中所有已检测到的机械臂进行自动标定",
     calibrateAllDisabledTitle: "未检测到机械臂 — 请接上机械臂并重新扫描",
@@ -148,6 +159,7 @@ export default {
     openFollowerFolder: "打开从臂标定文件夹",
     leader: "主臂",
     follower: "从臂",
+    calibrate: "标定",
     newCalibration: "新建标定",
     newCalibrationTitle: "为这条机械臂新建一份标定",
     // 括号里是该槽位对应的 LeRobot 设备类别。
@@ -180,13 +192,18 @@ export default {
     },
     zeroPose: {
       instructions:
-        "请用手将机械臂移动到零位姿态 —— 收拢贴合底座，夹爪完全张开 —— 然后在下方确认。此时扭矩已关闭，机械臂可自由活动。",
+        "用手把机械臂摆成上图的姿态：折叠贴近底座，夹爪完全张开。扭矩已关闭，可以自由移动。",
+      instructionsLeader:
+        "用手将 Star Arm 102 主控臂摆成上图的姿态：折叠贴近底座，夹爪闭合。关节未通电，可以自由移动。",
       instructionsMetal:
-        "请用手将机械臂移动到零位姿态 —— 竖直立起，所有关节为 0°，夹爪闭合 —— 然后在下方确认。此时扭矩已关闭，机械臂可自由活动。",
+        "用手把机械臂摆成上图的姿态：竖直站立，各关节归零，夹爪闭合。扭矩已关闭，可以自由移动。",
       liveAngles: "实时关节角度",
       start: "设置零位姿态",
       confirm: "设为零位并保存",
       saving: "正在设置零位并保存标定…",
+      poseImage: "零位姿态：折叠，夹爪张开",
+      poseImageLeader: "Star Arm 102 主控臂零位姿态：折叠，夹爪闭合",
+      poseImageMetal: "零位姿态：竖直，夹爪闭合",
     },
     cancel: "取消标定",
     auto: "自动标定",
@@ -207,6 +224,17 @@ export default {
       "开始标定时，请让机器人处于中间位置 — 所有关节都位于各自行程的中间。正确的起始姿态可参考旁边的标定演示视频。",
     errorLabel: "错误：",
     demoTitle: "标定演示",
+    start: "开始",
+    sweepNote: "把每个关节向两个方向都移到行程尽头。扭矩已关闭，机械臂会发软，请托住它。",
+    autoNote: "机械臂会自行运动以找到各关节的行程极限。请保持周围空旷。",
+    zeroNote: "把机械臂摆成上图的位置，然后设定零位。扭矩保持关闭，可以自由活动。",
+    videoAuto: "自动标定演示",
+    poseMiddle: "起始姿态：中间位置",
+    poseAutoStart: "自动标定起始姿态",
+    restingPoseCaption:
+      "这是 SO-101 的休息姿态，也是自动标定的起始姿态。按下「开始」之前，请先把机械臂摆成这个姿态。",
+    middlePoseCaption:
+      "按下「开始」之前，请先把机械臂摆成这个中间位置——每个关节都接近其行程的中点。",
     videoUnsupported: "你的浏览器不支持 video 标签。",
     videoLink: "点此查看标定视频",
     toast: {
@@ -236,13 +264,13 @@ export default {
     titleMulti: "多臂自动标定",
     stopSingle: "停止自动标定",
     stopAll: "停止全部自动标定",
-    pickerIntro:
-      "选择要标定的机械臂。每条机械臂都会在各自分配的端口上<0>同时</0>运行免手动标定 — 某一条失败不会影响其他机械臂。端口取自上方每条机械臂的分配；尚未分配端口的机械臂无法选中。每条机械臂都会覆盖它自己已有的标定；之后可在上方的标定列表中重命名。",
+    pickerHint: "取消勾选不需要标定的机械臂。它们会同时进行。",
     portUndetected: "未检测到端口",
     portMissing: "无端口 — 请在上方分配",
     // 中文只有一个复数形式，因此只提供 _other。
     start_other: "自动标定 {{count}} 条机械臂",
-    progress_other: "已完成 {{total}} 条中的 {{done}} 条 — 机械臂正在运动。请保持工作区无障碍物。",
+    progress_other:
+      "已完成 {{total}} 条中的 {{done}} 条 — 机械臂正在运动。请保持工作区无障碍物。",
     armStatus: {
       completed: "✓ 完成",
       failed: "✗ 失败",
@@ -252,20 +280,20 @@ export default {
     summary: "{{completed}} 条完成，{{failed}} 条失败/已停止。",
     dismiss: "关闭",
     prompt: {
-      titleSingle: "自动标定{{arm}} — 它会运动",
+      titleSingle: "自动标定{{arm}}",
       titleFallbackArm: "这条机械臂",
-      titleMulti: "自动标定多条机械臂 — 它们都会运动",
-      bodySingle:
-        "这条机械臂将<0>自行通电运动</0>以测定每个关节的行程。请清空工作区，双手远离机械臂。它会覆盖自己已有的标定。",
+      titleMulti: "自动标定 {{count}} 条机械臂",
+      bodySingle: "机械臂会<0>自行运动</0>。请先把它摆到休息位，并清空工作区。",
       bodyMulti:
-        "{{count}} 条机械臂将同时<0>自行通电运动</0>以测定每个关节的行程。请清空工作区，双手远离所有机械臂。每条机械臂都会覆盖自己已有的标定。",
+        "{{count}} 条机械臂会<0>自行运动</0>。请先把它们摆到休息位，并清空工作区。",
       confirm: "开始自动标定",
     },
     toast: {
       noArmsTitle: "未选择机械臂",
       noArmsDescription: "请至少勾选一条要自动标定的机械臂。",
       noPortTitle: "机械臂没有已检测到的端口",
-      noPortDescription: "{{arm}}没有当前已接入的端口 — 开始之前请在上方分配或重新连接。",
+      noPortDescription:
+        "{{arm}}没有当前已接入的端口 — 开始之前请在上方分配或重新连接。",
       duplicatePortTitle: "端口重复",
       duplicatePortDescription: "每条机械臂都需要各自独立的串口。",
       startedTitle_other: "已在 {{count}} 条机械臂上开始自动标定",

@@ -65,6 +65,15 @@ export const CheckpointDropdown: React.FC<Props> = ({
     step === 0
       ? t("jobs.checkpointDropdown.latest")
       : t("jobs.checkpointDropdown.step", { step: String(step) });
+  // A checkpoint label is an identifier, not prose: JetBrains Mono + tabular
+  // figures is the house treatment for that everywhere else in the app, and
+  // tabular figures also stop the step column jittering as the digit count
+  // changes down a list (step 1,000 / step 20,000 / step 100,000).
+  // Applied to the whole label rather than just the numeral so the string
+  // stays one translatable unit.
+  const CheckpointLabel: React.FC<{ step: number }> = ({ step }) => (
+    <span className="font-mono tabular-nums">{labelFor(step)}</span>
+  );
   // Render newest-first regardless of the caller's order (the backend lists
   // ascending; JobCard pre-sorts descending — this is the one authoritative
   // display order). The step-0 "latest" sentinel sorts to the top, not the
@@ -106,7 +115,30 @@ export const CheckpointDropdown: React.FC<Props> = ({
       <SelectTrigger
         id={id}
         className={cn(
-          "bg-background border-input h-8 text-xs px-2 w-auto min-w-[110px]",
+          // A picker CHIP — deliberately between the two things this control
+          // has been. The original was styled as a text input (h-8 rectangle,
+          // `border-input`, a 110px min-width padding it out), which fought the
+          // fine-tune banner's prose box: a bordered box inside a bordered box.
+          // Stripping all the chrome fixed that but went too far — with only a
+          // hover background, nothing at rest said "you can change this".
+          //
+          // So: a permanent boundary (it must read as interactive without being
+          // hovered) in a pill radius with a `bg-background` surface, which
+          // reads as a token rather than a field and contrasts against the
+          // banner's own `bg-muted/50`. `border-border` rather than
+          // `border-input` — the latter is the form-field token and is what
+          // made it look like somewhere you type.
+          //
+          // justify-between is inherited from the base on purpose: at w-auto the box
+          // shrinks to fit so it behaves like justify-start with the gap, while
+          // JobCard's w-full override still parks the caret at the right edge.
+          "h-7 w-auto min-w-0 gap-1.5 rounded-full border border-border bg-background px-2.5 py-0 text-xs shadow-sm",
+          "hover:border-ring hover:bg-accent hover:text-accent-foreground",
+          "data-[state=open]:border-ring data-[state=open]:bg-accent",
+          "focus:ring-1 focus:ring-offset-0",
+          // The shared caret is sized for a full-height field; scale it down so
+          // it sits with inline text instead of towering over it.
+          "[&_svg]:h-3.5 [&_svg]:w-3.5 [&_svg]:shrink-0 [&_svg]:text-foreground/70",
           className,
         )}
         onClick={(e) => e.stopPropagation()}
@@ -120,7 +152,13 @@ export const CheckpointDropdown: React.FC<Props> = ({
             belongs where the ambiguity is visible: the open list. */}
         {attributed && selected !== undefined ? (
           <SelectValue placeholder={placeholderText}>
-            {labelFor(selected.step)}
+            <CheckpointLabel step={selected.step} />
+          </SelectValue>
+        ) : selected !== undefined ? (
+          // Always render our own label, not Radix's mirror of the item, so the
+          // trigger gets the same mono treatment as the list.
+          <SelectValue placeholder={placeholderText}>
+            <CheckpointLabel step={selected.step} />
           </SelectValue>
         ) : (
           <SelectValue placeholder={placeholderText} />
@@ -144,7 +182,7 @@ export const CheckpointDropdown: React.FC<Props> = ({
                 // a row the user can find. The timestamp and full id stay one
                 // hover away rather than spending width here.
                 <span className="flex flex-col gap-0.5" title={owner.detail}>
-                  <span>{labelFor(c.step)}</span>
+                  <CheckpointLabel step={c.step} />
                   <span className="whitespace-nowrap text-[10px] leading-none text-muted-foreground">
                     {owner.number > 0 ? (
                       <span className="font-mono">#{owner.number} </span>
@@ -153,7 +191,7 @@ export const CheckpointDropdown: React.FC<Props> = ({
                   </span>
                 </span>
               ) : (
-                labelFor(c.step)
+                <CheckpointLabel step={c.step} />
               )}
             </SelectItem>
           );

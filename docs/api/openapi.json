@@ -327,7 +327,7 @@
         "type": "object"
       },
       "CheckpointPolicyConfigResponse": {
-        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature.",
+        "description": "jobs.py JobRegistry.get_policy_config_summary — the UX-relevant slice\nof a checkpoint's pretrained_model/config.json. policy_type passes through\nfrom the file's \"type\" key (null when absent); state_dim/action_dim are\nnull when the checkpoint omits the feature. trained_on_robot_type is the\nraw lerobot robot_type of the checkpoint's training dataset (recovered via\ntrain_config.json), null when it can't be established — the fine-tune\npanel compares it against the selected dataset's arm.\n\nsupports_rtc says whether this architecture can run the Real-Time Chunking\ninference engine; null means the policy type isn't one the server knows\n(a fork newer than jobs.policy_type_supports_rtc's table), which the client\nmust read as \"offer it and let the server decide\", not as \"no\". The route\ndeclares no exclude_none/exclude_unset, so the key is always present.",
         "properties": {
           "action_dim": {
             "anyOf": [
@@ -372,16 +372,59 @@
               }
             ],
             "title": "State Dim"
+          },
+          "supports_rtc": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Rtc"
+          },
+          "trained_on_robot_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trained On Robot Type"
           }
         },
         "required": [
           "policy_type",
           "image_features",
           "requires_task",
+          "supports_rtc",
           "state_dim",
-          "action_dim"
+          "action_dim",
+          "trained_on_robot_type"
         ],
         "title": "CheckpointPolicyConfigResponse",
+        "type": "object"
+      },
+      "CoachingCommandResponse": {
+        "description": "The 200 body of the coaching control verbs (rollout.handle_coaching_command).\n\nOnly the ACCEPTED shape is modelled: a refusal carries its own status code\nand is raised as an HTTPException by the route, so it never reaches here.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "CoachingCommandResponse",
         "type": "object"
       },
       "CurrentSessionResponse": {
@@ -1318,8 +1361,52 @@
         "type": "object"
       },
       "HubJobItem": {
-        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).\n\nThe trailing four are the run's identity, recovered from the job's own argv\nby _hub_job_identity so a run launched on another machine reads like a\ntracked one. Each is independently nullable and for a real reason: a RESUMED\ncloud run carries `--config_path` instead of `--policy.type` /\n`--dataset.repo_id`, so it reports a repo and a step target with no policy\nor dataset. They are decoration on a listing — never identity — so a row\nthat answers none of them still renders.",
+        "description": "One row of GET /jobs/hub `jobs` (server.py list_hub_jobs). Every key is\nalways present; the nullables mirror huggingface_hub's JobInfo (docker_image\nand space_id are mutually exclusive on the Hub side, status/owner can be\nabsent objects → null, name is _hub_job_run_name's best effort).\n\n`policy_type` / `dataset` / `total_steps` / `hf_repo_id` are the run's\nidentity, recovered from the job's own argv by _hub_job_identity so a run\nlaunched on another machine reads like a tracked one. Each is independently\nnullable and for a real reason: a RESUMED cloud run carries `--config_path`\ninstead of `--policy.type` / `--dataset.repo_id`, so it reports a repo and a\nstep target with no policy or dataset.\n\n`kind` and the `base_*` / `dataset_repo_id` / `steps` fields are what the run\nstarted FROM, parsed by _hub_job_provenance off the same argv (kind chip +\nbase-checkpoint row on the card). `kind` is always one of\nscratch/foundation/finetune/resume; the rest are null when the argv doesn't\nanswer them. All of it is decoration on a listing — never identity — so a\nrow that answers none of them still renders.",
         "properties": {
+          "base_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Job Id"
+          },
+          "base_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Ref"
+          },
+          "base_repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Repo"
+          },
+          "base_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Step"
+          },
           "created_at": {
             "anyOf": [
               {
@@ -1341,6 +1428,17 @@
               }
             ],
             "title": "Dataset"
+          },
+          "dataset_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Repo Id"
           },
           "docker_image": {
             "anyOf": [
@@ -1378,6 +1476,23 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "scratch",
+                  "foundation",
+                  "finetune",
+                  "resume"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
           },
           "name": {
             "anyOf": [
@@ -1432,6 +1547,17 @@
                 "type": "null"
               }
             ]
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
           },
           "total_steps": {
             "anyOf": [
@@ -1677,6 +1803,16 @@
             ],
             "title": "Checkpoint State Dim"
           },
+          "coaching": {
+            "default": false,
+            "title": "Coaching",
+            "type": "boolean"
+          },
+          "coaching_dataset_name": {
+            "default": "",
+            "title": "Coaching Dataset Name",
+            "type": "string"
+          },
           "duration_s": {
             "default": 60,
             "title": "Duration S",
@@ -1704,6 +1840,16 @@
             "title": "Inference Engine",
             "type": "string"
           },
+          "leader_config": {
+            "default": "",
+            "title": "Leader Config",
+            "type": "string"
+          },
+          "leader_port": {
+            "default": "",
+            "title": "Leader Port",
+            "type": "string"
+          },
           "mode": {
             "default": "single",
             "title": "Mode",
@@ -1723,6 +1869,16 @@
             "title": "Right Follower Port",
             "type": "string"
           },
+          "right_leader_config": {
+            "default": "",
+            "title": "Right Leader Config",
+            "type": "string"
+          },
+          "right_leader_port": {
+            "default": "",
+            "title": "Right Leader Port",
+            "type": "string"
+          },
           "robot_name": {
             "default": "",
             "title": "Robot Name",
@@ -1732,6 +1888,11 @@
             "default": false,
             "title": "Skip Identity Check",
             "type": "boolean"
+          },
+          "target_corrections": {
+            "default": 10,
+            "title": "Target Corrections",
+            "type": "integer"
           },
           "task": {
             "default": "",
@@ -1812,6 +1973,39 @@
       "JobCheckpoint": {
         "description": "One checkpoint produced by a training job.\n\n`ref` is opaque to the frontend; the inference handler resolves it back\nto a usable `--policy.path` value (a local dir for both sources, after\nsnapshot_download for hub refs).",
         "properties": {
+          "owner_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Job Id"
+          },
+          "owner_job_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Job Number"
+          },
+          "owner_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Name"
+          },
           "ref": {
             "title": "Ref",
             "type": "string"
@@ -1838,7 +2032,7 @@
         "type": "object"
       },
       "JobCheckpointsResponse": {
-        "description": "server.py get_job_checkpoints — JobRegistry.list_checkpoints, ascending\nby step.",
+        "description": "server.py get_job_checkpoints — JobRegistry.list_checkpoints, ascending\nby step.\n\n``?lineage=true`` serves the same shape from list_chain_checkpoints (the\nwhole resume chain); those rows are the ones that carry JobCheckpoint's\nowner_* stamps, which a single-run listing leaves null.",
         "properties": {
           "checkpoints": {
             "items": {
@@ -2389,6 +2583,19 @@
       },
       "MergeRequest": {
         "properties": {
+          "acknowledge_warnings": {
+            "default": false,
+            "title": "Acknowledge Warnings",
+            "type": "boolean"
+          },
+          "drop_features": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Drop Features",
+            "type": "array"
+          },
           "output_repo_id": {
             "title": "Output Repo Id",
             "type": "string"
@@ -2399,6 +2606,20 @@
             },
             "title": "Source Repo Ids",
             "type": "array"
+          },
+          "source_weights": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Weights"
           }
         },
         "required": [
@@ -2409,7 +2630,7 @@
         "type": "object"
       },
       "MergeStartResponse": {
-        "description": "merge.py MergeManager.start — unlike the download routes, the\nstarted=False refusals return 200 with the reason in `message`.",
+        "description": "merge.py MergeManager.start — unlike the download routes, the\nstarted=False refusals return 200 with the reason in `message`.\n\n`warnings` is populated only when a merge is refused pending confirmation\n(the sources span more than one arm family): the client shows them and\nre-submits with `acknowledge_warnings=true`. Empty on every other outcome.",
         "properties": {
           "message": {
             "title": "Message",
@@ -2418,6 +2639,14 @@
           "started": {
             "title": "Started",
             "type": "boolean"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [
@@ -3978,6 +4207,46 @@
         "title": "RunnersHardwareResponse",
         "type": "object"
       },
+      "SessionCoachingBody": {
+        "additionalProperties": false,
+        "description": "POST /api/v1/sessions/{session_id}/coaching. One operator command for a\ncoaching (DAgger) inference session. The runner interprets the verb against\nthe live phase — this layer forwards it and never pre-checks (a stale phase\ncopy would sometimes reject a command the arm was ready for).",
+        "properties": {
+          "command": {
+            "enum": [
+              "takeover",
+              "handback",
+              "cancel",
+              "hold",
+              "resume",
+              "reset",
+              "recovered",
+              "drop_last"
+            ],
+            "title": "Command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "SessionCoachingBody",
+        "type": "object"
+      },
+      "SessionCoachingResponse": {
+        "description": "The runner's command result, verbatim (`success` plus a status message).\nRich coaching state stays on the /inference-status poll + the pushed\n`coaching_state` websocket event.",
+        "properties": {
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "SessionCoachingResponse",
+        "type": "object"
+      },
       "SessionHeartbeatBody": {
         "description": "POST /api/v1/sessions/{session_id}/heartbeat. `owner` must match the\nlease's owner (shape-checked in the handler like SessionStartBody's).",
         "properties": {
@@ -4231,6 +4500,303 @@
           "episode_indices"
         ],
         "title": "SetExcludedEpisodesResponse",
+        "type": "object"
+      },
+      "SkillListItem": {
+        "description": "One row of GET /skills (models.py list_skills).\n\nThe deployable projection of a listing row: the same producers, the same\nabsent-key heterogeneity (the route serializes with exclude_unset for the\nreason ModelListItem documents — a scanned checkpoint dir carries no\n``state``, for instance), plus the annotations list_skills stamps on every\nrow it emits.\n\n``origin`` is where the weights CAME FROM, as opposed to ``source``, which\nis where they live now. ``deployable`` is derived on read, never stored:\na checkpoint dir can be deleted and a resume can land at any moment, so a\npersisted flag would rot with no writer nearby.",
+        "properties": {
+          "dataset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset"
+          },
+          "dataset_episodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Episodes"
+          },
+          "deployable": {
+            "title": "Deployable",
+            "type": "boolean"
+          },
+          "hf_repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hf Repo Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "last_modified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Modified"
+          },
+          "local_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "run",
+                  "downloaded"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Kind"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "origin": {
+            "enum": [
+              "trained-local",
+              "trained-cloud",
+              "imported",
+              "downloaded",
+              "hub-untracked"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "policy_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Type"
+          },
+          "private": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private"
+          },
+          "repo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Id"
+          },
+          "saved_custom": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saved Custom"
+          },
+          "source": {
+            "enum": [
+              "local",
+              "hub",
+              "both"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "stale": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stale"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By"
+          },
+          "target_steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Steps"
+          },
+          "weights": {
+            "enum": [
+              "ready",
+              "unverified",
+              "none"
+            ],
+            "title": "Weights",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "policy_type",
+          "dataset",
+          "steps",
+          "path",
+          "last_modified",
+          "hf_repo_id",
+          "source",
+          "origin",
+          "weights",
+          "superseded_by",
+          "deployable",
+          "job_id"
+        ],
+        "title": "SkillListItem",
+        "type": "object"
+      },
+      "SkillsHubStatus": {
+        "description": "The Hub half's reachability, carried by the /skills envelope so the UI\ncan tell an outage from an empty shelf — the two used to render\nidentically, as an empty list (models.py _hub_listing).",
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "degraded": {
+            "title": "Degraded",
+            "type": "boolean"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "stale_rows": {
+            "title": "Stale Rows",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "authenticated",
+          "degraded",
+          "stale_rows"
+        ],
+        "title": "SkillsHubStatus",
+        "type": "object"
+      },
+      "SkillsResponse": {
+        "description": "GET /skills (models.py list_skills): an envelope, not a bare array —\nsee SkillsHubStatus for why the `hub` half exists.",
+        "properties": {
+          "hub": {
+            "$ref": "#/components/schemas/SkillsHubStatus"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/SkillListItem"
+            },
+            "title": "Skills",
+            "type": "array"
+          }
+        },
+        "required": [
+          "skills",
+          "hub"
+        ],
+        "title": "SkillsResponse",
         "type": "object"
       },
       "SuccessRepoIdResponse": {
@@ -5612,6 +6178,182 @@
           }
         },
         "summary": "Camera Preview Stream"
+      }
+    },
+    "/api/v1/coaching-cancel": {
+      "post": {
+        "description": "Coaching mode only: end the correction and DISCARD it.\n\nThe fumbled-takeover escape. Upstream lerobot saves every correction\nunconditionally, which makes a botched takeover permanent training data;\nthis drops the buffer instead.\n\nIt then runs the ordinary reset behind the discard — the follower eases home\nand the session parks for a scene rearrangement, and the leader is released\non the way. A discard means the last few seconds were a mess, and the scene\nalmost always needs setting up again after one. Accepted from EVERY phase,\nnot just mid-correction: with nothing in flight it is a plain reset, which\nis what still gives a wedged correction a way out.",
+        "operationId": "coaching_cancel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Cancel",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-drop-last": {
+      "post": {
+        "description": "Coaching mode only: un-record the correction from the attempt just ended.\n\nA real delete, and it can be one only because nothing has been deleted: the\nrunner HOLDS a finished correction in memory rather than writing it at\nhand-back, and commits it when the operator takes over again or starts the\nnext attempt. This says don't.\n\nThat indirection is not an optimisation. `save_episode` interleaves an\nepisode's frames into a shared per-chunk parquet file and appends its video\ninto a shared per-chunk video file, and lerobot offers nothing that removes\none episode from a dataset that is still open — `dataset_tools.delete_episodes`\nrebuilds a FINALIZED dataset into a new directory by copying and re-encoding\neverything that survives. See \"The held correction\" in dagger_protocol.\n\nSo the window is narrow and the runner owns it: from the hand-back that\nended the correction until the operator either takes over again or starts\nthe next attempt — exactly the window they spend standing at a parked arm\ndeciding. Clients must read\n`droppable_correction` off /inference-status rather than infer it from the\nphase.\n\nRefused mid-correction — there the operator means the take they are still\nrecording, and /coaching-cancel is the control for that one.\n\n409 `coaching.nothing_to_drop` when the window is shut (mid-correction, or\nonce the correction has been committed or already dropped). That is the one\nstate check this surface makes, and it is not a phase guess: it reads\n`droppable_correction`, the runner's own published window. It used to answer\n200 \"sent\" and let the runner refuse in a log nobody reads.",
+        "operationId": "coaching_drop_last",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Drop Last",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-handback": {
+      "post": {
+        "description": "Coaching mode only: end the correction, SAVE it, and resume the policy.",
+        "operationId": "coaching_handback",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Handback",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-hold": {
+      "post": {
+        "description": "Coaching mode only: freeze the policy without taking over.\n\nThe arm holds its pose and nothing is recorded — for when the operator needs\na moment to decide, or to reposition the scene, without committing to a\ncorrection.",
+        "operationId": "coaching_hold",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Hold",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-recovered": {
+      "post": {
+        "description": "Coaching mode only: mark the end of RECOVERY inside the correction.\n\nAn intervention is two things wearing one name — first the operator rewinds\nthe arm back to a state the policy has actually seen, then they demonstrate\nthe behaviour that should follow. lerobot's own HIL guide names RaC\n(arXiv:2509.07953) as the protocol its DAgger strategy follows, and RaC's\nentire claim rests on that decomposition; the strategy nonetheless records\nboth halves as one undifferentiated `intervention=True`.\n\nThis records the boundary out of band (a sidecar beside the dataset — see\ndagger_protocol) because the dataset's feature dict is assembled inside\nlerobot with no hook to add a column. It requests no phase change: recovery\nand correction are the same control mode.\n\nIgnored outside a correction, and ignored a second time within one — the\nfirst mark is the one the operator meant.",
+        "operationId": "coaching_recovered",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Recovered",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-reset": {
+      "post": {
+        "description": "Coaching mode only: end this ATTEMPT at the task and reset for the next.\n\nCorrections-only DAgger has no task-episode concept — an \"episode\" there is\none takeover — so this is what tells the session that the cube is finally in\nthe tray. The policy stops, the follower eases back to the pose captured at\nconnect, and the session parks so the scene can be rearranged. Nothing is\nwritten to the dataset: corrections are the only thing ever recorded.\n\nValid mid-correction, where it SAVES the correction in flight before\nresetting: an operator who finishes the task while still driving has\nalready decided those frames are the correction, and making them hand back\nand then reset as two presses let the policy briefly regain a finished\nscene in between. Use /coaching-cancel for the opposite — discard, then\nreset.",
+        "operationId": "coaching_reset",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Reset",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-resume": {
+      "post": {
+        "description": "Coaching mode only: hand control back to the policy from a hold.",
+        "operationId": "coaching_resume",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Resume",
+        "tags": [
+          "inference"
+        ]
+      }
+    },
+    "/api/v1/coaching-takeover": {
+      "post": {
+        "description": "Coaching mode only: take control from the policy and start recording.\n\nOne press covers the whole handover — the policy pauses, an actuated leader\nglides toward the follower's pose so the operator picks up an arm roughly\nwhere the robot is, and only then does the correction begin recording. The\nglide is best-effort and nothing checks that it arrived: whatever gap is\nleft is measured at the edge and cancelled out of every command, so the\nfollower cannot jump however far apart the two arms were.",
+        "operationId": "coaching_takeover",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoachingCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Coaching Takeover",
+        "tags": [
+          "inference"
+        ]
       }
     },
     "/api/v1/complete-calibration-step": {
@@ -7093,7 +7835,7 @@
     },
     "/api/v1/jobs/{job_id}/checkpoints": {
       "get": {
-        "description": "List the checkpoints saved for this job, ascending by step.",
+        "description": "List the checkpoints saved for this job, ascending by step.\n\n``lineage=true`` widens that to the whole resume chain — this run plus the\nruns it resumed. Opt-in rather than the default so existing callers keep\ntheir exact semantics; the skill picker asks for it because a chain is one\nmodel and splitting its steps across rows is what this fixes.",
         "operationId": "get_job_checkpoints",
         "parameters": [
           {
@@ -7103,6 +7845,16 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lineage",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Lineage",
+              "type": "boolean"
             }
           }
         ],
@@ -7183,7 +7935,7 @@
     },
     "/api/v1/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, and\nthe flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch.",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
         "operationId": "get_checkpoint_policy_config",
         "parameters": [
           {
@@ -9252,6 +10004,59 @@
         ]
       }
     },
+    "/api/v1/sessions/{session_id}/coaching": {
+      "post": {
+        "description": "Send one coaching (DAgger) command to the current inference session.\n\nSession-scoped like /stop: 404 `session.not_found` unless `session_id`\nnames the running session; a plain (non-coaching) inference session yields\nthe runner's coded 409. The verb — takeover / handback / cancel / hold /\nresume / reset / recovered / drop_last — is forwarded to the coaching\nrunner, which alone decides which phase it is legal from (a server-side\nphase copy is always one event stale). Never owner-gated: a physical arm\nmust stay controllable by whoever can reach the API.\n\nTHIS is the endpoint the browser uses. The flat `/coaching-*` verbs below\nremain for callers that only know \"an inference run is active\", exactly as\n`/stop-inference` does beside `/sessions/{id}/stop` — but anything holding a\nsession id must come through here, or a dialog left open across a session\nchange commands whichever session happens to be current instead of failing.",
+        "operationId": "coaching_command",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionCoachingBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCoachingResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Coaching Command",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/api/v1/sessions/{session_id}/heartbeat": {
       "post": {
         "description": "Renew the current session's lease deadline — the owner's deliberate\nact (GET /sessions/current never renews).\n\n200 with the renewed identity when `session_id` names the current session\nand `owner` matches its lease; a current session with NO lease is a\nharmless no-op 200 (eases client rollout while leases are opt-in). 404\nsession.not_found for an unknown or stale id — including a session the\nexpiry watchdog already stopped and released; 409 session.lease_expired\nonly in the window where the expiry stop is dispatched but the release\nhasn't landed; 409 session.not_owner on an owner mismatch.",
@@ -9345,6 +10150,28 @@
         "summary": "Stop Session",
         "tags": [
           "sessions"
+        ]
+      }
+    },
+    "/api/v1/skills": {
+      "get": {
+        "description": "Every trained policy, each saying whether it can actually run.\n\nThe deployable projection of the same merged build `/models` serves, so the\ndeploy picker and the models library can no longer disagree about what a\nskill is — they were reading two different endpoints (`/models` and the\n`/jobs` registry) and filtering them on two different rules.\n\nEnvelope, not a bare array: `{skills, hub}`. `hub` reports whether the Hub\nhalf was reachable, because \"the Hub is down\" and \"you own no skills\" used\nto render identically as an empty list. Each row carries `weights`\n(ready/unverified/none), `superseded_by`, `deployable`, `origin` and the\n`job_id` that deploys it.",
+        "operationId": "skills_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Skills List",
+        "tags": [
+          "models"
         ]
       }
     },
@@ -11969,7 +12796,7 @@
     },
     "/jobs/{job_id}/checkpoints": {
       "get": {
-        "description": "List the checkpoints saved for this job, ascending by step.",
+        "description": "List the checkpoints saved for this job, ascending by step.\n\n``lineage=true`` widens that to the whole resume chain — this run plus the\nruns it resumed. Opt-in rather than the default so existing callers keep\ntheir exact semantics; the skill picker asks for it because a chain is one\nmodel and splitting its steps across rows is what this fixes.",
         "operationId": "get_job_checkpoints_jobs__job_id__checkpoints_get",
         "parameters": [
           {
@@ -11979,6 +12806,16 @@
             "schema": {
               "title": "Job Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lineage",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Lineage",
+              "type": "boolean"
             }
           }
         ],
@@ -12059,7 +12896,7 @@
     },
     "/jobs/{job_id}/checkpoints/{step}/policy-config": {
       "get": {
-        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, and\nthe flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch.",
+        "description": "Return the UX-relevant slice of a checkpoint's pretrained_model config:\npolicy_type, image_features (per-camera height/width), requires_task, the\nflat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference\nmodal uses to flag a single-arm/bimanual mismatch, and trained_on_robot_type\n(the arm the checkpoint was trained on, for the fine-tune panel's cross-arm\nwarning; null when it can't be established).",
         "operationId": "get_checkpoint_policy_config_jobs__job_id__checkpoints__step__policy_config_get",
         "parameters": [
           {

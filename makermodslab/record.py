@@ -26,7 +26,6 @@ from pydantic import BaseModel
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.configs.video import RGBEncoderConfig
 from lerobot.datasets import LeRobotDataset
-from lerobot.motors.motors_bus import MotorsBus
 
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
@@ -34,6 +33,7 @@ from lerobot.scripts.lerobot_record import RecordConfig
 from .api_errors import ErrorCode
 from .arm_capabilities import arm_type_of_robot_config, uses_feetech_bus
 from .arm_identity import ArmIdentityError, verify_devices
+from .bus_retry import BUS_SYNC_READ_RETRIES as _BUS_SYNC_READ_RETRIES  # noqa: F401
 from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
@@ -46,7 +46,7 @@ from .maker_rest_pose import (
     maker_follower_arms,
     return_maker_arms_to_rest,
 )
-from .motor_power import clear_goal_velocity, reset_torque_limit
+from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
 from .rest_pose import RETURN_CEILING_S, capture_rest_pose
 from .session_events import notify_session_changed
 from .teleoperate import (
@@ -78,32 +78,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_FOURCC = "MJPG"
 
 # --- Motor bus read retries ----------------------------------------------------
-# lerobot's SO-10x follower/leader call bus.sync_read("Present_Position") with
-# the default num_retry=0, so a single missed reply kills the whole recording
-# session ("[TxRxResult] There is no status packet!"). Replies do get missed:
-# on hosts where the arm serial adapters share a USB bus with streaming
-# cameras (e.g. the Jetson rig, cameras and CH34x adapters on the same hubs),
-# isochronous camera traffic occasionally delays a bulk serial reply past the
-# packet timeout. Position reads are idempotent, and a retry costs only the
-# packet timeout (single-digit ms at 1 Mbps) *when a read actually glitched* —
-# invisible at a 30 Hz loop. Patch the class-level default (process-wide);
-# an explicit num_retry from any caller still wins.
-_BUS_SYNC_READ_RETRIES = 2
-_original_sync_read = MotorsBus.sync_read
-
+# Moved to makermodslab/bus_retry.py so the two subprocess runners (eval and
+# coaching) get it too — importing it is what applies the patch, and they were
+# each running with lerobot's zero-retry default and dying on a single dropped
+# packet. Imported for that side effect; the constant is re-exported because
+# tests and readers looked for it here.
 # Robot-connect attempts before giving up on transient camera turbulence (see
 # the retry loop below and connect_retry_attempt above).
 _CONNECT_ATTEMPTS = 3
 
-
-def _sync_read_with_default_retries(
-    self, data_name, motors=None, *, normalize=True, num_retry=_BUS_SYNC_READ_RETRIES
-):
-    return _original_sync_read(self, data_name, motors, normalize=normalize, num_retry=num_retry)
-
-
-if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":  # idempotent under --reload
-    MotorsBus.sync_read = _sync_read_with_default_retries
 
 # --- Recording log capture (bounded ring buffer) ------------------------------
 # The record flow logs progress through the Python `logger` rather than a
@@ -931,6 +914,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     last_session_discarded_empty = _discard_empty_dataset(
                         request.dataset_repo_id, request.resume
                     )
+
+                # The happy path adds a dataset to the local listing and nothing
+                # else drops the cache for it; a quit removes one. Invalidate for
+                # both, BEFORE the release hint, so a client that refetches on
+                # the hint sees the new state instead of a <=45s-stale one. The
+                # zero-episode-no-quit case is left to _discard_empty_dataset,
+                # which invalidates itself iff it actually removed a directory —
+                # a session that created nothing (e.g. a connect failure) must
+                # not force a needless Hub re-fan-out.
+                if saved_episodes > 0 or discard_requested:
+                    invalidate_dataset_listing_cache()
 
                 recording_active = False
                 # Final release: record_with_web_events' own finally already
@@ -1940,11 +1934,11 @@ def record_with_web_events(
     # previous auto-calibration left in RAM; a failed write degrades to the
     # previous limit (logged inside) and must not abort the session.
     if feetech:
-        reset_torque_limit(robot, "follower arm")
+        reset_torque_limit(robot, FOLLOWER)
         # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
         # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
         # follower only, never the human-held leader. See makermodslab/motor_power.py.
-        clear_goal_velocity(robot, "follower arm")
+        clear_goal_velocity(robot, FOLLOWER)
 
     # Capture the follower's rest pose now — after connect/configure/identity
     # guard, before the recording loop moves anything — so a normal stop can

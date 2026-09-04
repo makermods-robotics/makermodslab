@@ -553,6 +553,63 @@ def test_stop_kills_orphaned_reload_worker_in_this_checkout(
     assert terminated == [300]
 
 
+def test_stop_kills_the_prod_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the long-standing sharp edge: prod mode runs uvicorn
+    IN-PROCESS, so its argv is `.../python3 .../bin/makermodslab --lan ...`
+    with no `makermodslab.server` substring anywhere — and `--stop` reported
+    its own server as a port stranger and refused to touch it (observed on two
+    real stations). The executed launcher script is now identity signal 3."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    shebang_form = _FakeProc(
+        500,
+        ["/Users/x/MakerLab/.venv/bin/python3", "./.venv/bin/makermodslab", "--lan", "--portal"],
+        listening=(8000,),
+    )
+    direct_form = _FakeProc(501, ["/Users/x/.local/bin/makermodslab-station", "--offline"])
+
+    monkeypatch.setattr(launcher.psutil, "process_iter", lambda attrs=None: [shebang_form, direct_form])
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 999)
+    terminated: list[int] = []
+    monkeypatch.setattr(launcher, "_terminate_tree", lambda pid, timeout=5: terminated.append(pid))
+
+    launcher._run_stop()
+
+    assert sorted(terminated) == [500, 501]
+
+
+def test_prod_launcher_signal_never_matches_a_mere_mention(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The signal matches the EXECUTED script only. A process that just names
+    the launcher in an argument (an editor, a log tail) or in a longer
+    basename must stay a stranger — `--stop` kills identity matches whether or
+    not they hold a port, so a loose match here is a loose SIGTERM."""
+    import makermodslab.scripts.makermodslab as launcher
+
+    editor = _FakeProc(600, ["vim", "makermodslab"], name="vim")
+    log_tail = _FakeProc(601, ["tail", "-f", "/Users/x/makermodslab.log"], name="tail")
+    lookalike = _FakeProc(602, ["python3", "makermodslab_helper.py"], name="python")
+    stranger_on_port = _FakeProc(603, ["node", "server.js"], name="node", listening=(8000,))
+
+    monkeypatch.setattr(
+        launcher.psutil,
+        "process_iter",
+        lambda attrs=None: [editor, log_tail, lookalike, stranger_on_port],
+    )
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 999)
+    terminated: list[int] = []
+    monkeypatch.setattr(launcher, "_terminate_tree", lambda pid, timeout=5: terminated.append(pid))
+
+    with caplog.at_level(logging.INFO):
+        launcher._run_stop()
+
+    assert terminated == []
+
+
 def test_stop_reports_nothing_when_no_candidates(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

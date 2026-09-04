@@ -354,6 +354,9 @@ const policyConfig = (policy: string): PolicyConfigSummary => ({
     wrist: { height: 480, width: 640 },
   },
   requires_task: policy === "smolvla" || policy === "pi05",
+  // Mirrors the server's table (jobs.policy_type_supports_rtc): the VLAs run
+  // Real-Time Chunking, ACT and the other regression policies don't.
+  supports_rtc: policy === "smolvla" || policy === "pi05",
   state_dim: 6,
   action_dim: 6,
 });

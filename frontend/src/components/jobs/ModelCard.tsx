@@ -349,7 +349,7 @@ const ModelCard: React.FC<Props> = ({
   const canFinetune = !isRunning && hasCheckpoints;
 
   // No dialog and no route jump: fine-tuning opens the Train panel's
-  // "Start a new training" form with the base skill (and the dropdown's
+  // "Start a new training" form with the base policy (and the dropdown's
   // checkpoint step) prefilled.
   const handleFinetune = (e: React.MouseEvent) => {
     e.stopPropagation();
