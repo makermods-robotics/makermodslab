@@ -63,6 +63,7 @@ from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 from .api_errors import ErrorCode
 from .arm_capabilities import supports_dagger, uses_feetech_bus
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .arms import registry as _arm_registry
 from .camera_preview import camera_preview_manager
 from .dagger_protocol import (
     CANCEL_REASON_OPERATOR,
@@ -121,6 +122,7 @@ from .motor_power import FOLLOWER, LEADER, clear_goal_velocity, reset_torque_lim
 from .record import _DEFAULT_FOURCC
 from .session_events import notify_session_changed
 from .utils.config import (
+    DEFAULT_ARM_TYPE,
     LEADER_CONFIG_PATH,
     CameraResolutionError,
     _atomic_write_text,
@@ -148,8 +150,8 @@ logger = logging.getLogger(__name__)
 # against the SO-101's 6 is neither <= 6 nor a clean multiple of it, and the
 # guard would silently disable itself on exactly the mismatch it exists to
 # catch.
-_ARM_STATE_DIMS = {"so101": 6, "maker": 7, "metal": 7}
-_SINGLE_ARM_STATE_DIM = _ARM_STATE_DIMS["so101"]
+_ARM_STATE_DIMS = {family.id: family.joints_per_arm for family in _arm_registry.families()}
+_SINGLE_ARM_STATE_DIM = _arm_registry.default().joints_per_arm
 
 
 class PolicyCameraDims(BaseModel):
@@ -1756,7 +1758,9 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
     return download_hub_checkpoint_ref(policy_ref, tqdm_class=tqdm_class)
 
 
-def _arm_count_mismatch(mode: str, checkpoint_state_dim: int | None, arm_type: str = "so101") -> str | None:
+def _arm_count_mismatch(
+    mode: str, checkpoint_state_dim: int | None, arm_type: str = DEFAULT_ARM_TYPE
+) -> str | None:
     """Explain a checkpoint/robot arm-count mismatch, or None when they agree.
 
     An SO-101 follower has 6 state dims and a Maker follower 7 (6 joints plus
@@ -2313,25 +2317,17 @@ def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
     )
 
 
-# lerobot `--robot.type` per arm type, single and bimanual. These are draccus
-# choice-registry keys (RobotConfig.register_subclass), not free text: a typo
-# fails inside the subprocess at CLI-parse time with a choices list, long after
-# the session has been claimed.
-_ROBOT_CLI_TYPES = {
-    ("so101", False): "so101_follower",
-    ("so101", True): "bi_so_follower",
-    ("maker", False): "maker_follower",
-    ("maker", True): "bi_maker_follower",
-    ("metal", False): "metal_follower",
-    ("metal", True): "bi_metal_follower",
-}
-
-
 def _robot_cli_type(request: InferenceRequest) -> str:
-    """The `--robot.type=` value for this request's arm type and layout."""
+    """The `--robot.type=` value for this request's arm type and layout.
+
+    The family's registered lerobot type — a draccus choice-registry key
+    (RobotConfig.register_subclass), not free text: a typo fails inside the
+    subprocess at CLI-parse time with a choices list, long after the session
+    has been claimed.
+    """
     from .utils.config import normalize_arm_type
 
-    return _ROBOT_CLI_TYPES[(normalize_arm_type(request.arm_type), request.mode == "bimanual")]
+    return _arm_registry.get(normalize_arm_type(request.arm_type)).robot_cli_type(request.mode == "bimanual")
 
 
 def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]:

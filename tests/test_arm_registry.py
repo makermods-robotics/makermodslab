@@ -9,6 +9,8 @@ from a literal somebody re-added to a flow.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import get_args
 
 import pytest
@@ -140,3 +142,69 @@ def test_non_families_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry, "_FAMILIES", dict(registry._FAMILIES))
     with pytest.raises(TypeError, match="ArmFamily"):
         registry.register(object())  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Call-site sweep: no arm-type literal comparison outside makermodslab/arms.
+#
+# A tripwire in the genre of tests/test_motor_power_call_sites.py. The seams
+# below resolve arm types through the registry; the thing this protects — that
+# nobody re-adds `if arm_type == "maker"` to one of them, which is the branch
+# the NEXT family forgets to extend — cannot be reached by a behaviour test.
+# Pure AST over the files on disk.
+#
+# Scoped to the modules step 4a moved (docs/extensions/plan.md); 4b widens
+# this list to the calibration, port-detection, stop-path and loop modules.
+# ---------------------------------------------------------------------------
+
+_PACKAGE = Path(__file__).resolve().parents[1] / "makermodslab"
+_SWEPT_FILES = (
+    "arm_capabilities.py",
+    "rollout.py",
+    "utils/config.py",
+    "utils/robot_factory.py",
+)
+
+
+def _is_arm_id(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value in set(registry.ids())
+
+
+def _literal_comparisons(path: Path) -> list[str]:
+    """Every `x == "<arm id>"` / `x in ("<arm id>", ...)` comparison in the file."""
+    offenders = []
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        for comparator in node.comparators:
+            elements = (
+                comparator.elts if isinstance(comparator, ast.Tuple | ast.List | ast.Set) else [comparator]
+            )
+            if any(_is_arm_id(e) for e in elements):
+                offenders.append(f"{path.name}:{node.lineno}")
+                break
+    return offenders
+
+
+def test_the_sweep_reads_the_files_it_claims_to() -> None:
+    """Guards the guard: a file list that no longer matches the tree passes
+    every assertion below by matching nothing."""
+    for name in _SWEPT_FILES:
+        assert (_PACKAGE / name).is_file(), name
+
+
+@pytest.mark.parametrize("name", _SWEPT_FILES)
+def test_no_arm_type_literal_comparison_outside_the_families(name: str) -> None:
+    offenders = _literal_comparisons(_PACKAGE / name)
+    assert not offenders, (
+        "arm-type literal comparisons must go through makermodslab.arms.registry "
+        "(ask the family for a flag or a builder instead of branching on its id):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_sweep_would_catch_a_regression(tmp_path: Path) -> None:
+    sample = tmp_path / "flow.py"
+    sample.write_text('def f(t):\n    if t == "maker":\n        pass\n    return t in ("maker", "metal")\n')
+    assert len(_literal_comparisons(sample)) == 2
