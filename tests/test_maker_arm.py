@@ -19,7 +19,7 @@ from makermodslab.utils import config as cfg
 
 def test_records_written_before_the_maker_arm_read_back_as_so101(tmp_lerobot_home: Path) -> None:
     """A record with no arm_type on disk is an SO-101 by definition."""
-    robots = tmp_lerobot_home / "robots"
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
     (robots / "legacy.json").write_text('{"name": "legacy", "mode": "single", "leader_port": "/dev/a"}')
 
@@ -32,7 +32,7 @@ def test_records_written_before_the_maker_arm_read_back_as_so101(tmp_lerobot_hom
 def test_a_corrupted_arm_type_on_disk_falls_back_rather_than_raising(tmp_lerobot_home: Path) -> None:
     """Same contract as motor_power's clamp: a bad value must never make a
     robot unopenable."""
-    robots = tmp_lerobot_home / "robots"
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
     (robots / "weird.json").write_text('{"name": "weird", "arm_type": "definitely-not-an-arm"}')
 
@@ -128,7 +128,7 @@ def test_deleting_a_maker_calibration_leaves_same_named_so101_records_alone(
     """The two libraries are separate namespaces: an SO-101 record naming
     "armA" points at a different file from a Maker record naming "armA", so a
     Maker delete must not unassign the SO-101 robot."""
-    robots = tmp_lerobot_home / "robots"
+    robots = Path(cfg.ROBOTS_PATH)
     robots.mkdir(exist_ok=True)
     cfg.save_robot_record("so_bot", {"arm_type": "so101", "follower_config": "armA"}, allow_create=True)
     cfg.save_robot_record("maker_bot", {"arm_type": "maker", "follower_config": "armA"}, allow_create=True)

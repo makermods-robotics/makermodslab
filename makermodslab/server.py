@@ -265,6 +265,7 @@ from .teleoperate import (
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
 from .utils.config import (
+    HOME_IS_OVERRIDDEN,
     add_dismissed_hub_job,
     add_hidden_dataset,
     add_hidden_model,
@@ -284,6 +285,7 @@ from .utils.config import (
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
+    migrate_legacy_state,
     port_slot_conflict,
     prune_dismissed_hub_jobs,
     remove_hidden_dataset,
@@ -4509,6 +4511,20 @@ def delete_robot(name: str):
     if delete_robot_record(name):
         return {"status": "success"}
     return JSONResponse(status_code=404, content={"status": "error", "message": "Robot not found"})
+
+
+@app.on_event("startup")
+def migrate_state_home():
+    """Move pre-split state from lerobot's cache into MAKERMODSLAB_HOME.
+
+    Registered FIRST so it runs before any other startup work; every reader
+    of the moved entries is lazy (robot records, ports, the node registry's
+    saved peers, the instance id), so startup is early enough. Skipped under
+    a MAKERMODSLAB_HOME override — see utils/config.HOME_IS_OVERRIDDEN.
+    """
+    if HOME_IS_OVERRIDDEN:
+        return
+    migrate_legacy_state()
 
 
 @app.on_event("startup")

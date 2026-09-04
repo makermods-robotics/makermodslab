@@ -125,15 +125,20 @@ server.py defines a single `ConnectionManager` with a background `_broadcast_wor
 
 ### Persistent state on disk
 
-All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makermodslab/utils/config.py); writes are atomic):
+Two roots, split by who owns the data (all paths managed in [utils/config.py](makermodslab/utils/config.py); writes are atomic). **Import the constants; never spell a path.**
 
-- `calibration/teleoperators/so_leader/*.json`, `calibration/robots/so_follower/*.json` — named calibrations (leader = "teleop", follower = "robot")
+**MakerMods Lab's own state** lives under `MAKERMODSLAB_HOME` = `~/.makermods/makermodslab/` (env var `MAKERMODSLAB_HOME` overrides it — the test suite points it at a tmp dir before importing anything, which also switches the legacy migration off):
+
 - `robots/*.json` — per-robot records: arm layout (`mode: single|bimanual` with right-arm fields), ports, cameras, calibration names, `motor_power`
-- `makermodslab_biso/` — bimanual calibration staging
-- `ports/{leader,follower}_port.txt` — last-used serial ports
-- `dismissed_hub_jobs.json`, `saved_custom_{datasets,models}.json`, `hidden_{datasets,models}.json` — UI-level bookkeeping
+- `biso_staging/` — bimanual calibration staging (lerobot reads it through an explicit `calibration_dir`, so it need not sit in lerobot's cache)
+- `ports/{leader,follower}_port.txt` — last-used serial ports (legacy: read as a fallback, nothing writes them any more)
+- `dismissed_hub_jobs.json`, `saved_custom_{datasets,models}.json`, `hidden_{datasets,models}.json`, `excluded_episodes.json` — UI-level bookkeeping
 - `instance_id.txt` — this install's stable node identity (32-hex, minted on first read; how peers recognize this machine across restarts and address changes)
 - `nodes.json` — saved peer nodes (url + name only; identity is re-verified on load, never trusted from disk)
+
+**lerobot's data** stays under `~/.cache/huggingface/lerobot/` (`HF_LEROBOT_HOME`): datasets, models, `outputs/train/` (local policies and run history), and the calibration libraries — `calibration/teleoperators/so_leader/*.json`, `calibration/robots/so_follower/*.json` (leader = "teleop", follower = "robot") — because lerobot's device classes read them from there.
+
+Versions before the split wrote the first group beside the second. `migrate_legacy_state` runs once at server startup: a file moves only when nothing exists at the new path (the newer file wins), a directory present at both places is merged name by name under the same rule, whatever is left behind is named in one warning, and nothing runs under a `MAKERMODSLAB_HOME` override — so setting the override on an install that already has state starts it fresh, including a newly minted instance id that peers will see as a new node. A new state file goes under `MAKERMODSLAB_HOME`; it does not need a migration row unless it existed before the split. Two log dirs deliberately still sit in the lerobot cache: rollout.py's `inference_logs/` and merge.py's sibling — logs, not state; move them with a constant when there is a reason to.
 
 `device_type` in API requests is `"teleop"` or `"robot"` (mapped to leader/follower paths). `robot_type` in port endpoints is `"leader"` or `"follower"`. Don't conflate the two vocabularies.
 
