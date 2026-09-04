@@ -127,6 +127,16 @@ one-line flavor (Python 3.12; Linux x86_64/aarch64 or Apple Silicon) — and the
 registered peer node. A bare `uv pip install 'makermodslab[remote]'` does NOT work: uv refuses the
 lerobot git pin as a transitive URL dependency.
 
+**Remote inference.** Same SFU, other direction: the policy runs on a [Modal](https://modal.com/) GPU and
+streams action chunks to the arm. In the studio's Deploy panel pick the robot and checkpoint, choose **Run it
+remotely**, press **Start GPU** (the Lab launches and stops the Modal app itself, with the `modal` CLI logged
+in on this machine) and then **Start**; the arm is only energized once the policy is in the room, and Stop
+returns it to rest before releasing torque. The GPU joins the room with a short-lived token from this
+machine — no LiveKit credentials to configure — but its media cannot ride the tailnet, so start the station
+with `--sfu --sfu-external-ip` and let UDP 7882 through. Works on a station in `--host` mode too: a parked
+host yields to the run and re-arms after. Needs the `remote` extra on the station; SO-101 single arm in this
+release.
+
 **Peer nodes are verified, not trusted.** A node is only added once its `/api/v1/health` identity
 document checks out, and a discovered peer gets re-verified every time.
 
