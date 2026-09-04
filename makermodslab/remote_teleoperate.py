@@ -377,7 +377,10 @@ def handle_start_remote_teleoperation(
                 camera_height=int(cameras[0]["height"]) if cameras else 480,
                 video_codec=VideoCodec[descriptor["video_codec"]],
                 observation_features=observation_features,
-                auto_claim_control=True,
+                # The STATION assigns the seat (remote_host.SeatMonitor); an
+                # operator never self-claims — that is what stopped a second
+                # laptop from stealing control mid-session.
+                auto_claim_control=False,
             ),
             teleop=leader,
         )
@@ -458,6 +461,10 @@ def handle_start_remote_teleoperation(
             logger.error(f"Error during remote teleoperation loop: {e}")
             loop_error = format_exception(e)
         finally:
+            # A deliberate stop tells the station FIRST, so it parks at once
+            # instead of waiting out the silent-loss grace period.
+            if stopped_normally:
+                _rpc(robot, "release")
             try:
                 robot.disconnect()
             except Exception as e:
@@ -479,6 +486,72 @@ def handle_start_remote_teleoperation(
 
 class _SchemaMismatchError(RuntimeError):
     pass
+
+
+def _rpc(robot, name: str, timeout_ms: int = 3000) -> tuple[bool, str]:
+    """Invoke one of the station's RPCs (home / engage / release) through the
+    plugin's Portal — a private handle until the plugin exposes it. Never
+    raises: (ok, message)."""
+    portal = getattr(robot, "_portal", None)
+    run = getattr(robot, "_run", None)
+    if portal is None or run is None:
+        return False, "not connected to the station"
+    try:
+        reply = run(portal.perform_rpc(name, payload="{}", response_timeout_ms=timeout_ms))
+        return True, str(reply)
+    except Exception as exc:
+        logger.warning(f"RPC {name!r} to the station failed: {exc}")
+        return False, str(exc)
+
+
+def _command(name: str) -> dict[str, Any]:
+    with _state_lock:
+        active = remote_teleoperation_active
+        source = _metrics_source
+    if not active or source is None:
+        return {"success": False, "message": "No remote teleoperation session is active"}
+    ok, message = _rpc(source, name)
+    if not ok:
+        return {"success": False, "message": f"The station did not accept {name}: {message}"}
+    return {
+        "success": True,
+        "message": {"home": "Homing the remote arm", "engage": "Engaging the remote arm"}.get(name, "ok"),
+    }
+
+
+def handle_remote_home() -> dict[str, Any]:
+    """Park the station's arm (return to rest, torque off) and HOLD it parked
+    until Engage — the station honours it only from the seated operator."""
+    return _command("home")
+
+
+def handle_remote_engage() -> dict[str, Any]:
+    """Re-energize the station's arm with a soft start after a Home."""
+    return _command("engage")
+
+
+_station_phase_cache: tuple[float, str | None] = (0.0, None)
+
+
+def _station_phase() -> str | None:
+    """The station's live phase from its hosting descriptor, re-read at most
+    once a second; None when it cannot be read."""
+    global _station_phase_cache
+    station = current_station
+    if station is None:
+        return None
+    read_at, cached = _station_phase_cache
+    now = time.monotonic()
+    if now - read_at < 1.0:
+        return cached
+    try:
+        status = node_registry.fetch_peer_hosting(station["instance_id"])
+        descriptor = status.get("hosting") if isinstance(status, dict) else None
+        current = descriptor.get("phase") if isinstance(descriptor, dict) else None
+    except Exception:
+        current = None
+    _station_phase_cache = (now, current)
+    return current
 
 
 def _end_session(stopped_normally: bool, loop_error: str | None, cleanup_error: str | None) -> None:
@@ -543,6 +616,7 @@ def handle_remote_teleoperation_status() -> dict[str, Any]:
     return {
         "remote_teleoperation_active": active,
         "station": station,
+        "station_phase": _station_phase() if active else None,
         "room": room,
         "cameras": cameras,
         "metrics": metrics,

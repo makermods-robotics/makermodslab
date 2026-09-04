@@ -268,6 +268,7 @@ def mint_token(
     role: Role,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     now: datetime.datetime | None = None,
+    max_participants: int | None = None,
 ) -> tuple[str, int]:
     """Sign a LiveKit room token for `identity`. Returns (jwt, expires_at
     epoch seconds).
@@ -278,7 +279,10 @@ def mint_token(
     `can_update_own_metadata`: Portal sets the `lk.portal.role` participant
     attribute at connect and fails without it. The room config pins playout
     delay to 0–1 ms, LiveKit's own teleop recommendation (smoothness traded
-    for latency); the room is created on first join with it.
+    for latency); the room is created on first join with it. `max_participants`
+    (the STATION's own token sets it, since the robot joins first and the
+    room is created from its config) makes the SFU itself enforce the single
+    operator seat: robot + one operator = 2.
     """
     from livekit import api
     from livekit.protocol.room import RoomConfiguration
@@ -295,6 +299,8 @@ def mint_token(
         can_update_own_metadata=True,
     )
     room_config = RoomConfiguration(name=room, min_playout_delay=0, max_playout_delay=1)
+    if max_participants is not None:
+        room_config.max_participants = max_participants
     ttl = datetime.timedelta(seconds=ttl_seconds)
     token = (
         api.AccessToken(api_key, api_secret)

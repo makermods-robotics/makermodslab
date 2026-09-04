@@ -650,6 +650,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--host",
+        metavar="ROBOT",
+        help=(
+            "Station mode: host this saved robot for remote teleoperation from startup — its follower "
+            "and cameras join the LiveKit room parked (torque off), an operator engages it automatically, "
+            "and hosting re-arms after any local session. Requires --sfu"
+        ),
+    )
+    parser.add_argument(
         "--stop",
         action="store_true",
         help="Stop a running MakerMods Lab and free its ports (:8000/:8080/:7880), then exit.",
@@ -675,6 +684,18 @@ def main():
     # Same fail-fast rule as --bind: a missing livekit-server is a one-line
     # exit before anything starts, never a half-started stack.
     sfu_bin = _require_livekit_server() if args.sfu else None
+    if args.host is not None:
+        if not args.host.strip():
+            logger.error("❌ --host needs a saved robot name.")
+            sys.exit(1)
+        if not args.sfu and not os.environ.get(sfu.ENV_URL):
+            logger.error(
+                "❌ --host needs the LiveKit SFU: add --sfu (or set %s to an external SFU).", sfu.ENV_URL
+            )
+            sys.exit(1)
+        # Read by makermodslab.server at startup (remote_host.start_station_mode)
+        # — same import-order rule as the other flags.
+        os.environ["MAKERMODSLAB_HOST_ROBOT"] = args.host.strip()
 
     _ensure_path_symlinks()
 

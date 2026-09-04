@@ -680,3 +680,35 @@ def test_identity_reason_recognises_our_sfu_child_but_not_a_foreign_livekit() ->
     foreign = _FakeProc(301, ["livekit-server", "--config", "/etc/livekit/livekit.yaml"])
     assert launcher._identity_reason(" ".join(ours.info["cmdline"]), ours) == "livekit-server (--sfu)"
     assert launcher._identity_reason(" ".join(foreign.info["cmdline"]), foreign) is None
+
+
+def test_host_flag_requires_the_sfu_and_exports_the_robot(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """`--host ROBOT` is station mode: it needs the SFU (--sfu or an external
+    MAKERMODSLAB_SFU_URL) and hands the robot name to the app through the
+    environment before the server import."""
+    import os
+
+    import makermodslab.scripts.makermodslab as launcher
+
+    monkeypatch.delenv("MAKERMODSLAB_HOST_ROBOT", raising=False)
+    monkeypatch.delenv(launcher.sfu.ENV_URL, raising=False)
+    monkeypatch.setattr(launcher, "_ensure_path_symlinks", lambda: None)
+    monkeypatch.setattr(
+        launcher.sfu, "find_livekit_server", lambda *a, **k: "/opt/homebrew/bin/livekit-server"
+    )
+    seen: dict = {}
+    monkeypatch.setattr(
+        launcher,
+        "_run_prod",
+        lambda **kwargs: seen.update(kwargs, robot=os.environ.get("MAKERMODSLAB_HOST_ROBOT")),
+    )
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--host", "arm1"])
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit):
+        launcher.main()
+    assert "--sfu" in caplog.text
+
+    monkeypatch.setattr(launcher.sys, "argv", ["makermodslab", "--sfu", "--host", "arm1"])
+    launcher.main()
+    assert seen["robot"] == "arm1"
+    assert seen["sfu_bin"] == "/opt/homebrew/bin/livekit-server"

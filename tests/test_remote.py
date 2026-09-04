@@ -27,6 +27,7 @@ import types
 from pathlib import Path
 
 import httpx
+import jwt
 import pytest
 
 from makermodslab import remote_host, remote_teleoperate, sfu
@@ -409,8 +410,12 @@ def _instance_prefix() -> str:
 
 
 def test_hosting_flag_holds_the_hardware_for_every_kind(client, tmp_lerobot_home, _idle, monkeypatch) -> None:
+    """An ENGAGED hosting session holds the hardware like any feature (a
+    parked, unseated one yields to a local start instead — see the
+    preemption tests below)."""
     _make_robot("bench", leader=True, follower=True)
     monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "phase", "engaged")
     resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench"})
     assert resp.status_code == 409
     assert resp.json()["code"] == "session.held"
@@ -445,7 +450,12 @@ def test_hosting_status_fills_url_from_the_request_host(client, _idle, monkeypat
     assert body["hosting"]["motors"] == ["a"]
     # ...and health advertises the hosted robot so a laptop's picker can find it.
     caps = client.get("/api/v1/health").json()["capabilities"]
-    assert caps["hosting"] == {"robot": "bench", "arm_type": "so101"}
+    assert caps["hosting"] == {
+        "robot": "bench",
+        "arm_type": "so101",
+        "phase": "parked",
+        "active_operator": None,
+    }
 
 
 def test_health_has_no_hosting_key_when_idle(client, _idle) -> None:
@@ -464,3 +474,232 @@ def test_remote_extra_route_shape(client) -> None:
     body = client.get("/api/v1/system/remote-extra").json()
     assert set(body) == {"available", "install_hint"}
     assert isinstance(body["available"], bool)
+
+
+# --- parked / engaged: the seat policy ------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _monitor() -> tuple[remote_host.SeatMonitor, _Clock]:
+    clock = _Clock()
+    return remote_host.SeatMonitor(grace_s=15.0, clock=clock), clock
+
+
+def test_first_operator_takes_the_seat_and_is_engaged() -> None:
+    m, _ = _monitor()
+    assert m.operator_joined("laptop") == "engage"
+    assert m.seat == "laptop"
+    # A second operator is ignored (the room cap and token route keep them out anyway).
+    assert m.operator_joined("intruder") is None
+    assert m.seat == "laptop"
+
+
+def test_silent_loss_inside_grace_is_tolerated_and_a_rejoin_re_engages() -> None:
+    m, clock = _monitor()
+    m.operator_joined("laptop")
+    m.operator_left("laptop")
+    clock.now += 10.0
+    assert m.tick(engaged=True) is None  # still within grace: frozen, seat kept
+    assert m.operator_joined("laptop") == "engage"  # reconnect resumes with a soft start
+    clock.now += 20.0
+    m.action_received()
+    assert m.tick(engaged=True) is None
+    assert m.seat == "laptop"
+
+
+def test_silent_loss_past_grace_parks_and_frees_the_seat() -> None:
+    m, clock = _monitor()
+    m.operator_joined("laptop")
+    m.operator_left("laptop")
+    clock.now += 15.0
+    assert m.tick(engaged=True) == "park"
+    assert m.seat is None
+    assert m.operator_joined("someone-else") == "engage"  # seat is free again
+
+
+def test_home_parks_and_holds_until_an_explicit_engage() -> None:
+    m, clock = _monitor()
+    m.operator_joined("laptop")
+    assert m.command("home", "laptop") == "park"
+    # The leader keeps streaming; that must NOT re-engage a homed arm.
+    clock.now += 0.5
+    m.action_received()
+    assert m.tick(engaged=False) is None
+    assert m.command("engage", "stranger") is None  # only the seat holder is heard
+    assert m.command("engage", "laptop") == "engage"
+
+
+def test_release_parks_immediately_and_frees_the_seat() -> None:
+    m, _ = _monitor()
+    m.operator_joined("laptop")
+    assert m.command("release", "laptop") == "park"
+    assert m.seat is None
+
+
+def test_action_stall_parks_but_keeps_the_seat_and_resuming_re_engages() -> None:
+    m, clock = _monitor()
+    m.operator_joined("laptop")
+    clock.now += 15.0
+    assert m.tick(engaged=True) == "park"  # no actions for the grace period, operator still present
+    assert m.seat == "laptop"
+    clock.now += 5.0
+    assert m.tick(engaged=False) is None  # still stalled
+    m.action_received()
+    assert m.tick(engaged=False) == "engage"  # stream is back
+
+
+def test_a_stall_that_persists_a_second_grace_frees_the_seat() -> None:
+    """A hard-crashed laptop is reported late by the SFU; the stall rule
+    parks after one grace and must not keep the seat forever."""
+    m, clock = _monitor()
+    m.operator_joined("laptop")
+    clock.now += 15.0
+    assert m.tick(engaged=True) == "park"
+    assert m.seat == "laptop"
+    clock.now += 14.0
+    assert m.tick(engaged=False) is None
+    assert m.seat == "laptop"
+    clock.now += 1.0
+    assert m.tick(engaged=False) is None
+    assert m.seat is None  # freed: the next operator can take it
+
+
+def test_soft_start_blend_eases_from_present_to_target() -> None:
+    assert remote_host.soft_start_blend(0.0) == 0.0
+    assert remote_host.soft_start_blend(0.5) == pytest.approx(0.5)
+    assert remote_host.soft_start_blend(1.0) == 1.0
+    assert remote_host.soft_start_blend(9.0) == 1.0
+    mid = remote_host.blend_action(
+        {"a.pos": 0.0, "b.pos": 10.0}, {"a.pos": 100.0, "b.pos": 10.0, "c.pos": 5.0}, 0.25
+    )
+    assert mid == {"a.pos": 25.0, "b.pos": 10.0, "c.pos": 5.0}
+
+
+# --- single seat on the token route, station mode, preemption -------------------
+
+
+@pytest.fixture
+def sfu_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """The launcher's --sfu handoff: a key file + the env the app reads."""
+    from makermodslab.utils.config import load_or_create_livekit_keys
+
+    path = str(tmp_path / "livekit_keys.yaml")
+    key, secret = load_or_create_livekit_keys(path)
+    monkeypatch.setenv(sfu.ENV_KEY_FILE, path)
+    monkeypatch.setenv(sfu.ENV_PORT, "7880")
+    monkeypatch.delenv(sfu.ENV_URL, raising=False)
+    sfu._keys_from_file.cache_clear()
+    return key, secret
+
+
+def test_operator_token_refused_while_the_seat_is_held_by_someone_else(client, sfu_env, monkeypatch) -> None:
+    monkeypatch.setattr(remote_host, "seat_holder", lambda: "operator-aaaaaaaaaaaa")
+    denied = client.post("/api/v1/sfu/token", json={"role": "operator", "identity": "operator-bbbbbbbbbbbb"})
+    assert denied.status_code == 409
+    assert denied.json()["code"] == "sfu.seat_taken"
+    # The holder itself (a reconnect) and non-operator roles are unaffected.
+    assert (
+        client.post(
+            "/api/v1/sfu/token", json={"role": "operator", "identity": "operator-aaaaaaaaaaaa"}
+        ).status_code
+        == 200
+    )
+    assert client.post("/api/v1/sfu/token", json={"role": "viewer"}).status_code == 200
+
+
+def test_robot_token_caps_the_room_at_two_participants() -> None:
+    token, _ = sfu.mint_token(
+        api_key="k", api_secret="s" * 40, identity="robot", room="r", role="robot", max_participants=2
+    )
+    assert jwt.decode(token, options={"verify_signature": False})["roomConfig"]["maxParticipants"] == 2
+
+
+def test_hosting_refuses_can_arms_in_this_release(client, tmp_lerobot_home, _idle, monkeypatch) -> None:
+    from makermodslab.utils import config as cfg
+
+    (Path(cfg.follower_config_path_for("maker")) / "FC.json").parent.mkdir(parents=True, exist_ok=True)
+    (Path(cfg.follower_config_path_for("maker")) / "FC.json").write_text("{}")
+    cfg.save_robot_record(
+        "canbot", {"arm_type": "maker", "follower_port": "/dev/can", "follower_config": "FC"}
+    )
+    monkeypatch.setenv(sfu.ENV_KEY_FILE, "/enabled")
+    resp = client.post("/api/v1/sessions", json={"kind": "hosting", "robot": "canbot"})
+    assert resp.status_code == 400
+    assert "SO-101" in resp.json()["detail"]
+
+
+def test_local_start_preempts_a_parked_unseated_hosting_session(
+    client, tmp_lerobot_home, _idle, monkeypatch
+) -> None:
+    """Station mode's "local wins when idle": a flow started at the station
+    stops a parked, unseated hosting session instead of being refused."""
+    from makermodslab import sessions
+
+    _make_robot("bench", leader=True, follower=True)
+    monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "phase", "parked")
+    monkeypatch.setattr(remote_host, "seat", remote_host.SeatMonitor())
+    yielded: list[bool] = []
+
+    def fake_yield(timeout_s: float = 10.0) -> bool:
+        yielded.append(True)
+        monkeypatch.setattr(remote_host, "hosting_active", False)
+        return True
+
+    monkeypatch.setattr(remote_host, "yield_for_local", fake_yield)
+    # The local start itself is stubbed: only the gate is under test.
+    monkeypatch.setattr(
+        sessions,
+        "_dispatch_start",
+        lambda kind, request, ws: {"success": False, "message": "stub", "status_code": 418},
+    )
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench"})
+    assert yielded == [True]
+    assert resp.status_code == 418  # got past the held gate to the (stubbed) start
+
+
+def test_local_start_is_refused_while_the_seat_is_held(client, tmp_lerobot_home, _idle, monkeypatch) -> None:
+    _make_robot("bench", leader=True, follower=True)
+    monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "phase", "engaged")
+    m = remote_host.SeatMonitor()
+    m.operator_joined("laptop")
+    monkeypatch.setattr(remote_host, "seat", m)
+    resp = client.post("/api/v1/sessions", json={"kind": "teleoperation", "robot": "bench"})
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "session.held"
+    assert resp.json()["details"]["holder"]["kind"] == "hosting"
+
+
+def test_hosting_status_reports_phase_seat_and_station_mode(client, _idle, monkeypatch) -> None:
+    descriptor = remote_host.build_descriptor(
+        remote_host.HostingRequest(follower_port="/dev/f", follower_config="fc", robot_name="bench"),
+        room="mml-x",
+        motors=["a"],
+        cameras={},
+        ranges_deg={},
+    )
+    m = remote_host.SeatMonitor()
+    m.operator_joined("operator-xyz")
+    monkeypatch.setattr(remote_host, "hosting_active", True)
+    monkeypatch.setattr(remote_host, "current_descriptor", descriptor)
+    monkeypatch.setattr(remote_host, "seat", m)
+    monkeypatch.setattr(remote_host, "phase", "engaged")
+    monkeypatch.setattr(remote_host, "station_mode", True)
+    body = client.get("/api/v1/hosting").json()["hosting"]
+    assert (body["phase"], body["active_operator"], body["station_mode"]) == ("engaged", "operator-xyz", True)
+    caps = client.get("/api/v1/health").json()["capabilities"]["hosting"]
+    assert (caps["phase"], caps["active_operator"]) == ("engaged", "operator-xyz")
+
+
+def test_remote_home_and_engage_routes_refuse_when_idle(client, _idle) -> None:
+    for verb in ("home", "engage"):
+        body = client.post(f"/api/v1/remote-teleoperation/{verb}").json()
+        assert body["success"] is False

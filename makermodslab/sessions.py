@@ -821,6 +821,15 @@ def handle_start_session(body: SessionStartBody, websocket_manager=None) -> dict
     kind = body.kind
 
     held = _held_by()
+    if held == "hosting" and kind != "hosting":
+        # Station mode's "local wins when idle": a PARKED, UNSEATED hosting
+        # session yields to a flow started at the station (and the station
+        # supervisor re-arms hosting once that flow ends). Engaged or seated,
+        # it is a held session like any other.
+        from . import remote_host
+
+        if remote_host.yield_for_local():
+            held = _held_by()
     if held is not None:
         _raise_held(
             held,

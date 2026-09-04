@@ -271,6 +271,9 @@ V1_ONLY_ROUTES: frozenset[str] = frozenset(
         "GET /api/v1/system/remote-extra",
         "POST /api/v1/system/remote-extra/install",
         "GET /api/v1/system/remote-extra/install-status",
+        # Operator-side Home / Engage: forwarded to the station as Portal RPCs.
+        "POST /api/v1/remote-teleoperation/home",
+        "POST /api/v1/remote-teleoperation/engage",
         "POST /api/v1/nodes/{instance_id}/jobs/{job_id}/stop",
         "DELETE /api/v1/nodes/{instance_id}/jobs/{job_id}",
         # Environment proxies: the peer's own policy-extra status / install /

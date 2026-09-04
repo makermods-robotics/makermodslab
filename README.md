@@ -113,10 +113,13 @@ It needs the `livekit-server` binary on your PATH — `brew install livekit` on 
 hint if it is missing. Peers fetch short-lived room tokens from `POST /api/v1/sfu/token`; the signing
 secret stays in a 0600 file on the station. Open `7880/tcp`, `7881/tcp` and `7882/udp` for remote peers.
 
-**Remote teleoperation.** With the SFU up on the station, press **Available for remote teleop** on the
-station's robot (its follower and cameras join the room). On your laptop, plug in the leader arm, pick the
-station in **Remote**, and drive: the station's cameras and the real follower's pose show up in the same
-teleop view. Both machines need the `remote` extra — `uv pip install -e '.[remote]'` in a checkout, or
+**Remote teleoperation.** Start the station in station mode — `makermodslab --sfu --host <robot>` (or
+`makermodslab-station --sfu --host <robot>` headless): its follower and cameras join the room **parked**
+(torque off, streaming, listening). On your laptop, plug in the leader arm, pick the station in **Remote**,
+and drive: the arm engages with a one-second soft start, **Home** parks it again, and ending your session
+parks it at once. One operator at a time; a brief network blip is tolerated (15 s) and a reconnect resumes
+your seat. Anything you start at the station itself takes the arm back from a parked, idle hosting session
+and hosting re-arms when you are done. Both machines need the `remote` extra — `uv pip install -e '.[remote]'` in a checkout, or
 `uv tool install 'makermodslab[remote] @ git+https://github.com/makermods-robotics/makermodslab'` for the
 one-line flavor (Python 3.12; Linux x86_64/aarch64 or Apple Silicon) — and the station must be a
 registered peer node. A bare `uv pip install 'makermodslab[remote]'` does NOT work: uv refuses the

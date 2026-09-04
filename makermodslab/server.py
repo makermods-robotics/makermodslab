@@ -211,7 +211,7 @@ from .schemas.nodes import (
     NodeListResponse,
     NodeRemoveResponse,
 )
-from .schemas.remote import HostingStatusResponse, RemoteTeleoperationStatusResponse
+from .schemas.remote import HostingStatusResponse, RemoteCommandResponse, RemoteTeleoperationStatusResponse
 from .schemas.sessions import (
     CoachingCommandResponse,
     CurrentSessionResponse,
@@ -1175,7 +1175,14 @@ def _hosting_capability() -> dict:
     descriptor = remote_host.current_descriptor
     if not remote_host.hosting_active or not descriptor:
         return {}
-    return {"hosting": {"robot": descriptor["robot"], "arm_type": descriptor["arm_type"]}}
+    return {
+        "hosting": {
+            "robot": descriptor["robot"],
+            "arm_type": descriptor["arm_type"],
+            "phase": remote_host.phase,
+            "active_operator": remote_host.seat_holder(),
+        }
+    }
 
 
 # --- SFU token broker (v1-only surface; see v1_router note above) ---
@@ -1212,6 +1219,18 @@ def issue_sfu_token(body: SfuTokenBody, request: Request):
         )
     api_key, api_secret = sfu.api_keys()
     identity = body.identity or sfu.default_identity(body.role)
+    # Single seat: while a hosting session's seat is held, only its holder
+    # (a reconnect) gets another operator token. The room cap is the SFU's
+    # half of the same rule.
+    if body.role == "operator":
+        holder = remote_host.seat_holder()
+        if holder is not None and holder != identity:
+            raise ApiError(
+                409,
+                f"This station's operator seat is held by {holder!r}. Only one operator drives at a time.",
+                code=ErrorCode.SFU_SEAT_TAKEN,
+                details={"holder": holder},
+            )
     room = body.room or sfu.default_room(get_instance_id())
     token, expires_at = sfu.mint_token(
         api_key=api_key,
@@ -1260,6 +1279,20 @@ def get_remote_teleoperation_camera(name: str):
     return StreamingResponse(
         remote_teleoperate.camera_stream(name), media_type="multipart/x-mixed-replace; boundary=frame"
     )
+
+
+@v1_router.post("/remote-teleoperation/home", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_home():
+    """Park the station's arm (return to rest, torque off) and hold it there
+    until Engage. Forwarded to the station as a Portal RPC; the station
+    honours it only from the seated operator."""
+    return remote_teleoperate.handle_remote_home()
+
+
+@v1_router.post("/remote-teleoperation/engage", response_model=RemoteCommandResponse, tags=["remote"])
+def remote_teleoperation_engage():
+    """Re-energize the station's arm after a Home, with a soft start."""
+    return remote_teleoperate.handle_remote_engage()
 
 
 @v1_router.get("/system/remote-extra", response_model=ExtraStatus, tags=["system"])
@@ -4574,6 +4607,16 @@ def delete_robot(name: str):
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""
     warn_if_cuda_mismatch()
+
+
+@app.on_event("startup")
+def start_station_mode():
+    """`makermodslab --host <robot>`: keep that robot hosted for remote
+    teleoperation (remote_host.start_station_mode) — parked from startup,
+    re-armed after any local session, no browser required."""
+    robot_name = os.environ.get(remote_host.STATION_ROBOT_ENV, "").strip()
+    if robot_name:
+        remote_host.start_station_mode(robot_name, manager)
 
 
 # Strong reference so the loop's task set can't drop the pump mid-flight.

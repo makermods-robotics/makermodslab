@@ -1398,6 +1398,16 @@
             "title": "Motors",
             "type": "array"
           },
+          "phase": {
+            "enum": [
+              "parked",
+              "engaging",
+              "engaged",
+              "parking"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
           "robot": {
             "title": "Robot",
             "type": "string"
@@ -1405,6 +1415,10 @@
           "room": {
             "title": "Room",
             "type": "string"
+          },
+          "station_mode": {
+            "title": "Station Mode",
+            "type": "boolean"
           },
           "url": {
             "title": "Url",
@@ -1432,7 +1446,9 @@
           "motors",
           "cameras",
           "joint_ranges_deg",
-          "active_operator"
+          "active_operator",
+          "phase",
+          "station_mode"
         ],
         "title": "HostingDescriptor",
         "type": "object"
@@ -3880,6 +3896,25 @@
         "title": "ReleaseCanTorqueResponse",
         "type": "object"
       },
+      "RemoteCommandResponse": {
+        "description": "Home / engage from the operator side (remote_teleoperate): accepted or\nrefused with a reason. Refusals that are the station's verdict ride as a\ncoded 4xx instead.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ],
+        "title": "RemoteCommandResponse",
+        "type": "object"
+      },
       "RemoteStation": {
         "properties": {
           "instance_id": {
@@ -3966,7 +4001,7 @@
         "type": "object"
       },
       "RemoteTeleoperationStatusResponse": {
-        "description": "remote_teleoperate.handle_remote_teleoperation_status.",
+        "description": "remote_teleoperate.handle_remote_teleoperation_status. `station_phase`\nis the station's live phase (its hosting descriptor, re-read at most once\na second) — null when the station could not be read.",
         "properties": {
           "cameras": {
             "items": {
@@ -4057,11 +4092,29 @@
                 "type": "null"
               }
             ]
+          },
+          "station_phase": {
+            "anyOf": [
+              {
+                "enum": [
+                  "parked",
+                  "engaging",
+                  "engaged",
+                  "parking"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Station Phase"
           }
         },
         "required": [
           "remote_teleoperation_active",
           "station",
+          "station_phase",
           "room",
           "cameras",
           "metrics",
@@ -9829,6 +9882,50 @@
           }
         },
         "summary": "Get Remote Teleoperation Camera",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/engage": {
+      "post": {
+        "description": "Re-energize the station's arm after a Home, with a soft start.",
+        "operationId": "remote_teleoperation_engage",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Remote Teleoperation Engage",
+        "tags": [
+          "remote"
+        ]
+      }
+    },
+    "/api/v1/remote-teleoperation/home": {
+      "post": {
+        "description": "Park the station's arm (return to rest, torque off) and hold it there\nuntil Engage. Forwarded to the station as a Portal RPC; the station\nhonours it only from the seated operator.",
+        "operationId": "remote_teleoperation_home",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCommandResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Remote Teleoperation Home",
         "tags": [
           "remote"
         ]

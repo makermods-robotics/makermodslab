@@ -156,6 +156,10 @@ class ErrorCode(StrEnum):
     # no secret to sign room tokens with — the remedy is restarting the
     # launcher with --sfu, not retrying.
     SFU_DISABLED = "sfu.disabled"
+    # The station's single operator seat is held by someone else: the room
+    # admits one operator beside the robot, and the token route refuses a
+    # second operator token while the seat is occupied.
+    SFU_SEAT_TAKEN = "sfu.seat_taken"
 
     # The residual 500.
     INTERNAL_UNEXPECTED = "internal.unexpected"

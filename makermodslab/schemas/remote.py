@@ -26,6 +26,7 @@ __all__ = [
     "HostingCamera",
     "HostingDescriptor",
     "HostingStatusResponse",
+    "RemoteCommandResponse",
     "RemoteStation",
     "RemoteTeleoperationMetrics",
     "RemoteTeleoperationStatusResponse",
@@ -59,6 +60,21 @@ class HostingDescriptor(BaseModel):
     cameras: list[HostingCamera]
     joint_ranges_deg: dict[str, float]
     active_operator: str | None
+    # parked (torque off at the rest pose, listening) | engaging (soft start)
+    # | engaged (following the seated operator) | parking (returning to rest).
+    phase: Literal["parked", "engaging", "engaged", "parking"]
+    # True when the process was started with --host: hosting re-arms itself
+    # after any local session ends.
+    station_mode: bool
+
+
+class RemoteCommandResponse(BaseModel):
+    """Home / engage from the operator side (remote_teleoperate): accepted or
+    refused with a reason. Refusals that are the station's verdict ride as a
+    coded 4xx instead."""
+
+    success: bool
+    message: str
 
 
 class HostingStatusResponse(BaseModel):
@@ -93,10 +109,13 @@ class RemoteTeleoperationMetrics(BaseModel):
 
 
 class RemoteTeleoperationStatusResponse(BaseModel):
-    """remote_teleoperate.handle_remote_teleoperation_status."""
+    """remote_teleoperate.handle_remote_teleoperation_status. `station_phase`
+    is the station's live phase (its hosting descriptor, re-read at most once
+    a second) — null when the station could not be read."""
 
     remote_teleoperation_active: bool
     station: RemoteStation | None
+    station_phase: Literal["parked", "engaging", "engaged", "parking"] | None
     room: str | None
     cameras: list[str]
     metrics: RemoteTeleoperationMetrics | None
