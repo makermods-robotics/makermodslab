@@ -341,6 +341,14 @@ export default {
       // Only `placeholderNone` may claim the dataset lists no task; a lookup
       // that failed is not evidence of that.
       placeholderNone: "No task found on the training dataset — type one",
+      // While the lookup is in flight. The animated dots are appended by the
+      // caller — they are punctuation, not prose, and must not be translated
+      // into a catalog string that a plural or a full stop could disturb.
+      placeholderLoading: "Loading the training dataset",
+      // The lookup is STILL running after the animation gives up. Deliberately
+      // does not say the dataset has no task: it has not answered either way,
+      // and if it lands later its answer replaces this.
+      placeholderSlow: "Still loading — type the task if you'd rather not wait",
       // The dataset could not be found — deleted, renamed, or never downloaded.
       placeholderMissing:
         "Can't find the training dataset on this machine — type the task",

@@ -53,6 +53,9 @@ import {
   classifyTaskLookup,
   defaultTaskFrom,
   effectiveTaskFor,
+  loadingDots,
+  TASK_LOADING_DOT_MS,
+  TASK_LOADING_MAX_MS,
   taskFieldVisible,
   taskIsAmbiguous,
   tasksFrom,
@@ -554,6 +557,10 @@ const DeployPanel: React.FC = () => {
   const [taskPrefill, setTaskPrefill] = useState<TaskPrefillState>({
     kind: "idle",
   });
+  // Purely cosmetic companions to `taskPrefill`: which dot the animation is on,
+  // and whether it has run long enough to stop claiming to be loading.
+  const [taskLoadingTick, setTaskLoadingTick] = useState(0);
+  const [taskLoadingExpired, setTaskLoadingExpired] = useState(false);
   // Inference engine A/B. "sync" is the server default and the historical
   // behaviour; "rtc" is experimental (see InferenceSessionOptions).
   const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
@@ -1125,6 +1132,11 @@ const DeployPanel: React.FC = () => {
       return;
     }
     let cancelled = false;
+    // Say so BEFORE awaiting. Without this the field kept whatever it last
+    // said — for a Hub round-trip that meant several seconds of "No task found
+    // on the training dataset" before the real sentence appeared, which is the
+    // same lie this module exists to stop telling, just on a timer.
+    setTaskPrefill({ kind: "loading" });
     (async () => {
       try {
         const info = await getDatasetInfo(baseUrl, fetchWithHeaders, repoId);
@@ -1146,6 +1158,34 @@ const DeployPanel: React.FC = () => {
       cancelled = true;
     };
   }, [policyConfig, selectedJob, baseUrl, fetchWithHeaders]);
+
+  // Animate the loading placeholder's trailing dots, and give up saying
+  // "loading" after TASK_LOADING_MAX_MS.
+  //
+  // The timeout does NOT cancel the request — it only stops the animation and
+  // lets the field invite typing instead. A lookup still running after eight
+  // seconds is a slow Hub round-trip the operator can beat by hand, but if it
+  // does land afterwards its answer replaces the invitation, because a real
+  // task always beats one somebody invented.
+  useEffect(() => {
+    if (taskPrefill.kind !== "loading") {
+      setTaskLoadingTick(0);
+      setTaskLoadingExpired(false);
+      return;
+    }
+    const dots = window.setInterval(
+      () => setTaskLoadingTick((n) => n + 1),
+      TASK_LOADING_DOT_MS,
+    );
+    const giveUp = window.setTimeout(
+      () => setTaskLoadingExpired(true),
+      TASK_LOADING_MAX_MS,
+    );
+    return () => {
+      window.clearInterval(dots);
+      window.clearTimeout(giveUp);
+    };
+  }, [taskPrefill.kind]);
 
   // Drop the operator's typed overrides when the POLICY changes.
   //
@@ -1626,15 +1666,24 @@ const DeployPanel: React.FC = () => {
                     // about what the operator should do next.
                     placeholder={
                       defaultTask ||
-                      (taskPrefill.kind === "unknown"
-                        ? t(
-                            taskPrefill.reason === "not_found"
-                              ? "studio.deploy.task.placeholderMissing"
-                              : "studio.deploy.task.placeholderUnreadable",
-                          )
-                        : taskAmbiguous
-                          ? t("studio.deploy.task.placeholderChoose")
-                          : t("studio.deploy.task.placeholderNone"))
+                      (taskPrefill.kind === "loading" && !taskLoadingExpired
+                        ? // The word is translated; the dots are punctuation
+                          // driven by the tick, so they stay out of the catalog.
+                          `${t("studio.deploy.task.placeholderLoading")}${loadingDots(taskLoadingTick)}`
+                        : taskPrefill.kind === "loading"
+                          ? // Still running, but past the point where watching
+                            // dots beats typing. Does NOT claim the dataset has
+                            // no task — it hasn't answered either way yet.
+                            t("studio.deploy.task.placeholderSlow")
+                          : taskPrefill.kind === "unknown"
+                            ? t(
+                                taskPrefill.reason === "not_found"
+                                  ? "studio.deploy.task.placeholderMissing"
+                                  : "studio.deploy.task.placeholderUnreadable",
+                              )
+                            : taskAmbiguous
+                              ? t("studio.deploy.task.placeholderChoose")
+                              : t("studio.deploy.task.placeholderNone"))
                     }
                   />
                   <p className="text-xs text-muted-foreground">

@@ -24,8 +24,29 @@ import type { DatasetInfo, DatasetTask } from "@/lib/replayApi";
  * reach it" send an operator to different places. */
 export type TaskPrefillState =
   | { kind: "idle" }
+  | { kind: "loading" }
   | { kind: "loaded"; tasks: string[] }
   | { kind: "unknown"; reason: "not_found" | "unreachable" };
+
+/** How long one dot stays on screen while the lookup is in flight. */
+export const TASK_LOADING_DOT_MS = 400;
+
+/** How long the animation runs before the field stops saying "loading" and
+ * invites the operator to type instead.
+ *
+ * A lookup that has not answered in this long is either a slow Hub round-trip
+ * or never coming back, and either way the operator should not be left watching
+ * dots — they can type the sentence faster than the wait. The request is NOT
+ * abandoned: if it lands afterwards its answer replaces whatever is on screen,
+ * because a real task is always better than a prompt to invent one. */
+export const TASK_LOADING_MAX_MS = 8000;
+
+/** The trailing dots of the loading placeholder: one, two, three, then back to
+ * one. A count rather than a string so the caller owns the word being animated
+ * and this stays a pure function of the tick. */
+export function loadingDots(tick: number): string {
+  return ".".repeat((tick % 3) + 1);
+}
 
 /** Order tasks most-represented first, but ONLY when every count is known.
  *
@@ -71,8 +92,8 @@ export function classifyTaskLookup(
   return { kind: "loaded", tasks };
 }
 
-/** The tasks the panel may offer. Empty for every non-`loaded` state, so a
- * failed lookup can never contribute a default. */
+/** The tasks the panel may offer. Empty for every non-`loaded` state, so
+ * neither a failed lookup nor one still in flight can contribute a default. */
 export function tasksFrom(state: TaskPrefillState): string[] {
   return state.kind === "loaded" ? state.tasks : [];
 }
