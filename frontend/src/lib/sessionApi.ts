@@ -88,6 +88,9 @@ export interface InferenceSessionOptions {
   duration_s?: number;
   checkpoint_state_dim?: number;
   eval_episodes?: number;
+  // "rtc" is also refused (400) when the checkpoint's ARCHITECTURE can't run
+  // Real-Time Chunking — read `supports_rtc` off the checkpoint's policy-config
+  // summary and don't offer the engine for it (PolicyConfigSummary).
   inference_engine?: "sync" | "rtc";
   temporal_ensemble_coeff?: number;
   skip_identity_check?: boolean;

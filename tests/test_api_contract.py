@@ -221,6 +221,11 @@ def test_no_new_routes_outside_api_v1():
 # checks every entry actually exists so retired surface can't linger.
 V1_ONLY_ROUTES: frozenset[str] = frozenset(
     [
+        # Multi-checkpoint publish: the training view's picker + background queue.
+        # Legacy POST /models/upload stays the single-checkpoint synchronous push.
+        "GET /api/v1/models/checkpoints",
+        "GET /api/v1/models/publish-status",
+        "POST /api/v1/models/publish",
         # Coaching (DAgger) controls. Born versioned: the flat mount was frozen
         # before coaching landed, so every coaching verb exists only under
         # /api/v1.

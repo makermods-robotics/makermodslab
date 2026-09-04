@@ -47,11 +47,12 @@ The two device SIDES differ in exactly one place, ``_set_zero``:
   unlocked and given ``set_origin_point`` individually.
 
 Between the two CAN FAMILIES the differences are carried by the request's
-``arm_type``: which device configs _connect builds, which pose text the user
-sees (the two zero poses are opposites on the gripper), which library the
-name-collision check reads, and — on Metal — the fact that the post-connect
-``disable_torque()`` is what frees an arm the Damiao handshake just
-energized.
+``arm_type``: which device configs _connect builds, which follower pose text
+the user sees (the follower zero poses are opposites on the gripper), which
+library the name-collision check reads, and — on Metal — the fact that the
+post-connect ``disable_torque()`` is what frees an arm the Damiao handshake
+just energized. The two families' Star Arm 102 leaders share one physical
+zero pose.
 """
 
 import logging
@@ -86,14 +87,18 @@ _SETTLE_SEC = 0.01
 _POSE_TIMEOUT_S = 15 * 60.0
 
 
-def zero_pose_instructions(arm_type: object) -> str:
-    """The physical zero pose to ask the user for, per CAN family.
+def zero_pose_instructions(arm_type: object, device_type: object | None = None) -> str:
+    """The physical zero pose to ask the user for, per CAN device.
 
-    The two poses are OPPOSITES on the gripper (Maker: fully open; Metal:
-    closed), so showing one family's text to the other zeroes the gripper at
-    the wrong end of its travel. Wording mirrors each family's own
-    ``calibrate()`` prompt in lerobot.
+    Both CAN families use the same Star Arm 102 leader and its shared folded,
+    closed-gripper zero pose. The follower poses remain family-specific and
+    opposite on the gripper (Maker: open; Metal: closed).
     """
+    if device_type == "teleop":
+        return (
+            "Move the Star Arm 102 leader by hand to its ZERO POSE — folded "
+            "against the base, gripper closed — then confirm."
+        )
     if arm_type == "metal":
         return (
             "Move the arm by hand to its ZERO POSE — standing upright, all "
@@ -402,7 +407,7 @@ class ZeroCalibrationManager:
                 status="awaiting_zero",
                 awaiting_pose=True,
                 step=1,
-                message=zero_pose_instructions(request.arm_type),
+                message=zero_pose_instructions(request.arm_type, request.device_type),
             )
             notify_session_changed("calibration", True, phase="awaiting_zero")
 

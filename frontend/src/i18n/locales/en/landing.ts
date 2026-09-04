@@ -12,8 +12,7 @@
  * i18next's `count`.
  */
 export default {
-  // Shared by DatasetPicker and ModelPicker: the two popovers render the same
-  // section headings and row chips, so one set of keys serves both.
+  // The dataset picker's section headings and row chips.
   picker: {
     // Product name — same in every language, keyed so both sections have one
     // uniform shape.
@@ -31,12 +30,6 @@ export default {
     empty:
       "No datasets yet. Use “Add dataset” to record, download, or import one.",
     deleteAria: "Delete {{repoId}}",
-  },
-  modelPicker: {
-    searchPlaceholder: "Search models…",
-    loading: "Loading models…",
-    empty: "No models yet. Use “Add model” to train, download, or import one.",
-    deleteAria: "Delete {{name}}",
   },
   addDatasetFromHub: {
     title: "Add a dataset from Hugging Face",
@@ -430,6 +423,10 @@ export default {
       "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result.",
     engineSyncHint:
       "One policy forward per control step. The arm pauses briefly between action chunks.",
+    // Shown under the picker when the selected checkpoint's architecture can't
+    // run RTC (the server refuses it), which also disables the option.
+    engineRtcUnavailable:
+      "Real-Time Chunking isn't available for this checkpoint's policy.",
     camerasSection: "Cameras",
     policyConfigLoading: "Reading policy config…",
     // {{message}} is the raw error text (backend or JS) — not ours to translate.

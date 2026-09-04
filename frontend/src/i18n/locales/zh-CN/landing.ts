@@ -20,12 +20,6 @@ export default {
     empty: "还没有数据集。使用“添加数据集”来录制、下载或导入。",
     deleteAria: "删除 {{repoId}}",
   },
-  modelPicker: {
-    searchPlaceholder: "搜索模型…",
-    loading: "正在加载模型…",
-    empty: "还没有模型。使用“添加模型”来训练、下载或导入。",
-    deleteAria: "删除 {{name}}",
-  },
   addDatasetFromHub: {
     title: "从 Hugging Face 添加数据集",
     description:
@@ -348,6 +342,9 @@ export default {
     engineRtcHint:
       "Real-Time Chunking 让推理与运动重叠，消除动作块之间的停顿。它同时改变了动作的生成方式 —— 在采信结果前请与 Sync 对比。",
     engineSyncHint: "每个控制步进行一次策略前向计算。机械臂在动作块之间会短暂停顿。",
+    // 当所选检查点的架构无法运行 RTC（服务端会拒绝）时显示在选择器下方，
+    // 同时该选项也会被禁用。
+    engineRtcUnavailable: "该检查点的策略不支持 Real-Time Chunking。",
     camerasSection: "摄像头",
     policyConfigLoading: "正在读取策略配置…",
     policyConfigError: "无法加载策略配置：{{message}}",

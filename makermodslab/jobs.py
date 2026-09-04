@@ -1664,6 +1664,90 @@ def _list_hub_checkpoints(api, repo_id: str) -> list[JobCheckpoint]:
 
 _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
 
+# Policy types whose class declares Real-Time Chunking support in the pinned
+# lerobot fork. See policy_type_supports_rtc for how this list was derived and
+# why it is a hand-mirrored table rather than a live import.
+_RTC_CAPABLE_POLICY_TYPES = frozenset({"evo1", "groot", "molmoact2", "pi0", "pi05", "smolvla"})
+
+# Every policy type registered via @PreTrainedConfig.register_subclass in the
+# pinned fork. Membership is what separates "this architecture cannot do RTC"
+# (False) from "we've never heard of it" (None) — a type we don't know about is
+# one the fork gained after this table was written, and guessing False for it
+# would refuse a run the subprocess would have accepted.
+_KNOWN_POLICY_TYPES = frozenset(
+    {
+        "act",
+        "diffusion",
+        "eo1",
+        "evo1",
+        "fastwam",
+        "gaussian_actor",
+        "groot",
+        "lingbot_va",
+        "molmoact2",
+        "multi_task_dit",
+        "pi0",
+        "pi0_fast",
+        "pi05",
+        "smolvla",
+        "tdmpc",
+        "vla_jepa",
+        "vqbet",
+        "wall_x",
+        "xvla",
+    }
+)
+
+
+def policy_type_supports_rtc(policy_type: str) -> bool | None:
+    """Whether a checkpoint of this architecture can run the Real-Time Chunking
+    inference engine (``--inference.type=rtc``).
+
+    True/False for a policy type registered in the pinned lerobot fork; None for
+    anything else, which means "not established", never "no" — callers must not
+    refuse a run on None, they must let the subprocess decide (same
+    silent-when-unreadable discipline as read_pretrained_policy_type).
+
+    **How it decides, and why.** The fork's own authority is
+    ``lerobot.rollout.inference.rtc.supports_rtc_inference(policy)``, which
+    takes an INSTANTIATED policy and asks two things: that ``policy.supports_rtc()``
+    returns True, and that ``predict_action_chunk`` binds ``inference_delay`` and
+    ``prev_chunk_left_over``. Neither can be evaluated here:
+
+    * ``supports_rtc`` is a plain instance method on every policy in the fork
+      (not a classmethod), so there is nothing to call without building the
+      policy — and MolmoAct2's reads ``self.config``.
+    * Reaching the classes at all means importing ``lerobot.policies.factory``,
+      which costs ~2 s and pulls ``transformers`` into the API process on the
+      first RTC launch. Optional-extra policies would also raise ImportError on
+      an install without their extra, turning a capability question into a
+      crash.
+
+    So the table above is a hand-mirrored read of the fork's classes, verified
+    against ``supports_rtc_inference``'s two criteria at class level on the
+    pinned SHA (b968c0c01). Six types declare support — evo1, groot, molmoact2,
+    pi0, pi05, smolvla — and all six accept the RTC call shape; every other
+    registered type inherits ``PreTrainedPolicy.supports_rtc`` (``return False``).
+    Notably **pi0_fast does NOT support RTC** even though its siblings do.
+    Change the fork's pin, re-check this table (test_rollout.py has a drift
+    test that reads the fork's sources without importing them).
+
+    **MolmoAct2 is reported True on purpose, and it is the one approximation
+    here.** Its ``supports_rtc`` is ``self.config.inference_action_mode ==
+    "continuous"`` — a per-CHECKPOINT condition, not a per-architecture one, and
+    the field defaults to None. The class does implement RTC semantics, so this
+    answers the architecture question honestly and leaves the config-level
+    condition to the subprocess, which still raises for a discrete-mode
+    MolmoAct2 checkpoint. Erring the other way would refuse continuous-mode
+    checkpoints that RTC genuinely runs.
+    """
+    if policy_type in _RTC_CAPABLE_POLICY_TYPES:
+        return True
+    if policy_type in _KNOWN_POLICY_TYPES:
+        return False
+    return None
+
+
 # None of _LANGUAGE_CONDITIONED_POLICY_TYPES has a legitimate from-scratch
 # mode: each builds a pretrained backbone (a vision-language model for
 # smolvla, a PaliGemma+expert stack for pi0/pi05/pi0_fast) from a bare config
@@ -2863,6 +2947,22 @@ class QueueChangedError(Exception):
 
 class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
+
+
+class JobPublishInProgressError(Exception):
+    """Raised when delete() targets a run whose checkpoints the background Hub
+    publish (models.model_upload_manager) is uploading right now.
+
+    A publish reads the run's checkpoint dirs for minutes off the request
+    thread, so a delete that passes every other guard (the run IS terminal)
+    would rmtree the files out from under upload_folder mid-read — the upload
+    dies with an opaque OS/Hub error and its repo pin fails against a deleted
+    record. One guard here covers both delete surfaces, since POST
+    /models/delete's run branch reuses JobRegistry.delete."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
 
 
 class JobSourceOfQueuedRunError(Exception):
@@ -4850,6 +4950,39 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def set_hf_repo_id(self, job_id: str, repo_id: str) -> JobRecord:
+        """Record the Hub model repo a LOCAL run has been published to.
+
+        Unlike `rename` this is identity, not decoration. It is what makes a
+        SECOND publish land in the same repo as the first — models.
+        `upload_local_model` defaults its target to `record.hf_repo_id` — and
+        what the training dialog reads to render "View on Hub" and to offer
+        "add more checkpoints" instead of a fresh publish.
+
+        Cloud runs get theirs at submit time (see `start`); this is the
+        local-run equivalent, written after the first successful upload.
+        Idempotent: re-publishing to the same repo rewrites the same value."""
+        target = repo_id.strip()
+        if not target:
+            raise ValueError("Hub repo id cannot be empty.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            if record.hf_repo_id == target:
+                return record
+            record.hf_repo_id = target
+            # Zeroed before the write, then restamped after — the same derived-
+            # field protocol `rename`, `start` and `reorder_queue` follow, so a
+            # position a read stamped onto the live record never freezes into
+            # job.json. (Publish targets terminal runs, whose position is 0
+            # anyway — the convention holds so no caller has to prove that.)
+            record.queue_position = 0
+            self._persist(record, force=True)
+            self._annotate_queue(record, self._queue_positions(self._records))
+        self._notify_change()
+        return record
+
     def stop(self, job_id: str, expect_state: JobState | None = None) -> JobRecord:
         """Ask a running job to stop, and record that we asked.
 
@@ -5180,6 +5313,14 @@ class JobRegistry:
             "policy_type": policy_type,
             "image_features": image_features,
             "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            # Whether this architecture can run the Real-Time Chunking engine,
+            # so the launch UI can offer the engine choice only where it works
+            # instead of letting the run die inside the subprocess with the arm
+            # already claimed. null = unknown type (a fork newer than our table)
+            # — the UI must treat that as "offer it", matching the server-side
+            # guard in rollout.handle_start_inference, which only refuses on a
+            # definite False.
+            "supports_rtc": (policy_type_supports_rtc(policy_type) if isinstance(policy_type, str) else None),
             # Flat proprioceptive state / action widths. For an SO-101 arm this
             # is 6 (one per joint); a bimanual-trained checkpoint carries 12
             # (two arms). The inference modal compares this against the selected
@@ -5288,6 +5429,18 @@ class JobRegistry:
             )
 
     def delete(self, job_id: str) -> None:
+        # Refuse while the background Hub publish is reading this run's
+        # checkpoint dirs (lazy import: models imports from this module).
+        # Checked BEFORE our lock so the two locks are never held together —
+        # the publish worker takes this registry's lock (set_hf_repo_id)
+        # without holding the manager's. The unlocked read leaves a tiny
+        # start-after-check window, which is fine: a publish that starts after
+        # this point 404s on the deleted run instead of racing the rmtree.
+        from .models import model_upload_manager
+
+        publish = model_upload_manager.get_status()
+        if publish["state"] == "running" and publish["model_id"] == job_id:
+            raise JobPublishInProgressError(job_id)
         with self._lock:
             record = self._records.get(job_id)
             if record is None:

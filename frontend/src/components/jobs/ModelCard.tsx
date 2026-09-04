@@ -268,12 +268,16 @@ const ModelCard: React.FC<Props> = ({
         )
       )
         onDelete(model.id);
-    } else if (
-      window.confirm("Delete this model? This wipes the output directory.")
-    ) {
-      onDelete(model.id);
     }
+    // No destructive branch for a local run's weights: the "wipes the output
+    // directory" delete was removed from the UI (the backend routes remain
+    // for a future management surface). `canRemove` keeps the button off for
+    // records that would have landed there.
   };
+
+  // Only the record-only removals survive in the UI: imported records (source
+  // files untouched) and cloud records (repo on the Hub untouched).
+  const canRemove = isImported || model.runner === "hf_cloud";
 
   // Key ancestors by id+count so the frequent list refreshes (which hand us new
   // array refs) don't refetch unless the lineage actually changed.
@@ -574,16 +578,18 @@ const ModelCard: React.FC<Props> = ({
                 </a>
               </Button>
             ) : null}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={handleDelete}
-              className="h-7 w-7 text-muted-foreground hover:text-destructive"
-              aria-label={t("jobs.modelCard.deleteAria")}
-              title={t("jobs.modelCard.deleteTitle")}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </Button>
+            {canRemove ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleDelete}
+                className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                aria-label={t("jobs.modelCard.deleteAria")}
+                title={t("jobs.modelCard.deleteTitle")}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </Button>
+            ) : null}
           </div>
         </div>
 

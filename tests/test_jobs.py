@@ -1316,6 +1316,32 @@ def test_rename_sets_display_name_and_persists(tmp_path) -> None:
     assert reg2.get(rec.id).display_name == "pick-and-place v2"
 
 
+def test_set_hf_repo_id_does_not_persist_a_stamped_queue_position(tmp_path) -> None:
+    """set_hf_repo_id follows the same derived-field protocol as rename:
+    queue_position is zeroed before the persist and restamped after, so a
+    position a read stamped onto the live record never freezes into job.json."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    # Simulate a queue read having stamped the live record.
+    rec.queue_position = 7
+
+    updated = reg.set_hf_repo_id(rec.id, "user/repo")
+    assert updated.hf_repo_id == "user/repo"
+    assert updated.queue_position == 0  # restamped; not queued ⇒ 0
+
+    # The RAW persisted file must not carry the stale stamp — reads re-annotate
+    # in memory, so only the file itself can prove the zero-before-persist.
+    from makermodslab.jobs import _job_meta_path
+
+    on_disk = _json.loads(_job_meta_path(reg._output_root, rec.id).read_text())
+    assert on_disk["queue_position"] == 0
+    assert on_disk["hf_repo_id"] == "user/repo"
+
+
 def test_rename_rejects_empty_and_path_characters(tmp_path) -> None:
     from makermodslab.jobs import JobRegistry
 
@@ -4763,6 +4789,40 @@ def test_policy_config_summary_arm_is_none_when_unrecoverable(
     reg = JobRegistry(tmp_path / "root")
     rec = reg.register_imported(str(model))
     assert reg.get_policy_config_summary(rec.id, 0)["trained_on_robot_type"] is None
+
+
+@pytest.mark.parametrize(
+    ("policy_type", "expected"),
+    [("act", False), ("smolvla", True), ("some_future_policy", None)],
+)
+def test_policy_config_summary_reports_rtc_support(tmp_path, tmp_lerobot_home, policy_type, expected) -> None:
+    """The launch UI gates its inference-engine choice on this, so the key is
+    always present — null meaning "unknown type", not "no"."""
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(_json.dumps({"type": policy_type}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert "supports_rtc" in summary
+    assert summary["supports_rtc"] is expected
+
+
+def test_policy_config_summary_rtc_is_none_when_the_type_is_unreadable(tmp_path, tmp_lerobot_home) -> None:
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(_json.dumps({"input_features": {}}))
+
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    summary = reg.get_policy_config_summary(rec.id, 0)
+    assert summary["policy_type"] is None
+    assert summary["supports_rtc"] is None
 
 
 # --- Deliberate stop vs genuine failure -------------------------------------

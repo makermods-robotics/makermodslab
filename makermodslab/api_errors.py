@@ -109,6 +109,11 @@ class ErrorCode(StrEnum):
     # stop/cancel it where it lives (the jobs surface), not to retry the
     # delete.
     JOB_NOT_TERMINAL = "job.not_terminal"
+    # `publish_in_progress`: a delete was aimed at a run whose checkpoints the
+    # background Hub publish (models.model_upload_manager) is uploading RIGHT
+    # NOW — the rmtree would pull the files out from under upload_folder
+    # mid-read. The remedy is to wait for the publish to finish (or fail).
+    JOB_PUBLISH_IN_PROGRESS = "job.publish_in_progress"
 
     # Library resources.
     DATASET_NOT_FOUND = "dataset.not_found"

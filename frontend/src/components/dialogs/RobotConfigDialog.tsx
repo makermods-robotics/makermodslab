@@ -65,12 +65,12 @@ import {
 } from "@/lib/sessionApi";
 import { tabOwnerId } from "@/lib/sessionOwner";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
-// The same two product photos the "Create a new robot" arm cards use. One per
-// FAMILY: the two zero poses are opposites at the gripper, so showing one
-// family's picture to the other would zero the gripper at the wrong end of its
-// travel.
+// Followers use the same family-specific product photos as the "Create a new
+// robot" arm cards. Both CAN families use the same physical Star Arm 102
+// leader, so its calibration gets one dedicated, shared zero-pose reference.
 import makerArmPhoto from "@/assets/arms/maker.jpg";
 import metalArmPhoto from "@/assets/arms/metal.jpg";
+import starArm102LeaderZeroPose from "@/assets/calibration/star-arm-102-leader-zero-pose.jpg";
 // The SO-101's auto-calibration start pose IS the folded resting pose, which
 // is exactly what the arm card's product photo already shows — so it is the
 // same file, not a second copy of the same picture.
@@ -2126,19 +2126,31 @@ const RobotConfigWindow = ({
 
     // The pose the user has to put the arm in. Shown BEFORE Start (so the arm
     // can be posed while reading) and again while awaiting zero (so it is on
-    // screen at the moment it is matched). One photo per FAMILY: the two zero
-    // poses are opposites at the gripper, so showing one family's picture to
-    // the other would zero the gripper at the wrong end of its travel.
+    // screen at the moment it is matched). Followers get one photo per family:
+    // their two zero poses are opposites at the gripper, so showing one family's
+    // picture to the other would zero the gripper at the wrong end of its
+    // travel. The Star Arm 102 leader is identical on Maker and Metal rigs, so
+    // both leader rows deliberately share the photographed reference pose.
     //
-    // object-cover, not contain: the sources are 4:3 on white with the arm in
-    // the middle band, so a 16:9 centre crop trims background, not hardware.
+    // object-cover, not contain: the follower sources are 4:3 on white with the
+    // arm in the middle band, so a 16:9 centre crop trims background, not
+    // hardware. The dedicated leader reference is already 16:9.
+    const isLeaderZeroPose = deviceType === "teleop";
     const zeroPoseImage = (
       <img
-        src={isMetalArm ? metalArmPhoto : makerArmPhoto}
+        src={
+          isLeaderZeroPose
+            ? starArm102LeaderZeroPose
+            : isMetalArm
+              ? metalArmPhoto
+              : makerArmPhoto
+        }
         alt={
-          isMetalArm
-            ? t("robotConfig.calib.zeroPose.poseImageMetal")
-            : t("robotConfig.calib.zeroPose.poseImage")
+          isLeaderZeroPose
+            ? t("robotConfig.calib.zeroPose.poseImageLeader")
+            : isMetalArm
+              ? t("robotConfig.calib.zeroPose.poseImageMetal")
+              : t("robotConfig.calib.zeroPose.poseImage")
         }
         loading="lazy"
         className="aspect-video w-full rounded-md border border-border bg-muted object-cover"
@@ -2414,9 +2426,11 @@ const RobotConfigWindow = ({
             <Alert className="border-info/40 bg-info/10 text-info">
               <Activity className="h-4 w-4" />
               <AlertDescription>
-                {isMetalArm
-                  ? t("robotConfig.calib.zeroPose.instructionsMetal")
-                  : t("robotConfig.calib.zeroPose.instructions")}
+                {isLeaderZeroPose
+                  ? t("robotConfig.calib.zeroPose.instructionsLeader")
+                  : isMetalArm
+                    ? t("robotConfig.calib.zeroPose.instructionsMetal")
+                    : t("robotConfig.calib.zeroPose.instructions")}
               </AlertDescription>
             </Alert>
 
