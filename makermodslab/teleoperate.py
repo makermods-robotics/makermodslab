@@ -32,6 +32,7 @@ from lerobot.utils.errors import DeviceNotConnectedError
 from .api_errors import ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
+from .arms import registry as arm_registry
 from .maker_rest_pose import (
     capture_maker_pose,
     maker_follower_arms,
@@ -43,7 +44,7 @@ from .session_events import notify_session_changed
 from .torque import de_energize_can_device, release_maker_torque
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
-from .utils.robot_factory import build_bimanual_configs, build_single_configs
+from .utils.robot_factory import build_bimanual_configs, build_single_configs, request_arm_type
 
 logger = logging.getLogger(__name__)
 
@@ -832,7 +833,7 @@ def _connect_bimanual(request: TeleoperateRequest):
 
 def _can_family_label(request) -> str:
     """Human name of a CAN request's follower family, for messages and logs."""
-    return "Metal" if getattr(request, "arm_type", None) == "metal" else "Maker"
+    return arm_registry.get(request_arm_type(request)).short_label
 
 
 def _connect_can(request: TeleoperateRequest):

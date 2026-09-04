@@ -53,16 +53,7 @@ as subprocess CLI args, not as config objects, so it does not use this
 module — the follower-only asymmetry lives there, not here.
 """
 
-from lerobot.robots.maker_follower import MakerFollowerConfig
-from lerobot.robots.metal_follower import MetalFollowerConfig
-from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_maker import (
-    RebotArm102LeaderMakerTeleopConfig,
-)
-from lerobot.teleoperators.rebot_102_leader.config_rebot_102_leader_metal import (
-    RebotArm102LeaderMetalTeleopConfig,
-)
-
-from ..arms import registry as arm_registry
+from ..arms import MAKER, METAL, registry as arm_registry
 from .config import (
     bimanual_base_id,
     normalize_arm_type,
@@ -123,44 +114,32 @@ def build_bimanual_configs(request, cameras=None):
 
 # --- single-device configs, for the calibration flows -------------------------
 # Calibration connects ONE arm at a time, so it needs a config for that arm
-# alone rather than the leader/follower pair the session builders return. These
-# stay here until step 4b moves the calibration procedure onto the family.
+# alone rather than the leader/follower pair the session builders return.
+# These are the CAN families' single_follower_config / single_leader_config,
+# kept under their historical names for the callers and tests that import
+# them; new code asks the family directly.
 
 
-def maker_follower_config(port: str, config_id: str) -> MakerFollowerConfig:
-    """A single Maker follower config for zero-pose calibration.
+def maker_follower_config(port: str, config_id: str):
+    """A single Maker follower config for zero-pose calibration (no cameras)."""
+    return MAKER.single_follower_config(port, config_id)
 
-    No cameras: calibration never opens one, and opening a camera here would
-    hold it for the duration of a flow that is otherwise pure motor work.
+
+def maker_leader_config(port: str, config_id: str):
+    """A single Star Arm 102 leader config with the Maker preset."""
+    return MAKER.single_leader_config(port, config_id)
+
+
+def metal_follower_config(port: str, config_id: str):
+    """A single Metal follower config for zero-pose calibration (no cameras).
+
+    NOTE for callers that connect it: the Damiao bus HANDSHAKE is the motor
+    enable command, so the first thing to do after ``bus.connect()`` is
+    ``bus.disable_torque()``.
     """
-    return MakerFollowerConfig(port=port, id=config_id)
+    return METAL.single_follower_config(port, config_id)
 
 
-def maker_leader_config(port: str, config_id: str) -> RebotArm102LeaderMakerTeleopConfig:
-    """A single Star Arm 102 leader config for zero-pose calibration.
-
-    The ``_maker`` preset rather than the bare ``rebot_102_leader``, so the
-    calibration file this run writes carries the Maker joint ranges the teleop
-    session will later expect to find in it.
-    """
-    return RebotArm102LeaderMakerTeleopConfig(port=port, id=config_id)
-
-
-def metal_follower_config(port: str, config_id: str) -> MetalFollowerConfig:
-    """A single Metal follower config for zero-pose calibration.
-
-    No cameras, same as the Maker helper. NOTE for callers that connect it:
-    the Damiao bus HANDSHAKE is the motor enable command, so the first thing
-    to do after ``bus.connect()`` is ``bus.disable_torque()``.
-    """
-    return MetalFollowerConfig(port=port, id=config_id)
-
-
-def metal_leader_config(port: str, config_id: str) -> RebotArm102LeaderMetalTeleopConfig:
-    """A single Star Arm 102 leader config for Metal zero-pose calibration.
-
-    The ``_metal`` preset, so the calibration file carries the Metal joint
-    ranges — and so the minted id keeps it apart from any ``_maker`` file in
-    the SHARED rebot_102_leader library.
-    """
-    return RebotArm102LeaderMetalTeleopConfig(port=port, id=config_id)
+def metal_leader_config(port: str, config_id: str):
+    """A single Star Arm 102 leader config with the Metal preset."""
+    return METAL.single_leader_config(port, config_id)

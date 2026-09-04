@@ -25,6 +25,7 @@ from makermodslab.utils import config as cfg
 _ATTRIBUTE_TYPES: dict[str, type | tuple[type, ...]] = {
     "id": str,
     "label": str,
+    "short_label": str,
     "indefinite_label": str,
     "joints_per_arm": int,
     "supports_bimanual": bool,
@@ -65,6 +66,40 @@ def test_every_built_in_satisfies_the_contract(family: ArmFamily) -> None:
     # The library attrs must name real config constants — resolved at call time.
     assert isinstance(family.leader_calibration_dir(), str)
     assert isinstance(family.follower_calibration_dir(), str)
+
+
+@pytest.mark.parametrize("family", registry.families(), ids=lambda f: f.id)
+def test_single_device_configs_carry_the_port_and_id(family: ArmFamily) -> None:
+    """The calibration and recovery flows connect ONE arm through these; the
+    follower's registered type must be the family's own (the string that
+    reads the family back off a built config)."""
+    follower = family.single_follower_config("/dev/f", "cal-f")
+    leader = family.single_leader_config("/dev/l", "cal-l")
+    assert (follower.port, follower.id) == ("/dev/f", "cal-f")
+    assert (leader.port, leader.id) == ("/dev/l", "cal-l")
+    # A config the family built reads back as the family (the CAN types by
+    # their registered names; the SO-101 by the default-family fallback, since
+    # lerobot registers its config under the SO-100 name).
+    assert registry.family_for_robot_config_type(follower.type) is family
+    assert not getattr(follower, "cameras", None), "single-device configs never open a camera"
+
+
+@pytest.mark.parametrize("family", registry.families(), ids=lambda f: f.id)
+def test_zero_pose_text_exists_exactly_for_zero_calibrated_families(family: ArmFamily) -> None:
+    follower_text = family.zero_pose_instructions("robot")
+    leader_text = family.zero_pose_instructions("teleop")
+    if family.uses_zero_calibration:
+        assert "ZERO POSE" in follower_text and "ZERO POSE" in leader_text
+        assert "leader" in leader_text and "leader" not in follower_text
+    else:
+        assert follower_text == "" and leader_text == ""
+
+
+def test_the_can_followers_zero_poses_are_opposites_on_the_gripper() -> None:
+    maker, metal = registry.get("maker"), registry.get("metal")
+    assert "gripper fully open" in maker.zero_pose_instructions("robot")
+    assert "gripper closed" in metal.zero_pose_instructions("robot")
+    assert maker.zero_pose_instructions("teleop") == metal.zero_pose_instructions("teleop")
 
 
 def test_library_dirs_are_resolved_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,6 +152,12 @@ def test_an_incomplete_family_is_refused_naming_the_gaps(monkeypatch: pytest.Mon
     class Half(ArmFamily):
         id = "half"
         label = "Half an arm"
+
+        def single_follower_config(self, port, config_id):
+            raise NotImplementedError
+
+        def single_leader_config(self, port, config_id):
+            raise NotImplementedError
 
         def build_single_configs(self, request, cameras, leader_id, follower_id):
             raise NotImplementedError

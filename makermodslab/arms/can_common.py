@@ -63,11 +63,22 @@ class CanDeviceClasses:
     bi_teleop: type  # bimanual leader config carrying two leader_sub configs
 
 
+# Both CAN families use the same Star Arm 102 leader, and it has ONE zero
+# pose: folded against the base, gripper closed. The follower poses are
+# family-specific (follower_zero_pose) and opposite on the gripper.
+_LEADER_ZERO_POSE = "Move the Star Arm 102 leader by hand to its ZERO POSE — folded against the base, gripper closed — then confirm."
+
+
 class CanArmFamily(ArmFamily):
-    """Shared shape of the CAN families; subclasses name their classes."""
+    """Shared shape of the CAN families; subclasses name their classes and
+    their follower's zero pose."""
 
     joints_per_arm = 7
     supports_bimanual = True
+
+    # The follower's zero-pose text; set by each family (the two are
+    # opposites on the gripper — Maker folded/open, Metal upright/closed).
+    follower_zero_pose: str
 
     uses_feetech_bus = False
     supports_auto_calibration = False
@@ -79,6 +90,17 @@ class CanArmFamily(ArmFamily):
     def _device_classes(self) -> CanDeviceClasses:  # pragma: no cover - abstract by convention
         """Import (lazily — python-can / motorbridge) and return this family's classes."""
         raise NotImplementedError
+
+    def zero_pose_instructions(self, device_type: object | None = None) -> str:
+        if device_type == "teleop":
+            return _LEADER_ZERO_POSE
+        return self.follower_zero_pose
+
+    def single_follower_config(self, port: str, config_id: str):
+        return self._device_classes().follower(port=port, id=config_id)
+
+    def single_leader_config(self, port: str, config_id: str):
+        return self._device_classes().teleop(port=port, id=config_id)
 
     def build_single_configs(self, request: Any, cameras: dict | None, leader_id: str, follower_id: str):
         # The follower config's defaults carry the CAN wiring (slcan @ 1 Mbps,

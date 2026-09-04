@@ -53,7 +53,7 @@ from .rest_pose import (
 from .session_events import notify_session_changed
 from .teleoperate import _cleanup_after_setup_failure, force_disable_torque
 from .torque import release_maker_torque
-from .utils.config import get_robot_record, setup_follower_calibration_file
+from .utils.config import get_robot_record, normalize_arm_type, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
 
@@ -372,14 +372,13 @@ def _connect_can_follower(request: ReplayRequest):
     """
     from lerobot.robots import make_robot_from_config
 
+    from .arms import registry as arm_registry
     from .torque import de_energize_can_device
-    from .utils.robot_factory import maker_follower_config, metal_follower_config
 
-    is_metal = request.arm_type == "metal"
-    family = "Metal" if is_metal else "Maker"
-    builder = metal_follower_config if is_metal else maker_follower_config
+    arm_family = arm_registry.get(normalize_arm_type(request.arm_type))
+    family = arm_family.short_label
     follower_id = setup_follower_calibration_file(request.follower_config, request.arm_type)
-    robot = make_robot_from_config(builder(request.follower_port, follower_id))
+    robot = make_robot_from_config(arm_family.single_follower_config(request.follower_port, follower_id))
     try:
         robot.connect(calibrate=False)
     except Exception as e:

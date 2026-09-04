@@ -90,23 +90,14 @@ _POSE_TIMEOUT_S = 15 * 60.0
 def zero_pose_instructions(arm_type: object, device_type: object | None = None) -> str:
     """The physical zero pose to ask the user for, per CAN device.
 
-    Both CAN families use the same Star Arm 102 leader and its shared folded,
-    closed-gripper zero pose. The follower poses remain family-specific and
-    opposite on the gripper (Maker: open; Metal: closed).
+    The family owns the text: both CAN families share the Star Arm 102 leader
+    and its folded, closed-gripper pose, while the follower poses are
+    family-specific and opposite on the gripper (Maker: open; Metal: closed).
     """
-    if device_type == "teleop":
-        return (
-            "Move the Star Arm 102 leader by hand to its ZERO POSE — folded "
-            "against the base, gripper closed — then confirm."
-        )
-    if arm_type == "metal":
-        return (
-            "Move the arm by hand to its ZERO POSE — standing upright, all "
-            "joints at 0 degrees, gripper closed — then confirm."
-        )
-    return (
-        "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
-    )
+    from .arms import registry as arm_registry
+    from .utils.config import normalize_arm_type
+
+    return arm_registry.get(normalize_arm_type(arm_type)).zero_pose_instructions(device_type)
 
 
 @dataclass
@@ -442,20 +433,14 @@ class ZeroCalibrationManager:
 
     def _connect(self, request: ZeroCalibrationRequest):
         """Open the bus with torque OFF, ready for the user to pose the arm."""
-        from .utils.robot_factory import (  # local import: avoids a cycle at module load
-            maker_follower_config,
-            maker_leader_config,
-            metal_follower_config,
-            metal_leader_config,
-        )
+        from .arms import registry as arm_registry
+        from .utils.config import normalize_arm_type
 
-        is_metal = request.arm_type == "metal"
+        family = arm_registry.get(normalize_arm_type(request.arm_type))
         if request.device_type == "robot":
-            builder = metal_follower_config if is_metal else maker_follower_config
-            config = builder(request.port, request.config_file)
+            config = family.single_follower_config(request.port, request.config_file)
             self.device = make_robot_from_config(config)
-            label = "Metal" if is_metal else "Maker"
-            self._update_status(message=f"Connecting to the {label} follower arm...")
+            self._update_status(message=f"Connecting to the {family.short_label} follower arm...")
             # NOT device.connect(): both followers' connect() finishes by
             # calling enable_torque(), which would lock the arm rigid exactly
             # when the user needs to move it by hand. Open the bus directly
@@ -467,8 +452,7 @@ class ZeroCalibrationManager:
             self.device.bus.connect()
             self.device.bus.disable_torque()
         else:
-            builder = metal_leader_config if is_metal else maker_leader_config
-            config = builder(request.port, request.config_file)
+            config = family.single_leader_config(request.port, request.config_file)
             self.device = make_teleoperator_from_config(config)
             self._update_status(message="Connecting to the Star Arm 102 leader arm...")
             # The leader's bus is constructed inside connect(), so there is no

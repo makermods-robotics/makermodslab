@@ -31,7 +31,13 @@ from .can_common import CanArmFamily, CanDeviceClasses
 class MetalFamily(CanArmFamily):
     id = "metal"
     label = "Metal Arm"
+    short_label = "Metal"
     indefinite_label = "a Metal arm"
+
+    follower_zero_pose = (
+        "Move the arm by hand to its ZERO POSE — standing upright, all "
+        "joints at 0 degrees, gripper closed — then confirm."
+    )
 
     single_robot_type = "metal_follower"
     bimanual_robot_type = "bi_metal_follower"

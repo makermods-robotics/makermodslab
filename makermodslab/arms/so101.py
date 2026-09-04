@@ -31,6 +31,7 @@ from .base import ArmFamily
 class SO101Family(ArmFamily):
     id = "so101"
     label = "SO-101"
+    short_label = "SO-101"
     indefinite_label = "an SO-101 arm"
 
     joints_per_arm = 6
@@ -55,6 +56,16 @@ class SO101Family(ArmFamily):
     def default_calibration_name(self, record_name: str) -> str:
         """Historical default: the bare record name, no family suffix."""
         return record_name
+
+    def single_follower_config(self, port: str, config_id: str):
+        from lerobot.robots.so_follower import SO101FollowerConfig
+
+        return SO101FollowerConfig(port=port, id=config_id)
+
+    def single_leader_config(self, port: str, config_id: str):
+        from lerobot.teleoperators.so_leader import SO101LeaderConfig
+
+        return SO101LeaderConfig(port=port, id=config_id)
 
     def build_single_configs(self, request: Any, cameras: dict | None, leader_id: str, follower_id: str):
         from lerobot.robots.so_follower import SO101FollowerConfig

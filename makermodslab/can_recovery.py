@@ -55,16 +55,17 @@ class ReleaseCanTorqueRequest(BaseModel):
 def _build_follower_device(arm_type: str, port: str):
     """The follower device whose bus gets de-energized.
 
-    Built through the same factory helpers the calibration flows use, with a
-    throwaway id — construction does no device I/O, and the calibration file
-    (if any) is irrelevant to a torque release.
+    Built through the family's single-follower config, as the calibration
+    flows do, with a throwaway id — construction does no device I/O, and the
+    calibration file (if any) is irrelevant to a torque release.
     """
     from lerobot.robots import make_robot_from_config
 
-    from .utils.robot_factory import maker_follower_config, metal_follower_config
+    from .arms import registry as arm_registry
+    from .utils.config import normalize_arm_type
 
-    builder = metal_follower_config if arm_type == "metal" else maker_follower_config
-    return make_robot_from_config(builder(port, "recovery"))
+    family = arm_registry.get(normalize_arm_type(arm_type))
+    return make_robot_from_config(family.single_follower_config(port, "recovery"))
 
 
 def handle_release_can_torque(request: ReleaseCanTorqueRequest) -> dict[str, Any]:
@@ -85,7 +86,10 @@ def handle_release_can_torque(request: ReleaseCanTorqueRequest) -> dict[str, Any
             details={"holder": {"kind": holder, "session_id": None}},
         )
 
-    family = "Metal" if request.arm_type == "metal" else "Maker"
+    from .arms import registry as arm_registry
+    from .utils.config import normalize_arm_type
+
+    family = arm_registry.get(normalize_arm_type(request.arm_type)).short_label
     logger.info(f"Releasing torque on the {family} follower at {request.port} (crash recovery)")
     device = _build_follower_device(request.arm_type, request.port)
     problems = de_energize_can_device(device, f"{family} follower arm")

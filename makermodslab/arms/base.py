@@ -50,12 +50,17 @@ What the contract covers TODAY (refactor step "4a" of docs/extensions/plan.md):
   the CAN families' configs drag in python-can / motorbridge, and this package
   is imported by utils.config, i.e. by everything.
 
-What step "4b" adds (deliberately NOT declared yet, so this step stays a pure
-move of the four seams above): port probing and motion identify, the
-pre-torque preflight (identity fingerprint, motor-power cap), the stop-path
-pair return_to_rest / release_torque, the telemetry kind the loops
-broadcast (URDF joints vs degrees by motor name), and the calibration
-procedure kind. Until then those flows keep their own per-family modules.
+* calibration procedure — zero_pose_instructions (the pose text the
+  zero-calibration flow shows; only the CAN families have one) and the
+  single-device configs single_follower_config / single_leader_config that
+  calibration and crash recovery connect ONE arm with (no leader/follower
+  pair, no cameras).
+
+What step "4b" still adds (deliberately NOT declared yet): port probing and
+motion identify, the pre-torque preflight (identity fingerprint, motor-power
+cap), the stop-path pair return_to_rest / release_torque, and the telemetry
+kind the loops broadcast (URDF joints vs degrees by motor name). Until then
+those flows keep their own per-family modules.
 """
 
 from __future__ import annotations
@@ -70,6 +75,7 @@ from typing import Any
 REQUIRED_ATTRIBUTES: tuple[str, ...] = (
     "id",
     "label",
+    "short_label",
     "indefinite_label",
     "joints_per_arm",
     "supports_bimanual",
@@ -96,8 +102,11 @@ class ArmFamily(ABC):
     # --- identity ---------------------------------------------------------
     id: str
     label: str
-    # For prose a user reads ("recorded on a Metal arm"). Not localized — the
-    # backend never is (see frontend/docs/localization.md).
+    # The one-word family name status messages and logs splice into prose
+    # ("Connecting to the Metal follower arm..."). Not localized — the backend
+    # never is (see frontend/docs/localization.md).
+    short_label: str
+    # For prose a user reads ("recorded on a Metal arm").
     indefinite_label: str
 
     # --- shape ------------------------------------------------------------
@@ -165,6 +174,33 @@ class ArmFamily(ABC):
         overrides this to keep its historical bare name.
         """
         return f"{record_name}_{self.id}"
+
+    # --- calibration procedure -----------------------------------------------
+
+    def zero_pose_instructions(self, device_type: object | None = None) -> str:
+        """The physical pose to ask the user for during a zero-pose calibration.
+
+        Only meaningful when uses_zero_calibration is True; a family calibrated
+        by a range sweep has no zero pose and answers "". ``device_type`` is
+        "teleop" (the leader) or "robot" (the follower): the two poses differ,
+        and on the CAN families they are OPPOSITES on the gripper.
+        """
+        return ""
+
+    @abstractmethod
+    def single_follower_config(self, port: str, config_id: str):
+        """A config for ONE follower arm, alone — no leader, no cameras.
+
+        What the zero-pose calibration and the crash-recovery torque release
+        connect with: calibration never opens a camera (holding one for a flow
+        that is pure motor work would only block it for everyone else), and
+        recovery reaches the bus through a throwaway id.
+        """
+
+    @abstractmethod
+    def single_leader_config(self, port: str, config_id: str):
+        """A config for ONE leader arm, alone — the family's own preset, so the
+        calibration file this run writes carries THIS follower's joint ranges."""
 
     # --- device construction -------------------------------------------------
 

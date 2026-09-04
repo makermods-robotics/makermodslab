@@ -27,7 +27,12 @@ from .can_common import CanArmFamily, CanDeviceClasses
 class MakerFamily(CanArmFamily):
     id = "maker"
     label = "Maker Arm v1"
+    short_label = "Maker"
     indefinite_label = "a Maker arm"
+
+    follower_zero_pose = (
+        "Move the arm by hand to its ZERO POSE — folded against the base, gripper fully open — then confirm."
+    )
 
     single_robot_type = "maker_follower"
     bimanual_robot_type = "bi_maker_follower"
