@@ -156,8 +156,9 @@ class ErrorCode(StrEnum):
     # the same reason `hub` has one: folding it into `hardware.connect_failed`
     # would lie (that is the serial bus) and so would `system.*` (it is not
     # this process). `no_policy` is the empty-room case — the room answers but
-    # no GPU-side operator is in it, caught BEFORE the arm is energized.
-    TRANSPORT_EXTRA_MISSING = "transport.extra_missing"
+    # no GPU-side operator is in it, caught BEFORE the arm is energized. A
+    # missing Portal extra is NOT a transport fact and lives under `system.*`
+    # (`SYSTEM_EXTRA_MISSING`), shared with hosting / remote teleoperation.
     TRANSPORT_NOT_CONFIGURED = "transport.not_configured"
     TRANSPORT_UNREACHABLE = "transport.unreachable"
     TRANSPORT_UNAUTHORIZED = "transport.unauthorized"
@@ -170,8 +171,9 @@ class ErrorCode(StrEnum):
     # would orphan a live pip subprocess mid-write — retry once it finishes.
     SYSTEM_RESTART_UNSUPPORTED = "system.restart_unsupported"
     SYSTEM_INSTALL_IN_PROGRESS = "system.install_in_progress"
-    # An optional extra the flow needs is not importable (the `remote` extra
-    # for the LiveKit Portal plugins) — install it, then retry.
+    # An optional extra the flow needs is not importable (the `remote` extra:
+    # LiveKit Portal and its lerobot plugins, shared by hosting, remote
+    # teleoperation and remote inference) — install it, then retry.
     SYSTEM_EXTRA_MISSING = "system.extra_missing"
 
     # gpu.* — the remote GPU that runs the policy for a remote-inference run

@@ -977,30 +977,30 @@ training = [
 
 [[package]]
 name = "lerobot-robot-livekit"
-version = "0.2.5"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lerobot" },
     { name = "livekit-portal" },
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/db/f4610d6ea19a9fc8185eb35ee90572e2a7f6f97c7811948ec324cd2bda73/lerobot_robot_livekit-0.2.5.tar.gz", hash = "sha256:b8c9cb0d3e3c6b9f0d6a5409f4e5df7beb9ce742e59b4efcb0a098a7718a730b", size = 6284, upload-time = "2026-08-15T03:05:51.481Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9b/d8/253912d937433f2cee29d85a50a33f636b3ea8193786cb284ce505a09053/lerobot_robot_livekit-0.2.4.tar.gz", hash = "sha256:bcce3492e283b65830b4cf2a1955c81feffd846084d60f3b284ffce33c0a297a", size = 5711, upload-time = "2026-06-24T13:59:28.455Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/ce/51f6a20226dbcc0ced676b051e720719284c2da89a9ca79adcb63242349e/lerobot_robot_livekit-0.2.5-py3-none-any.whl", hash = "sha256:1393a46254f461d4a3c35e8f3eb91cbb960548425229549af192111c2d8cc5e1", size = 7723, upload-time = "2026-08-15T03:05:49.33Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/2b/81f977ed86094a02b6f61fcb5169457af81cf0aa27507f0a61006d079b56/lerobot_robot_livekit-0.2.4-py3-none-any.whl", hash = "sha256:56bac8ec1ee2274cb388633ee611bff4dd3d4ec66d38da91a54c2b15e3334214", size = 6454, upload-time = "2026-06-24T13:59:26.462Z" },
 ]
 
 [[package]]
 name = "lerobot-teleoperator-livekit"
-version = "0.2.5"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lerobot" },
     { name = "livekit-portal" },
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/a6/ef1dd8dbf3f1c5b7e099ddc6c236bdf5495766ba710a4ae02856ccd1339b/lerobot_teleoperator_livekit-0.2.5.tar.gz", hash = "sha256:8bbd13679159e992d120df5a6ec0670d1dcbf53920b9040436aaf32a9feef56b", size = 5394, upload-time = "2026-08-15T03:05:52.215Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/fd/bb6b40c8c9e1468339984b20551472a8f7e6beb6b1a1a886ad712987ae50/lerobot_teleoperator_livekit-0.2.4.tar.gz", hash = "sha256:37b6900700a792bc8e0274a319082895ec328d3ca22e4526c063e59204394ad5", size = 4755, upload-time = "2026-06-24T13:59:29.202Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/e1/f14453a9bb450569992aac21003a52e72165e91128b99c37325863b9f645/lerobot_teleoperator_livekit-0.2.5-py3-none-any.whl", hash = "sha256:1b936ca45a53b163d816970ed596a2c26b2ace587ac00c330d7b61e72f81691a", size = 6922, upload-time = "2026-08-15T03:05:50.353Z" },
+    { url = "https://files.pythonhosted.org/packages/87/64/50a16800fbe4ed689670979d6c77d070f54b66d9fd0597ec2e94e8063561/lerobot_teleoperator_livekit-0.2.4-py3-none-any.whl", hash = "sha256:555a0f85232c23df19ce85c06bd5144e76b12159ee6bb0ea9e70f27fb8d3395e", size = 5661, upload-time = "2026-06-24T13:59:27.446Z" },
 ]
 
 [[package]]
@@ -1021,15 +1021,15 @@ wheels = [
 
 [[package]]
 name = "livekit-portal"
-version = "0.2.5"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/1c/9e555097356e170756eb7697409db7a7d2e4ad9c01b7fa694ae9b7e2d06b/livekit_portal-0.2.5-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:91f6d89928b88da6fec5e1f5db4c982fc143c72c92a91a7aee0261895e83a269", size = 11202252, upload-time = "2026-08-15T03:05:36.64Z" },
-    { url = "https://files.pythonhosted.org/packages/8e/a6/956cc1fe5f5e4095d9eb40c6d17061b16b9e97ba95d3a2969d1ded23f9dc/livekit_portal-0.2.5-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:6fed98e1b72a1735c4cd3132074b189011d0f8e389eebab8bcbc3cef59655c48", size = 13267813, upload-time = "2026-08-15T03:05:38.936Z" },
-    { url = "https://files.pythonhosted.org/packages/93/d2/9b26ff35f31955fea14a6baadd78356a9cd61d50fe98d81c31dd050c79f9/livekit_portal-0.2.5-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:67f2633ec7a6a510c83bf09a4c94ba4cc4412858f36bdf19081840b2fc157203", size = 13564921, upload-time = "2026-08-15T03:05:41.033Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/35/0f23e3a0d9c586ef5badf4dd591d33c4a99f73607292ebad6fc0fb961885/livekit_portal-0.2.4-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:373a4caf8420023ca214d42ba735e3a45b9a88eab8f262b02e1878a93928cc03", size = 12423200, upload-time = "2026-06-24T13:59:08.338Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/17/939fabaa7918729a9663d3a7b9cc387f2109c31cd9f3efb32cf2a63035f5/livekit_portal-0.2.4-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:628be80b59200b14df6f79826b97974ede78dd672fa93a1c98591f80e707d045", size = 14050082, upload-time = "2026-06-24T13:59:10.716Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/82/76faa2b378ee0aa2fc1ae45ad04252e3e08264b9e4b1f2419571771b923d/livekit_portal-0.2.4-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:c682cf20be05940c86ab7196b62a6f7dce2cc133ec2c03e8fe2eb9032b14d7e3", size = 15099393, upload-time = "2026-06-24T13:59:12.988Z" },
 ]
 
 [[package]]
@@ -1070,6 +1070,8 @@ dev = [
 remote = [
     { name = "lerobot-robot-livekit" },
     { name = "lerobot-teleoperator-livekit" },
+    { name = "livekit-portal" },
+    { name = "python-dotenv" },
 ]
 test = [
     { name = "httpx" },
@@ -1082,15 +1084,17 @@ requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27" },
     { name = "lerobot", extras = ["core-scripts", "feetech", "training", "maker", "damiao", "rebot"], git = "https://github.com/makermods-robotics/lerobot.git?rev=eaab69339120787948776e4354dcee09f501fd16" },
-    { name = "lerobot-robot-livekit", marker = "extra == 'remote'", specifier = ">=0.2.5" },
-    { name = "lerobot-teleoperator-livekit", marker = "extra == 'remote'", specifier = ">=0.2.5" },
+    { name = "lerobot-robot-livekit", marker = "extra == 'remote'", specifier = "==0.2.4" },
+    { name = "lerobot-teleoperator-livekit", marker = "extra == 'remote'", specifier = "==0.2.4" },
     { name = "livekit-api", specifier = ">=1.0" },
+    { name = "livekit-portal", marker = "extra == 'remote'", specifier = "==0.2.4" },
     { name = "makermodslab", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "pygrabber", marker = "sys_platform == 'win32'", specifier = ">=0.2" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
+    { name = "python-dotenv", marker = "extra == 'remote'", specifier = ">=1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "uvicorn", specifier = ">=0.24.0" },
     { name = "websockets", specifier = ">=15.0.1" },

@@ -54,38 +54,36 @@ dev = [
     "ruff>=0.6",
     "pre-commit>=3.0",
 ]
-# Remote teleoperation / inference over LiveKit: the Portal lerobot plugins
-# (remote_host.py / remote_teleoperate.py import them lazily and refuse with
-# system.extra_missing when absent). Opt-in because livekit-portal's PyPI
-# wheels are tagged cp312 + Linux x86_64/aarch64 + Apple Silicon only — a
-# packaging artifact (the lib is a ctypes cdylib), to be fixed in our fork.
+# Remote teleoperation / inference over LiveKit Portal: the Portal FFI package
+# itself (the remote-inference child imports it; `makermodslab.drtc`) and its
+# two lerobot plugins (remote_host.py / remote_teleoperate.py). Every import
+# is lazy and refuses with system.extra_missing when absent, so a normal
+# install never pulls these. Opt-in because livekit-portal's PyPI wheels are
+# tagged cp312 + Linux x86_64/aarch64 + Apple Silicon only — a packaging
+# artifact (the lib is a ctypes cdylib), to be fixed in our fork.
+#
+# All three are pinned EXACTLY, to one version: the robot and the GPU side
+# must run the identical wire implementation — Portal fingerprints the schema
+# and silently drops packets whose fingerprint differs, which surfaces as a
+# healthy-looking session with 0 chunks and 0 observations rather than an
+# error. The GPU side's pin lives in the two `drtc/modal_policy*.py` wrappers
+# and the in-app installer's in utils/system.REMOTE_INSTALL_TARGET; bump them
+# together or not at all. The plugins ship in lockstep with Portal, so they
+# take the same version.
+#
+# `livekit-api` is NOT here: since the bundled SFU landed it is a CORE
+# dependency (the token route signs with it), so listing it again would only
+# invite the two bounds to drift.
 remote = [
-    "lerobot-teleoperator-livekit>=0.2.5",
-    "lerobot-robot-livekit>=0.2.5",
+    "livekit-portal==0.2.4",
+    "lerobot-teleoperator-livekit==0.2.4",
+    "lerobot-robot-livekit==0.2.4",
+    "python-dotenv>=1",
 ]
 test = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
-]
-
-# Remote inference over LiveKit Portal (`makermodslab.drtc`). OPTIONAL: nothing
-# in the Lab imports the package at startup, so a normal install never pulls
-# these. livekit-portal is pinned EXACTLY because the robot and the GPU side
-# must run the identical wire implementation — Portal fingerprints the schema
-# and silently drops packets whose fingerprint differs, which surfaces as a
-# healthy-looking session with 0 chunks and 0 observations rather than an
-# error. The GPU side's pin lives in the two `modal_policy*.py` wrappers; bump
-# the two together or not at all.
-#
-# `livekit-api` is NOT here any more: since the bundled SFU landed it is a CORE
-# dependency (the token route signs with it), so listing it again would only
-# invite the two bounds to drift. What is left is the FFI dylib the server
-# process must never load, plus the dotenv reader the child's credential
-# fallback needs.
-drtc = [
-    "livekit-portal==0.2.4",
-    "python-dotenv>=1",
 ]
 
 [project.scripts]

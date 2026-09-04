@@ -654,3 +654,13 @@ def camera_stream(name: str, fps: int = 15, jpeg_quality: int = 70) -> Iterator[
                 yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
                 last_sent = frame
         time.sleep(period)
+
+
+def stop_for_shutdown() -> bool:
+    """Shutdown's stop for a live remote-teleoperation session: the normal
+    stop, which already waits (bounded) for the worker to leave the room and
+    release the leader. Returns True when there was a session to stop."""
+    if not remote_teleoperation_active:
+        return False
+    handle_stop_remote_teleoperation()
+    return True

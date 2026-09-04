@@ -43,7 +43,7 @@ import pathlib
 
 from ..utils.config import DRTC_ENV_PATH
 
-_EXTRA_HINT = "remote inference needs the optional 'drtc' extra: uv pip install -e '.[drtc]'"
+_EXTRA_HINT = "remote inference needs the optional 'drtc' extra: uv pip install -e '.[remote]'"
 
 try:
     from dotenv import dotenv_values

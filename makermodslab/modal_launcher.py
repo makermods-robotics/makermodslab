@@ -149,7 +149,7 @@ _FALLBACK_BINS = (
 INSTALL_HINT = "Install the Modal CLI: `uv tool install modal`"
 
 # The two GPU servers, addressed BY PATH so nothing here imports `drtc/` (that
-# package is only importable with the optional `[drtc]` extra, and this module
+# package is only importable with the optional `[remote]` extra, and this module
 # is imported by the server at boot).
 _DRTC_DIR = Path(__file__).parent / "drtc"
 WRAPPERS: dict[str, Path] = {

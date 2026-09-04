@@ -116,7 +116,7 @@ def test_reraise_still_shields_an_interrupt(shielded) -> None:
 # A dead stdout (the parent died)
 # ---------------------------------------------------------------------------
 #
-# `_session_glue` is importable WITHOUT the `[drtc]` extra (see its module
+# `_session_glue` is importable WITHOUT the `[remote]` extra (see its module
 # docstring), so these run everywhere rather than importorskip-ing.
 
 

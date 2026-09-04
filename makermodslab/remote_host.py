@@ -73,7 +73,7 @@ from .api_errors import ApiError, ErrorCode
 from .arm_capabilities import uses_feetech_bus
 from .arm_identity import verify_devices
 from .motor_power import FOLLOWER, clear_goal_velocity, reset_torque_limit
-from .rest_pose import capture_rest_pose
+from .rest_pose import RETURN_CEILING_S, capture_rest_pose
 from .session_events import notify_session_changed
 from .teleoperate import (
     _SO101_URDF_JOINTS,
@@ -1085,3 +1085,31 @@ def start_station_mode(robot_name: str | None, websocket_manager=None) -> thread
     thread = threading.Thread(target=supervisor, name="station-mode", daemon=True)
     thread.start()
     return thread
+
+
+def stop_station_mode() -> None:
+    """Switch the station supervisor off (server shutdown): its next tick
+    exits instead of re-arming hosting while the process winds down."""
+    global station_mode
+    station_mode = False
+
+
+def stop_hosting_for_shutdown() -> bool:
+    """Shutdown's stop for a live hosting session — the same stop its own Stop
+    control runs, but WAITED FOR (bounded), because a stop that outlives the
+    process it runs in is not a stop. An engaged arm returns to rest first
+    (the worker's own park path, ceiling `RETURN_CEILING_S`), then torque is
+    released; past the ceiling the release is forced, the way a second Stop
+    press does it. Returns True when there was a session to stop."""
+    worker = hosting_thread
+    if not hosting_active and (worker is None or not worker.is_alive()):
+        return False
+    handle_stop_hosting()
+    worker = hosting_thread
+    if worker is not None and worker.is_alive():
+        worker.join(timeout=RETURN_CEILING_S + 5.0)
+        if worker.is_alive():
+            logger.warning("Hosting worker did not finish its return within the ceiling — releasing now")
+            _release_now.set()
+            worker.join(timeout=5.0)
+    return True

@@ -21,7 +21,7 @@ same session, and the only honest way to do that is to lift the pieces here
 rather than to copy them: two divergent copies of a teardown whose entire job
 is to make an energized arm safe is exactly the bug this module prevents.
 
-Importable WITHOUT the `[drtc]` extra, deliberately — same rule as `._pose`,
+Importable WITHOUT the `[remote]` extra, deliberately — same rule as `._pose`,
 and for the same reason. Nothing here imports `livekit.portal` (the FFI dylib),
 `livekit.api` or `python-dotenv`; the two `portal`-typed helpers take the portal
 object as an argument and only call methods on it. So the pure parts stay

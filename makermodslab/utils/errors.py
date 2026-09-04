@@ -136,7 +136,7 @@ def transport_hint(code: str, *, sfu: bool = False, room: str = "") -> str:
         return (
             "Install it from the PRIMARY checkout (never a git worktree — an editable install "
             "re-points the shared virtualenv at whatever directory it runs from): "
-            "uv pip install -e '.[drtc]'"
+            "uv pip install -e '.[remote]' — or use the in-app installer (Remote → Install)"
         )
     if code.endswith("not_configured"):
         return (

@@ -51,7 +51,7 @@ directly owns the choice.
 
 Why a subprocess, and why stdin
 -------------------------------
-`livekit.portal` is an FFI dylib behind the optional `[drtc]` extra, and the
+`livekit.portal` is an FFI dylib behind the optional `[remote]` extra, and the
 server must never load it — so the child is the only process that imports it,
 and the two ends speak `makermodslab.drtc_protocol` over pipes. The child owns
 the bus, so a stop CANNOT be a signal: `robot_sync`'s `finally:` would release
@@ -169,7 +169,7 @@ from .utils.config import (
 )
 from .utils.errors import friendly_hint, transport_hint
 
-# The `[drtc]` extra is OPTIONAL, and this module is imported by the FastAPI
+# The `[remote]` extra is OPTIONAL, and this module is imported by the FastAPI
 # server at boot (and by every peer feature's reciprocal guard), so none of its
 # packages may be a hard import. Guarded at module TOP rather than inside the
 # functions — an import inside a function body is the thing this project does
@@ -397,7 +397,7 @@ class RoomProbe:
 
 
 def _extra_missing() -> bool:
-    """True when the `[drtc]` extra is not (fully) installed.
+    """True when the `[remote]` extra is not (fully) installed.
 
     `find_spec` and NEVER an import: `livekit.portal` is an FFI dylib, and
     loading it into the server process is precisely what the extra's split
@@ -729,7 +729,7 @@ def resolve_transport() -> ResolvedTransport:
             source="sfu",
             missing=(),
         )
-    # `_read_env` is None only when the `[drtc]` extra is absent. Both session
+    # `_read_env` is None only when the `[remote]` extra is absent. Both session
     # callers gate on `_extra_missing()` long before this, so the fallback is
     # for the launcher's benefit: "nothing is configured" is the honest answer
     # there, and it carries the same remedy.
@@ -818,7 +818,7 @@ def _probe_room(url: str, key: str, secret: str, room: str) -> RoomProbe:
     warranted for a seam this thin.
     """
     if _livekit_api is None or _aiohttp is None:  # pragma: no cover — extra guard
-        return RoomProbe(False, False, False, False, error="the drtc extra is not installed")
+        return RoomProbe(False, False, False, False, error="the remote extra is not installed")
 
     async def _list() -> list[Any]:
         client = _livekit_api.LiveKitAPI(
@@ -1483,9 +1483,9 @@ def handle_start_remote_inference(request: RemoteInferenceRequest) -> dict[str, 
         return {
             "success": False,
             "status_code": 400,
-            "message": "Remote inference needs the optional 'drtc' extra, which isn't installed. "
-            + transport_hint(ErrorCode.TRANSPORT_EXTRA_MISSING),
-            "code": ErrorCode.TRANSPORT_EXTRA_MISSING,
+            "message": "Remote inference needs the optional 'remote' extra, which isn't installed. "
+            + transport_hint(ErrorCode.SYSTEM_EXTRA_MISSING),
+            "code": ErrorCode.SYSTEM_EXTRA_MISSING,
         }
 
     # 2. The transport — `resolve_transport()` and nothing else, so the
@@ -1922,9 +1922,9 @@ def handle_remote_inference_transport() -> dict[str, Any]:
         # to install — and the install command must name the PRIMARY checkout
         # (transport_hint owns that wording).
         payload["extra_installed"] = False
-        payload["error_code"] = str(ErrorCode.TRANSPORT_EXTRA_MISSING)
-        payload["message"] = "The optional 'drtc' extra isn't installed. " + transport_hint(
-            ErrorCode.TRANSPORT_EXTRA_MISSING
+        payload["error_code"] = str(ErrorCode.SYSTEM_EXTRA_MISSING)
+        payload["message"] = "The optional 'remote' extra isn't installed. " + transport_hint(
+            ErrorCode.SYSTEM_EXTRA_MISSING
         )
         return payload
 

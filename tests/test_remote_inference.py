@@ -474,7 +474,7 @@ def test_preflight_passes_and_hands_off_to_the_worker(preflight) -> None:
 def test_preflight_refuses_when_the_extra_is_missing(monkeypatch, preflight) -> None:
     monkeypatch.setattr(ri, "_extra_missing", lambda: True)
     result = ri.handle_start_remote_inference(_request())
-    assert result["code"] == "transport.extra_missing"
+    assert result["code"] == "system.extra_missing"
     assert result["status_code"] == 400
     # Never "run this here": an editable install re-points the shared venv at
     # whatever directory it runs from, which silently breaks every other

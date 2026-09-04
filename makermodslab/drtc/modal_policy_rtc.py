@@ -345,7 +345,7 @@ image = (
     # it, and nothing else in this image pulls it in.
     #
     # livekit-portal comes from PyPI, pinned to the same version as
-    # pyproject.toml's `[drtc]` extra so robot and GPU sides speak the identical
+    # pyproject.toml's `[remote]` extra so robot and GPU sides speak the identical
     # wire code (Portal fingerprints the schema and drops mismatched packets
     # SILENTLY — a healthy-looking session with zero chunks).
     .run_commands(

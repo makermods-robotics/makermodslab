@@ -24,7 +24,7 @@ Redirecting `DRTC_ENV_PATH` is NOT something `tmp_lerobot_home` does — it
 patches `utils.config`'s robot/calibration constants, while `remote_inference`
 binds the DRTC paths by value at import time, so it is patched on the MODULE.
 
-The `[drtc]` extra is optional and CI installs only `.[test]`, so nothing here
+The `[remote]` extra is optional and CI installs only `.[test]`, so nothing here
 may depend on python-dotenv, aiohttp or livekit-api being importable: every one
 of the module's extra-provided names is stubbed, including `_dotenv_values`
 (with a three-line parser), so the provenance walk under test runs identically
@@ -295,7 +295,7 @@ def test_transport_when_the_extra_is_missing_reports_it(
     assert resp.status_code == 200
     body = resp.json()
     assert body["extra_installed"] is False
-    assert body["error_code"] == "transport.extra_missing"
+    assert body["error_code"] == "system.extra_missing"
     assert "PRIMARY checkout" in body["message"]
     assert body["endpoint_reachable"] is None and body["operator_present"] is None
 

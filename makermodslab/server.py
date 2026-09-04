@@ -1228,7 +1228,7 @@ def get_remote_inference_transport():
 
     `endpoint_reachable` / `operator_present` come from one `list_participants`
     call behind remote_inference._probe_room, bounded at 3s, and are null when
-    that probe did not run at all. A missing [drtc] extra is REPORTED here
+    that probe did not run at all. A missing [remote] extra is REPORTED here
     rather than raised: the panel's job is to tell the user what to install,
     and the install command must name the PRIMARY CHECKOUT — an editable
     install run from a worktree silently re-points every other session's
@@ -5024,6 +5024,11 @@ async def shutdown_event():
     # reload that this same process survives.
     job_registry.shutdown()
 
+    # Same for the station supervisor (`--host`): it re-arms hosting every few
+    # seconds whenever nothing holds the hardware, and the stops below are
+    # exactly "nothing holds the hardware" from its point of view.
+    remote_host.stop_station_mode()
+
     # THEN the GPU, before anything else here spends its (bounded but real)
     # time, because this is the one child that is BILLED BY THE MINUTE and the
     # one whose death has to be a specific signal. `modal run` tears its app
@@ -5090,6 +5095,13 @@ async def shutdown_event():
         asyncio.to_thread(handle_stop_inference),
         asyncio.to_thread(stop_replay_and_wait),
         asyncio.to_thread(remote_inference.stop_for_shutdown),
+        # Hosting drives the follower from an in-process thread like teleop
+        # does — an engaged arm returns to rest, then torque is released.
+        # Remote teleoperation only holds the leader, but it must leave the
+        # room so the station parks the follower now rather than after its
+        # silent-loss grace.
+        asyncio.to_thread(remote_host.stop_hosting_for_shutdown),
+        asyncio.to_thread(remote_teleoperate.stop_for_shutdown),
         return_exceptions=True,
     )
     labels = (
@@ -5100,6 +5112,8 @@ async def shutdown_event():
         "inference",
         "replay",
         "remote inference",
+        "hosting",
+        "remote teleoperation",
     )
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):

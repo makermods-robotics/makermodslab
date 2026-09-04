@@ -241,9 +241,16 @@ wandb_install_manager = InstallManager("wandb")
 # pip would go looking for a `makermodslab` on PyPI instead. Keep these pins
 # in step with pyproject.toml's extra.
 REMOTE_PROBE_MODULE = "lerobot_teleoperator_livekit"
-REMOTE_INSTALL_TARGET = ("lerobot-teleoperator-livekit>=0.2.5", "lerobot-robot-livekit>=0.2.5")
+# Exact pins, mirroring pyproject's `remote` extra: Portal fingerprints the
+# wire schema, so the station, the operator and the GPU image must all run
+# the same version (see pyproject.toml).
+REMOTE_INSTALL_TARGET = (
+    "livekit-portal==0.2.4",
+    "lerobot-teleoperator-livekit==0.2.4",
+    "lerobot-robot-livekit==0.2.4",
+)
 REMOTE_INSTALL_HINT = (
-    "Remote teleoperation needs the LiveKit Portal plugins (Python 3.12; Linux x86_64/aarch64 or Apple Silicon). "
+    "Remote teleoperation and remote inference need LiveKit Portal (Python 3.12; Linux x86_64/aarch64 or Apple Silicon). "
     "From a checkout: `uv pip install -e '.[remote]'`; for a `uv tool` install: "
     "`uv tool install 'makermodslab[remote] @ git+https://github.com/makermods-robotics/makermodslab'`. Then restart."
 )

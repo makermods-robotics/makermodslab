@@ -30,7 +30,7 @@ import type { Fetcher } from "@/lib/apiClient";
 export type TransportSource = "sfu" | "cloud" | "process_env" | "none";
 
 export interface RemoteInferenceTransportStatus {
-  /** The optional `[drtc]` extra. False ⇒ the probe did not run and the four
+  /** The optional `[remote]` extra. False ⇒ the probe did not run and the four
    * probe-shaped fields below are null. */
   extra_installed: boolean;
   /** All four LIVEKIT_* vars resolved. */

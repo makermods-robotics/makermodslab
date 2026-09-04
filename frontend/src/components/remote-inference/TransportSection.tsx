@@ -11,7 +11,7 @@ import type { UseRemoteInferenceTransport } from "@/hooks/useRemoteInferenceTran
  * Three things here are worth more than they look:
  *
  *  - `endpoint_reachable` / `operator_present` are `boolean | null`, and null
- *    means THE PROBE DID NOT RUN (no `[drtc]` extra, or no credentials). That
+ *    means THE PROBE DID NOT RUN (no `[remote]` extra, or no credentials). That
  *    is a third state, and collapsing it into "false" would tell an operator
  *    the SFU is down when nothing ever asked it.
  *  - `source` distinguishes the Lab's OWN SFU from LiveKit Cloud, and within

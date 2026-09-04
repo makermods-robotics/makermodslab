@@ -99,14 +99,14 @@ def test_render_config_specific_address_pins_node_ip() -> None:
     assert "  - 100.64.0.7" in lines
 
 
-def test_render_config_specific_address_also_binds_loopback() -> None:
-    """The launcher's readiness probe and the robot child both dial
-    127.0.0.1; binding the tailnet address ALONE made the launcher kill a
-    healthy server after 15 s ("never came up")."""
+def test_render_config_specific_address_binds_only_that_address() -> None:
+    """A specific bind is the ONLY place the server answers: the launcher's
+    readiness probe and every participant on this machine (`local_url`) dial
+    the bind host, so no loopback line is added beside it."""
     lines = _lines(sfu.render_config(bind_host="100.64.0.7", key_file="/k.yaml"))
     bind_block = lines[lines.index("bind_addresses:") + 1 :]
-    assert bind_block[:2] == ["  - 100.64.0.7", "  - 127.0.0.1"]
-    # Loopback and wildcard binds gain nothing and get no second line.
+    assert bind_block[0] == "  - 100.64.0.7"
+    assert "  - 127.0.0.1" not in lines
     loop = _lines(sfu.render_config(bind_host="127.0.0.1", key_file="/k.yaml"))
     assert loop.count("  - 127.0.0.1") == 1
 

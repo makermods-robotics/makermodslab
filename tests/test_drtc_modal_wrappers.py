@@ -76,7 +76,7 @@ def expected() -> dict[str, str]:
     pyproject = _PYPROJECT.read_text(encoding="utf-8")
     lerobot = _lerobot_pin(pyproject)
     portal = _PORTAL_PIN_RE.search(pyproject)
-    assert portal is not None, "pyproject.toml's [drtc] extra no longer pins livekit-portal"
+    assert portal is not None, "pyproject.toml's [remote] extra no longer pins livekit-portal"
     return {"url": lerobot["url"], "sha": lerobot["sha"], "portal": portal["version"]}
 
 
@@ -117,7 +117,7 @@ def test_gpu_image_pins_the_same_livekit_portal_as_the_lab(wrapper: Path, expect
     assert found is not None, f"{wrapper.name} no longer pins livekit-portal"
     assert found["version"] == expected["portal"], (
         f"{wrapper.name} pins livekit-portal=={found['version']} but pyproject.toml's "
-        f"[drtc] extra pins {expected['portal']}. Robot and GPU must run identical wire code."
+        f"[remote] extra pins {expected['portal']}. Robot and GPU must run identical wire code."
     )
 
 

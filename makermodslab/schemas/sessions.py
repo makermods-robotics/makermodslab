@@ -592,7 +592,7 @@ class RemoteInferenceTransportStatusResponse(BaseModel):
     endpoint_reachable: bool | None
     operator_present: bool | None
     # The probe's coded failure ("transport.unreachable" / ".unauthorized" /
-    # ".no_policy"), or "transport.extra_missing" / ".not_configured" when the
+    # ".no_policy"), or "system.extra_missing" / "transport.not_configured" when the
     # probe never ran. Null on success.
     error_code: str | None
     message: str | None

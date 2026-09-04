@@ -28,7 +28,7 @@ The dependencies are an **optional extra** — nothing in the Lab imports this
 package at startup, so a normal install never pulls LiveKit:
 
 ```bash
-uv pip install -e '.[drtc]'
+uv pip install -e '.[remote]'
 ```
 
 **Run that from the primary checkout, never from a git worktree.** An editable

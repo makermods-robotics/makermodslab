@@ -75,7 +75,7 @@ normalize=True, tolerance=…, stall_min_progress=…)` is exactly it — it is 
 
 **Read-only run.** No files were written or edited, no git mutations (only `git log`/`git diff --stat`/`git status`), no installs, no servers, no network. Everything read came from `/Users/mokuroh54/Documents/MakerMods/MakerModsLab/.worktrees/drtc` at `227100b1`, with one exception disclosed for honesty: I ran read-only `ls`/`grep`/`sed` against `/Users/mokuroh54/Documents/MakerMods/MakerModsLab/.venv/lib/python3.*/site-packages/livekit/api/` to confirm the installed `livekit-api` 1.2.1 surface (`RoomService.list_participants`, `ws://`→`http://` normalization in `twirp_client.py`). Nothing was modified.
 
-Baseline confirmed: `git diff --stat e8454e5b..227100b1` is 29 files, purely additive — `makermodslab/drtc/**`, `tools/drtc/**`, `docs/drtc/**`, `tests/test_drtc_{env,schedule}.py`, +22 lines in `utils/config.py` (the four `DRTC_*` paths), the `[drtc]` extra, `uv.lock`, `.gitignore`. `server.py`, `sessions.py`, `session_events.py`, `api_errors.py`, `schemas/**` are untouched. The preview claim holds exactly.
+Baseline confirmed: `git diff --stat e8454e5b..227100b1` is 29 files, purely additive — `makermodslab/drtc/**`, `tools/drtc/**`, `docs/drtc/**`, `tests/test_drtc_{env,schedule}.py`, +22 lines in `utils/config.py` (the four `DRTC_*` paths), the `[remote]` extra, `uv.lock`, `.gitignore`. `server.py`, `sessions.py`, `session_events.py`, `api_errors.py`, `schemas/**` are untouched. The preview claim holds exactly.
 
 ---
 
@@ -235,13 +235,13 @@ Response model `RemoteInferenceStatusResponse` (in `schemas/sessions.py`, tag `s
 
 **Preflight ladder** (all cheap and synchronous in `handle_start_remote_inference`, before or immediately after the claim with a `_release_slot()`):
 
-1. **Extra present** — `importlib.util.find_spec("livekit.portal")`, never an actual import (FFI dylib load). Missing → 400 `transport.extra_missing`.
+1. **Extra present** — `importlib.util.find_spec("livekit.portal")`, never an actual import (FFI dylib load). Missing → 400 `system.extra_missing` (was `transport.extra_missing` before the combine with remote teleoperation).
 2. **Credentials present** — the four vars → 400 `transport.not_configured`, naming which are missing and the path `~/.cache/huggingface/lerobot/livekit.env`.
 3. **Room probe** — `list_participants`. Connection error → 400 `transport.unreachable`, and the message must branch: if the local override is active, say _"`livekit.local.env` points at 127.0.0.1:7880 and nothing is answering — is `tools/drtc/local_sfu_ts.sh` still running? Delete the override to go back to LiveKit Cloud."_ Auth error → 400 `transport.unauthorized`. Room absent or zero operators → 400 `transport.no_policy`, naming the room and the three causes (no `modal run` started; the `LiveKit-cloud` secret's `LIVEKIT_ROOM` differs from yours; an expired `TS_AUTHKEY` left the container unable to join).
 4. **Arm type** — `supports_remote_inference` → 400.
 5. **Arm count + cameras** — reuse `_arm_count_mismatch` and `_session_cameras` verbatim; a `CameraResolutionError` is a 400 in the launch panel, as it already is for inference.
 
-**Does `utils/system.py`'s installer fit? No — deliberately.** `InstallManager` takes a single package string, and `POLICY_EXTRAS` maps a policy type to one `lerobot[extra]` target. The drtc extra is three packages, one of them exactly pinned (`livekit-portal==0.2.4`) for a reason that fails _silently_ if broken. The only single-string form is `makermodslab[drtc]`, which re-resolves the whole project including the SHA-pinned lerobot fork against a shared `.venv` — a multi-minute, potentially destructive operation triggered by a button. **REC: report, don't install**, with the exact command _and_ the worktree warning from `docs/drtc/README.md` (an editable install run from a worktree silently re-points every other session's `makermodslab`). Say in the code comment that this is a deliberate non-use of the InstallManager and why.
+**Does `utils/system.py`'s installer fit? No — deliberately.** `InstallManager` takes a single package string, and `POLICY_EXTRAS` maps a policy type to one `lerobot[extra]` target. The drtc extra is three packages, one of them exactly pinned (`livekit-portal==0.2.4`) for a reason that fails _silently_ if broken. The only single-string form is `makermodslab[remote]`, which re-resolves the whole project including the SHA-pinned lerobot fork against a shared `.venv` — a multi-minute, potentially destructive operation triggered by a button. **REC: report, don't install**, with the exact command _and_ the worktree warning from `docs/drtc/README.md` (an editable install run from a worktree silently re-points every other session's `makermodslab`). Say in the code comment that this is a deliberate non-use of the InstallManager and why.
 
 **The empty-room failure, surfaced fast** — three layers, cheapest first:
 
@@ -329,7 +329,7 @@ Note the pleasant consequence of the sessions-first design: **start and stop nee
 6. **The first-action jump.** `robot_sync` sends the policy's first action with no ramp and no `max_relative_target` — the doc's own "Not yet done" item, and the same snap-to-pose family analysed for teleop/record on 2026-09-01. **I would gate slice 3 on fixing this**: ease in to the first chunk's step-0 pose using the very primitives replay already uses for its frame-0 approach (`return_to_rest_pose` / `return_maker_to_pose` with `EASE_ARRIVE_TOLERANCE`), giving the operator an `easing_in` phase to watch. Worth confirming first whether lerobot's own rollout ramps on entry — if it does, this is a regression against the local sibling rather than mere parity, which raises the priority further.
 7. **`livekit.local.env` outliving its script** — handled by the preflight message and the clear-override action.
 8. **`load_env()` permanently poisoning the server's `os.environ`** — handled by `read_env()`.
-9. **The editable-install-from-a-worktree footgun** — the `transport.extra_missing` message must name the _primary checkout_, never "run this here".
+9. **The editable-install-from-a-worktree footgun** — the `system.extra_missing` message must name the _primary checkout_, never "run this here".
 10. **The CAN guard is the only thing** between a Metal record and a session that claims the arm, runs the identity preflight, spawns, and dies at draccus CLI parse. It must be synchronous and pre-claim.
 
 ---
@@ -451,7 +451,7 @@ written. Nothing in `sessions.py`, `schemas/`, `server.py`, `docs/api/` or
   WRITES STOP and returns rather than calling the stop handler: calling it from
   the pump would block the very thread that has to drain the child's stdout for
   the return-to-rest to finish.
-- **The four `[drtc]` packages are one guarded top-level import.**
+- **The four `[remote]` packages are one guarded top-level import.**
   `python-dotenv` is in the extra too, so `drtc._env` cannot be a hard import in
   a module the server loads at boot. `aiohttp`, `dotenv`, `livekit.api` and
   `drtc._env` are imported together in one `try/except ImportError` that sets
@@ -539,7 +539,7 @@ def` would have turned every configured call into a 500.
   `remote_inference` binds the DRTC paths by value at import; the tests patch
   them on the MODULE, which is what keeps the clear-override test from
   unlinking a real `livekit.local.env`. They also stub `_dotenv_values`, since
-  CI installs `.[test]` and never the `[drtc]` extra.
+  CI installs `.[test]` and never the `[remote]` extra.
 
 Ratchets: `V1_ONLY_ROUTES` grew by exactly the three routes;
 `LEGACY_ROUTES`, `UNTYPED_V1_ROUTES` and `RESPONSE_MODEL_EXEMPT` are unchanged
@@ -886,7 +886,7 @@ check." tail (gone with the verb).
 ### Everything else
 
 `uv.lock` was regenerated with `uv lock` rather than hand-merged; against
-staging's lock it is additive only — the `[drtc]` extra's five packages
+staging's lock it is additive only — the `[remote]` extra's five packages
 (`livekit-portal` 0.2.4, `livekit-api`, `livekit-protocol`, `pyjwt`,
 `types-protobuf`) plus `provides-extras`. `docs/api/openapi.json` was
 regenerated and was already up to date. The lerobot pin moved to `eaab69339`,
@@ -1015,7 +1015,7 @@ interface. Two tests pin both halves.
   `sfu.py`'s docstring actually promises. If the coordinator wants it tighter,
   the child's environment is the next rung down (`/proc/PID/environ` is 0600),
   at the cost of the flag being invisible in a log of the spawn.
-- **`livekit-api` moved from the `[drtc]` extra to core dependencies**
+- **`livekit-api` moved from the `[remote]` extra to core dependencies**
   (`>=1.0`, his bound). The token route needs it at boot and so does the room
   probe; leaving a second copy in the extra would only invite the two bounds to
   drift. The extra is now `livekit-portal==0.2.4` + `python-dotenv>=1` — the
