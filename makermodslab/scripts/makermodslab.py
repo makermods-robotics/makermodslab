@@ -147,11 +147,18 @@ def _ensure_path_symlinks(
         logger.debug("PATH symlink self-install skipped: %s", exc)
 
 
-def _wait_for_port(port: int, timeout: int = 30) -> bool:
+def _wait_for_port(port: int, timeout: int = 30, host: str = "localhost") -> bool:
+    """Poll until `port` accepts a connection on `host`.
+
+    `host` must be the address the child actually BOUND: a --bind run pins
+    livekit's `bind_addresses` to one interface, so polling loopback there
+    would time out on a perfectly healthy server and kill it. The wildcard
+    bind is reachable on loopback, so it keeps the default.
+    """
     for _ in range(timeout):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
-        result = sock.connect_ex(("localhost", port))
+        result = sock.connect_ex((host, port))
         sock.close()
         if result == 0:
             return True
@@ -363,7 +370,10 @@ def _start_sfu(binary: str, host: str) -> subprocess.Popen:
         [binary, "--config", LIVEKIT_CONFIG_FILE, "--key-file", key_file],
         start_new_session=True,
     )
-    if not _wait_for_port(sfu.SFU_HTTP_PORT, timeout=15):
+    # The wildcard bind is reachable on loopback; a specific --bind address is
+    # the only place the server answers, so poll it there.
+    probe_host = "localhost" if host == "0.0.0.0" else host  # noqa: S104  # nosec B104 — comparison, not a bind
+    if not _wait_for_port(sfu.SFU_HTTP_PORT, timeout=15, host=probe_host):
         logger.error("❌ LiveKit SFU never came up on :%d (see its log lines above)", sfu.SFU_HTTP_PORT)
         _terminate_tree(proc.pid)
         sys.exit(1)

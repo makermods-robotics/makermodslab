@@ -86,6 +86,44 @@ def test_wait_for_port_returns_true_immediately_for_already_open_port(
         server.close()
 
 
+def test_wait_for_port_probes_the_host_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `--bind <iface>` pins livekit's `bind_addresses` to that one
+    interface, so probing loopback timed out on a healthy SFU and the launcher
+    killed it. The probe must go to the address the child actually bound."""
+    from makermodslab.scripts.makermodslab import _wait_for_port
+
+    probed: list[tuple[str, int]] = []
+
+    class _RecordingSocket:
+        def settimeout(self, _t): ...
+
+        def connect_ex(self, address):
+            probed.append(address)
+            return 0
+
+        def close(self): ...
+
+    monkeypatch.setattr(
+        "makermodslab.scripts.makermodslab.socket.socket",
+        lambda *_a, **_k: _RecordingSocket(),
+    )
+
+    assert _wait_for_port(7880, timeout=1, host="100.64.0.1") is True
+    assert probed == [("100.64.0.1", 7880)]
+
+
+def test_wait_for_port_defaults_to_loopback() -> None:
+    """The default host keeps the loopback behaviour every other call site
+    (dev-mode Vite and backend, both hardcoded to 127.0.0.1) relies on."""
+    import inspect
+
+    from makermodslab.scripts.makermodslab import _wait_for_port
+
+    assert inspect.signature(_wait_for_port).parameters["host"].default == "localhost"
+
+
 def _fake_entry_points(tmp_path):
     """A fake venv bin dir containing all three entry-point scripts."""
     from makermodslab.scripts.makermodslab import ENTRY_POINT_NAMES
